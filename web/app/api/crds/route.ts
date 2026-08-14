@@ -10,9 +10,10 @@ export const runtime = "nodejs";
  * lightweight projection of each one.
  */
 export async function GET() {
-  const api = getApiextensionsClient();
-
   try {
+    // Built lazily inside the try so a kubeconfig-load failure surfaces as a
+    // 500 JSON response instead of an unhandled throw.
+    const api = getApiextensionsClient();
     const crds = await api.listCustomResourceDefinition();
 
     return Response.json(
@@ -25,9 +26,8 @@ export async function GET() {
       })),
     );
   } catch (err) {
-    return Response.json(
-      { error: `Failed to list CRDs: ${(err as Error).message}` },
-      { status: 500 },
-    );
+    // Log the full error server-side; keep the client response free of internals.
+    console.error("Failed to list CRDs:", err);
+    return Response.json({ error: "Failed to list CRDs" }, { status: 500 });
   }
 }

@@ -25,5 +25,7 @@ ENV PORT=3000
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/public ./public
+# Run the standalone server as the non-root `node` user built into node:alpine.
+USER node
 EXPOSE 3000
 CMD ["node", "server.js"]
