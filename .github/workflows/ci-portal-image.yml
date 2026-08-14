@@ -1,0 +1,85 @@
+name: CI Portal Image
+
+# Push-only so the image job never appears in pull request checks. The lint and
+# build checks run in ci-portal.yml on the same push; docker build here also
+# validates the app compiles before anything is pushed.
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: ci-portal-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    permissions:
+      contents: read
+      pull-requests: read
+    runs-on: ubuntu-latest
+    outputs:
+      portal: ${{ steps.filter.outputs.portal }}
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Full history so paths-filter can diff against the base ref without fetching
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Detect changed paths
+        uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3
+        id: filter
+        with:
+          filters: |
+            portal:
+              - 'web/**'
+              - '.github/**'
+
+  build-push-image:
+    # Push the portal image only when a merge lands on main with portal changes.
+    needs: changes
+    if: needs.changes.outputs.portal == 'true'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Log in to Harbor
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: harbor.isuanova.com
+          username: ${{ vars.CI_BOT_NAME }}
+          password: ${{ secrets.CI_BOT_PASSWORD }}
+      - name: Build and push image
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          set -euo pipefail
+          IMAGE=harbor.isuanova.com/suanova/cubestack-ui
+          SHA_TAG="${GITHUB_SHA}"
+
+          # Push the immutable, commit-addressed tag. Safe for any commit that
+          # ever landed on main, even if a newer commit now exists.
+          docker build -t "${IMAGE}:${SHA_TAG}" ./web
+          docker push "${IMAGE}:${SHA_TAG}"
+
+          # Only refresh the mutable `latest` tag if this run's commit is still
+          # the head of main. An older run can finish after a newer main commit;
+          # pushing its image as `latest` would mislabel which commit is newest.
+          CURRENT_MAIN="$(
+            curl -fsSL \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/branches/main" \
+              | jq -r .commit.sha
+          )"
+          if [ "${CURRENT_MAIN}" = "${SHA_TAG}" ]; then
+            docker tag "${IMAGE}:${SHA_TAG}" "${IMAGE}:latest"
+            docker push "${IMAGE}:latest"
+          else
+            echo "Skipping 'latest': ${SHA_TAG} is no longer the head of main (current: ${CURRENT_MAIN})"
+          fi

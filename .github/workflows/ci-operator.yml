@@ -103,61 +103,8 @@ jobs:
       - name: Running Test e2e
         run: make test-e2e
 
-  build-push-image:
-    # Push the operator image only when a merge lands on main with operator changes
-    # and the fast checks (lint + test) pass. test-e2e is intentionally not in the
-    # gate to avoid blocking releases on the slow kind-based e2e suite.
-    needs: [changes, lint, test]
-    if: |
-      success() &&
-      github.event_name == 'push' &&
-      github.ref == 'refs/heads/main' &&
-      needs.changes.outputs.operator == 'true'
-    permissions:
-      contents: read
-    runs-on: ubuntu-latest
-    steps:
-      - name: Clone the code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - name: Log in to Harbor
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: harbor.isuanova.com
-          username: ${{ vars.CI_BOT_NAME }}
-          password: ${{ secrets.CI_BOT_PASSWORD }}
-      - name: Build and push image
-        env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
-        run: |
-          set -euo pipefail
-          IMAGE=harbor.isuanova.com/suanova/cubestack-operator
-          SHA_TAG="${GITHUB_SHA}"
-
-          # Push the immutable, commit-addressed tag. Safe for any commit that
-          # ever landed on main, even if a newer commit now exists.
-          make -C operator docker-build IMG="${IMAGE}:${SHA_TAG}"
-          make -C operator docker-push IMG="${IMAGE}:${SHA_TAG}"
-
-          # Only refresh the mutable `latest` tag if this run's commit is still
-          # the head of main. An older run can finish after a newer main commit;
-          # pushing its image as `latest` would mislabel which commit is newest.
-          CURRENT_MAIN="$(
-            curl -fsSL \
-              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-              "https://api.github.com/repos/${GITHUB_REPOSITORY}/branches/main" \
-              | jq -r .commit.sha
-          )"
-          if [ "${CURRENT_MAIN}" = "${SHA_TAG}" ]; then
-            docker tag "${IMAGE}:${SHA_TAG}" "${IMAGE}:latest"
-            docker push "${IMAGE}:latest"
-          else
-            echo "Skipping 'latest': ${SHA_TAG} is no longer the head of main (current: ${CURRENT_MAIN})"
-          fi
-
   result:
-    needs: [lint, test, test-e2e, build-push-image]
+    needs: [lint, test, test-e2e]
     if: always()
     runs-on: ubuntu-latest
     steps:
