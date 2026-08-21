@@ -1,0 +1,238 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: modelversions.ai.cubestack.io
+spec:
+  group: ai.cubestack.io
+  names:
+    kind: ModelVersion
+    listKind: ModelVersionList
+    plural: modelversions
+    singular: modelversion
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.model
+      name: Model
+      type: string
+    - jsonPath: .spec.version
+      name: Version
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: ModelVersion is the Schema for the modelversions API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of ModelVersion
+            properties:
+              architecture:
+                description: |-
+                  Architecture is the model architecture identifier, from the model_type of
+                  HuggingFace or the internal config.json, e.g. deepseek_v4.
+                minLength: 1
+                type: string
+              meta:
+                additionalProperties:
+                  type: string
+                description: |-
+                  Meta is a free-form map maintained by the admin, e.g. for launcher names
+                  that differ from the architecture.
+                type: object
+              model:
+                description: Model is the semantic model name; together with version
+                  it determines metadata.name.
+                minLength: 1
+                type: string
+              quantization:
+                description: Quantization is the weight quantization method, e.g.
+                  w8a8.
+                minLength: 1
+                type: string
+              storage:
+                description: Storage defines where and how the model is provided.
+                properties:
+                  hostPath:
+                    description: HostPath is the pre-distributed model configuration,
+                      required when strategy is HostPath.
+                    properties:
+                      path:
+                        description: Path is the absolute path of the pre-distributed
+                          model root directory.
+                        pattern: ^/
+                        type: string
+                    required:
+                    - path
+                    type: object
+                  pvc:
+                    description: PVC is the shared-storage configuration, required
+                      when strategy is PVC.
+                    properties:
+                      capacity:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: Capacity is written to spec.resources.requests.storage
+                          of the created PVC.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      storageClassName:
+                        description: StorageClassName references a StorageClass created
+                          by the platform admin.
+                        minLength: 1
+                        type: string
+                      subPath:
+                        description: SubPath is the model directory within the shared
+                          storage, organized as <model>/<version>.
+                        minLength: 1
+                        type: string
+                    required:
+                    - capacity
+                    - storageClassName
+                    - subPath
+                    type: object
+                  strategy:
+                    description: Strategy selects how the model storage is provided.
+                    enum:
+                    - HostPath
+                    - PVC
+                    type: string
+                required:
+                - strategy
+                type: object
+                x-kubernetes-validations:
+                - message: strategy HostPath requires hostPath and forbids pvc; strategy
+                    PVC requires pvc and forbids hostPath
+                  rule: 'self.strategy == ''HostPath'' ? (has(self.hostPath) && !has(self.pvc))
+                    : (self.strategy == ''PVC'' ? (has(self.pvc) && !has(self.hostPath))
+                    : true)'
+              version:
+                description: |-
+                  Version is the model version. Model names may contain '-', so the version
+                  cannot be reliably parsed back from metadata.name and is stored explicitly.
+                minLength: 1
+                type: string
+            required:
+            - architecture
+            - model
+            - quantization
+            - storage
+            - version
+            type: object
+          status:
+            description: status defines the observed state of ModelVersion
+            properties:
+              conditions:
+                description: |-
+                  conditions represent the current state of the ModelVersion resource.
+                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
+
+                  Standard condition types include:
+                  - "StorageResolved": the referenced StorageClass exists (PVC strategy only)
+                  - "InUse": the ModelVersion is referenced by at least one InferenceService
+
+                  The status of each condition is one of True, False, or Unknown.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              usedBy:
+                description: UsedBy lists the InferenceServices currently referencing
+                  this ModelVersion.
+                items:
+                  description: ObjectRef identifies an InferenceService referencing
+                    this ModelVersion.
+                  properties:
+                    name:
+                      description: Name is the name of the referencing InferenceService.
+                      type: string
+                    namespace:
+                      description: Namespace is the namespace of the referencing InferenceService.
+                      type: string
+                  required:
+                  - name
+                  - namespace
+                  type: object
+                type: array
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
