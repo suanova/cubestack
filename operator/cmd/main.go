@@ -34,6 +34,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+
+	aiv1alpha1 "github.com/suanova/cubestack/api/v1alpha1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -45,6 +47,7 @@ var (
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
+	utilruntime.Must(aiv1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 

@@ -843,5 +843,6 @@ ModelVersion 与 InferenceRuntimeProfile 的 spec 均不可变（§3.1、§3.2�
 
 - [ ] ModelVersion：支持模型溯源，如新增 `source{registry, repo, revision}` 记录来源，revision 可以考虑使用 HuggingFace/ModelScope 的 revision commit ID 。
 - [ ] ModelVersion：支持更多的模型存储策略，如 puller sidecar / image volume
+- [ ] ModelVersion：PVC 策略支持静态供给的共享文件系统（如 CephFS 静态 PV）。
 - [ ] ModelVersion / InferenceRuntimeProfile 的 in-use finalizer：组织对象仍被引用时删除。
 - [ ] InferenceRuntimeProfile：增加 leaderPatch：为 leader 和 worker 提供差异化配置，通过受控合并写入 LWS `leaderTemplate`。仅在两者启动入口不同（如 Ray head/worker、MPI launcher）或 leader 资源不同的引擎中使用。

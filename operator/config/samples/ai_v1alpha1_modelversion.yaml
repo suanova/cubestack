@@ -1,0 +1,18 @@
+apiVersion: ai.cubestack.io/v1alpha1
+kind: ModelVersion
+metadata:
+  labels:
+    app.kubernetes.io/name: cubestack
+    app.kubernetes.io/managed-by: kustomize
+  name: deepseek-v4-flash-w8a8-v1
+spec:
+  model: deepseek-v4-flash
+  version: w8a8-v1
+  architecture: deepseek_v4
+  quantization: w8a8
+  meta:
+    launcherSpec: deepseek-v4-flash
+  storage:
+    strategy: HostPath
+    hostPath:
+      path: /workspace/wnma/model/DeepSeek-V4-Flash-FlexSMQ-AWQ-W8A8

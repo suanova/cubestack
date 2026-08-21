@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- ai_v1alpha1_modelversion.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples
