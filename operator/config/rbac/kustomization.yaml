@@ -22,6 +22,9 @@ resources:
 # default, aiding admins in cluster management. Those roles are
 # not used by the cubestack itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
+- inferenceruntimeprofile_admin_role.yaml
+- inferenceruntimeprofile_editor_role.yaml
+- inferenceruntimeprofile_viewer_role.yaml
 - modelversion_admin_role.yaml
 - modelversion_editor_role.yaml
 - modelversion_viewer_role.yaml

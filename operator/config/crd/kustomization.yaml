@@ -3,6 +3,7 @@
 # It should be run by config/default
 resources:
 - bases/ai.cubestack.io_modelversions.yaml
+- bases/ai.cubestack.io_inferenceruntimeprofiles.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

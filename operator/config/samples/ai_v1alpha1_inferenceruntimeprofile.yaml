@@ -1,0 +1,113 @@
+apiVersion: ai.cubestack.io/v1alpha1
+kind: InferenceRuntimeProfile
+metadata:
+  labels:
+    app.kubernetes.io/name: cubestack
+    app.kubernetes.io/managed-by: kustomize
+  name: metax-sglang-dsv4-pd
+spec:
+  accelerator:
+    vendor: metax
+    models: [MXC500]
+
+  engine:
+    name: sglang
+    version: vendor-0.5.12-rc1
+
+  modelRequirements:
+    architectures: [deepseek_v4]
+    quantization: [w8a8]
+
+  vars:
+    prefillHca: "mlx5_0,mlx5_1"
+    decodeHca: "mlx5_0,mlx5_1"
+
+  assets:
+  - name: bootstrap
+    configMapRef:
+      name: metax-c500-bootstrap-v0.5.12-rc1
+    mount:
+      path: /opt/cubestack-bootstrap
+      mode: 0755
+  - name: runtime-config
+    configMapRef:
+      name: metax-dsv4-runtime-v0.5.12-rc1
+    envFrom: true
+
+  overrides:
+  - name: prefillReplicas
+    type: integer
+    min: 1
+    max: 8
+    default: 1
+    description: "prefill LWS array"
+  - name: decodeReplicas
+    type: integer
+    min: 1
+    max: 16
+    default: 1
+    description: "decode LWS array"
+  - name: groupSize
+    type: integer
+    enum: [1, 2, 4]
+    default: 1
+    description: "prefill/decode group pod counts"
+
+  roles:
+  - name: router
+    dependsOn: [prefill, decode]
+    workload:
+      kind: Deployment
+      replicas: 1
+    podTemplate:
+      image: metax-registry.local/sglang-router:v0.5.12-rc1
+    service:
+      ports:
+      - name: http
+        port: 8001
+        targetPort: http
+  - name: prefill
+    workload:
+      kind: LeaderWorkerSet
+      replicas: "{{ overrides.prefillReplicas }}"
+      group:
+        size: "{{ overrides.groupSize }}"
+        startupPolicy: LeaderCreated
+    podTemplate:
+      image: metax-registry.local/sglang-prefill:v0.5.12-rc1
+      resources:
+        gpuPerPod: 8
+      mounts:
+      - model: main
+        at: /workspace/model
+        readOnly: true
+    service:
+      ports:
+      - name: http
+        port: 30000
+        targetPort: http
+  - name: decode
+    workload:
+      kind: LeaderWorkerSet
+      replicas: "{{ overrides.decodeReplicas }}"
+      group:
+        size: "{{ overrides.groupSize }}"
+        startupPolicy: LeaderCreated
+    podTemplate:
+      image: metax-registry.local/sglang-decode:v0.5.12-rc1
+      resources:
+        gpuPerPod: 8
+      mounts:
+      - model: main
+        at: /workspace/model
+        readOnly: true
+    service:
+      ports:
+      - name: http
+        port: 30000
+        targetPort: http
+
+  endpoint:
+    role: router
+  readinessPolicy:
+    requireAllRoles: true
