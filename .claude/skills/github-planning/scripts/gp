@@ -42,6 +42,7 @@ DESC_FILE=""
 AUTO_CLOSE=0
 LABEL_BLOCKED=0
 REPO=""
+SPLIT_RESULT=""
 MANIFEST=""
 STATE=""
 CREATED=""
@@ -229,7 +230,7 @@ find_or_create_milestone() {
     return 0
   fi
   payload="$(jq -n --arg t "$title" --arg due "$(iso_due "$due")" --arg d "$desc" \
-    '{title:$t, state:"open", due_on:$due, description:$d}')"
+    'if $due == "" then {title:$t, state:"open", description:$d} else {title:$t, state:"open", due_on:$due, description:$d} end')"
   created="$(gh_req POST "repos/$REPO/milestones" "$payload")"
   num="$(printf '%s' "$created" | jq -r '.number')"
   printf '%s\n' "create milestone: '$title' (#$num)"
@@ -588,16 +589,16 @@ split_repo_arg() {
   local first="${1:-}" second="${2:-}"
   if [[ -n "$second" ]]; then
     REPO="$(resolve_repo "$first")"
-    printf '%s\n' "$second"
+    SPLIT_RESULT="$second"
   elif [[ -f "$first" ]]; then
     REPO="$(resolve_repo)"
-    printf '%s\n' "$first"
+    SPLIT_RESULT="$first"
   elif [[ "$first" =~ ^[^./][^/]*/[^/]+$ ]]; then
     REPO="$(resolve_repo "$first")"
-    printf '%s\n' ""
+    SPLIT_RESULT=""
   else
     REPO="$(resolve_repo)"
-    printf '%s\n' "$first"
+    SPLIT_RESULT="$first"
   fi
 }
 
@@ -629,7 +630,8 @@ cmd_milestone() {
   need jq
   CONFIG="$(resolve_config)"
   local title desc=""
-  title="$(split_repo_arg "${POSITIONAL[0]:-}" "${POSITIONAL[1]:-}")"
+  split_repo_arg "${POSITIONAL[0]:-}" "${POSITIONAL[1]:-}"
+  title="$SPLIT_RESULT"
   [[ -n "$title" ]] || die "usage: gp milestone [<repo>] <title> [--due YYYY-MM-DD] [--desc TEXT|--desc-file FILE]"
   if [[ -n "$DESC_FILE" ]]; then
     [[ -f "$DESC_FILE" ]] || die "desc-file not found: $DESC_FILE"
@@ -645,7 +647,8 @@ cmd_plan() {
   parse_common "$@"
   need jq
   CONFIG="$(resolve_config)"
-  MANIFEST="$(split_repo_arg "${POSITIONAL[0]:-}" "${POSITIONAL[1]:-}")"
+  split_repo_arg "${POSITIONAL[0]:-}" "${POSITIONAL[1]:-}"
+  MANIFEST="$SPLIT_RESULT"
   [[ -n "$MANIFEST" ]] || die "usage: gp plan [<repo>] <manifest.json> [--dry-run] [--state FILE]"
   [[ -f "$MANIFEST" ]] || die "manifest not found: $MANIFEST"
   load_state
@@ -694,7 +697,8 @@ cmd_release_notes() {
   need jq
   CONFIG="$(resolve_config)"
   local ms msnum out
-  ms="$(split_repo_arg "${POSITIONAL[0]:-}" "${POSITIONAL[1]:-}")"
+  split_repo_arg "${POSITIONAL[0]:-}" "${POSITIONAL[1]:-}"
+  ms="$SPLIT_RESULT"
   [[ -n "$ms" ]] || die "usage: gp release-notes [<repo>] <milestone> [--tag TAG] [--draft] [--create-release] [--out FILE]"
   load_state
   msnum="$(find_milestone "$ms" any)"
@@ -730,7 +734,8 @@ cmd_update_milestone() {
   need jq
   CONFIG="$(resolve_config)"
   local ms msnum totals total closed open pct block today orig newdesc payload
-  ms="$(split_repo_arg "${POSITIONAL[0]:-}" "${POSITIONAL[1]:-}")"
+  split_repo_arg "${POSITIONAL[0]:-}" "${POSITIONAL[1]:-}"
+  ms="$SPLIT_RESULT"
   [[ -n "$ms" ]] || die "usage: gp update-milestone [<repo>] <milestone> [--auto-close] [--label-blocked]"
   load_state
   msnum="$(find_milestone "$ms" any)"
