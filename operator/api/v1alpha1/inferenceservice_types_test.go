@@ -107,7 +107,7 @@ var _ = Describe("InferenceService", func() {
 			isvc.Status.Profile = &ProfileStatus{Name: testProfileRef, Revision: "a1b2c3"}
 			isvc.Status.Model = &ModelStatus{Name: testModelName, Version: testModelVersion}
 			isvc.Status.Conditions = []metav1.Condition{{
-				Type:               "Resolved",
+				Type:               ConditionResolved,
 				Status:             metav1.ConditionTrue,
 				Reason:             "Resolved",
 				Message:            "references resolved",

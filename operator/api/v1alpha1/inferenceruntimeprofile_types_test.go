@@ -203,7 +203,7 @@ var _ = Describe("InferenceRuntimeProfile", func() {
 
 			irp.Status.UsedBy = []ObjectRef{{Namespace: testRefNamespace, Name: testRefServiceName}}
 			irp.Status.Conditions = []metav1.Condition{{
-				Type:               "AssetsResolved",
+				Type:               ConditionAssetsResolved,
 				Status:             metav1.ConditionTrue,
 				Reason:             "AssetsFound",
 				Message:            "all assets resolved",
@@ -215,7 +215,7 @@ var _ = Describe("InferenceRuntimeProfile", func() {
 			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: irp.Name}, got)).To(Succeed())
 			Expect(got.Status.UsedBy).To(Equal([]ObjectRef{{Namespace: testRefNamespace, Name: testRefServiceName}}))
 			Expect(got.Status.Conditions).To(HaveLen(1))
-			Expect(got.Status.Conditions[0].Type).To(Equal("AssetsResolved"))
+			Expect(got.Status.Conditions[0].Type).To(Equal(ConditionAssetsResolved))
 
 			Expect(k8sClient.Delete(ctx, irp)).To(Succeed())
 		})

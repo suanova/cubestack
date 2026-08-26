@@ -162,15 +162,15 @@ type InferenceServiceStatus struct {
 	// conditions represent the current state of the InferenceService resource.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
 	//
-	// Standard condition types include:
-	// - "Resolved": profileRef/modelRef/assets resolve and are compatible
-	// - "Rendered": overrides are valid and the templates render successfully
-	// - "Provisioned": rendered asset ConfigMaps and model PVCs are created
-	// - "WorkloadsApplied": desired config is applied to Services and workloads
-	// - "EndpointReady": the internal endpoint is actually reachable
-	// - "RouteReady": the public route is published (or not requested)
-	// - "Ready": all roles' workloads and Pods are ready
-	// - "Progressing": the controller is still applying the desired config
+	// Standard condition types include (see conditions.go for the constants):
+	// - ConditionResolved: profileRef/modelRef/assets resolve and are compatible
+	// - ConditionRendered: overrides are valid and the templates render successfully
+	// - ConditionProvisioned: rendered asset ConfigMaps and model PVCs are created
+	// - ConditionWorkloadsApplied: desired config is applied to Services and workloads
+	// - ConditionEndpointReady: the internal endpoint is actually reachable
+	// - ConditionRouteReady: the public route is published (or not requested)
+	// - ConditionReady: all roles' workloads and Pods are ready
+	// - ConditionProgressing: the controller is still applying the desired config
 	//
 	// The status of each condition is one of True, False, or Unknown.
 	// +listType=map

@@ -119,9 +119,9 @@ type ModelVersionStatus struct {
 	// conditions represent the current state of the ModelVersion resource.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
 	//
-	// Standard condition types include:
-	// - "StorageResolved": the referenced StorageClass exists (PVC strategy only)
-	// - "InUse": the ModelVersion is referenced by at least one InferenceService
+	// Standard condition types include (see conditions.go for the constants):
+	// - ConditionStorageResolved: the referenced StorageClass exists (PVC strategy only)
+	// - ConditionInUse: the ModelVersion is referenced by at least one InferenceService
 	//
 	// The status of each condition is one of True, False, or Unknown.
 	// +listType=map

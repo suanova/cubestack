@@ -97,7 +97,7 @@ var _ = Describe("ModelVersion", func() {
 
 			mv.Status.UsedBy = []ObjectRef{{Namespace: "project-a", Name: "dsv4-flash-pd"}}
 			mv.Status.Conditions = []metav1.Condition{{
-				Type:               "StorageResolved",
+				Type:               ConditionStorageResolved,
 				Status:             metav1.ConditionTrue,
 				Reason:             "StorageClassExists",
 				Message:            "storage class found",
@@ -109,7 +109,7 @@ var _ = Describe("ModelVersion", func() {
 			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: mv.Name}, got)).To(Succeed())
 			Expect(got.Status.UsedBy).To(Equal([]ObjectRef{{Namespace: "project-a", Name: "dsv4-flash-pd"}}))
 			Expect(got.Status.Conditions).To(HaveLen(1))
-			Expect(got.Status.Conditions[0].Type).To(Equal("StorageResolved"))
+			Expect(got.Status.Conditions[0].Type).To(Equal(ConditionStorageResolved))
 
 			Expect(k8sClient.Delete(ctx, mv)).To(Succeed())
 		})

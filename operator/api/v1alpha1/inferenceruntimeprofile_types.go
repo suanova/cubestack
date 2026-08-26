@@ -587,9 +587,9 @@ type InferenceRuntimeProfileStatus struct {
 	// conditions represent the current state of the InferenceRuntimeProfile resource.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
 	//
-	// Standard condition types include:
-	// - "AssetsResolved": all assets[].configMapRef.name exist in cubestack-system
-	// - "InUse": the InferenceRuntimeProfile is referenced by at least one InferenceService
+	// Standard condition types include (see conditions.go for the constants):
+	// - ConditionAssetsResolved: all assets[].configMapRef.name exist in cubestack-system
+	// - ConditionInUse: the InferenceRuntimeProfile is referenced by at least one InferenceService
 	//
 	// The status of each condition is one of True, False, or Unknown.
 	// +listType=map
