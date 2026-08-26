@@ -4,6 +4,7 @@
 resources:
 - bases/ai.cubestack.io_modelversions.yaml
 - bases/ai.cubestack.io_inferenceruntimeprofiles.yaml
+- bases/ai.cubestack.io_inferenceservices.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

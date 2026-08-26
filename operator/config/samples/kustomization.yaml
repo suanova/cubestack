@@ -2,4 +2,5 @@
 resources:
 - ai_v1alpha1_modelversion.yaml
 - ai_v1alpha1_inferenceruntimeprofile.yaml
+- ai_v1alpha1_inferenceservice.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

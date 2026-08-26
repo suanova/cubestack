@@ -1,0 +1,19 @@
+apiVersion: ai.cubestack.io/v1alpha1
+kind: InferenceService
+metadata:
+  labels:
+    app.kubernetes.io/name: cubestack
+    app.kubernetes.io/managed-by: kustomize
+  name: dsv4-flash-pd
+  namespace: project-a
+spec:
+  modelRef: deepseek-v4-flash-w8a8-v1
+  profileRef: metax-sglang-dsv4-pd
+  overrides:
+    prefillReplicas: 1
+    decodeReplicas: 2
+    maxModelLen: 131072
+  route:
+    publish: true
+    modelName: dsv4-flash
+    timeoutSeconds: 60
