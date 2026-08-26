@@ -36,6 +36,7 @@ var modelVersionGVR = schema.GroupVersionResource{
 }
 
 const (
+	testLauncherSpecKey  = "launcherSpec"
 	testModelName        = "deepseek-v4-flash"
 	testStorageClassName = "juicefs-model-cache"
 	testModelSubPath     = "models/deepseek-v4-flash/w8a8-v1"
@@ -49,7 +50,7 @@ func validModelVersion(name string) *ModelVersion {
 			Version:      "w8a8-v1",
 			Architecture: "deepseek_v4",
 			Quantization: "w8a8",
-			Meta:         map[string]string{"launcherSpec": testModelName},
+			Meta:         map[string]string{testLauncherSpecKey: testModelName},
 			Storage: ModelStorage{
 				Strategy: StorageStrategyHostPath,
 				HostPath: &HostPathStorage{Path: "/workspace/models/deepseek-v4-flash"},

@@ -1,0 +1,34 @@
+# L1 validation for ModelVersion per docs/design/isvc/api.md §3.1:
+# - metadata.name must equal <model>-<version> (CREATE)
+# - spec is immutable (UPDATE)
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: modelversions-ai-cubestack-io
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: ["ai.cubestack.io"]
+      apiVersions: ["v1alpha1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["modelversions"]
+  validations:
+  # The name binding is enforced on CREATE only: pre-existing objects whose
+  # name does not match the naming rule (created before this policy was
+  # deployed) must stay updatable for metadata changes. spec changes are still
+  # blocked by the immutability rule below.
+  - expression: "request.operation != 'CREATE' || object.metadata.name == object.spec.model + '-' + object.spec.version"
+    message: "metadata.name must equal <model>-<version>"
+    reason: Invalid
+  - expression: "oldObject == null || object.spec == oldObject.spec"
+    message: "spec is immutable"
+    reason: Invalid
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: modelversions-ai-cubestack-io-binding
+spec:
+  policyName: modelversions-ai-cubestack-io
+  validationActions: [Deny]
