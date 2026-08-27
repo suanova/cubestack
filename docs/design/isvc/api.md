@@ -338,13 +338,14 @@ GPU 扩展资源通常只区分厂商，不区分具体 GPU 型号。例如，�
 
 | 字段 | 类型 | 校验规则 | 说明 |
 |---|---|---|---|
-| `name` | string | L0：必填、Profile 内唯一 | 该 asset 在 Profile 内的别名，供 `envFromAssets[]` 等引用。渲染后的 ConfigMap 名称为 `<isvc>-<name>`。 |
+| `name` | string | L0：必填；L1：Profile 内唯一 | 该 asset 在 Profile 内的别名，供 `envFromAssets[]` 等引用。渲染后的 ConfigMap 名称为 `<isvc>-<name>`。 |
 | `configMapRef.name` | string | L0：必填 | 源 ConfigMap 的名称。固定从 `cubestack-system` 读取，因此不需要也不允许指定 namespace。版本化命名与 `immutable` 要求见下方约束。 |
 | `mount` / `envFrom` | object / bool | L0：二选一（oneOf） | `mount` 指定 `path` 和 `mode`，将副本作为文件挂载；`envFrom: true` 将副本中的键值作为环境变量注入。两种方式都对所有 role 的 Pod 生效。 |
 
 **约束**
 
-- 源 ConfigMap 必须使用版本化名称，例如 `*-v0.5.12-rc1`，并设置 `immutable: true`（L1，VAP 校验）。
+- 源 ConfigMap 必须使用版本化名称，例如 `*-v0.5.12-rc1`（L1，VAP 校验引用名称的版本化格式）。
+- 源 ConfigMap 必须设置 `immutable: true`（L2，`AssetsResolved` 检查时校验；VAP 无法查看其他对象）。
 - ConfigMap 的 data 值可以使用 `{{ }}` 占位符。渲染时只能使用服务级上下文，不能使用 `role.*` 等 role 级变量，确保所有 Pod 得到相同的内容。
 - Controller 校验源 ConfigMap 是否存在（L2，`Resolved`）；VAP 校验引用名称是否符合命名规范（L1）。
 
@@ -358,7 +359,7 @@ GPU 扩展资源通常只区分厂商，不区分具体 GPU 型号。例如，�
 | `type` | enum | L0：必填、枚举（`integer` \| `string` \| `boolean`） | 参数类型，决定 override 值的解析方式。 |
 | `enum` | list | L0：可选；L1：不能与 `min`、`max` 同时使用 | 可接受的值列表。 |
 | `min` / `max` | number | L0：可选；L1：与 `enum` 互斥 | 数值参数的最小值和最大值。 |
-| `default` | scalar | L0：可选；L1：必须符合 `type`，并落在 `enum` 或 `min` / `max` 的边界内（VAP 在 Profile 创建或更新时校验） | 用户未提供该参数时使用的值。 |
+| `default` | scalar | L0：可选；L1：设置 `enum` 时 `default` 必须属于 `enum`（VAP 校验）；`type` 符合性与 `min` / `max` 边界在 L2 解析时校验 | 用户未提供该参数时使用的值。 |
 | `description` | string | L0：可选 | 向用户说明参数的用途和推荐取值。 |
 
 **使用规则**
@@ -370,7 +371,7 @@ GPU 扩展资源通常只区分厂商，不区分具体 GPU 型号。例如，�
 | 字段 | 类型 | 校验规则 | 说明 |
 |---|---|---|---|
 | `name` | string | L0：必填；L1：同一 Profile 内唯一 | role 名，作为引用锚点：`endpoint.role`、`dependsOn` 和模板 `{{ roles.<name>.* }}` 均按名引用；生成的资源名中也包含它（`<isvc>-<role>`）。 |
-| `dependsOn` | list | L1：引用的 role 名必须存在 | role 间的启动依赖，构成 DAG。Controller 按拓扑序创建并做就绪门控（见 §4.3）。 |
+| `dependsOn` | list | L1：引用的 role 名必须存在；L2：依赖构成 DAG（拓扑排序时检测循环） | role 间的启动依赖，构成 DAG。Controller 按拓扑序创建并做就绪门控（见 §4.3）。 |
 
 ##### roles[].podTemplate
 

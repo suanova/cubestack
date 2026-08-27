@@ -1,3 +1,4 @@
 # L1 validation policies (ValidatingAdmissionPolicy) for the ai.cubestack.io CRDs.
 resources:
+- inferenceruntimeprofile_policy.yaml
 - modelversion_policy.yaml
