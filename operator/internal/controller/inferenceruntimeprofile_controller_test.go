@@ -268,5 +268,71 @@ var _ = Describe("InferenceRuntimeProfile controller", func() {
 				g.Expect(cond.Reason).To(Equal("NotApplicable"))
 			}, "15s", "200ms").Should(Succeed())
 		})
+
+		It("refreshes AssetsResolved when a source ConfigMap is created", func() {
+			irp := validInferenceRuntimeProfile("irp-assets-late-create")
+			irp.Spec.Assets = []aiv1alpha1.Asset{
+				{Name: "bootstrap", ConfigMapRef: aiv1alpha1.AssetConfigMapRef{Name: "late-create-cm"}, EnvFrom: ptrTo(true)},
+			}
+			Expect(k8sClient.Create(ctx, irp)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, irp) }()
+
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.InferenceRuntimeProfile{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: irp.Name}, got)).To(Succeed())
+				cond := meta.FindStatusCondition(got.Status.Conditions, aiv1alpha1.ConditionAssetsResolved)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			}, "15s", "200ms").Should(Succeed())
+
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "late-create-cm", Namespace: systemNamespace},
+				Immutable:  ptrTo(true),
+				Data:       map[string]string{"key": "value"},
+			}
+			Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.InferenceRuntimeProfile{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: irp.Name}, got)).To(Succeed())
+				cond := meta.FindStatusCondition(got.Status.Conditions, aiv1alpha1.ConditionAssetsResolved)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			}, "15s", "200ms").Should(Succeed())
+		})
+
+		It("refreshes AssetsResolved when a source ConfigMap is deleted", func() {
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "to-delete-cm", Namespace: systemNamespace},
+				Immutable:  ptrTo(true),
+				Data:       map[string]string{"key": "value"},
+			}
+			Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+
+			irp := validInferenceRuntimeProfile("irp-assets-late-delete")
+			irp.Spec.Assets = []aiv1alpha1.Asset{
+				{Name: "bootstrap", ConfigMapRef: aiv1alpha1.AssetConfigMapRef{Name: cm.Name}, EnvFrom: ptrTo(true)},
+			}
+			Expect(k8sClient.Create(ctx, irp)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, irp) }()
+
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.InferenceRuntimeProfile{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: irp.Name}, got)).To(Succeed())
+				cond := meta.FindStatusCondition(got.Status.Conditions, aiv1alpha1.ConditionAssetsResolved)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			}, "15s", "200ms").Should(Succeed())
+
+			Expect(k8sClient.Delete(ctx, cm)).To(Succeed())
+
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.InferenceRuntimeProfile{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: irp.Name}, got)).To(Succeed())
+				cond := meta.FindStatusCondition(got.Status.Conditions, aiv1alpha1.ConditionAssetsResolved)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			}, "15s", "200ms").Should(Succeed())
+		})
 	})
 })

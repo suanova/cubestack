@@ -10,6 +10,8 @@ rules:
   - configmaps
   verbs:
   - get
+  - list
+  - watch
 - apiGroups:
   - ai.cubestack.io
   resources:

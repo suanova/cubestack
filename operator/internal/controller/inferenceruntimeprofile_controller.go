@@ -17,7 +17,7 @@ limitations under the License.
 // +kubebuilder:rbac:groups=ai.cubestack.io,resources=inferenceruntimeprofiles,verbs=get;list;watch
 // +kubebuilder:rbac:groups=ai.cubestack.io,resources=inferenceruntimeprofiles/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=ai.cubestack.io,resources=inferenceservices,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
 
 package controller
 
@@ -43,6 +43,10 @@ import (
 
 // profileRefIndexKey is the cache index field for InferenceService.spec.profileRef.
 const profileRefIndexKey = "spec.profileRef"
+
+// assetConfigMapRefIndexKey is the cache index field for
+// InferenceRuntimeProfile assets[].configMapRef.name.
+const assetConfigMapRefIndexKey = "assets[].configMapRef.name"
 
 // systemNamespace hosts the source ConfigMaps referenced by profile assets.
 const systemNamespace = "cubestack-system"
@@ -156,9 +160,10 @@ func (r *InferenceRuntimeProfileReconciler) setAssetsResolvedCondition(ctx conte
 	return nil
 }
 
-// SetupWithManager registers the InferenceRuntimeProfile watch and the
-// InferenceService watch mapped through spec.profileRef, and indexes
-// InferenceServices by spec.profileRef for the referring-services query.
+// SetupWithManager registers the InferenceRuntimeProfile watch, the
+// InferenceService watch mapped through spec.profileRef, and the ConfigMap
+// watch mapped through assets[].configMapRef.name, indexing both query
+// fields on the cache.
 func (r *InferenceRuntimeProfileReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := mgr.GetCache().IndexField(context.Background(), &aiv1alpha1.InferenceService{}, profileRefIndexKey,
 		func(o client.Object) []string {
@@ -166,10 +171,23 @@ func (r *InferenceRuntimeProfileReconciler) SetupWithManager(mgr ctrl.Manager) e
 		}); err != nil {
 		return err
 	}
+	if err := mgr.GetCache().IndexField(context.Background(), &aiv1alpha1.InferenceRuntimeProfile{}, assetConfigMapRefIndexKey,
+		func(o client.Object) []string {
+			irp := o.(*aiv1alpha1.InferenceRuntimeProfile)
+			refs := make([]string, 0, len(irp.Spec.Assets))
+			for _, asset := range irp.Spec.Assets {
+				refs = append(refs, asset.ConfigMapRef.Name)
+			}
+			return refs
+		}); err != nil {
+		return err
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&aiv1alpha1.InferenceRuntimeProfile{}).
 		Watches(&aiv1alpha1.InferenceService{},
 			handler.EnqueueRequestsFromMapFunc(r.enqueueReferencingProfile)).
+		Watches(&corev1.ConfigMap{},
+			handler.EnqueueRequestsFromMapFunc(r.enqueueReferencingProfiles)).
 		Complete(r)
 }
 
@@ -178,4 +196,26 @@ func (r *InferenceRuntimeProfileReconciler) SetupWithManager(mgr ctrl.Manager) e
 func (r *InferenceRuntimeProfileReconciler) enqueueReferencingProfile(_ context.Context, obj client.Object) []reconcile.Request {
 	isvc := obj.(*aiv1alpha1.InferenceService)
 	return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: isvc.Spec.ProfileRef}}}
+}
+
+// enqueueReferencingProfiles maps a source ConfigMap to the profiles whose
+// assets reference it. Only ConfigMaps in cubestack-system can be asset
+// sources, and profiles are found through the assets[].configMapRef.name
+// cache index, so unrelated ConfigMap events short-circuit cheaply.
+func (r *InferenceRuntimeProfileReconciler) enqueueReferencingProfiles(ctx context.Context, obj client.Object) []reconcile.Request {
+	cm := obj.(*corev1.ConfigMap)
+	if cm.Namespace != systemNamespace {
+		return nil
+	}
+	irpList := &aiv1alpha1.InferenceRuntimeProfileList{}
+	if err := r.List(ctx, irpList, client.MatchingFields{assetConfigMapRefIndexKey: cm.Name}); err != nil {
+		// A failed index lookup drops the event; the profile is still
+		// refreshed on its next reconcile.
+		return nil
+	}
+	requests := make([]reconcile.Request, 0, len(irpList.Items))
+	for _, irp := range irpList.Items {
+		requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{Name: irp.Name}})
+	}
+	return requests
 }
