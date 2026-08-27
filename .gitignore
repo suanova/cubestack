@@ -29,3 +29,6 @@ go.work
 
 # Kubeconfig might contain secrets
 *.kubeconfig
+
+# Superpowers workflow artifacts (personal workflow, not team-shared)
+docs/superpowers/

@@ -36,6 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	aiv1alpha1 "github.com/suanova/cubestack/api/v1alpha1"
+	"github.com/suanova/cubestack/internal/controller"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -178,6 +179,14 @@ func main() {
 	}
 
 	// +kubebuilder:scaffold:builder
+
+	if err = (&controller.ModelVersionReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "ModelVersion")
+		os.Exit(1)
+	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "Failed to set up health check")
