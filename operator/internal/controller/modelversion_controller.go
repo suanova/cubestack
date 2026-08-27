@@ -22,10 +22,8 @@ limitations under the License.
 package controller
 
 import (
-	"cmp"
 	"context"
 	"fmt"
-	"slices"
 
 	storagev1 "k8s.io/api/storage/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -70,34 +68,9 @@ func (r *ModelVersionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
-	usedBy := make([]aiv1alpha1.ObjectRef, 0, len(referrers.Items))
-	for _, isvc := range referrers.Items {
-		usedBy = append(usedBy, aiv1alpha1.ObjectRef{Namespace: isvc.Namespace, Name: isvc.Name})
-	}
-	slices.SortFunc(usedBy, func(a, b aiv1alpha1.ObjectRef) int {
-		if c := cmp.Compare(a.Namespace, b.Namespace); c != 0 {
-			return c
-		}
-		return cmp.Compare(a.Name, b.Name)
-	})
-
 	desired := mv.DeepCopy()
-	desired.Status.UsedBy = usedBy
-	if len(usedBy) == 0 {
-		meta.SetStatusCondition(&desired.Status.Conditions, metav1.Condition{
-			Type:    aiv1alpha1.ConditionInUse,
-			Status:  metav1.ConditionFalse,
-			Reason:  "NotReferenced",
-			Message: "Not referenced by any InferenceService",
-		})
-	} else {
-		meta.SetStatusCondition(&desired.Status.Conditions, metav1.Condition{
-			Type:    aiv1alpha1.ConditionInUse,
-			Status:  metav1.ConditionTrue,
-			Reason:  "ReferencedByServices",
-			Message: fmt.Sprintf("Referenced by %d InferenceService", len(usedBy)),
-		})
-	}
+	desired.Status.UsedBy = sortedUsedBy(referrers.Items)
+	setInUseCondition(&desired.Status.Conditions, desired.Status.UsedBy)
 	if err := r.setStorageResolvedCondition(ctx, &desired.Status.Conditions, &mv); err != nil {
 		return ctrl.Result{}, err
 	}

@@ -5,8 +5,15 @@ metadata:
   name: manager-role
 rules:
 - apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+- apiGroups:
   - ai.cubestack.io
   resources:
+  - inferenceruntimeprofiles
   - inferenceservices
   - modelversions
   verbs:
@@ -16,6 +23,7 @@ rules:
 - apiGroups:
   - ai.cubestack.io
   resources:
+  - inferenceruntimeprofiles/status
   - modelversions/status
   verbs:
   - get
