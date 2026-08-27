@@ -32,6 +32,12 @@ import (
 
 func ptrTo[T any](v T) *T { return &v }
 
+const (
+	testAssetName          = "bootstrap"
+	testConfigMapDataKey   = "key"
+	testConfigMapDataValue = "value"
+)
+
 func validInferenceRuntimeProfile(name string) *aiv1alpha1.InferenceRuntimeProfile {
 	return &aiv1alpha1.InferenceRuntimeProfile{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
@@ -50,7 +56,7 @@ func validInferenceRuntimeProfile(name string) *aiv1alpha1.InferenceRuntimeProfi
 			},
 			Assets: []aiv1alpha1.Asset{
 				{
-					Name:         "bootstrap",
+					Name:         testAssetName,
 					ConfigMapRef: aiv1alpha1.AssetConfigMapRef{Name: "metax-c500-bootstrap-v0.5.12-rc1"},
 					Mount:        &aiv1alpha1.AssetMount{Path: "/opt/cubestack-bootstrap", Mode: 0755},
 				},
@@ -211,7 +217,7 @@ var _ = Describe("InferenceRuntimeProfile controller", func() {
 				cm := &corev1.ConfigMap{
 					ObjectMeta: metav1.ObjectMeta{Name: cmName, Namespace: systemNamespace},
 					Immutable:  ptrTo(true),
-					Data:       map[string]string{"key": "value"},
+					Data:       map[string]string{testConfigMapDataKey: testConfigMapDataValue},
 				}
 				Expect(k8sClient.Create(ctx, cm)).To(Succeed())
 			}
@@ -232,13 +238,13 @@ var _ = Describe("InferenceRuntimeProfile controller", func() {
 		It("marks AssetsResolved false when a source ConfigMap is not immutable", func() {
 			cm := &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{Name: "mutable-cm", Namespace: systemNamespace},
-				Data:       map[string]string{"key": "value"},
+				Data:       map[string]string{testConfigMapDataKey: testConfigMapDataValue},
 			}
 			Expect(k8sClient.Create(ctx, cm)).To(Succeed())
 
 			irp := validInferenceRuntimeProfile("irp-assets-mutable")
 			irp.Spec.Assets = []aiv1alpha1.Asset{
-				{Name: "bootstrap", ConfigMapRef: aiv1alpha1.AssetConfigMapRef{Name: cm.Name}, EnvFrom: ptrTo(true)},
+				{Name: testAssetName, ConfigMapRef: aiv1alpha1.AssetConfigMapRef{Name: cm.Name}, EnvFrom: ptrTo(true)},
 			}
 			Expect(k8sClient.Create(ctx, irp)).To(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, irp) }()
@@ -272,7 +278,7 @@ var _ = Describe("InferenceRuntimeProfile controller", func() {
 		It("refreshes AssetsResolved when a source ConfigMap is created", func() {
 			irp := validInferenceRuntimeProfile("irp-assets-late-create")
 			irp.Spec.Assets = []aiv1alpha1.Asset{
-				{Name: "bootstrap", ConfigMapRef: aiv1alpha1.AssetConfigMapRef{Name: "late-create-cm"}, EnvFrom: ptrTo(true)},
+				{Name: testAssetName, ConfigMapRef: aiv1alpha1.AssetConfigMapRef{Name: "late-create-cm"}, EnvFrom: ptrTo(true)},
 			}
 			Expect(k8sClient.Create(ctx, irp)).To(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, irp) }()
@@ -288,7 +294,7 @@ var _ = Describe("InferenceRuntimeProfile controller", func() {
 			cm := &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{Name: "late-create-cm", Namespace: systemNamespace},
 				Immutable:  ptrTo(true),
-				Data:       map[string]string{"key": "value"},
+				Data:       map[string]string{testConfigMapDataKey: testConfigMapDataValue},
 			}
 			Expect(k8sClient.Create(ctx, cm)).To(Succeed())
 
@@ -305,13 +311,13 @@ var _ = Describe("InferenceRuntimeProfile controller", func() {
 			cm := &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{Name: "to-delete-cm", Namespace: systemNamespace},
 				Immutable:  ptrTo(true),
-				Data:       map[string]string{"key": "value"},
+				Data:       map[string]string{testConfigMapDataKey: testConfigMapDataValue},
 			}
 			Expect(k8sClient.Create(ctx, cm)).To(Succeed())
 
 			irp := validInferenceRuntimeProfile("irp-assets-late-delete")
 			irp.Spec.Assets = []aiv1alpha1.Asset{
-				{Name: "bootstrap", ConfigMapRef: aiv1alpha1.AssetConfigMapRef{Name: cm.Name}, EnvFrom: ptrTo(true)},
+				{Name: testAssetName, ConfigMapRef: aiv1alpha1.AssetConfigMapRef{Name: cm.Name}, EnvFrom: ptrTo(true)},
 			}
 			Expect(k8sClient.Create(ctx, irp)).To(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, irp) }()
