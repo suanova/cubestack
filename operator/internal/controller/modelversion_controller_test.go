@@ -129,8 +129,12 @@ var _ = Describe("ModelVersion controller", func() {
 				g.Expect(got.Status.UsedBy).To(ContainElement(aiv1alpha1.ObjectRef{Namespace: testNamespace, Name: isvc.Name}))
 			}, "15s", "200ms").Should(Succeed())
 
-			isvc.Spec.ModelRef = mvNew.Name
-			Expect(k8sClient.Update(ctx, isvc)).To(Succeed())
+			// Re-fetch before mutating: the InferenceService controller writes
+			// status, so the object created above may be stale.
+			fresh := &aiv1alpha1.InferenceService{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: isvc.Name, Namespace: testNamespace}, fresh)).To(Succeed())
+			fresh.Spec.ModelRef = mvNew.Name
+			Expect(k8sClient.Update(ctx, fresh)).To(Succeed())
 
 			Eventually(func(g Gomega) {
 				gotOld := &aiv1alpha1.ModelVersion{}

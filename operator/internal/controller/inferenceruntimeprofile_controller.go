@@ -41,13 +41,6 @@ import (
 	aiv1alpha1 "github.com/suanova/cubestack/api/v1alpha1"
 )
 
-// profileRefIndexKey is the cache index field for InferenceService.spec.profileRef.
-const profileRefIndexKey = "spec.profileRef"
-
-// assetConfigMapRefIndexKey is the cache index field for
-// InferenceRuntimeProfile assets[].configMapRef.name.
-const assetConfigMapRefIndexKey = "assets[].configMapRef.name"
-
 // systemNamespace hosts the source ConfigMaps referenced by profile assets.
 const systemNamespace = "cubestack-system"
 
@@ -165,21 +158,7 @@ func (r *InferenceRuntimeProfileReconciler) setAssetsResolvedCondition(ctx conte
 // watch mapped through assets[].configMapRef.name, indexing both query
 // fields on the cache.
 func (r *InferenceRuntimeProfileReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	if err := mgr.GetCache().IndexField(context.Background(), &aiv1alpha1.InferenceService{}, profileRefIndexKey,
-		func(o client.Object) []string {
-			return []string{o.(*aiv1alpha1.InferenceService).Spec.ProfileRef}
-		}); err != nil {
-		return err
-	}
-	if err := mgr.GetCache().IndexField(context.Background(), &aiv1alpha1.InferenceRuntimeProfile{}, assetConfigMapRefIndexKey,
-		func(o client.Object) []string {
-			irp := o.(*aiv1alpha1.InferenceRuntimeProfile)
-			refs := make([]string, 0, len(irp.Spec.Assets))
-			for _, asset := range irp.Spec.Assets {
-				refs = append(refs, asset.ConfigMapRef.Name)
-			}
-			return refs
-		}); err != nil {
+	if err := registerSharedIndexes(mgr); err != nil {
 		return err
 	}
 	return ctrl.NewControllerManagedBy(mgr).

@@ -84,6 +84,9 @@ var _ = BeforeSuite(func() {
 	err = (&InferenceRuntimeProfileReconciler{Client: testMgr.GetClient(), Scheme: testMgr.GetScheme()}).SetupWithManager(testMgr)
 	Expect(err).NotTo(HaveOccurred())
 
+	err = (&InferenceServiceReconciler{Client: testMgr.GetClient(), Scheme: testMgr.GetScheme()}).SetupWithManager(testMgr)
+	Expect(err).NotTo(HaveOccurred())
+
 	mgrDone = make(chan struct{})
 	go func() {
 		defer close(mgrDone)

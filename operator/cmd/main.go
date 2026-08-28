@@ -194,6 +194,13 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "InferenceRuntimeProfile")
 		os.Exit(1)
 	}
+	if err = (&controller.InferenceServiceReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "InferenceService")
+		os.Exit(1)
+	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "Failed to set up health check")

@@ -26,6 +26,7 @@ rules:
   - ai.cubestack.io
   resources:
   - inferenceruntimeprofiles/status
+  - inferenceservices/status
   - modelversions/status
   verbs:
   - get

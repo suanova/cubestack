@@ -40,9 +40,6 @@ import (
 	aiv1alpha1 "github.com/suanova/cubestack/api/v1alpha1"
 )
 
-// modelRefIndexKey is the cache index field for InferenceService.spec.modelRef.
-const modelRefIndexKey = "spec.modelRef"
-
 // ModelVersionReconciler maintains the reverse index of InferenceServices
 // referencing a ModelVersion: status.usedBy and the InUse condition. The
 // index is fully rebuilt on every reconcile.
@@ -136,10 +133,7 @@ func (r *ModelVersionReconciler) referringServices(ctx context.Context, modelRef
 // watch mapped through spec.modelRef, and indexes InferenceServices by
 // spec.modelRef for the referring-services query.
 func (r *ModelVersionReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	if err := mgr.GetCache().IndexField(context.Background(), &aiv1alpha1.InferenceService{}, modelRefIndexKey,
-		func(o client.Object) []string {
-			return []string{o.(*aiv1alpha1.InferenceService).Spec.ModelRef}
-		}); err != nil {
+	if err := registerSharedIndexes(mgr); err != nil {
 		return err
 	}
 	return ctrl.NewControllerManagedBy(mgr).
