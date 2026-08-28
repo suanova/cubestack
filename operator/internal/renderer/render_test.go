@@ -133,6 +133,20 @@ var _ = Describe("Render", func() {
 		Expect(res.Errors[0].Reason).To(Equal(ReasonPhaseViolation))
 	})
 
+	It("reports asset errors in deterministic key order", func() {
+		// The asset data map iterates in unspecified order; the rendered
+		// condition reason is Errors[0], so rendering must sort the keys.
+		res := Render(renderISVC(), renderProfile(), renderModel(), map[string]map[string]string{
+			bootstrapAsset: {
+				"z": "{{ overrides.undeclared }}",
+				"a": "{{ role.group.size }}",
+			},
+		})
+		Expect(res.Errors).To(HaveLen(2))
+		Expect(res.Errors[0].Reason).To(Equal(ReasonPhaseViolation)) // key "a" renders first
+		Expect(res.Errors[1].Reason).To(Equal(ReasonUnknownPlaceholder))
+	})
+
 	It("fails with PhaseViolation for non-override variables in workload structure", func() {
 		p := renderProfile()
 		p.Spec.Roles[0].Workload.Replicas = ptrTo(intstr.FromString("{{ model.name }}"))

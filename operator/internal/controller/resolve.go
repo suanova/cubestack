@@ -54,7 +54,7 @@ func (r *InferenceServiceReconciler) resolve(ctx context.Context, isvc *aiv1alph
 	profile := &aiv1alpha1.InferenceRuntimeProfile{}
 	if err := r.Get(ctx, types.NamespacedName{Name: isvc.Spec.ProfileRef}, profile); err != nil {
 		if apierrors.IsNotFound(err) {
-			rr.failures = append(rr.failures, fmt.Sprintf("profileRef %q does not exist", isvc.Spec.ProfileRef))
+			rr.failures = append(rr.failures, fmt.Sprintf("ProfileRef %q does not exist", isvc.Spec.ProfileRef))
 			rr.reason = "ProfileNotFound"
 		} else {
 			return nil, err
@@ -66,7 +66,7 @@ func (r *InferenceServiceReconciler) resolve(ctx context.Context, isvc *aiv1alph
 	model := &aiv1alpha1.ModelVersion{}
 	if err := r.Get(ctx, types.NamespacedName{Name: isvc.Spec.ModelRef}, model); err != nil {
 		if apierrors.IsNotFound(err) {
-			rr.failures = append(rr.failures, fmt.Sprintf("modelRef %q does not exist", isvc.Spec.ModelRef))
+			rr.failures = append(rr.failures, fmt.Sprintf("ModelRef %q does not exist", isvc.Spec.ModelRef))
 			if rr.reason == "" {
 				rr.reason = "ModelNotFound"
 			}
@@ -81,7 +81,7 @@ func (r *InferenceServiceReconciler) resolve(ctx context.Context, isvc *aiv1alph
 		if !slices.Contains(rr.profile.Spec.ModelRequirements.Architectures, rr.model.Spec.Architecture) ||
 			!slices.Contains(rr.profile.Spec.ModelRequirements.Quantization, rr.model.Spec.Quantization) {
 			rr.failures = append(rr.failures, fmt.Sprintf(
-				"model %s/%s is not supported by profile %s (requires architecture in %v and quantization in %v)",
+				"Model %s/%s is not supported by profile %s (requires architecture in %v and quantization in %v)",
 				rr.model.Spec.Architecture, rr.model.Spec.Quantization, rr.profile.Name,
 				rr.profile.Spec.ModelRequirements.Architectures, rr.profile.Spec.ModelRequirements.Quantization))
 			if rr.reason == "" {
@@ -95,7 +95,7 @@ func (r *InferenceServiceReconciler) resolve(ctx context.Context, isvc *aiv1alph
 			cm := &corev1.ConfigMap{}
 			if err := r.Get(ctx, types.NamespacedName{Namespace: systemNamespace, Name: asset.ConfigMapRef.Name}, cm); err != nil {
 				if apierrors.IsNotFound(err) {
-					rr.failures = append(rr.failures, fmt.Sprintf("asset source ConfigMap %q not found in %s", asset.ConfigMapRef.Name, systemNamespace))
+					rr.failures = append(rr.failures, fmt.Sprintf("Asset source ConfigMap %q not found in %s", asset.ConfigMapRef.Name, systemNamespace))
 					if rr.reason == "" {
 						rr.reason = "AssetNotFound"
 					}

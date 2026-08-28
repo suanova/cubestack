@@ -107,6 +107,30 @@ var _ = Describe("ResolveOverrides", func() {
 		Expect(got).To(Equal(map[string]string{overrideSize: "1"}))
 	})
 
+	It("distinguishes large integers beyond float64 precision", func() {
+		declared := []aiv1alpha1.Override{
+			{Name: overrideSize, Type: aiv1alpha1.OverrideTypeInteger, Enum: []apiextensionsv1.JSON{jsonValue("9007199254740992")}},
+		}
+		// 9007199254740993 and 9007199254740992 are distinct int64 values that
+		// collide when converted to float64; the enum check must not round.
+		_, errs := ResolveOverrides(declared, map[string]apiextensionsv1.JSON{overrideSize: jsonValue("9007199254740993")})
+		Expect(errs).To(HaveLen(1))
+		Expect(errs[0].Reason).To(Equal(ReasonInvalidOverride))
+
+		got, errs := ResolveOverrides(declared, map[string]apiextensionsv1.JSON{overrideSize: jsonValue("9007199254740992")})
+		Expect(errs).To(BeEmpty())
+		Expect(got).To(Equal(map[string]string{overrideSize: "9007199254740992"}))
+	})
+
+	It("compares exponent-notation enum items exactly", func() {
+		declared := []aiv1alpha1.Override{
+			{Name: overrideSize, Type: aiv1alpha1.OverrideTypeInteger, Enum: []apiextensionsv1.JSON{jsonValue("1e3")}},
+		}
+		got, errs := ResolveOverrides(declared, map[string]apiextensionsv1.JSON{overrideSize: jsonValue("1000")})
+		Expect(errs).To(BeEmpty())
+		Expect(got).To(Equal(map[string]string{overrideSize: "1000"}))
+	})
+
 	It("omits declared overrides with neither a value nor a default", func() {
 		got, errs := ResolveOverrides([]aiv1alpha1.Override{{Name: "solo", Type: aiv1alpha1.OverrideTypeString}}, nil)
 		Expect(errs).To(BeEmpty())

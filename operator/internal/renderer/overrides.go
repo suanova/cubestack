@@ -5,6 +5,7 @@ package renderer
 import (
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"strconv"
 	"strings"
 
@@ -140,7 +141,9 @@ func validateValue(ov aiv1alpha1.Override, raw apiextensionsv1.JSON) (string, *E
 
 // enumContains compares semantically (1 equals 1.0), not by raw bytes. Both
 // sides are decoded with UseNumber so numeric values compare as json.Number;
-// two numbers are compared numerically, everything else via deep equality.
+// two numbers are compared exactly (int64 when both are integral, big.Rat
+// otherwise — never float64, which loses precision above 2^53), everything
+// else via deep equality.
 func enumContains(enum []apiextensionsv1.JSON, v any) bool {
 	for _, item := range enum {
 		var want any
@@ -151,9 +154,7 @@ func enumContains(enum []apiextensionsv1.JSON, v any) bool {
 		}
 		if a, ok := v.(json.Number); ok {
 			if b, ok := want.(json.Number); ok {
-				av, aerr := a.Float64()
-				bv, berr := b.Float64()
-				if aerr == nil && berr == nil && av == bv {
+				if numbersEqual(a, b) {
 					return true
 				}
 				continue
@@ -164,4 +165,45 @@ func enumContains(enum []apiextensionsv1.JSON, v any) bool {
 		}
 	}
 	return false
+}
+
+// numbersEqual compares two JSON numbers exactly: integral forms compare as
+// int64, anything else (decimals, exponents) via big.Rat.
+func numbersEqual(a, b json.Number) bool {
+	ai, errA := strconv.ParseInt(a.String(), 10, 64)
+	bi, errB := strconv.ParseInt(b.String(), 10, 64)
+	if errA == nil && errB == nil {
+		return ai == bi
+	}
+	ra, okA := ratFromNumber(a)
+	rb, okB := ratFromNumber(b)
+	return okA && okB && ra.Cmp(rb) == 0
+}
+
+// ratFromNumber converts a JSON number to a big.Rat exactly, expanding
+// exponent notation (1.5e3 -> 1500).
+func ratFromNumber(n json.Number) (*big.Rat, bool) {
+	s := n.String()
+	if i := strings.IndexAny(s, "eE"); i >= 0 {
+		exp, err := strconv.Atoi(s[i+1:])
+		if err != nil {
+			return nil, false
+		}
+		r, ok := new(big.Rat).SetString(s[:i])
+		if !ok {
+			return nil, false
+		}
+		absExp := exp
+		if absExp < 0 {
+			absExp = -absExp
+		}
+		power := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(absExp)), nil)
+		if exp >= 0 {
+			r.Mul(r, new(big.Rat).SetInt(power))
+		} else {
+			r.Quo(r, new(big.Rat).SetInt(power))
+		}
+		return r, true
+	}
+	return new(big.Rat).SetString(s)
 }

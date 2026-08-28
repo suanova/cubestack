@@ -2,6 +2,7 @@ package renderer
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -100,13 +101,20 @@ func Render(isvc *aiv1alpha1.InferenceService, profile *aiv1alpha1.InferenceRunt
 	ctx.role = nil
 
 	// Assets: service-level context only. Errors from the overrides and role
-	// phases accumulate into res.Errors; each asset string only appends.
+	// phases accumulate into res.Errors; each asset string only appends. The
+	// asset data keys are sorted so the error order — and therefore the
+	// Rendered condition reason — is deterministic across reconciles.
 	for _, asset := range profile.Spec.Assets {
 		data := assetData[asset.Name]
+		keys := make([]string, 0, len(data))
+		for k := range data {
+			keys = append(keys, k)
+		}
+		slices.Sort(keys)
 		rendered := make(map[string]string, len(data))
-		for k, v := range data {
+		for _, k := range keys {
 			var errs []Error
-			rendered[k], errs = renderString(ctx, v, assetAllowed)
+			rendered[k], errs = renderString(ctx, data[k], assetAllowed)
 			res.Errors = append(res.Errors, errs...)
 		}
 		res.Assets[asset.Name] = rendered

@@ -230,6 +230,8 @@ var _ = Describe("InferenceService controller", func() {
 				g.Expect(cond).ToNot(BeNil())
 				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 				g.Expect(cond.Reason).To(Equal("ModelNotFound"))
+				// The echo must not linger from the previously resolved state.
+				g.Expect(got.Status.Model).To(BeNil())
 			}, "15s", "200ms").Should(Succeed())
 		})
 

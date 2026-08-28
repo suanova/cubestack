@@ -83,9 +83,16 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		if isvc.Status.Profile != nil && isvc.Status.Profile.Name == resolved.profile.Name {
 			desired.Status.Profile.Revision = isvc.Status.Profile.Revision
 		}
+	} else if isvc.Status.Profile != nil && isvc.Status.Profile.Name != isvc.Spec.ProfileRef {
+		// A switched reference must not linger, but a same-name reference
+		// keeps its echo — including the adopted revision, the drift baseline
+		// that must survive the profile's deletion and recreation.
+		desired.Status.Profile = nil
 	}
 	if resolved.model != nil {
 		desired.Status.Model = &aiv1alpha1.ModelStatus{Name: resolved.model.Spec.Model, Version: resolved.model.Spec.Version}
+	} else {
+		desired.Status.Model = nil
 	}
 
 	if !resolved.resolved() {
