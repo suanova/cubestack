@@ -8,15 +8,33 @@ export const runtime = "nodejs";
 const PERSES_SERVER_URL = process.env.PERSES_SERVER_URL ?? "http://localhost:8080";
 
 /**
- * Forward a portal `/api/perses/*` request to the Perses server.
+ * Forward a read-only portal `/api/perses/*` request to the Perses server.
  *
- * The portal's dashboards talk to three surfaces on the Perses server — the
- * resource API (`/api/v1/...`), the datasource proxy (`/proxy/...`) that
- * reaches Prometheus/Thanos, and the remote plugin bundles loaded by
- * @perses-dev/plugin-system. One catch-all keeps them all same-origin.
+ * The portal's dashboards only render dashboards, so this proxy exposes two
+ * surfaces on the Perses server:
+ *
+ *  - GET on any path — the resource API (`/api/v1/...`), the datasource proxy
+ *    (`/proxy/...`) queries that reach Prometheus/Thanos, and the remote
+ *    plugin bundles loaded by @perses-dev/plugin-system. One catch-all keeps
+ *    them all same-origin.
+ *  - POST only on the datasource proxy path, where a datasource query is run.
+ *
+ * Resource mutations (POST on `/api/v1/...`, and PUT/PATCH/DELETE anywhere)
+ * are never needed for dashboard rendering: PUT/PATCH/DELETE are not exported
+ * (Next.js responds 405), and POST is rejected unless it targets a datasource
+ * query.
  */
+function isDatasourceQuery(path: string[]): boolean {
+  return path[0] === "proxy";
+}
+
 async function proxy(request: NextRequest, path: string[]) {
   const upstreamUrl = `${PERSES_SERVER_URL}/${path.join("/")}${request.nextUrl.search}`;
+
+  if (request.method === "POST" && !isDatasourceQuery(path)) {
+    // Only datasource queries may be written to; reject resource mutations.
+    return Response.json({ error: "Method not allowed" }, { status: 405 });
+  }
 
   try {
     const headers = new Headers();
@@ -57,21 +75,6 @@ export async function GET(request: NextRequest, ctx: { params: Promise<{ path: s
 }
 
 export async function POST(request: NextRequest, ctx: { params: Promise<{ path: string[] }> }) {
-  const { path } = await ctx.params;
-  return proxy(request, path);
-}
-
-export async function PUT(request: NextRequest, ctx: { params: Promise<{ path: string[] }> }) {
-  const { path } = await ctx.params;
-  return proxy(request, path);
-}
-
-export async function PATCH(request: NextRequest, ctx: { params: Promise<{ path: string[] }> }) {
-  const { path } = await ctx.params;
-  return proxy(request, path);
-}
-
-export async function DELETE(request: NextRequest, ctx: { params: Promise<{ path: string[] }> }) {
   const { path } = await ctx.params;
   return proxy(request, path);
 }

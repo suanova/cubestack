@@ -11,6 +11,14 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: ["./vitest.setup.ts"],
   },
+  // tsconfig sets jsx: "preserve" for Next, which leaves JSX in the transform
+  // output and trips vite's import-analysis lexer when a test imports a .tsx
+  // component. The test runner transforms .tsx with oxc (vitest rebuilds the
+  // esbuild config but leaves oxc alone), so lower JSX with the automatic
+  // runtime here.
+  oxc: {
+    jsx: { runtime: "automatic" },
+  },
   resolve: {
     alias: {
       "@": root,

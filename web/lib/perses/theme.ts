@@ -150,8 +150,11 @@ function subscribeToPlatformTheme(onStoreChange: () => void): () => void {
   const observer = new MutationObserver(onStoreChange);
   observer.observe(html, { attributes: true, attributeFilter: ["data-theme"] });
   const onStorage = (event: StorageEvent) => {
-    // key === null covers localStorage.clear(); re-read data-theme either way.
+    // key === null covers localStorage.clear(). Apply the persisted theme to
+    // this document before notifying, so getThemeSnapshot re-reads the new
+    // value instead of this tab's stale data-theme.
     if (event.key === PLATFORM_THEME_STORAGE_KEY || event.key === null) {
+      applyPlatformTheme();
       onStoreChange();
     }
   };

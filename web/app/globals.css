@@ -16,6 +16,7 @@
   --font-body: Inter, system-ui, -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
   --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
   --radius: 8px;
+
   color-scheme: light;
 }
 
@@ -27,6 +28,7 @@
   --border: #34373c;
   --accent: #1677ff;
   --accent-strong: color-mix(in oklch, var(--accent) 78%, #ffffff);
+
   color-scheme: dark;
 }
 

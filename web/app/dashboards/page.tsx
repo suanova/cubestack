@@ -60,6 +60,9 @@ export default function DashboardsPage() {
   const { t } = useI18n();
   const [dashboards, setDashboards] = useState<DashboardResource[]>([]);
   const [listError, setListError] = useState<string | null>(null);
+  // Tracks whether the request has settled, so a successful but empty list is
+  // distinguishable from the not-yet-loaded state (both have length 0).
+  const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -71,6 +74,9 @@ export default function DashboardsPage() {
         if (!cancelled) {
           setListError(err instanceof Error ? err.message : String(err));
         }
+      })
+      .finally(() => {
+        if (!cancelled) setLoaded(true);
       });
     return () => {
       cancelled = true;
@@ -94,8 +100,10 @@ export default function DashboardsPage() {
 
       {listError ? (
         <Typography color="error">{t("dash.loadError", { error: listError })}</Typography>
-      ) : dashboards.length === 0 ? (
+      ) : !loaded ? (
         <CircularProgress />
+      ) : dashboards.length === 0 ? (
+        <Typography sx={{ color: "text.secondary" }}>{t("dash.empty")}</Typography>
       ) : (
         <Box
           sx={{
