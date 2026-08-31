@@ -20,12 +20,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
-	"slices"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -90,8 +92,12 @@ func (r *InferenceServiceReconciler) provisionAssets(ctx context.Context, isvc *
 			return nil, err
 		// Compare the copy's actual data, not the stored hash annotation: an
 		// in-place edit of the data leaves the annotation untouched and must
-		// still be repaired.
+		// still be repaired. A same-name foreign ConfigMap must not be
+		// overwritten — only a copy owned by this service may be updated.
 		case assetDataHash(existing.Data) != assetDataHash(cm.Data):
+			if err := ensureOwned(existing, isvc.UID); err != nil {
+				return nil, err
+			}
 			cm.ResourceVersion = existing.ResourceVersion
 			if err := r.Update(ctx, cm); err != nil {
 				return nil, err
@@ -140,18 +146,26 @@ func (r *InferenceServiceReconciler) cleanupOrphanAssets(ctx context.Context, is
 }
 
 // assetDataHash is the sha256 hash of the rendered asset data, using the
-// sorted k=v lines so it is deterministic.
+// canonical JSON form (json.Marshal sorts map keys) so it is deterministic
+// and injective: a k=v\n concatenation would collide across values such as
+// {"a":"x\nb=y"} and {"a":"x","b":"y"}.
 func assetDataHash(data map[string]string) string {
-	keys := make([]string, 0, len(data))
-	for k := range data {
-		keys = append(keys, k)
-	}
-	slices.Sort(keys)
 	h := sha256.New()
-	for _, k := range keys {
-		_, _ = fmt.Fprintf(h, "%s=%s\n", k, data[k])
-	}
+	h.Write(mustJSON(data))
 	return fmt.Sprintf("sha256:%x", h.Sum(nil))
+}
+
+// ensureOwned verifies that an existing resource is controlled by the given
+// InferenceService. A same-name resource owned by someone else — or not owned
+// at all — must never be updated or accepted; the caller returns a conflict
+// so the reconcile fails visibly instead of mutating foreign objects.
+func ensureOwned(existing client.Object, uid types.UID) error {
+	if owner := metav1.GetControllerOf(existing); owner == nil || owner.UID != uid {
+		gvk := existing.GetObjectKind().GroupVersionKind()
+		return apierrors.NewConflict(schema.GroupResource{Group: gvk.Group, Resource: strings.ToLower(gvk.Kind) + "s"}, existing.GetName(),
+			fmt.Errorf("resource is not controlled by InferenceService %q", uid))
+	}
+	return nil
 }
 
 // setProvisionedCondition sets the Provisioned condition from the provision

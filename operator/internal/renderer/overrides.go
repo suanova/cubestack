@@ -211,8 +211,12 @@ func ratFromNumber(n json.Number) (*big.Rat, bool) {
 		}
 		if scale < 0 {
 			// A fraction unless the digit string ends in enough zeros to
-			// absorb the negative scale (100e-2 == 1).
+			// absorb the negative scale (100e-2 == 1). Negating the minimum
+			// int value would overflow and stay negative; reject it first.
 			need := -scale
+			if need < 0 {
+				return nil, false
+			}
 			zeros := 0
 			for j := len(digits) - 1; j >= 0 && digits[j] == '0'; j-- {
 				zeros++

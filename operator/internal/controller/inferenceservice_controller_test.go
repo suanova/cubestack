@@ -24,6 +24,7 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -39,6 +40,9 @@ const testOverridePrefillReplicas = "prefillReplicas"
 
 // testOverrideMode is the string-enum override name declared by validRenderProfile.
 const testOverrideMode = "mode"
+
+// testForeignDataKey is the data key of the foreign-resource specs.
+const testForeignDataKey = "foreign"
 
 // validResolveProfile returns a profile whose assets reference unique source
 // ConfigMaps in cubestack-system, plus the matching immutable ConfigMaps.
@@ -750,7 +754,7 @@ var _ = Describe("InferenceService controller", func() {
 						assetLabelKey:            "foreign-asset",
 					},
 				},
-				Data: map[string]string{"foreign": "data"},
+				Data: map[string]string{testForeignDataKey: "data"},
 			}
 			Expect(k8sClient.Create(ctx, foreign)).To(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, foreign) }()
@@ -767,7 +771,7 @@ var _ = Describe("InferenceService controller", func() {
 				g.Expect(apierrors.IsNotFound(err)).To(BeTrue())
 				got := &corev1.ConfigMap{}
 				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-foreign", Namespace: testNamespace}, got)).To(Succeed())
-				g.Expect(got.Data).To(Equal(map[string]string{"foreign": "data"}))
+				g.Expect(got.Data).To(Equal(map[string]string{testForeignDataKey: "data"}))
 			}, "15s", "200ms").Should(Succeed())
 		})
 
@@ -911,6 +915,89 @@ var _ = Describe("InferenceService controller", func() {
 				pvc := &corev1.PersistentVolumeClaim{}
 				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-model-main", Namespace: testNamespace}, pvc)).To(Succeed())
 			}, "15s", "200ms").Should(Succeed())
+		})
+
+		It("does not overwrite a foreign ConfigMap at the canonical name", func() {
+			name := "isvc-provision-foreign-cm"
+			// The foreign copy exists before the service does; it has no
+			// ownerRef and different data.
+			foreign := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      name + "-" + testAssetName,
+					Namespace: testNamespace,
+					Labels:    map[string]string{inferenceServiceLabelKey: name, managedByLabelKey: managedByValue},
+				},
+				Data: map[string]string{testForeignDataKey: "keep-me"},
+			}
+			Expect(k8sClient.Create(ctx, foreign)).To(Succeed())
+
+			provisionBase(name)
+			defer func() {
+				_ = k8sClient.Delete(ctx, &aiv1alpha1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace}})
+			}()
+
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.InferenceService{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: testNamespace}, got)).To(Succeed())
+				cond := meta.FindStatusCondition(got.Status.Conditions, aiv1alpha1.ConditionProvisioned)
+				g.Expect(cond).ToNot(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(cond.Reason).To(Equal("AssetConfigMapFailed"))
+			}, "15s", "200ms").Should(Succeed())
+
+			cm := &corev1.ConfigMap{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-" + testAssetName, Namespace: testNamespace}, cm)).To(Succeed())
+			Expect(cm.Data).To(Equal(map[string]string{testForeignDataKey: "keep-me"}))
+			Expect(cm.OwnerReferences).To(BeEmpty())
+		})
+
+		It("does not accept a foreign PVC at the canonical name", func() {
+			name := "isvc-provision-foreign-pvc"
+			foreign := &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: name + "-model-main", Namespace: testNamespace},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+					Resources:   corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, foreign)).To(Succeed())
+
+			irp := validRenderProfile(name)
+			Expect(k8sClient.Create(ctx, irp)).To(Succeed())
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: name + "-cm", Namespace: systemNamespace},
+				Immutable:  ptrTo(true),
+				Data:       map[string]string{testConfigMapDataKey: testConfigMapDataValue},
+			}
+			Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+			mv := validPVCModelVersion(name+"-mv", "standard")
+			Expect(k8sClient.Create(ctx, mv)).To(Succeed())
+			isvc := validInferenceService(name, mv.Name)
+			isvc.Spec.ProfileRef = irp.Name
+			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
+			defer func() {
+				_ = k8sClient.Delete(ctx, isvc)
+				_ = k8sClient.Delete(ctx, mv)
+				_ = k8sClient.Delete(ctx, irp)
+			}()
+
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.InferenceService{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: testNamespace}, got)).To(Succeed())
+				cond := meta.FindStatusCondition(got.Status.Conditions, aiv1alpha1.ConditionProvisioned)
+				g.Expect(cond).ToNot(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(cond.Reason).To(Equal("PVCCreateFailed"))
+			}, "15s", "200ms").Should(Succeed())
+
+			pvc := &corev1.PersistentVolumeClaim{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-model-main", Namespace: testNamespace}, pvc)).To(Succeed())
+			Expect(pvc.Spec.AccessModes).To(Equal([]corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}))
+			Expect(pvc.OwnerReferences).To(BeEmpty())
+		})
+
+		It("hashes asset data without k=v collision", func() {
+			Expect(assetDataHash(map[string]string{"a": "x\nb=y"})).NotTo(Equal(assetDataHash(map[string]string{"a": "x", "b": "y"})))
 		})
 	})
 })

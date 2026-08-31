@@ -185,6 +185,17 @@ var _ = Describe("ResolveOverrides", func() {
 		Expect(errs[0].Reason).To(Equal(ReasonInvalidOverride))
 	})
 
+	It("rejects a minimum-int exponent without overflowing", func() {
+		// 1e-9223372036854775808 would overflow -scale to a negative value
+		// and panic on the slice; it must be rejected as an invalid override.
+		declared := []aiv1alpha1.Override{
+			{Name: overrideSize, Type: aiv1alpha1.OverrideTypeInteger, Enum: []apiextensionsv1.JSON{jsonValue("1e-9223372036854775808")}},
+		}
+		_, errs := ResolveOverrides(declared, map[string]apiextensionsv1.JSON{overrideSize: jsonValue("1")})
+		Expect(errs).To(HaveLen(1))
+		Expect(errs[0].Reason).To(Equal(ReasonInvalidOverride))
+	})
+
 	It("rejects an over-limit enum exponent without allocating", func() {
 		// A schemaless enum item like 1e1000000000 must be rejected before any
 		// big.Int expansion; this spec completes instantly when the guard works

@@ -70,5 +70,10 @@ func (r *InferenceServiceReconciler) provisionModelPVC(ctx context.Context, isvc
 	if apierrors.IsNotFound(err) {
 		return r.Create(ctx, pvc)
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	// A same-name PVC that is not controlled by this service must not be
+	// accepted silently: Phase 3 workloads would bind to a foreign volume.
+	return ensureOwned(existing, isvc.UID)
 }

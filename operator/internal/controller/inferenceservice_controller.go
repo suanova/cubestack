@@ -76,6 +76,9 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	desired := isvc.DeepCopy()
 	desired.Status.ObservedGeneration = isvc.Generation
+	// The audit echo reflects only a fully provisioned state: it is cleared
+	// here and filled after every provisioning step succeeds.
+	desired.Status.Assets = nil
 	setResolvedCondition(&desired.Status.Conditions, resolved)
 	if resolved.profile != nil {
 		desired.Status.Profile = &aiv1alpha1.ProfileStatus{Name: resolved.profile.Name}
