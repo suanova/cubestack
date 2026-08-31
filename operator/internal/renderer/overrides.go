@@ -181,7 +181,11 @@ func numbersEqual(a, b json.Number) bool {
 }
 
 // ratFromNumber converts a JSON number to a big.Rat exactly, expanding
-// exponent notation (1.5e3 -> 1500).
+// exponent notation (1.5e3 -> 1500). The exponent is shifted by the
+// mantissa's fraction digits before expanding, so an exponent that cannot
+// fall within the int64 range (10^20 or larger) is rejected without any
+// big.Int allocation; a zero mantissa is returned as-is regardless of the
+// exponent.
 func ratFromNumber(n json.Number) (*big.Rat, bool) {
 	s := n.String()
 	if i := strings.IndexAny(s, "eE"); i >= 0 {
@@ -189,20 +193,26 @@ func ratFromNumber(n json.Number) (*big.Rat, bool) {
 		if err != nil {
 			return nil, false
 		}
-		r, ok := new(big.Rat).SetString(s[:i])
+		mant := s[:i]
+		r, ok := new(big.Rat).SetString(mant)
 		if !ok {
 			return nil, false
 		}
-		absExp := exp
-		if absExp < 0 {
-			absExp = -absExp
+		if r.Sign() == 0 {
+			return r, true // 0e<anything> is 0
 		}
-		power := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(absExp)), nil)
-		if exp >= 0 {
-			r.Mul(r, new(big.Rat).SetInt(power))
-		} else {
-			r.Quo(r, new(big.Rat).SetInt(power))
+		fracDigits := 0
+		if dot := strings.IndexByte(mant, '.'); dot >= 0 {
+			fracDigits = len(mant) - dot - 1
 		}
+		if exp < fracDigits {
+			return nil, false // a fraction below 1, never an integer
+		}
+		if exp-fracDigits > 19 {
+			return nil, false // 10^20 and above exceed the int64 range
+		}
+		power := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(exp-fracDigits)), nil)
+		r.Mul(r, new(big.Rat).SetInt(power))
 		return r, true
 	}
 	return new(big.Rat).SetString(s)

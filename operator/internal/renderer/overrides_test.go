@@ -131,6 +131,27 @@ var _ = Describe("ResolveOverrides", func() {
 		Expect(got).To(Equal(map[string]string{overrideSize: "1000"}))
 	})
 
+	It("rejects an over-limit enum exponent without allocating", func() {
+		// A schemaless enum item like 1e1000000000 must be rejected before any
+		// big.Int expansion; this spec completes instantly when the guard works
+		// and would exhaust memory otherwise.
+		declared := []aiv1alpha1.Override{
+			{Name: overrideSize, Type: aiv1alpha1.OverrideTypeInteger, Enum: []apiextensionsv1.JSON{jsonValue("1e1000000000")}},
+		}
+		_, errs := ResolveOverrides(declared, map[string]apiextensionsv1.JSON{overrideSize: jsonValue("1000")})
+		Expect(errs).To(HaveLen(1))
+		Expect(errs[0].Reason).To(Equal(ReasonInvalidOverride))
+	})
+
+	It("accepts a zero mantissa with an over-limit exponent", func() {
+		declared := []aiv1alpha1.Override{
+			{Name: overrideSize, Type: aiv1alpha1.OverrideTypeInteger, Enum: []apiextensionsv1.JSON{jsonValue("0e1000000000")}},
+		}
+		got, errs := ResolveOverrides(declared, map[string]apiextensionsv1.JSON{overrideSize: jsonValue("0")})
+		Expect(errs).To(BeEmpty())
+		Expect(got).To(Equal(map[string]string{overrideSize: "0"}))
+	})
+
 	It("omits declared overrides with neither a value nor a default", func() {
 		got, errs := ResolveOverrides([]aiv1alpha1.Override{{Name: "solo", Type: aiv1alpha1.OverrideTypeString}}, nil)
 		Expect(errs).To(BeEmpty())
