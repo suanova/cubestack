@@ -1,4 +1,4 @@
-name: CI Operator
+name: CI Portal
 
 on:
   push:
@@ -9,7 +9,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: ci-operator-${{ github.ref }}
+  group: ci-portal-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -19,7 +19,7 @@ jobs:
       pull-requests: read
     runs-on: ubuntu-latest
     outputs:
-      operator: ${{ steps.filter.outputs.operator }}
+      portal: ${{ steps.filter.outputs.portal }}
     steps:
       - name: Clone the code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -32,14 +32,13 @@ jobs:
         id: filter
         with:
           filters: |
-            operator:
-              - 'operator/**'
-              - 'Makefile'
+            portal:
+              - 'web/**'
               - '.github/**'
 
   lint:
     needs: changes
-    if: needs.changes.outputs.operator == 'true'
+    if: needs.changes.outputs.portal == 'true'
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -48,18 +47,22 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - name: Setup Go
-        uses: ./.github/actions/setup-go
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          go-version-file: operator/go.mod
-      - name: Check linter configuration
-        run: make lint-config
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+        working-directory: web
       - name: Run linter
-        run: make lint
+        run: npm run lint
+        working-directory: web
 
   test:
     needs: changes
-    if: needs.changes.outputs.operator == 'true'
+    if: needs.changes.outputs.portal == 'true'
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -68,16 +71,22 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - name: Setup Go
-        uses: ./.github/actions/setup-go
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          go-version-file: operator/go.mod
-      - name: Running Tests
-        run: make test
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+        working-directory: web
+      - name: Run unit tests
+        run: npm test
+        working-directory: web
 
-  test-e2e:
+  build:
     needs: changes
-    if: needs.changes.outputs.operator == 'true'
+    if: needs.changes.outputs.portal == 'true'
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -86,25 +95,21 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - name: Setup Go
-        uses: ./.github/actions/setup-go
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          go-version-file: operator/go.mod
-      - name: Install the latest version of kind
-        run: |
-          KIND_VERSION=0.32.0
-          KIND_SHA256="50030de23cf40a18505f20426f6a8506bedf13c6e509244bd1fa9463721b0f54"
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v${KIND_VERSION}/kind-linux-$(go env GOARCH)
-          echo "${KIND_SHA256}  ./kind" | sha256sum --check --strict
-          chmod +x ./kind
-          sudo mv ./kind /usr/local/bin/kind
-      - name: Verify kind installation
-        run: kind version
-      - name: Running Test e2e
-        run: make test-e2e
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+        working-directory: web
+      - name: Build the portal
+        run: npm run build
+        working-directory: web
 
   result:
-    needs: [lint, test, test-e2e]
+    needs: [lint, test, build]
     if: always()
     runs-on: ubuntu-latest
     steps:
