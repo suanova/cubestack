@@ -3,8 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
+    "dev": "npm run build:island && next dev --turbopack",
+    "build": "npm run build:island && next build --webpack",
+    "build:island": "node perses-island/build.mjs",
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run"
@@ -20,7 +21,7 @@
     "@perses-dev/explore": "0.54.0",
     "@perses-dev/plugin-system": "0.54.0",
     "@tanstack/react-query": "^4.36.1",
-    "next": "15.5.24",
+    "next": "16.3.3",
     "react": "18.2.0",
     "react-dom": "18.2.0",
     "react-router": "^7.13.1",
@@ -28,16 +29,19 @@
     "use-query-params": "^2.2.2"
   },
   "devDependencies": {
-    "@eslint/eslintrc": "^3.3.6",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^18",
     "@types/react-dom": "^18",
+    "esbuild": "^0.28.2",
     "eslint": "^9",
-    "eslint-config-next": "15.5.23",
+    "eslint-config-next": "16.3.3",
     "jsdom": "^30.0.1",
     "tailwindcss": "^4",
     "typescript": "^5",
     "vitest": "^4.1.11"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
   }
 }

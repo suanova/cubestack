@@ -1,14 +1,14 @@
 "use client";
 
 // Dashboard viewer page: fetch the dashboard named by the route param and
-// render it via DashboardViewer. Next 15 passes params to client pages as a
-// Promise, unwrapped below.
+// render it via PersesIslandHost (which mounts the react-18 perses island).
+// Next 15 passes params to client pages as a Promise, unwrapped below.
 
 import { Box, CircularProgress, Typography } from "@mui/material";
 import { DashboardResource } from "@perses-dev/core";
 import { useEffect, useState } from "react";
 
-import { DashboardViewer } from "@/components/perses/DashboardViewer";
+import { PersesIslandHost } from "@/components/perses/PersesIslandHost";
 import { useI18n } from "@/lib/i18n";
 import { PERSES_PROJECT } from "@/lib/perses/config";
 import { fetchDashboard } from "@/lib/perses/perses-client";
@@ -34,8 +34,12 @@ export default function DashboardPage({ params }: { params: Promise<{ name: stri
   useEffect(() => {
     if (name === null) return;
     let cancelled = false;
+    // Intentionally reset the view before fetching the new dashboard when the
+    // route param changes. react-hooks v7 flags synchronous setState-in-effect.
+    /* eslint-disable react-hooks/set-state-in-effect */
     setViewError(null);
     setDashboard(null);
+    /* eslint-enable react-hooks/set-state-in-effect */
     fetchDashboard(PERSES_PROJECT, name)
       .then((resource) => {
         if (!cancelled) setDashboard(resource);
@@ -72,7 +76,7 @@ export default function DashboardPage({ params }: { params: Promise<{ name: stri
       ) : !dashboard ? (
         <CircularProgress />
       ) : (
-        <DashboardViewer
+        <PersesIslandHost
           project={PERSES_PROJECT}
           dashboardName={dashboard.metadata.name}
           dashboardResource={dashboard}

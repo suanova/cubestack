@@ -42,3 +42,6 @@ next-env.d.ts
 
 # next
 /.next/
+
+# generated react-18 perses island bundle (perses-island/build.mjs)
+/public/perses-viewer/

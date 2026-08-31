@@ -25,8 +25,6 @@ import {
   ValidationProvider,
 } from "@perses-dev/plugin-system";
 import { BuiltinVariableDefinition } from "@perses-dev/spec";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { forwardRef, ReactNode, useMemo } from "react";
 import type { AnchorHTMLAttributes, RefAttributes } from "react";
 
@@ -44,18 +42,19 @@ const queryClient = new QueryClient({
 });
 
 // Perses's RouterProvider is built around react-router's <Link>, which navigates
-// with `to`. Next's <Link> uses `href`, so bridge the two.
+// with `to`. The dashboard is rendered inside a react-18 island with no Next
+// router, so navigate to `to` directly with a plain anchor.
 type RouterLinkProps = { to: string } & AnchorHTMLAttributes<HTMLAnchorElement> &
   RefAttributes<HTMLAnchorElement>;
 
-const NextLink = forwardRef<HTMLAnchorElement, RouterLinkProps>(function NextLink(
+const PlainLink = forwardRef<HTMLAnchorElement, RouterLinkProps>(function PlainLink(
   { to, children, ...anchorProps },
   ref,
 ) {
   return (
-    <Link href={to} ref={ref} {...anchorProps}>
+    <a href={to} ref={ref} {...anchorProps}>
       {children}
-    </Link>
+    </a>
   );
 });
 
@@ -79,7 +78,6 @@ export function PersesProvider({
   dashboardResource,
   children,
 }: PersesProviderProps) {
-  const router = useRouter();
   const mode = usePlatformTheme();
   const muiTheme = useMemo(() => buildPlatformMuiTheme(mode), [mode]);
   const chartsTheme = useMemo(() => buildPlatformChartsTheme(mode), [mode]);
@@ -92,8 +90,8 @@ export function PersesProvider({
     <QueryClientProvider client={queryClient}>
       <ThemeProvider theme={muiTheme}>
         <RouterProvider
-          RouterComponent={NextLink}
-          navigate={(to) => router.push(to)}
+          RouterComponent={PlainLink}
+          navigate={(to) => history.pushState(null, "", to)}
         >
           <ChartsProvider chartsTheme={chartsTheme}>
             <SnackbarProvider>

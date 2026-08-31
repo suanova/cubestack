@@ -1,12 +1,12 @@
-import { FlatCompat } from "@eslint/eslintrc";
 import { defineConfig, globalIgnores } from "eslint/config";
+import nextVitals from "eslint-config-next/core-web-vitals";
+import nextTs from "eslint-config-next/typescript";
 
-// eslint-config-next exports legacy (eslintrc-style) configs; ESLint 9 uses
-// flat config only, so bridge them with FlatCompat.
-const compat = new FlatCompat({ baseDirectory: import.meta.dirname });
-
+// eslint-config-next 16 exports flat configs directly; ESLint 9+ requires
+// flat config, so no legacy FlatCompat bridge is needed.
 const eslintConfig = defineConfig([
-  ...compat.extends("next/core-web-vitals", "next/typescript"),
+  ...nextVitals,
+  ...nextTs,
   // Override default ignores of eslint-config-next.
   globalIgnores([
     // Default ignores of eslint-config-next:
@@ -14,6 +14,9 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Static assets, including the generated react-18 island bundle
+    // (perses-island/build.mjs writes public/perses-viewer/).
+    "public/**",
   ]),
 ]);
 
