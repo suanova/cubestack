@@ -7,6 +7,8 @@
 import type { Locale } from "./locale";
 
 const zhCN = {
+  "app.title": "CubeStack 智算云",
+  "app.description": "CubeStack 智算云平台",
   "brand.sub": "智算云平台",
   "nav.section.portal": "平台模块",
   "nav.overview": "平台总览",
@@ -36,6 +38,8 @@ export type MessageKey = keyof typeof zhCN;
 export type Dictionary = Record<MessageKey, string>;
 
 const zhTW: Dictionary = {
+  "app.title": "CubeStack 智算雲",
+  "app.description": "CubeStack 智算雲平台",
   "brand.sub": "智算雲平台",
   "nav.section.portal": "平台模組",
   "nav.overview": "平台總覽",
@@ -62,6 +66,8 @@ const zhTW: Dictionary = {
 };
 
 const en: Dictionary = {
+  "app.title": "CubeStack AI Cloud",
+  "app.description": "CubeStack AI Cloud Platform",
   "brand.sub": "AI Cloud Platform",
   "nav.section.portal": "Platform Modules",
   "nav.overview": "Overview",
