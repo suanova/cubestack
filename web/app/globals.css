@@ -1,26 +1,48 @@
 @import "tailwindcss";
 
+/* Platform design tokens, aligned with the static prototype pages in public/
+   (overview.html and siblings). Dark/light is driven by <html data-theme>,
+   stamped by an inline script in the root layout from
+   localStorage["cubestack-theme"] (with a prefers-color-scheme fallback). */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --bg: #ffffff;
+  --surface: #f7f8fa;
+  --fg: #111111;
+  --muted: #6b7280;
+  --border: #d9dee7;
+  --accent: #1677ff;
+  --accent-soft: color-mix(in oklch, var(--accent) 10%, transparent);
+  --accent-strong: color-mix(in oklch, var(--accent) 70%, black);
+  --font-body: Inter, system-ui, -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+  --radius: 8px;
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --bg: #111111;
+  --surface: #1f1f1f;
+  --fg: #ffffff;
+  --muted: #9ca3af;
+  --border: #34373c;
+  --accent: #1677ff;
+  --accent-strong: color-mix(in oklch, var(--accent) 78%, #ffffff);
+  color-scheme: dark;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --color-background: var(--bg);
+  --color-foreground: var(--fg);
+  --font-sans: var(--font-body);
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }

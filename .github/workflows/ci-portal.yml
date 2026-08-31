@@ -60,6 +60,30 @@ jobs:
         run: npm run lint
         working-directory: web
 
+  test:
+    needs: changes
+    if: needs.changes.outputs.portal == 'true'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+        working-directory: web
+      - name: Run unit tests
+        run: npm test
+        working-directory: web
+
   build:
     needs: changes
     if: needs.changes.outputs.portal == 'true'
@@ -85,7 +109,7 @@ jobs:
         working-directory: web
 
   result:
-    needs: [lint, build]
+    needs: [lint, test, build]
     if: always()
     runs-on: ubuntu-latest
     steps:

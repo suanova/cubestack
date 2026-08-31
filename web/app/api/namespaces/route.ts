@@ -3,6 +3,11 @@ import { getCoreClient } from "@/lib/kubernetes";
 // @kubernetes/client-node needs Node APIs (TLS, fs), not the Edge runtime.
 export const runtime = "nodejs";
 
+// This handler talks to the live cluster, so it must not be prerendered at
+// build time (Next 14 statically generates route handlers that don't use the
+// request object; that would hang on the kubeconfig/cluster call).
+export const dynamic = "force-dynamic";
+
 /**
  * GET /api/namespaces
  *
