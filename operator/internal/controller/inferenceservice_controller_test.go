@@ -37,6 +37,9 @@ const testLauncher = "sglang"
 // testOverridePrefillReplicas is the override name declared by validRenderProfile.
 const testOverridePrefillReplicas = "prefillReplicas"
 
+// testOverrideMode is the string-enum override name declared by validRenderProfile.
+const testOverrideMode = "mode"
+
 // validResolveProfile returns a profile whose assets reference unique source
 // ConfigMaps in cubestack-system, plus the matching immutable ConfigMaps.
 func validResolveProfile(name string) *aiv1alpha1.InferenceRuntimeProfile {
@@ -61,6 +64,28 @@ func ensureSystemNamespace() {
 	if err := k8sClient.Create(ctx, ns); err != nil && !apierrors.IsAlreadyExists(err) {
 		Expect(err).NotTo(HaveOccurred())
 	}
+}
+
+// validRenderProfile returns a profile with declared overrides, a vars map,
+// one asset and one Deployment role whose env references many variables. The
+// caller overrides fields per test.
+func validRenderProfile(name string) *aiv1alpha1.InferenceRuntimeProfile {
+	irp := validInferenceRuntimeProfile(name)
+	irp.Spec.Vars = map[string]string{"launcher": testLauncher}
+	irp.Spec.Assets = []aiv1alpha1.Asset{
+		{Name: testAssetName, ConfigMapRef: aiv1alpha1.AssetConfigMapRef{Name: name + "-cm"}, EnvFrom: ptrTo(true)},
+	}
+	irp.Spec.Overrides = []aiv1alpha1.Override{
+		{Name: testOverridePrefillReplicas, Type: aiv1alpha1.OverrideTypeInteger, Min: ptrTo[int64](1), Max: ptrTo[int64](8), Default: &apiextensionsv1.JSON{Raw: []byte("1")}},
+		{Name: testOverrideMode, Type: aiv1alpha1.OverrideTypeString, Enum: []apiextensionsv1.JSON{{Raw: []byte(`"pd"`)}, {Raw: []byte(`"normal"`)}}},
+	}
+	irp.Spec.Roles[0].Workload.Replicas = ptrTo(intstr.FromString("{{ overrides.prefillReplicas }}"))
+	irp.Spec.Roles[0].PodTemplate.Env = append(irp.Spec.Roles[0].PodTemplate.Env,
+		aiv1alpha1.EnvVar{Name: "LAUNCHER", Value: ptrTo("{{ profile.vars.launcher }}")})
+	irp.Spec.Roles[0].PodTemplate.Env = append(irp.Spec.Roles[0].PodTemplate.Env,
+		aiv1alpha1.EnvVar{Name: "MODEL_PATH", Value: ptrTo("{{ model.path }}")})
+	irp.Spec.Roles[0].PodTemplate.Mounts = []aiv1alpha1.ModelMount{{Model: "main", At: "/workspace/model", ReadOnly: true}}
+	return irp
 }
 
 var _ = Describe("InferenceService controller", func() {
@@ -276,28 +301,6 @@ var _ = Describe("InferenceService controller", func() {
 	})
 
 	Context("Rendered, revision and warnings", func() {
-		// validRenderProfile returns a profile with declared overrides, a vars
-		// map, one asset and one Deployment role whose env references many
-		// variables. The caller overrides fields per test.
-		validRenderProfile := func(name string) *aiv1alpha1.InferenceRuntimeProfile {
-			irp := validInferenceRuntimeProfile(name)
-			irp.Spec.Vars = map[string]string{"launcher": testLauncher}
-			irp.Spec.Assets = []aiv1alpha1.Asset{
-				{Name: testAssetName, ConfigMapRef: aiv1alpha1.AssetConfigMapRef{Name: name + "-cm"}, EnvFrom: ptrTo(true)},
-			}
-			irp.Spec.Overrides = []aiv1alpha1.Override{
-				{Name: testOverridePrefillReplicas, Type: aiv1alpha1.OverrideTypeInteger, Min: ptrTo[int64](1), Max: ptrTo[int64](8), Default: &apiextensionsv1.JSON{Raw: []byte("1")}},
-				{Name: "mode", Type: aiv1alpha1.OverrideTypeString, Enum: []apiextensionsv1.JSON{{Raw: []byte(`"pd"`)}, {Raw: []byte(`"normal"`)}}},
-			}
-			irp.Spec.Roles[0].Workload.Replicas = ptrTo(intstr.FromString("{{ overrides.prefillReplicas }}"))
-			irp.Spec.Roles[0].PodTemplate.Env = append(irp.Spec.Roles[0].PodTemplate.Env,
-				aiv1alpha1.EnvVar{Name: "LAUNCHER", Value: ptrTo("{{ profile.vars.launcher }}")})
-			irp.Spec.Roles[0].PodTemplate.Env = append(irp.Spec.Roles[0].PodTemplate.Env,
-				aiv1alpha1.EnvVar{Name: "MODEL_PATH", Value: ptrTo("{{ model.path }}")})
-			irp.Spec.Roles[0].PodTemplate.Mounts = []aiv1alpha1.ModelMount{{Model: "main", At: "/workspace/model", ReadOnly: true}}
-			return irp
-		}
-
 		createRenderBase := func(name string) (*aiv1alpha1.InferenceRuntimeProfile, *aiv1alpha1.ModelVersion) {
 			irp := validRenderProfile(name)
 			Expect(k8sClient.Create(ctx, irp)).To(Succeed())
@@ -384,7 +387,7 @@ var _ = Describe("InferenceService controller", func() {
 			}()
 			isvc := validInferenceService("isvc-render-invalid-ov", mv.Name)
 			isvc.Spec.ProfileRef = irp.Name
-			isvc.Spec.Overrides = map[string]apiextensionsv1.JSON{"mode": {Raw: []byte(`"fast"`)}}
+			isvc.Spec.Overrides = map[string]apiextensionsv1.JSON{testOverrideMode: {Raw: []byte(`"fast"`)}}
 			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, isvc) }()
 
@@ -594,6 +597,319 @@ var _ = Describe("InferenceService controller", func() {
 				drifted := meta.FindStatusCondition(got.Status.Conditions, aiv1alpha1.ConditionProfileDrifted)
 				g.Expect(drifted).ToNot(BeNil())
 				g.Expect(drifted.Status).To(Equal(metav1.ConditionFalse))
+			}, "15s", "200ms").Should(Succeed())
+		})
+	})
+
+	Context("Provisioned", func() {
+		// provisionBase creates the render profile (one EnvFrom asset
+		// "bootstrap"), the model version and the isvc; returns the isvc name.
+		provisionBase := func(name string) string {
+			irp := validRenderProfile(name)
+			Expect(k8sClient.Create(ctx, irp)).To(Succeed())
+			mv := validModelVersion(name + "-mv")
+			Expect(k8sClient.Create(ctx, mv)).To(Succeed())
+			// The source CM is mutable in the fixture so the update spec can
+			// change its data; production source CMs are immutable (enforced by
+			// the apiserver), where a changed source is delete + recreate.
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: name + "-cm", Namespace: systemNamespace},
+				Data:       map[string]string{testConfigMapDataKey: testConfigMapDataValue},
+			}
+			Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+			isvc := validInferenceService(name, mv.Name)
+			isvc.Spec.ProfileRef = irp.Name
+			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
+			return isvc.Name
+		}
+
+		It("creates the asset ConfigMap copy with labels, annotations and ownerRef", func() {
+			name := provisionBase("isvc-provision-cm")
+			defer func() {
+				_ = k8sClient.Delete(ctx, &aiv1alpha1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace}})
+			}()
+
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.InferenceService{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: testNamespace}, got)).To(Succeed())
+				g.Expect(meta.IsStatusConditionTrue(got.Status.Conditions, aiv1alpha1.ConditionProvisioned)).To(BeTrue())
+				g.Expect(got.Status.Assets).To(HaveLen(1))
+				g.Expect(got.Status.Assets[0].Name).To(Equal(testAssetName))
+				g.Expect(got.Status.Assets[0].Source).To(Equal(name + "-cm"))
+				g.Expect(got.Status.Assets[0].Hash).To(HavePrefix("sha256:"))
+			}, "15s", "200ms").Should(Succeed())
+
+			cm := &corev1.ConfigMap{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-" + testAssetName, Namespace: testNamespace}, cm)).To(Succeed())
+			Expect(cm.Data).To(Equal(map[string]string{testConfigMapDataKey: testConfigMapDataValue}))
+			Expect(cm.Labels[inferenceServiceLabelKey]).To(Equal(name))
+			Expect(cm.Labels[assetLabelKey]).To(Equal(testAssetName))
+			Expect(cm.Labels[managedByLabelKey]).To(Equal(managedByValue))
+			Expect(cm.Annotations[assetSourceAnnotationKey]).To(Equal(name + "-cm"))
+			Expect(cm.Annotations[assetHashAnnotationKey]).To(HavePrefix("sha256:"))
+			Expect(cm.OwnerReferences).To(ContainElement(HaveField("Kind", "InferenceService")))
+		})
+
+		It("updates the asset ConfigMap when the rendered data changes", func() {
+			name := provisionBase("isvc-provision-update")
+			defer func() {
+				_ = k8sClient.Delete(ctx, &aiv1alpha1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace}})
+			}()
+
+			// Wait until the copy exists, then change the source CM data.
+			Eventually(func(g Gomega) {
+				cm := &corev1.ConfigMap{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-" + testAssetName, Namespace: testNamespace}, cm)).To(Succeed())
+			}, "15s", "200ms").Should(Succeed())
+
+			src := &corev1.ConfigMap{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-cm", Namespace: systemNamespace}, src)).To(Succeed())
+			src.Data = map[string]string{testConfigMapDataKey: "changed"}
+			Expect(k8sClient.Update(ctx, src)).To(Succeed())
+
+			Eventually(func(g Gomega) {
+				cm := &corev1.ConfigMap{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-" + testAssetName, Namespace: testNamespace}, cm)).To(Succeed())
+				g.Expect(cm.Data).To(Equal(map[string]string{testConfigMapDataKey: "changed"}))
+			}, "15s", "200ms").Should(Succeed())
+		})
+
+		It("repairs an externally edited asset ConfigMap", func() {
+			name := provisionBase("isvc-provision-repair")
+			defer func() {
+				_ = k8sClient.Delete(ctx, &aiv1alpha1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace}})
+			}()
+
+			Eventually(func(g Gomega) {
+				cm := &corev1.ConfigMap{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-" + testAssetName, Namespace: testNamespace}, cm)).To(Succeed())
+			}, "15s", "200ms").Should(Succeed())
+
+			// Edit the copy's data in place, leaving the hash annotation
+			// untouched: the update decision must compare the actual data.
+			cm := &corev1.ConfigMap{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-" + testAssetName, Namespace: testNamespace}, cm)).To(Succeed())
+			cm.Data = map[string]string{testConfigMapDataKey: "tampered"}
+			Expect(k8sClient.Update(ctx, cm)).To(Succeed())
+
+			Eventually(func(g Gomega) {
+				got := &corev1.ConfigMap{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-" + testAssetName, Namespace: testNamespace}, got)).To(Succeed())
+				g.Expect(got.Data).To(Equal(map[string]string{testConfigMapDataKey: testConfigMapDataValue}))
+				g.Expect(got.Annotations[assetHashAnnotationKey]).To(Equal(assetDataHash(got.Data)))
+			}, "15s", "200ms").Should(Succeed())
+		})
+
+		It("deletes the orphaned asset ConfigMap when the profile drops the asset", func() {
+			name := provisionBase("isvc-provision-cleanup")
+			defer func() {
+				_ = k8sClient.Delete(ctx, &aiv1alpha1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace}})
+			}()
+
+			Eventually(func(g Gomega) {
+				cm := &corev1.ConfigMap{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-" + testAssetName, Namespace: testNamespace}, cm)).To(Succeed())
+			}, "15s", "200ms").Should(Succeed())
+
+			// Recreate the profile with the same name but no assets (envtest
+			// has no VAP, so the update is allowed; in production this is
+			// delete + recreate, which is equivalent for the controller).
+			irp := &aiv1alpha1.InferenceRuntimeProfile{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name}, irp)).To(Succeed())
+			irp.Spec.Assets = nil
+			Expect(k8sClient.Update(ctx, irp)).To(Succeed())
+
+			Eventually(func() bool {
+				err := k8sClient.Get(ctx, client.ObjectKey{Name: name + "-" + testAssetName, Namespace: testNamespace}, &corev1.ConfigMap{})
+				return apierrors.IsNotFound(err)
+			}, "15s", "200ms").Should(BeTrue())
+		})
+
+		It("does not delete a foreign ConfigMap with matching labels", func() {
+			name := provisionBase("isvc-provision-foreign")
+			defer func() {
+				_ = k8sClient.Delete(ctx, &aiv1alpha1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace}})
+			}()
+
+			Eventually(func(g Gomega) {
+				cm := &corev1.ConfigMap{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-" + testAssetName, Namespace: testNamespace}, cm)).To(Succeed())
+			}, "15s", "200ms").Should(Succeed())
+
+			// A ConfigMap in the service namespace carrying the service and
+			// managed-by labels but no ownerRef (chart, backup/restore tool)
+			// must survive cleanup: the design-mandated predicate is ownerRef
+			// pointing at this service AND the managed-by label.
+			foreign := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      name + "-foreign",
+					Namespace: testNamespace,
+					Labels: map[string]string{
+						inferenceServiceLabelKey: name,
+						managedByLabelKey:        managedByValue,
+						assetLabelKey:            "foreign-asset",
+					},
+				},
+				Data: map[string]string{"foreign": "data"},
+			}
+			Expect(k8sClient.Create(ctx, foreign)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, foreign) }()
+
+			// Drop the asset so cleanup has an orphan to chase: the owned copy
+			// must be deleted, the foreign ConfigMap must stay.
+			irp := &aiv1alpha1.InferenceRuntimeProfile{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name}, irp)).To(Succeed())
+			irp.Spec.Assets = nil
+			Expect(k8sClient.Update(ctx, irp)).To(Succeed())
+
+			Eventually(func(g Gomega) {
+				err := k8sClient.Get(ctx, client.ObjectKey{Name: name + "-" + testAssetName, Namespace: testNamespace}, &corev1.ConfigMap{})
+				g.Expect(apierrors.IsNotFound(err)).To(BeTrue())
+				got := &corev1.ConfigMap{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-foreign", Namespace: testNamespace}, got)).To(Succeed())
+				g.Expect(got.Data).To(Equal(map[string]string{"foreign": "data"}))
+			}, "15s", "200ms").Should(Succeed())
+		})
+
+		It("rebuilds a deleted asset ConfigMap", func() {
+			name := provisionBase("isvc-provision-rebuild")
+			defer func() {
+				_ = k8sClient.Delete(ctx, &aiv1alpha1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace}})
+			}()
+
+			Eventually(func(g Gomega) {
+				cm := &corev1.ConfigMap{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-" + testAssetName, Namespace: testNamespace}, cm)).To(Succeed())
+			}, "15s", "200ms").Should(Succeed())
+
+			Expect(k8sClient.Delete(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name + "-" + testAssetName, Namespace: testNamespace}})).To(Succeed())
+
+			Eventually(func(g Gomega) {
+				cm := &corev1.ConfigMap{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-" + testAssetName, Namespace: testNamespace}, cm)).To(Succeed())
+				g.Expect(cm.Data).To(Equal(map[string]string{testConfigMapDataKey: testConfigMapDataValue}))
+			}, "15s", "200ms").Should(Succeed())
+		})
+
+		It("does not provision assets when the render fails", func() {
+			name := "isvc-provision-gate"
+			irp := validRenderProfile(name)
+			Expect(k8sClient.Create(ctx, irp)).To(Succeed())
+			mv := validModelVersion(name + "-mv")
+			Expect(k8sClient.Create(ctx, mv)).To(Succeed())
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: name + "-cm", Namespace: systemNamespace},
+				Data:       map[string]string{testConfigMapDataKey: testConfigMapDataValue},
+			}
+			Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+			isvc := validInferenceService(name, mv.Name)
+			isvc.Spec.ProfileRef = irp.Name
+			isvc.Spec.Overrides = map[string]apiextensionsv1.JSON{testOverrideMode: {Raw: []byte(`"fast"`)}}
+			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
+			defer func() {
+				_ = k8sClient.Delete(ctx, isvc)
+			}()
+
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.InferenceService{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: testNamespace}, got)).To(Succeed())
+				cond := meta.FindStatusCondition(got.Status.Conditions, aiv1alpha1.ConditionRendered)
+				g.Expect(cond).ToNot(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(cond.Reason).To(Equal("InvalidOverride"))
+				// The render failed: Provisioned must not be claimed, and no
+				// asset ConfigMap copy may exist.
+				g.Expect(meta.FindStatusCondition(got.Status.Conditions, aiv1alpha1.ConditionProvisioned)).To(BeNil())
+			}, "15s", "200ms").Should(Succeed())
+
+			err := k8sClient.Get(ctx, client.ObjectKey{Name: name + "-" + testAssetName, Namespace: testNamespace}, &corev1.ConfigMap{})
+			Expect(apierrors.IsNotFound(err)).To(BeTrue())
+		})
+
+		It("creates the model PVC for PVC storage", func() {
+			name := "isvc-provision-pvc"
+			irp := validRenderProfile(name)
+			Expect(k8sClient.Create(ctx, irp)).To(Succeed())
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: name + "-cm", Namespace: systemNamespace},
+				Immutable:  ptrTo(true),
+				Data:       map[string]string{testConfigMapDataKey: testConfigMapDataValue},
+			}
+			Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+			mv := validPVCModelVersion(name+"-mv", "standard")
+			Expect(k8sClient.Create(ctx, mv)).To(Succeed())
+			isvc := validInferenceService(name, mv.Name)
+			isvc.Spec.ProfileRef = irp.Name
+			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
+			defer func() {
+				_ = k8sClient.Delete(ctx, isvc)
+				_ = k8sClient.Delete(ctx, mv)
+				_ = k8sClient.Delete(ctx, irp)
+			}()
+
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.InferenceService{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: testNamespace}, got)).To(Succeed())
+				g.Expect(meta.IsStatusConditionTrue(got.Status.Conditions, aiv1alpha1.ConditionProvisioned)).To(BeTrue())
+			}, "15s", "200ms").Should(Succeed())
+
+			pvc := &corev1.PersistentVolumeClaim{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-model-main", Namespace: testNamespace}, pvc)).To(Succeed())
+			Expect(pvc.Spec.AccessModes).To(Equal([]corev1.PersistentVolumeAccessMode{corev1.ReadOnlyMany}))
+			Expect(pvc.Spec.StorageClassName).To(Equal(ptrTo("standard")))
+			Expect(pvc.Spec.Resources.Requests.Storage().String()).To(Equal("320Gi"))
+			Expect(pvc.Labels[modelLabelKey]).To(Equal("main"))
+			Expect(pvc.Labels[managedByLabelKey]).To(Equal(managedByValue))
+			Expect(pvc.OwnerReferences).To(ContainElement(HaveField("Kind", "InferenceService")))
+		})
+
+		It("creates no PVC for HostPath storage", func() {
+			name := provisionBase("isvc-provision-hostpath")
+			defer func() {
+				_ = k8sClient.Delete(ctx, &aiv1alpha1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace}})
+			}()
+
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.InferenceService{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: testNamespace}, got)).To(Succeed())
+				g.Expect(meta.IsStatusConditionTrue(got.Status.Conditions, aiv1alpha1.ConditionProvisioned)).To(BeTrue())
+			}, "15s", "200ms").Should(Succeed())
+
+			err := k8sClient.Get(ctx, client.ObjectKey{Name: name + "-model-main", Namespace: testNamespace}, &corev1.PersistentVolumeClaim{})
+			Expect(apierrors.IsNotFound(err)).To(BeTrue())
+		})
+
+		It("rebuilds a deleted model PVC", func() {
+			name := "isvc-provision-pvc-rebuild"
+			irp := validRenderProfile(name)
+			Expect(k8sClient.Create(ctx, irp)).To(Succeed())
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: name + "-cm", Namespace: systemNamespace},
+				Immutable:  ptrTo(true),
+				Data:       map[string]string{testConfigMapDataKey: testConfigMapDataValue},
+			}
+			Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+			mv := validPVCModelVersion(name+"-mv", "standard")
+			Expect(k8sClient.Create(ctx, mv)).To(Succeed())
+			isvc := validInferenceService(name, mv.Name)
+			isvc.Spec.ProfileRef = irp.Name
+			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
+			defer func() {
+				_ = k8sClient.Delete(ctx, isvc)
+				_ = k8sClient.Delete(ctx, mv)
+				_ = k8sClient.Delete(ctx, irp)
+			}()
+
+			Eventually(func(g Gomega) {
+				pvc := &corev1.PersistentVolumeClaim{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-model-main", Namespace: testNamespace}, pvc)).To(Succeed())
+			}, "15s", "200ms").Should(Succeed())
+
+			Expect(k8sClient.Delete(ctx, &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: name + "-model-main", Namespace: testNamespace}})).To(Succeed())
+
+			Eventually(func(g Gomega) {
+				pvc := &corev1.PersistentVolumeClaim{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-model-main", Namespace: testNamespace}, pvc)).To(Succeed())
 			}, "15s", "200ms").Should(Succeed())
 		})
 	})

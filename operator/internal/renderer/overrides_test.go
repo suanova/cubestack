@@ -131,6 +131,60 @@ var _ = Describe("ResolveOverrides", func() {
 		Expect(got).To(Equal(map[string]string{overrideSize: "1000"}))
 	})
 
+	It("scales fractional mantissas in exponent-notation enum items exactly", func() {
+		declared := []aiv1alpha1.Override{
+			{Name: overrideSize, Type: aiv1alpha1.OverrideTypeInteger, Enum: []apiextensionsv1.JSON{jsonValue("1.5e1"), jsonValue("1.25e2")}},
+		}
+		got, errs := ResolveOverrides(declared, map[string]apiextensionsv1.JSON{overrideSize: jsonValue("15")})
+		Expect(errs).To(BeEmpty())
+		Expect(got).To(Equal(map[string]string{overrideSize: "15"}))
+
+		got, errs = ResolveOverrides(declared, map[string]apiextensionsv1.JSON{overrideSize: jsonValue("125")})
+		Expect(errs).To(BeEmpty())
+		Expect(got).To(Equal(map[string]string{overrideSize: "125"}))
+	})
+
+	It("absorbs a negative exponent when the mantissa ends in zeros", func() {
+		declared := []aiv1alpha1.Override{
+			{Name: overrideSize, Type: aiv1alpha1.OverrideTypeInteger, Enum: []apiextensionsv1.JSON{jsonValue("100e-2")}},
+		}
+		got, errs := ResolveOverrides(declared, map[string]apiextensionsv1.JSON{overrideSize: jsonValue("1")})
+		Expect(errs).To(BeEmpty())
+		Expect(got).To(Equal(map[string]string{overrideSize: "1"}))
+	})
+
+	It("compares negative mantissa exponents exactly", func() {
+		// A negative mantissa with a positive exponent matches the expanded
+		// integer; trailing zeros absorb a negative exponent; a zero mantissa
+		// matches zero regardless of the exponent.
+		got, errs := ResolveOverrides([]aiv1alpha1.Override{
+			{Name: overrideSize, Type: aiv1alpha1.OverrideTypeInteger, Enum: []apiextensionsv1.JSON{jsonValue("-1.5e2")}},
+		}, map[string]apiextensionsv1.JSON{overrideSize: jsonValue("-150")})
+		Expect(errs).To(BeEmpty())
+		Expect(got).To(Equal(map[string]string{overrideSize: "-150"}))
+
+		got, errs = ResolveOverrides([]aiv1alpha1.Override{
+			{Name: overrideSize, Type: aiv1alpha1.OverrideTypeInteger, Enum: []apiextensionsv1.JSON{jsonValue("-100e-2")}},
+		}, map[string]apiextensionsv1.JSON{overrideSize: jsonValue("-1")})
+		Expect(errs).To(BeEmpty())
+		Expect(got).To(Equal(map[string]string{overrideSize: "-1"}))
+
+		got, errs = ResolveOverrides([]aiv1alpha1.Override{
+			{Name: overrideSize, Type: aiv1alpha1.OverrideTypeInteger, Enum: []apiextensionsv1.JSON{jsonValue("0e-5")}},
+		}, map[string]apiextensionsv1.JSON{overrideSize: jsonValue("0")})
+		Expect(errs).To(BeEmpty())
+		Expect(got).To(Equal(map[string]string{overrideSize: "0"}))
+	})
+
+	It("rejects a fractional exponent-notation enum item", func() {
+		declared := []aiv1alpha1.Override{
+			{Name: overrideSize, Type: aiv1alpha1.OverrideTypeInteger, Enum: []apiextensionsv1.JSON{jsonValue("1e-1")}},
+		}
+		_, errs := ResolveOverrides(declared, map[string]apiextensionsv1.JSON{overrideSize: jsonValue("0")})
+		Expect(errs).To(HaveLen(1))
+		Expect(errs[0].Reason).To(Equal(ReasonInvalidOverride))
+	})
+
 	It("rejects an over-limit enum exponent without allocating", func() {
 		// A schemaless enum item like 1e1000000000 must be rejected before any
 		// big.Int expansion; this spec completes instantly when the guard works

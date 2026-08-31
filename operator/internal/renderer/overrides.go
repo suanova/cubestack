@@ -181,11 +181,10 @@ func numbersEqual(a, b json.Number) bool {
 }
 
 // ratFromNumber converts a JSON number to a big.Rat exactly, expanding
-// exponent notation (1.5e3 -> 1500). The exponent is shifted by the
-// mantissa's fraction digits before expanding, so an exponent that cannot
-// fall within the int64 range (10^20 or larger) is rejected without any
-// big.Int allocation; a zero mantissa is returned as-is regardless of the
-// exponent.
+// exponent notation (1.5e1 -> 15) by shifting the mantissa's digit string by
+// exp-fracDigits places. An expansion that would exceed the int64 range
+// (10^20 or larger) is rejected without any big.Int allocation; a zero
+// mantissa is returned as-is regardless of the exponent.
 func ratFromNumber(n json.Number) (*big.Rat, bool) {
 	s := n.String()
 	if i := strings.IndexAny(s, "eE"); i >= 0 {
@@ -194,26 +193,54 @@ func ratFromNumber(n json.Number) (*big.Rat, bool) {
 			return nil, false
 		}
 		mant := s[:i]
-		r, ok := new(big.Rat).SetString(mant)
-		if !ok {
-			return nil, false
-		}
-		if r.Sign() == 0 {
-			return r, true // 0e<anything> is 0
-		}
 		fracDigits := 0
 		if dot := strings.IndexByte(mant, '.'); dot >= 0 {
 			fracDigits = len(mant) - dot - 1
 		}
-		if exp < fracDigits {
-			return nil, false // a fraction below 1, never an integer
+		digits := strings.ReplaceAll(mant, ".", "")
+		if digits == "" || !isDigitString(digits) {
+			return nil, false
 		}
-		if exp-fracDigits > 19 {
+		if strings.Trim(digits, "0-") == "" {
+			zero, _ := new(big.Rat).SetString("0")
+			return zero, true // zero regardless of exponent
+		}
+		scale := exp - fracDigits
+		if scale > 19 {
 			return nil, false // 10^20 and above exceed the int64 range
 		}
-		power := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(exp-fracDigits)), nil)
-		r.Mul(r, new(big.Rat).SetInt(power))
-		return r, true
+		if scale < 0 {
+			// A fraction unless the digit string ends in enough zeros to
+			// absorb the negative scale (100e-2 == 1).
+			need := -scale
+			zeros := 0
+			for j := len(digits) - 1; j >= 0 && digits[j] == '0'; j-- {
+				zeros++
+			}
+			if zeros < need {
+				return nil, false
+			}
+			digits = digits[:len(digits)-need]
+			scale = 0
+		}
+		if scale > 0 {
+			digits += strings.Repeat("0", scale)
+		}
+		return new(big.Rat).SetString(digits)
 	}
 	return new(big.Rat).SetString(s)
+}
+
+// isDigitString reports whether s is digits with an optional leading '-'.
+func isDigitString(s string) bool {
+	s = strings.TrimPrefix(s, "-")
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }

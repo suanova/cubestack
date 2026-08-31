@@ -18,7 +18,8 @@ limitations under the License.
 // +kubebuilder:rbac:groups=ai.cubestack.io,resources=inferenceservices/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=ai.cubestack.io,resources=inferenceruntimeprofiles,verbs=get;list;watch
 // +kubebuilder:rbac:groups=ai.cubestack.io,resources=modelversions,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create
 
 package controller
 
@@ -47,17 +48,18 @@ import (
 )
 
 // InferenceServiceReconciler resolves the referenced profile, model version
-// and asset sources (Resolved), then validates and renders the profile
-// templates (Rendered). Resource creation and readiness aggregation are
-// later phases; this controller writes only status.
+// and asset sources (Resolved), validates and renders the profile templates
+// (Rendered), and provisions the rendered asset ConfigMaps and the model PVC
+// (Provisioned). Workload creation and readiness aggregation are later phases.
 type InferenceServiceReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 }
 
 // Reconcile runs the render pipeline's generation steps (design §4.1 steps
-// 1–2): resolve the references, render the templates, and report the
-// Resolved and Rendered conditions in status.
+// 1–3): resolve the references, render the templates, provision the asset
+// ConfigMaps and the model PVC, and report the Resolved, Rendered and
+// Provisioned conditions in status.
 func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var isvc aiv1alpha1.InferenceService
 	if err := r.Get(ctx, req.NamespacedName, &isvc); err != nil {
@@ -98,6 +100,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	if !resolved.resolved() {
 		// A stale Rendered from a previous spec must not persist.
 		meta.RemoveStatusCondition(&desired.Status.Conditions, aiv1alpha1.ConditionRendered)
+		meta.RemoveStatusCondition(&desired.Status.Conditions, aiv1alpha1.ConditionProvisioned)
 		return ctrl.Result{}, r.updateStatusIfChanged(ctx, &isvc, desired)
 	}
 
@@ -106,10 +109,41 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	rev := revisionHash(resolved.profile, resolved.assets)
 	setProfileDriftedCondition(&desired.Status.Conditions, desired.Status.Profile, rev)
+	setProfileDeprecatedCondition(&desired.Status.Conditions, resolved.profile)
+
+	// Provision only on a successful render: with Rendered=False the output
+	// may still hold unresolved placeholders, which must not be written to
+	// asset ConfigMaps.
 	if len(rendered.Errors) == 0 {
 		desired.Status.Profile.Revision = rev
+		assetStatuses, err := r.provisionAssets(ctx, &isvc, resolved.profile, &rendered)
+		if err != nil {
+			setProvisionedCondition(&desired.Status.Conditions, "AssetConfigMapFailed", err)
+			statusErr := r.updateStatusIfChanged(ctx, &isvc, desired)
+			if statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+			// Return the provision error so the reconcile is requeued; the
+			// status write must not swallow it.
+			return ctrl.Result{}, err
+		}
+		if err := r.provisionModelPVC(ctx, &isvc, resolved.model); err != nil {
+			setProvisionedCondition(&desired.Status.Conditions, "PVCCreateFailed", err)
+			statusErr := r.updateStatusIfChanged(ctx, &isvc, desired)
+			if statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+			// Return the provision error so the reconcile is requeued; the
+			// status write must not swallow it.
+			return ctrl.Result{}, err
+		}
+		desired.Status.Assets = assetStatuses
+		setProvisionedCondition(&desired.Status.Conditions, "", nil)
+	} else {
+		// A stale Provisioned from a previous spec must not persist when the
+		// current spec no longer renders.
+		meta.RemoveStatusCondition(&desired.Status.Conditions, aiv1alpha1.ConditionProvisioned)
 	}
-	setProfileDeprecatedCondition(&desired.Status.Conditions, resolved.profile)
 
 	return ctrl.Result{}, r.updateStatusIfChanged(ctx, &isvc, desired)
 }
@@ -132,6 +166,8 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&aiv1alpha1.InferenceService{}).
+		Owns(&corev1.ConfigMap{}).
+		Owns(&corev1.PersistentVolumeClaim{}).
 		Watches(&aiv1alpha1.ModelVersion{},
 			handler.EnqueueRequestsFromMapFunc(r.enqueueReferencingServices)).
 		Watches(&aiv1alpha1.InferenceRuntimeProfile{},
