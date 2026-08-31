@@ -41,6 +41,10 @@ const testOverridePrefillReplicas = "prefillReplicas"
 // testOverrideMode is the string-enum override name declared by validRenderProfile.
 const testOverrideMode = "mode"
 
+// testOverrideGroupSize is the override name the group-size spec appends to
+// validRenderProfile's declarations.
+const testOverrideGroupSize = "groupSize"
+
 // testForeignDataKey is the data key of the foreign-resource specs.
 const testForeignDataKey = "foreign"
 
@@ -50,7 +54,7 @@ func validResolveProfile(name string) *aiv1alpha1.InferenceRuntimeProfile {
 	irp := validInferenceRuntimeProfile(name)
 	irp.Spec.Assets = []aiv1alpha1.Asset{
 		{Name: testAssetName, ConfigMapRef: aiv1alpha1.AssetConfigMapRef{Name: name + "-cm-a"}, Mount: &aiv1alpha1.AssetMount{Path: "/opt/bootstrap", Mode: 0755}},
-		{Name: "runtime-config", ConfigMapRef: aiv1alpha1.AssetConfigMapRef{Name: name + "-cm-b"}, EnvFrom: ptrTo(true)},
+		{Name: testRuntimeConfig, ConfigMapRef: aiv1alpha1.AssetConfigMapRef{Name: name + "-cm-b"}, EnvFrom: ptrTo(true)},
 	}
 	for _, cmName := range []string{name + "-cm-a", name + "-cm-b"} {
 		cm := &corev1.ConfigMap{
@@ -88,7 +92,7 @@ func validRenderProfile(name string) *aiv1alpha1.InferenceRuntimeProfile {
 		aiv1alpha1.EnvVar{Name: "LAUNCHER", Value: ptrTo("{{ profile.vars.launcher }}")})
 	irp.Spec.Roles[0].PodTemplate.Env = append(irp.Spec.Roles[0].PodTemplate.Env,
 		aiv1alpha1.EnvVar{Name: "MODEL_PATH", Value: ptrTo("{{ model.path }}")})
-	irp.Spec.Roles[0].PodTemplate.Mounts = []aiv1alpha1.ModelMount{{Model: "main", At: "/workspace/model", ReadOnly: true}}
+	irp.Spec.Roles[0].PodTemplate.Mounts = []aiv1alpha1.ModelMount{{Model: "main", At: testModelPath, ReadOnly: true}}
 	return irp
 }
 

@@ -20,6 +20,9 @@ limitations under the License.
 // +kubebuilder:rbac:groups=ai.cubestack.io,resources=modelversions,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create
+// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=leaderworkerset.x-k8s.io,resources=leaderworkersets,verbs=get;list;watch;create;update;patch;delete
 
 package controller
 
@@ -27,10 +30,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -42,6 +47,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
 	aiv1alpha1 "github.com/suanova/cubestack/api/v1alpha1"
 	"github.com/suanova/cubestack/internal/renderer"
@@ -49,17 +55,20 @@ import (
 
 // InferenceServiceReconciler resolves the referenced profile, model version
 // and asset sources (Resolved), validates and renders the profile templates
-// (Rendered), and provisions the rendered asset ConfigMaps and the model PVC
-// (Provisioned). Workload creation and readiness aggregation are later phases.
+// (Rendered), provisions the rendered asset ConfigMaps and the model PVC
+// (Provisioned), and applies the Services and workloads of every role with
+// dependency gating (WorkloadsApplied). The profile revision is adopted only
+// after a fully successful apply.
 type InferenceServiceReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 }
 
 // Reconcile runs the render pipeline's generation steps (design §4.1 steps
-// 1–3): resolve the references, render the templates, provision the asset
-// ConfigMaps and the model PVC, and report the Resolved, Rendered and
-// Provisioned conditions in status.
+// 1–4): resolve the references, render the templates, provision the asset
+// ConfigMaps and the model PVC, and apply the Services and workloads of every
+// role with dependency gating, reporting the Resolved, Rendered, Provisioned
+// and WorkloadsApplied conditions in status.
 func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var isvc aiv1alpha1.InferenceService
 	if err := r.Get(ctx, req.NamespacedName, &isvc); err != nil {
@@ -104,6 +113,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		// A stale Rendered from a previous spec must not persist.
 		meta.RemoveStatusCondition(&desired.Status.Conditions, aiv1alpha1.ConditionRendered)
 		meta.RemoveStatusCondition(&desired.Status.Conditions, aiv1alpha1.ConditionProvisioned)
+		meta.RemoveStatusCondition(&desired.Status.Conditions, aiv1alpha1.ConditionWorkloadsApplied)
 		return ctrl.Result{}, r.updateStatusIfChanged(ctx, &isvc, desired)
 	}
 
@@ -118,7 +128,6 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// may still hold unresolved placeholders, which must not be written to
 	// asset ConfigMaps.
 	if len(rendered.Errors) == 0 {
-		desired.Status.Profile.Revision = rev
 		assetStatuses, err := r.provisionAssets(ctx, &isvc, resolved.profile, &rendered)
 		if err != nil {
 			setProvisionedCondition(&desired.Status.Conditions, "AssetConfigMapFailed", err)
@@ -142,10 +151,34 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 		desired.Status.Assets = assetStatuses
 		setProvisionedCondition(&desired.Status.Conditions, "", nil)
+
+		rolesStatus, applyRes, err := r.applyWorkloads(ctx, desired, resolved.profile, &rendered, resolved.model)
+		if err != nil {
+			var svcErr serviceApplyErr
+			if errors.As(err, &svcErr) {
+				setWorkloadsAppliedCondition(&desired.Status.Conditions, "ServiceApplyFailed", err)
+			} else {
+				setWorkloadsAppliedCondition(&desired.Status.Conditions, "WorkloadApplyFailed", err)
+			}
+			statusErr := r.updateStatusIfChanged(ctx, &isvc, desired)
+			if statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+			return ctrl.Result{}, err
+		}
+		desired.Status.Roles = rolesStatus
+		if len(applyRes.WaitingDependencies) > 0 {
+			setWorkloadsAppliedCondition(&desired.Status.Conditions, "WaitingForDependencies", fmt.Errorf("waiting for roles: %s", strings.Join(applyRes.WaitingDependencies, ", ")))
+		} else {
+			// Fully applied: adopt the revision and report WorkloadsApplied.
+			desired.Status.Profile.Revision = rev
+			setWorkloadsAppliedCondition(&desired.Status.Conditions, "", nil)
+		}
 	} else {
 		// A stale Provisioned from a previous spec must not persist when the
 		// current spec no longer renders.
 		meta.RemoveStatusCondition(&desired.Status.Conditions, aiv1alpha1.ConditionProvisioned)
+		meta.RemoveStatusCondition(&desired.Status.Conditions, aiv1alpha1.ConditionWorkloadsApplied)
 	}
 
 	return ctrl.Result{}, r.updateStatusIfChanged(ctx, &isvc, desired)
@@ -171,12 +204,16 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&aiv1alpha1.InferenceService{}).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
+		Owns(&appsv1.Deployment{}).
+		Owns(&corev1.Service{}).
 		Watches(&aiv1alpha1.ModelVersion{},
 			handler.EnqueueRequestsFromMapFunc(r.enqueueReferencingServices)).
 		Watches(&aiv1alpha1.InferenceRuntimeProfile{},
 			handler.EnqueueRequestsFromMapFunc(r.enqueueReferencingServices)).
 		Watches(&corev1.ConfigMap{},
 			handler.EnqueueRequestsFromMapFunc(r.enqueueForSourceConfigMap)).
+		Watches(&leaderworkersetv1.LeaderWorkerSet{},
+			handler.EnqueueRequestsFromMapFunc(r.enqueueForOwnedLWS)).
 		Complete(r)
 }
 
@@ -212,6 +249,15 @@ func (r *InferenceServiceReconciler) enqueueForSourceConfigMap(ctx context.Conte
 		reqs = append(reqs, r.referencingServices(ctx, profileRefIndexKey, irp.Name)...)
 	}
 	return reqs
+}
+
+// enqueueForOwnedLWS maps a LeaderWorkerSet to the InferenceService owning it.
+func (r *InferenceServiceReconciler) enqueueForOwnedLWS(ctx context.Context, obj client.Object) []reconcile.Request {
+	lws := obj.(*leaderworkersetv1.LeaderWorkerSet)
+	if owner := metav1.GetControllerOf(lws); owner != nil && owner.Kind == "InferenceService" {
+		return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: lws.Namespace, Name: owner.Name}}}
+	}
+	return nil
 }
 
 // referencingServices lists the InferenceServices whose spec field (via the
@@ -298,6 +344,28 @@ func setProfileDriftedCondition(conditions *[]metav1.Condition, stored *aiv1alph
 		Status:  metav1.ConditionTrue,
 		Reason:  "ProfileRecreated",
 		Message: fmt.Sprintf("Profile content hash %s differs from the last adopted revision %s; the profile may have been recreated", currentHash, stored.Revision),
+	})
+}
+
+// setWorkloadsAppliedCondition sets the WorkloadsApplied condition from the
+// apply outcome: True when every Service and workload is written to the
+// desired version; False with the matching reason otherwise. A gate-wait for
+// a not-yet-ready dependency uses WaitingForDependencies.
+func setWorkloadsAppliedCondition(conditions *[]metav1.Condition, reason string, applyErr error) {
+	if applyErr == nil {
+		meta.SetStatusCondition(conditions, metav1.Condition{
+			Type:    aiv1alpha1.ConditionWorkloadsApplied,
+			Status:  metav1.ConditionTrue,
+			Reason:  "WorkloadsApplied",
+			Message: "Services and workloads are applied to the desired version",
+		})
+		return
+	}
+	meta.SetStatusCondition(conditions, metav1.Condition{
+		Type:    aiv1alpha1.ConditionWorkloadsApplied,
+		Status:  metav1.ConditionFalse,
+		Reason:  reason,
+		Message: applyErr.Error(),
 	})
 }
 

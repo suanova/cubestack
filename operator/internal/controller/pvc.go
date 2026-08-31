@@ -46,7 +46,7 @@ func (r *InferenceServiceReconciler) provisionModelPVC(ctx context.Context, isvc
 			Namespace: isvc.Namespace,
 			Labels: map[string]string{
 				inferenceServiceLabelKey: isvc.Name,
-				modelLabelKey:            "main",
+				modelLabelKey:            modelKeyMain,
 				profileLabelKey:          isvc.Spec.ProfileRef,
 				managedByLabelKey:        managedByValue,
 			},

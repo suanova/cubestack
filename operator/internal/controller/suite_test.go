@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
 	aiv1alpha1 "github.com/suanova/cubestack/api/v1alpha1"
+	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 )
 
 var (
@@ -57,7 +58,10 @@ var _ = BeforeSuite(func() {
 	ctx, cancelMgr = context.WithCancel(context.Background())
 
 	testEnv = &envtest.Environment{
-		CRDDirectoryPaths: []string{filepath.Join("..", "..", "config", "crd", "bases")},
+		CRDDirectoryPaths: []string{
+			filepath.Join("..", "..", "config", "crd", "bases"),
+			filepath.Join("..", "..", "testdata", "lws-crd"),
+		},
 	}
 	// kube-apiserver 1.36 takes ~60s to exit on SIGTERM while informer
 	// watches are active; raise envtest's default 20s stop timeout so
@@ -71,6 +75,7 @@ var _ = BeforeSuite(func() {
 	testScheme = runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(testScheme))
 	utilruntime.Must(aiv1alpha1.AddToScheme(testScheme))
+	utilruntime.Must(leaderworkersetv1.AddToScheme(testScheme))
 
 	k8sClient, err = client.New(cfg, client.Options{Scheme: testScheme})
 	Expect(err).NotTo(HaveOccurred())

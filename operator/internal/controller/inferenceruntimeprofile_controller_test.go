@@ -61,7 +61,7 @@ func validInferenceRuntimeProfile(name string) *aiv1alpha1.InferenceRuntimeProfi
 					Mount:        &aiv1alpha1.AssetMount{Path: "/opt/cubestack-bootstrap", Mode: 0755},
 				},
 				{
-					Name:         "runtime-config",
+					Name:         testRuntimeConfig,
 					ConfigMapRef: aiv1alpha1.AssetConfigMapRef{Name: "metax-dsv4-runtime-v0.5.12-rc1"},
 					EnvFrom:      ptrTo(true),
 				},

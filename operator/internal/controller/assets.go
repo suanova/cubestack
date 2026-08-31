@@ -49,6 +49,10 @@ const (
 	assetHashAnnotationKey   = "ai.cubestack.io/asset-hash"
 )
 
+// modelKeyMain is the model key of the main model; model volumes are named
+// model-<key> (design §4.5, v1alpha1 fixes the key to main).
+const modelKeyMain = "main"
+
 // provisionAssets creates or updates the rendered asset ConfigMaps in the
 // service namespace, deletes copies whose asset is no longer declared, and
 // returns the audit statuses. A copy whose rendered data hash changed is
