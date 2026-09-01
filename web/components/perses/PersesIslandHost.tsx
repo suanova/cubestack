@@ -65,7 +65,17 @@ function loadScript(): Promise<void> {
     const script = document.createElement("script");
     script.src = ISLAND_JS;
     script.addEventListener("load", () => resolve(), { once: true });
-    script.addEventListener("error", () => resolve(), { once: true });
+    script.addEventListener(
+      "error",
+      () => {
+        // Remove the failed element so a later host instance creates a fresh
+        // bundle instead of deduping on a dead <script> that will never fire
+        // load again.
+        script.remove();
+        resolve();
+      },
+      { once: true },
+    );
     document.head.appendChild(script);
   });
 }
