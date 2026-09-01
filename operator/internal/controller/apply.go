@@ -137,7 +137,21 @@ func (r *InferenceServiceReconciler) applyWorkloads(ctx context.Context, isvc *a
 			desired := r.desiredWorkload(isvc, profile, role, rr, rendered, model)
 			switch {
 			case existingHash(existing) != existingHash(desired):
-				// Template change: apply the new template (rollout).
+				// Template change: apply the new template (rollout) — but only
+				// after every dependency has adopted the new template and is
+				// ready (design §5.1: one role updates and converges before the
+				// next starts), so a dependant never rolls out against a
+				// dependency that is mid-rollout. The gate is re-evaluated on
+				// the next reconcile — the dependency's readiness events drive
+				// it — so no progress state needs to be persisted.
+				converged, err := r.dependenciesConverged(ctx, isvc, profile, rolesByName, renderedByName, role, rendered, model)
+				if err != nil {
+					return statuses, nil, err
+				}
+				if !converged {
+					res.WaitingDependencies = append(res.WaitingDependencies, role.Name)
+					break // the loop tail reports the current (old) workload state
+				}
 				if err := r.updateWorkload(ctx, existing, desired); err != nil {
 					return statuses, nil, err
 				}
@@ -321,6 +335,40 @@ func (r *InferenceServiceReconciler) dependenciesReady(ctx context.Context, isvc
 		}
 		if !ready {
 			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// dependenciesConverged reports whether every role this role depends on has
+// adopted the desired template — its template-hash matches the current render
+// — and is ready (design §5.1 update order: a role's rollout starts only after
+// its dependencies updated and converged). A dependency still on the old
+// template, or mid-rollout (not enough ready replicas), blocks the dependant.
+func (r *InferenceServiceReconciler) dependenciesConverged(ctx context.Context, isvc *aiv1alpha1.InferenceService, profile *aiv1alpha1.InferenceRuntimeProfile, rolesByName map[string]*aiv1alpha1.Role, renderedByName map[string]*renderer.RenderedRole, role *aiv1alpha1.Role, rendered *renderer.Result, model *aiv1alpha1.ModelVersion) (bool, error) {
+	for _, dep := range role.DependsOn {
+		depRole := rolesByName[dep]
+		depRR := renderedByName[dep]
+		if depRole == nil || depRR == nil {
+			// topoOrder fails the apply on unknown dependency names, so every
+			// dependency resolves here.
+			continue
+		}
+		existing, err := r.getWorkload(ctx, isvc, depRole)
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		desired := r.desiredWorkload(isvc, profile, depRole, depRR, rendered, model)
+		if existingHash(existing) != existingHash(desired) {
+			// The dependency has not adopted the new template yet.
+			return false, nil
+		}
+		ready, err := r.roleReady(ctx, isvc, depRole, depRR.Replicas, model)
+		if err != nil || !ready {
+			return false, err
 		}
 	}
 	return true, nil

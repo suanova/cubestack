@@ -42,6 +42,7 @@ const (
 	testApplyRouterRole    = "router"
 	testApplyPrefillRole   = "prefill"
 	testApplyModelPath     = "/models/m"
+	testEngineImageV2      = "registry.local/engine:v2"
 	testForeignLabelKey    = "app"
 )
 
@@ -173,14 +174,14 @@ var _ = Describe("applyWorkloads", func() {
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + testApplyRouterSuffix, Namespace: testNamespace}, before)).To(Succeed())
 		beforeRV := before.ResourceVersion
 
-		roles[0].PodTemplate.Image = "registry.local/engine:v2" // template change
+		roles[0].PodTemplate.Image = testEngineImageV2 // template change
 		rr2 := []renderer.RenderedRole{roleResult(roles[0], 1)}
 		_, _, err = r.applyWorkloads(ctx, mustGetISVC(ctx, name), prof, &renderer.Result{Roles: rr2, Overrides: map[string]string{}}, model())
 		Expect(err).NotTo(HaveOccurred())
 
 		after := &appsv1.Deployment{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + testApplyRouterSuffix, Namespace: testNamespace}, after)).To(Succeed())
-		Expect(after.Spec.Template.Spec.Containers[0].Image).To(Equal("registry.local/engine:v2"))
+		Expect(after.Spec.Template.Spec.Containers[0].Image).To(Equal(testEngineImageV2))
 		Expect(after.ResourceVersion).NotTo(Equal(beforeRV))
 	})
 
@@ -398,6 +399,68 @@ var _ = Describe("applyWorkloads", func() {
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-router", Namespace: testNamespace}, after)).To(Succeed())
 		Expect(after.Spec.Template.Labels["app"]).To(Equal("marked"))
 		Expect(after.ResourceVersion).NotTo(Equal(beforeRV))
+	})
+
+	It("gates a rollout until the dependency adopted the new template and is ready", func() {
+		name := "apply-gate-update"
+		Expect(k8sClient.Create(ctx, isvcForApply(name))).To(Succeed())
+		prof := validRenderProfile("apply-gate-update-prof")
+		base := prof.Spec.Roles[0].PodTemplate
+		base.Env = nil
+		base.Mounts = nil
+		roles := []aiv1alpha1.Role{
+			{Name: testApplyPrefillRole, Workload: aiv1alpha1.Workload{Kind: aiv1alpha1.WorkloadKindLeaderWorkerSet, Group: &aiv1alpha1.WorkloadGroup{Size: intstr.FromInt(1), StartupPolicy: aiv1alpha1.StartupPolicyLeaderCreated}}, PodTemplate: base},
+			{Name: testApplyRouterRole, DependsOn: []string{testApplyPrefillRole}, Workload: aiv1alpha1.Workload{Kind: aiv1alpha1.WorkloadKindDeployment}, PodTemplate: base},
+		}
+		prof.Spec.Roles = roles
+		r := applyReconciler()
+		rr := []renderer.RenderedRole{roleResult(roles[0], 1), roleResult(roles[1], 1)}
+		rr[0].GroupSize = 1
+
+		// The first apply creates prefill only: router's creation is gated on
+		// its dependency being ready (the Phase 3 creation gate).
+		_, res, err := r.applyWorkloads(ctx, mustGetISVC(ctx, name), prof, &renderer.Result{Roles: rr, Overrides: map[string]string{}}, model())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.WaitingDependencies).To(Equal([]string{testApplyRouterRole}))
+
+		lws := &leaderworkersetv1.LeaderWorkerSet{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-prefill", Namespace: testNamespace}, lws)).To(Succeed())
+		// prefill converges; router is created.
+		lws.Status.ReadyReplicas = 1
+		Expect(k8sClient.Status().Update(ctx, lws)).To(Succeed())
+		_, res, err = r.applyWorkloads(ctx, mustGetISVC(ctx, name), prof, &renderer.Result{Roles: rr, Overrides: map[string]string{}}, model())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.WaitingDependencies).To(BeEmpty())
+		dep := &appsv1.Deployment{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-router", Namespace: testNamespace}, dep)).To(Succeed())
+
+		// Both templates change. Simulate prefill starting its rollout (its
+		// ready replicas drop as the old pods terminate) so router's rollout
+		// must wait: prefill adopted the new template but is not ready yet.
+		lws2 := &leaderworkersetv1.LeaderWorkerSet{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-prefill", Namespace: testNamespace}, lws2)).To(Succeed())
+		lws2.Status.ReadyReplicas = 0
+		Expect(k8sClient.Status().Update(ctx, lws2)).To(Succeed())
+		prof.Spec.Roles[0].PodTemplate.Image = testEngineImageV2
+		prof.Spec.Roles[1].PodTemplate.Image = testEngineImageV2
+		rr2 := []renderer.RenderedRole{roleResult(roles[0], 1), roleResult(roles[1], 1)}
+		rr2[0].GroupSize = 1
+		_, res, err = r.applyWorkloads(ctx, mustGetISVC(ctx, name), prof, &renderer.Result{Roles: rr2, Overrides: map[string]string{}}, model())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.WaitingDependencies).To(Equal([]string{testApplyRouterRole}))
+
+		// prefill rolled out (new template) and converged; router follows.
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-prefill", Namespace: testNamespace}, lws)).To(Succeed())
+		Expect(lws.Spec.LeaderWorkerTemplate.WorkerTemplate.Spec.Containers[0].Image).To(Equal(testEngineImageV2))
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-router", Namespace: testNamespace}, dep)).To(Succeed())
+		Expect(dep.Spec.Template.Spec.Containers[0].Image).To(Equal("registry.local/router:v1"))
+		lws.Status.ReadyReplicas = 1
+		Expect(k8sClient.Status().Update(ctx, lws)).To(Succeed())
+		_, res, err = r.applyWorkloads(ctx, mustGetISVC(ctx, name), prof, &renderer.Result{Roles: rr2, Overrides: map[string]string{}}, model())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.WaitingDependencies).To(BeEmpty())
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-router", Namespace: testNamespace}, dep)).To(Succeed())
+		Expect(dep.Spec.Template.Spec.Containers[0].Image).To(Equal(testEngineImageV2))
 	})
 
 	It("deletes a workload whose kind changed for a still-desired role", func() {
