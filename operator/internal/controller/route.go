@@ -190,7 +190,14 @@ func (r *InferenceServiceReconciler) checkRoute(ctx context.Context, isvc *aiv1a
 			return routeErr(check, err)
 		}
 	}
-	return routeAcceptance(check, existing, r.GatewayName, r.GatewayNamespace), nil
+	// Re-fetch after an update: the acceptance check must not run against the
+	// pre-update status — a status written for a previous generation must not
+	// report RouteReady for the new spec.
+	fresh := &gatewayv1.HTTPRoute{}
+	if err := r.Get(ctx, client.ObjectKey{Name: desired.Name, Namespace: desired.Namespace}, fresh); err != nil {
+		return routeErr(check, err)
+	}
+	return routeAcceptance(check, fresh, r.GatewayName, r.GatewayNamespace), nil
 }
 
 // routeAcceptance reports the route's acceptance at the configured Gateway:
@@ -207,9 +214,11 @@ func routeAcceptance(check *routeCheck, route *gatewayv1.HTTPRoute, gatewayName,
 }
 
 // routeAccepted reports whether the route's status.parents entry for the
-// configured Gateway reports Accepted=True and ResolvedRefs=True. The entry is
-// matched by parentRef name and — when set — namespace; without a matching
-// entry the gateway has not processed the route yet.
+// configured Gateway reports Accepted=True and ResolvedRefs=True for the
+// CURRENT generation: a condition whose ObservedGeneration is set but does not
+// match the route's generation is stale (the gateway has not processed the
+// latest spec yet). The entry is matched by parentRef name and — when set —
+// namespace; without a matching entry the gateway has not processed the route.
 func routeAccepted(route *gatewayv1.HTTPRoute, gatewayName, gatewayNamespace string) bool {
 	for _, parent := range route.Status.Parents {
 		if parent.ParentRef.Name != gatewayv1.ObjectName(gatewayName) {
@@ -220,6 +229,9 @@ func routeAccepted(route *gatewayv1.HTTPRoute, gatewayName, gatewayNamespace str
 		}
 		var accepted, resolved bool
 		for _, cond := range parent.Conditions {
+			if cond.ObservedGeneration != 0 && cond.ObservedGeneration != route.Generation {
+				continue // stale status from a previous generation
+			}
 			switch cond.Type {
 			case string(gatewayv1.RouteConditionAccepted):
 				accepted = cond.Status == metav1.ConditionTrue

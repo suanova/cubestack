@@ -15,6 +15,9 @@ import (
 	aiv1alpha1 "github.com/suanova/cubestack/api/v1alpha1"
 )
 
+// testLWSWatchName is the owner-fixture name of the LWS mapFunc spec.
+const testLWSWatchName = "svc-watch"
+
 var _ = Describe("LeaderWorkerSet CRD", func() {
 	It("creates and reads a LeaderWorkerSet", func() {
 		lws := &leaderworkersetv1.LeaderWorkerSet{
@@ -48,7 +51,7 @@ var _ = Describe("LeaderWorkerSet CRD", func() {
 var _ = Describe("enqueueForOwnedLWS", func() {
 	It("maps an owned LeaderWorkerSet to its InferenceService", func() {
 		owner := &aiv1alpha1.InferenceService{
-			ObjectMeta: metav1.ObjectMeta{Name: "svc-watch", Namespace: testNamespace},
+			ObjectMeta: metav1.ObjectMeta{Name: testLWSWatchName, Namespace: testNamespace},
 			Spec:       aiv1alpha1.InferenceServiceSpec{ModelRef: testModelRef, ProfileRef: "watch-prof"},
 		}
 		Expect(k8sClient.Create(ctx, owner)).To(Succeed())
@@ -64,11 +67,15 @@ var _ = Describe("enqueueForOwnedLWS", func() {
 		}
 		r := applyReconciler()
 		reqs := r.enqueueForOwnedLWS(ctx, lws)
-		Expect(reqs).To(Equal([]reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: "svc-watch"}}}))
-		// A foreign LWS produces nothing.
+		Expect(reqs).To(Equal([]reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testLWSWatchName}}}))
+		// A controller owner of the same Kind from another API group must not
+		// be treated as one of our services.
 		foreign := lws.DeepCopy()
 		foreign.Name = "other-role"
-		foreign.OwnerReferences = nil
+		foreign.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion: "other.example.io/v1", Kind: inferenceServiceKind,
+			Name: testLWSWatchName, UID: owner.UID, Controller: ptrTo(true),
+		}}
 		Expect(r.enqueueForOwnedLWS(ctx, foreign)).To(BeEmpty())
 	})
 })

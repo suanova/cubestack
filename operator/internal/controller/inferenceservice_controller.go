@@ -292,7 +292,7 @@ func (r *InferenceServiceReconciler) enqueueReferencingServices(ctx context.Cont
 // recover promptly.
 func (r *InferenceServiceReconciler) enqueueForOwnedHTTPRoute(ctx context.Context, obj client.Object) []reconcile.Request {
 	route := obj.(*gatewayv1.HTTPRoute)
-	if owner := metav1.GetControllerOf(route); owner != nil && owner.Kind == inferenceServiceKind {
+	if owner := metav1.GetControllerOf(route); owner != nil && isInferenceServiceOwner(owner) {
 		return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: route.Namespace, Name: owner.Name}}}
 	}
 	return nil
@@ -320,10 +320,18 @@ func (r *InferenceServiceReconciler) enqueueForSourceConfigMap(ctx context.Conte
 // enqueueForOwnedLWS maps a LeaderWorkerSet to the InferenceService owning it.
 func (r *InferenceServiceReconciler) enqueueForOwnedLWS(ctx context.Context, obj client.Object) []reconcile.Request {
 	lws := obj.(*leaderworkersetv1.LeaderWorkerSet)
-	if owner := metav1.GetControllerOf(lws); owner != nil && owner.Kind == inferenceServiceKind {
+	if owner := metav1.GetControllerOf(lws); owner != nil && isInferenceServiceOwner(owner) {
 		return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: lws.Namespace, Name: owner.Name}}}
 	}
 	return nil
+}
+
+// isInferenceServiceOwner reports whether the owner reference points at an
+// InferenceService of this API group — the Kind alone is not enough: a
+// controller owner of the same Kind from another group must not be treated as
+// one of our services.
+func isInferenceServiceOwner(owner *metav1.OwnerReference) bool {
+	return owner.Kind == inferenceServiceKind && owner.APIVersion == aiv1alpha1.GroupVersion.String()
 }
 
 // referencingServices lists the InferenceServices whose spec field (via the

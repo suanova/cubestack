@@ -53,8 +53,10 @@ func routeReconciler() *InferenceServiceReconciler {
 	return &InferenceServiceReconciler{Client: k8sClient, Scheme: testScheme, GatewayDomain: testGatewayDomain, GatewayName: testGatewayName, GatewayNamespace: testGatewayNamespace}
 }
 
-// acceptRoute marks the route accepted by the platform gateway: envtest runs
-// no gateway controller, so the specs write status.parents directly.
+// acceptRoute marks the route accepted by the platform gateway for its current
+// generation: envtest runs no gateway controller, so the specs write
+// status.parents directly (ObservedGeneration pins the status to the
+// generation it was written for, like a real gateway controller would).
 func acceptRoute(name string) {
 	route := &gatewayv1.HTTPRoute{}
 	Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-route", Namespace: testNamespace}, route)).To(Succeed())
@@ -65,8 +67,8 @@ func acceptRoute(name string) {
 		},
 		ControllerName: gatewayv1.GatewayController("example.net/gateway-controller"),
 		Conditions: []metav1.Condition{
-			{Type: string(gatewayv1.RouteConditionAccepted), Status: metav1.ConditionTrue, Reason: "Accepted", LastTransitionTime: metav1.Now()},
-			{Type: string(gatewayv1.RouteConditionResolvedRefs), Status: metav1.ConditionTrue, Reason: "ResolvedRefs", LastTransitionTime: metav1.Now()},
+			{Type: string(gatewayv1.RouteConditionAccepted), Status: metav1.ConditionTrue, Reason: "Accepted", LastTransitionTime: metav1.Now(), ObservedGeneration: route.Generation},
+			{Type: string(gatewayv1.RouteConditionResolvedRefs), Status: metav1.ConditionTrue, Reason: "ResolvedRefs", LastTransitionTime: metav1.Now(), ObservedGeneration: route.Generation},
 		},
 	}}
 	Expect(k8sClient.Status().Update(ctx, route)).To(Succeed())
@@ -196,12 +198,49 @@ var _ = Describe("checkRoute", func() {
 		*current.Spec.Route.TimeoutSeconds = 30
 		Expect(k8sClient.Update(ctx, current)).To(Succeed())
 
+		// The update bumps the route generation; the acceptance check requires
+		// fresh status (ObservedGeneration == the new generation), so the
+		// gateway re-accepts before RouteReady returns.
+		check, err = r.checkRoute(ctx, mustGetISVC(ctx, name), routeProfile(name+"-prof"), readyEndpoint(name), hostname)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(check.Reason).To(Equal("GatewayNotAccepted"))
+		acceptRoute(name)
 		check, err = r.checkRoute(ctx, mustGetISVC(ctx, name), routeProfile(name+"-prof"), readyEndpoint(name), hostname)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(check.Reason).To(BeEmpty())
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-route", Namespace: testNamespace}, route)).To(Succeed())
 		Expect(string(*route.Spec.Rules[0].Timeouts.Request)).To(Equal("30s"))
 		Expect(route.ResourceVersion).NotTo(Equal(oldRV))
+	})
+
+	It("does not report acceptance from a stale status after a spec update", func() {
+		// The route is accepted for generation 1; a spec change bumps the
+		// generation, and the pre-update status must not report RouteReady
+		// until the gateway writes status for the new generation.
+		name := "route-stale"
+		isvc := isvcForApply(name)
+		isvc.Spec.Route = &aiv1alpha1.RouteSpec{Publish: true, ModelName: "stale-model", TimeoutSeconds: ptrTo[int64](60)}
+		Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
+		r := routeReconciler()
+		hostname := publicHostname(isvc, testGatewayDomain)
+		_, err := r.checkRoute(ctx, mustGetISVC(ctx, name), routeProfile(name+"-prof"), readyEndpoint(name), hostname)
+		Expect(err).NotTo(HaveOccurred())
+		acceptRoute(name) // accepted for generation 1
+
+		// The spec changes the timeout; the update bumps the route generation
+		// but the stored status still carries generation 1.
+		current := mustGetISVC(ctx, name)
+		*current.Spec.Route.TimeoutSeconds = 30
+		Expect(k8sClient.Update(ctx, current)).To(Succeed())
+		check, err := r.checkRoute(ctx, mustGetISVC(ctx, name), routeProfile(name+"-prof"), readyEndpoint(name), hostname)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(check.Reason).To(Equal("GatewayNotAccepted"))
+
+		// The gateway writes status for the new generation; RouteReady returns.
+		acceptRoute(name)
+		check, err = r.checkRoute(ctx, mustGetISVC(ctx, name), routeProfile(name+"-prof"), readyEndpoint(name), hostname)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(check.Reason).To(BeEmpty())
 	})
 
 	It("sets the RouteReady condition from the check", func() {

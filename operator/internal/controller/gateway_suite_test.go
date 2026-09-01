@@ -78,9 +78,14 @@ var _ = Describe("enqueueForOwnedHTTPRoute", func() {
 		r := routeReconciler()
 		reqs := r.enqueueForOwnedHTTPRoute(ctx, route)
 		Expect(reqs).To(Equal([]reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testRouteWatchName}}}))
+		// A controller owner of the same Kind from another API group must not
+		// be treated as one of our services.
 		foreign := route.DeepCopy()
 		foreign.Name = "other-route"
-		foreign.OwnerReferences = nil
+		foreign.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion: "other.example.io/v1", Kind: inferenceServiceKind,
+			Name: "svc-route-watch", UID: owner.UID, Controller: ptrTo(true),
+		}}
 		Expect(r.enqueueForOwnedHTTPRoute(ctx, foreign)).To(BeEmpty())
 	})
 })
