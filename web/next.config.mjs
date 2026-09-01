@@ -3,6 +3,10 @@
 // (next.config.mjs so it loads on Next 14; TS config support arrived in 15.)
 const nextConfig = {
   output: "standalone",
+  // Next 16 blocks dev-resource requests from cross-origin hosts by default;
+  // the portal is commonly reached as http://127.0.0.1:3000 as well as
+  // localhost, so allow both in development.
+  allowedDevOrigins: ["127.0.0.1"],
   webpack: (config) => {
     // The perses DashboardProvider builds its zustand store by spreading
     // slice creators through a rest-arg initializer. Production minification

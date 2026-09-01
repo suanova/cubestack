@@ -4,6 +4,8 @@ import "./globals.css";
 
 import { AppShell } from "@/components/shell/AppShell";
 import { DocumentMeta } from "@/components/shell/DocumentMeta";
+import { EmotionCacheProvider } from "@/components/shell/EmotionCacheProvider";
+import { PlatformInitScript } from "@/components/shell/PlatformInitScript";
 import { dictionaries } from "@/lib/i18n/dictionaries";
 
 // Same theme bootstrap as the static prototype pages (public/overview.html):
@@ -28,9 +30,11 @@ export default function RootLayout({ children }: { children: ReactNode }) {
     // hydration; data-theme/data-locale are never React-rendered.
     <html lang="zh-CN" suppressHydrationWarning className="h-full antialiased">
       <body className="min-h-full flex flex-col">
-        <script dangerouslySetInnerHTML={{ __html: platformInitScript }} />
-        <DocumentMeta />
-        <AppShell>{children}</AppShell>
+        <PlatformInitScript script={platformInitScript} />
+        <EmotionCacheProvider>
+          <DocumentMeta />
+          <AppShell>{children}</AppShell>
+        </EmotionCacheProvider>
       </body>
     </html>
   );

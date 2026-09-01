@@ -1,6 +1,7 @@
 import {
   ApiextensionsV1Api,
   CoreV1Api,
+  CustomObjectsApi,
   KubeConfig,
 } from "@kubernetes/client-node";
 
@@ -35,4 +36,14 @@ export function getApiextensionsClient(): ApiextensionsV1Api {
  */
 export function getCoreClient(): CoreV1Api {
   return getKubeConfig().makeApiClient(CoreV1Api);
+}
+
+/**
+ * Client for reading cluster-scoped custom resources (the operator's
+ * ai.cubestack.io CRDs). Methods are object-param style and resolve to the
+ * deserialized list body, e.g. listClusterCustomObject({ group, version,
+ * plural }) -> { items: [...] }.
+ */
+export function getCustomObjectsClient(): CustomObjectsApi {
+  return getKubeConfig().makeApiClient(CustomObjectsApi);
 }
