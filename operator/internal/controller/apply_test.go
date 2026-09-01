@@ -373,4 +373,56 @@ var _ = Describe("applyWorkloads", func() {
 		lws := &leaderworkersetv1.LeaderWorkerSet{}
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKey{Name: name + testApplyPrefillSuffix, Namespace: testNamespace}, lws))).To(BeTrue())
 	})
+
+	It("rolls out when only the pod template labels change", func() {
+		name := "apply-labels"
+		Expect(k8sClient.Create(ctx, isvcForApply(name))).To(Succeed())
+		prof := validRenderProfile("apply-labels-prof")
+		roles := prof.Spec.Roles
+		r := applyReconciler()
+		rr := []renderer.RenderedRole{roleResult(roles[0], 1)}
+		_, _, err := r.applyWorkloads(ctx, mustGetISVC(ctx, name), prof, &renderer.Result{Roles: rr, Overrides: map[string]string{}}, model())
+		Expect(err).NotTo(HaveOccurred())
+
+		before := &appsv1.Deployment{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-router", Namespace: testNamespace}, before)).To(Succeed())
+		beforeRV := before.ResourceVersion
+
+		// Only podTemplate.labels change; the pod spec is untouched.
+		roles[0].PodTemplate.Labels = map[string]string{"app": "marked"}
+		rr2 := []renderer.RenderedRole{roleResult(roles[0], 1)}
+		_, _, err = r.applyWorkloads(ctx, mustGetISVC(ctx, name), prof, &renderer.Result{Roles: rr2, Overrides: map[string]string{}}, model())
+		Expect(err).NotTo(HaveOccurred())
+
+		after := &appsv1.Deployment{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-router", Namespace: testNamespace}, after)).To(Succeed())
+		Expect(after.Spec.Template.Labels["app"]).To(Equal("marked"))
+		Expect(after.ResourceVersion).NotTo(Equal(beforeRV))
+	})
+
+	It("deletes a workload whose kind changed for a still-desired role", func() {
+		name := "apply-kind"
+		Expect(k8sClient.Create(ctx, isvcForApply(name))).To(Succeed())
+		prof := validRenderProfile("apply-kind-prof")
+		roles := []aiv1alpha1.Role{
+			prof.Spec.Roles[0],
+			{Name: testApplyPrefillRole, Workload: aiv1alpha1.Workload{Kind: aiv1alpha1.WorkloadKindLeaderWorkerSet}, PodTemplate: prof.Spec.Roles[0].PodTemplate},
+		}
+		prof.Spec.Roles = roles
+		r := applyReconciler()
+		rr := []renderer.RenderedRole{roleResult(roles[0], 1), roleResult(roles[1], 1)}
+		_, _, err := r.applyWorkloads(ctx, mustGetISVC(ctx, name), prof, &renderer.Result{Roles: rr, Overrides: map[string]string{}}, model())
+		Expect(err).NotTo(HaveOccurred())
+		lws := &leaderworkersetv1.LeaderWorkerSet{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + testApplyPrefillSuffix, Namespace: testNamespace}, lws)).To(Succeed())
+
+		// The prefill role switches to a Deployment; the old LWS must go.
+		roles[1].Workload.Kind = aiv1alpha1.WorkloadKindDeployment
+		rr2 := []renderer.RenderedRole{roleResult(roles[0], 1), roleResult(roles[1], 1)}
+		_, _, err = r.applyWorkloads(ctx, mustGetISVC(ctx, name), prof, &renderer.Result{Roles: rr2, Overrides: map[string]string{}}, model())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKey{Name: name + testApplyPrefillSuffix, Namespace: testNamespace}, lws))).To(BeTrue())
+		dep := &appsv1.Deployment{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + testApplyPrefillSuffix, Namespace: testNamespace}, dep)).To(Succeed())
+	})
 })

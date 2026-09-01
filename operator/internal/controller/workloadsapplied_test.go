@@ -77,6 +77,9 @@ var _ = Describe("WorkloadsApplied", func() {
 		irp := validRenderProfile(name + "-prof")
 		irp.Spec.Roles[0].PodTemplate.Env = nil
 		irp.Spec.Roles[0].PodTemplate.Mounts = nil
+		irp.Spec.Roles[0].Service = &aiv1alpha1.RoleService{
+			Ports: []aiv1alpha1.ServicePort{{Name: testPortName, Port: 8001, TargetPort: ptrTo(intstr.FromString(testPortName))}},
+		}
 		Expect(k8sClient.Create(ctx, irp)).To(Succeed())
 		cm := &corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{Name: name + "-prof-cm", Namespace: systemNamespace},
@@ -141,14 +144,18 @@ var _ = Describe("WorkloadsApplied", func() {
 		dep := &appsv1.Deployment{}
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-router", Namespace: testNamespace}, dep))).To(BeTrue())
 
-		// prefill becomes ready → next reconcile applies router
+		// prefill becomes ready → the next reconcile applies router. The suite
+		// manager reconciles the same isvc concurrently, so the applied state
+		// is polled instead of asserted once.
 		lws.Status.ReadyReplicas = 1
 		Expect(k8sClient.Status().Update(ctx, lws)).To(Succeed())
-		_, err = reconcileISVC(ctx, name)
-		Expect(err).NotTo(HaveOccurred())
-		isvc2 := &aiv1alpha1.InferenceService{}
-		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: testNamespace}, isvc2)).To(Succeed())
-		Expect(meta.FindStatusCondition(isvc2.Status.Conditions, aiv1alpha1.ConditionWorkloadsApplied).Status).To(Equal(metav1.ConditionTrue))
+		Eventually(func(g Gomega) {
+			_, err := reconcileISVC(ctx, name)
+			g.Expect(err).NotTo(HaveOccurred())
+			isvc2 := &aiv1alpha1.InferenceService{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: testNamespace}, isvc2)).To(Succeed())
+			g.Expect(meta.FindStatusCondition(isvc2.Status.Conditions, aiv1alpha1.ConditionWorkloadsApplied).Status).To(Equal(metav1.ConditionTrue))
+		}).Should(Succeed())
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-router", Namespace: testNamespace}, dep)).To(Succeed())
 	})
 

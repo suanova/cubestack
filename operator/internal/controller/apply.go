@@ -69,12 +69,20 @@ func (r *InferenceServiceReconciler) applyWorkloads(ctx context.Context, isvc *a
 
 	res := &applyResult{}
 	desiredPrefixes := make(map[string]bool, 2*len(profile.Spec.Roles))
+	desiredKinds := make(map[string]aiv1alpha1.WorkloadKind, len(profile.Spec.Roles))
 	statuses := make([]aiv1alpha1.RoleStatus, 0, len(order))
 	for _, name := range order {
 		role := rolesByName[name]
 		rr := renderedByName[name]
+		if rr == nil {
+			// The renderer always emits one RenderedRole per profile role, but
+			// a nil entry must surface as a visible error instead of panicking
+			// the controller process on the dereference below.
+			return statuses, nil, fmt.Errorf("rendered result is missing role %q", name)
+		}
 		prefix := fmt.Sprintf("%s-%s", isvc.Name, role.Name)
 		desiredPrefixes[prefix] = true
+		desiredKinds[prefix] = role.Workload.Kind
 		if role.Service != nil && role.Service.Headless != nil && *role.Service.Headless {
 			desiredPrefixes[prefix+"-hl"] = true
 		}
@@ -140,7 +148,7 @@ func (r *InferenceServiceReconciler) applyWorkloads(ctx context.Context, isvc *a
 		statuses = append(statuses, roleStatus(role, rr, isvc, existing, ready))
 	}
 
-	if err := r.cleanupOrphanWorkloads(ctx, isvc, desiredPrefixes); err != nil {
+	if err := r.cleanupOrphanWorkloads(ctx, isvc, desiredPrefixes, desiredKinds); err != nil {
 		return statuses, nil, err
 	}
 	return statuses, res, nil
@@ -259,8 +267,13 @@ func (r *InferenceServiceReconciler) applyWorkload(ctx context.Context, isvc *ai
 func (r *InferenceServiceReconciler) desiredWorkload(isvc *aiv1alpha1.InferenceService, profile *aiv1alpha1.InferenceRuntimeProfile, role *aiv1alpha1.Role, rr *renderer.RenderedRole, rendered *renderer.Result, model *aiv1alpha1.ModelVersion) client.Object {
 	podSpec := buildPodSpec(rr.PodTemplate, isvc.Name, model, profile.Spec.Accelerator.Vendor)
 	mountsModel := len(rr.PodTemplate.Mounts) > 0
-	hashAnnotations := templateHashAnnotations(podSpec, nil, rr.PodTemplate.Annotations, rendered.Overrides, rendered.Assets, model, mountsModel)
-	labels, annotations := podObjectMeta(isvc.Name, role.Name, rr.PodTemplate, hashAnnotations)
+	// Hash the labels that are actually written to the pod template: a
+	// podTemplate.labels change must roll out (design §5.1 hashes the rendered
+	// pod template). The labels do not depend on the hash annotations, so they
+	// are computed first.
+	labels, _ := podObjectMeta(isvc.Name, role.Name, rr.PodTemplate, nil)
+	hashAnnotations := templateHashAnnotations(podSpec, labels, rr.PodTemplate.Annotations, rendered.Overrides, rendered.Assets, model, mountsModel)
+	_, annotations := podObjectMeta(isvc.Name, role.Name, rr.PodTemplate, hashAnnotations)
 	switch role.Workload.Kind {
 	case aiv1alpha1.WorkloadKindLeaderWorkerSet:
 		return desiredLWS(isvc, role, rr, podSpec, labels, annotations, r.Scheme)
@@ -270,8 +283,9 @@ func (r *InferenceServiceReconciler) desiredWorkload(isvc *aiv1alpha1.InferenceS
 }
 
 // dependenciesReady reports whether every role this role depends on has its
-// workload created and ready. Every DependsOn name resolves to a role:
-// topoOrder fails the apply when a dependency does not exist.
+// workload created and ready. Every DependsOn name is a declared role
+// (topoOrder fails the apply on unknown dependencies), so it appears in the
+// ordered loop whose rendered-lookup guard already validated the RenderedRole.
 func (r *InferenceServiceReconciler) dependenciesReady(ctx context.Context, isvc *aiv1alpha1.InferenceService, rolesByName map[string]*aiv1alpha1.Role, renderedByName map[string]*renderer.RenderedRole, role *aiv1alpha1.Role, model *aiv1alpha1.ModelVersion) (bool, error) {
 	for _, dep := range role.DependsOn {
 		depRole := rolesByName[dep]
@@ -421,16 +435,19 @@ func (r *InferenceServiceReconciler) roleReady(ctx context.Context, isvc *aiv1al
 
 // roleStatus builds the status of one role: the static topology plus the
 // observed readiness. ReadyReplicas is read from the existing workload's
-// status (0 when it does not exist).
+// status (0 when it does not exist). ServiceName is reported only when the
+// role declares a service — a role without one has no Service to point at.
 func roleStatus(role *aiv1alpha1.Role, rr *renderer.RenderedRole, isvc *aiv1alpha1.InferenceService, existing client.Object, ready bool) aiv1alpha1.RoleStatus {
 	st := aiv1alpha1.RoleStatus{
 		Name:          role.Name,
 		Kind:          role.Workload.Kind,
 		Replicas:      rr.Replicas,
 		WorkloadName:  fmt.Sprintf("%s-%s", isvc.Name, role.Name),
-		ServiceName:   fmt.Sprintf("%s-%s", isvc.Name, role.Name),
 		ReadyReplicas: int64(workloadReadyReplicas(existing)),
 		Ready:         ready,
+	}
+	if role.Service != nil {
+		st.ServiceName = fmt.Sprintf("%s-%s", isvc.Name, role.Name)
 	}
 	if role.Workload.Kind == aiv1alpha1.WorkloadKindLeaderWorkerSet {
 		st.GroupSize = ptr(rr.GroupSize)
@@ -440,15 +457,18 @@ func roleStatus(role *aiv1alpha1.Role, rr *renderer.RenderedRole, isvc *aiv1alph
 
 // cleanupOrphanWorkloads deletes the Deployments, LeaderWorkerSets and
 // Services this service owns (ownerRef + managed-by label) whose name is no
-// longer desired (design §5.1: role removal). Model PVCs are never touched.
-func (r *InferenceServiceReconciler) cleanupOrphanWorkloads(ctx context.Context, isvc *aiv1alpha1.InferenceService, desiredPrefixes map[string]bool) error {
+// longer desired — or whose workload kind changed for a still-desired role
+// name (a profile switch turning a role from Deployment to LeaderWorkerSet
+// leaves the old-kind workload behind otherwise) — see deleteOrphanWorkload.
+// Model PVCs are never touched.
+func (r *InferenceServiceReconciler) cleanupOrphanWorkloads(ctx context.Context, isvc *aiv1alpha1.InferenceService, desiredPrefixes map[string]bool, desiredKinds map[string]aiv1alpha1.WorkloadKind) error {
 	var deps appsv1.DeploymentList
 	if err := r.List(ctx, &deps, client.InNamespace(isvc.Namespace),
 		client.MatchingLabels{managedByLabelKey: managedByValue}); err != nil {
 		return err
 	}
 	for i := range deps.Items {
-		if err := r.deleteOrphanWorkload(ctx, isvc, desiredPrefixes, &deps.Items[i]); err != nil {
+		if err := r.deleteOrphanWorkload(ctx, isvc, desiredPrefixes, desiredKinds, &deps.Items[i]); err != nil {
 			return err
 		}
 	}
@@ -459,7 +479,7 @@ func (r *InferenceServiceReconciler) cleanupOrphanWorkloads(ctx context.Context,
 		return err
 	}
 	for i := range lws.Items {
-		if err := r.deleteOrphanWorkload(ctx, isvc, desiredPrefixes, &lws.Items[i]); err != nil {
+		if err := r.deleteOrphanWorkload(ctx, isvc, desiredPrefixes, desiredKinds, &lws.Items[i]); err != nil {
 			return err
 		}
 	}
@@ -470,18 +490,26 @@ func (r *InferenceServiceReconciler) cleanupOrphanWorkloads(ctx context.Context,
 		return err
 	}
 	for i := range svcs.Items {
-		if err := r.deleteOrphanWorkload(ctx, isvc, desiredPrefixes, &svcs.Items[i]); err != nil {
+		if err := r.deleteOrphanWorkload(ctx, isvc, desiredPrefixes, desiredKinds, &svcs.Items[i]); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// deleteOrphanWorkload deletes one listed object when it is no longer desired;
-// the ownerRef must point at this service, like cleanupOrphanAssets.
-func (r *InferenceServiceReconciler) deleteOrphanWorkload(ctx context.Context, isvc *aiv1alpha1.InferenceService, desiredPrefixes map[string]bool, obj client.Object) error {
-	if desiredPrefixes[obj.GetName()] {
-		return nil
+// deleteOrphanWorkload deletes one listed object when it is no longer desired:
+// the name is not a desired prefix, or the name is desired but belongs to a
+// workload of a different kind (the role's workload kind changed). The
+// ownerRef must point at this service, like cleanupOrphanAssets.
+func (r *InferenceServiceReconciler) deleteOrphanWorkload(ctx context.Context, isvc *aiv1alpha1.InferenceService, desiredPrefixes map[string]bool, desiredKinds map[string]aiv1alpha1.WorkloadKind, obj client.Object) error {
+	name := obj.GetName()
+	if desiredPrefixes[name] {
+		// A desired name: keep a Service, and keep a workload whose kind
+		// matches the role's. A workload of the old kind shares the name with
+		// the Service and the new workload — it must go, the others stay.
+		if kind, isWorkload := workloadKindOf(obj); !isWorkload || desiredKinds[name] == kind {
+			return nil
+		}
 	}
 	if owner := metav1.GetControllerOf(obj); owner == nil || owner.UID != isvc.UID {
 		return nil
@@ -490,4 +518,17 @@ func (r *InferenceServiceReconciler) deleteOrphanWorkload(ctx context.Context, i
 		return err
 	}
 	return nil
+}
+
+// workloadKindOf maps a workload object to its WorkloadKind; ok=false for
+// anything else (Services share the <isvc>-<role> name with workloads and are
+// never kind-checked).
+func workloadKindOf(obj client.Object) (aiv1alpha1.WorkloadKind, bool) {
+	switch obj.(type) {
+	case *appsv1.Deployment:
+		return aiv1alpha1.WorkloadKindDeployment, true
+	case *leaderworkersetv1.LeaderWorkerSet:
+		return aiv1alpha1.WorkloadKindLeaderWorkerSet, true
+	}
+	return "", false
 }

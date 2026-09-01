@@ -171,6 +171,24 @@ var _ = Describe("Render", func() {
 		Expect(res.Errors[0].Reason).To(Equal(ReasonInvalidOverride))
 	})
 
+	It("rejects replicas beyond the Kubernetes int32 range", func() {
+		p := renderProfile()
+		p.Spec.Roles[0].Workload.Replicas = ptrTo(intstr.FromString("2147483648"))
+		res := Render(renderISVC(), p, renderModel(), nil)
+		Expect(res.Errors).To(HaveLen(1))
+		Expect(res.Errors[0].Reason).To(Equal(ReasonInvalidOverride))
+		Expect(res.Errors[0].Msg).To(ContainSubstring("int32"))
+	})
+
+	It("rejects a group size beyond the Kubernetes int32 range", func() {
+		p := renderProfile()
+		p.Spec.Roles[1].Workload.Group.Size = intstr.FromString("-2147483649")
+		res := Render(renderISVC(), p, renderModel(), nil)
+		Expect(res.Errors).To(HaveLen(1))
+		Expect(res.Errors[0].Reason).To(Equal(ReasonInvalidOverride))
+		Expect(res.Errors[0].Msg).To(ContainSubstring("int32"))
+	})
+
 	It("fails with UnknownPlaceholder for role.group.size in a Deployment role", func() {
 		p := renderProfile()
 		p.Spec.Roles[0].PodTemplate.Env = append(p.Spec.Roles[0].PodTemplate.Env, envValue("BAD", "{{ role.group.size }}"))

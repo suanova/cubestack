@@ -2,6 +2,7 @@ package renderer
 
 import (
 	"fmt"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -368,6 +369,11 @@ func resolveReplicas(ctx *renderContext, roleName string, field *intstr.IntOrStr
 	n, err := strconv.ParseInt(strings.TrimSpace(rendered), 10, 64)
 	if err != nil {
 		return 0, append(errs, Error{Reason: ReasonInvalidOverride, Msg: fmt.Sprintf("replicas of role %q does not resolve to an integer: %q", roleName, rendered)})
+	}
+	// The value lands in an int32 spec field (Deployment and LWS both use
+	// *int32 for replicas and size); out-of-range values would wrap silently.
+	if n > math.MaxInt32 || n < math.MinInt32 {
+		return 0, append(errs, Error{Reason: ReasonInvalidOverride, Msg: fmt.Sprintf("replicas of role %q value %d exceeds the Kubernetes int32 range", roleName, n)})
 	}
 	return n, errs
 }
