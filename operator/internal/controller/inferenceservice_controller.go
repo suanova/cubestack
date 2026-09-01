@@ -23,6 +23,7 @@ limitations under the License.
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=leaderworkerset.x-k8s.io,resources=leaderworkersets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;update;patch;delete
 
 package controller
 
@@ -62,13 +63,22 @@ import (
 type InferenceServiceReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// GatewayDomain is the platform domain; the public hostname of a published
+	// service is <modelName>.<GatewayDomain> (design §3.3).
+	GatewayDomain string
+	// GatewayName and GatewayNamespace select the platform Gateway the
+	// HTTPRoutes of published services attach to.
+	GatewayName      string
+	GatewayNamespace string
 }
 
 // Reconcile runs the render pipeline's generation steps (design §4.1 steps
-// 1–4): resolve the references, render the templates, provision the asset
-// ConfigMaps and the model PVC, and apply the Services and workloads of every
-// role with dependency gating, reporting the Resolved, Rendered, Provisioned
-// and WorkloadsApplied conditions in status.
+// 1–7): resolve the references, render the templates, provision the asset
+// ConfigMaps and the model PVC, apply the Services and workloads of every
+// role with dependency gating, check the internal endpoint, publish the
+// public route and aggregate Ready/Progressing — reporting the Resolved,
+// Rendered, Provisioned, WorkloadsApplied, EndpointReady, RouteReady, Ready
+// and Progressing conditions in status.
 func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var isvc aiv1alpha1.InferenceService
 	if err := r.Get(ctx, req.NamespacedName, &isvc); err != nil {
@@ -86,10 +96,12 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	desired := isvc.DeepCopy()
 	desired.Status.ObservedGeneration = isvc.Generation
 	// The audit echo reflects only a fully provisioned state: it is cleared
-	// here and filled after every provisioning step succeeds. The role echo
-	// follows the same rule — it is filled only after a successful apply.
+	// here and filled after every provisioning step succeeds. The role and
+	// endpoint echoes follow the same rule — they are filled only after a
+	// successful apply (the endpoint by the convergence steps).
 	desired.Status.Assets = nil
 	desired.Status.Roles = nil
+	desired.Status.Endpoint = nil
 	setResolvedCondition(&desired.Status.Conditions, resolved)
 	if resolved.profile != nil {
 		desired.Status.Profile = &aiv1alpha1.ProfileStatus{Name: resolved.profile.Name}
@@ -116,6 +128,8 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		meta.RemoveStatusCondition(&desired.Status.Conditions, aiv1alpha1.ConditionRendered)
 		meta.RemoveStatusCondition(&desired.Status.Conditions, aiv1alpha1.ConditionProvisioned)
 		meta.RemoveStatusCondition(&desired.Status.Conditions, aiv1alpha1.ConditionWorkloadsApplied)
+		// Nothing is being applied: a stale True/Rollout must not linger.
+		setProgressingCondition(&desired.Status.Conditions, nil, "")
 		return ctrl.Result{}, r.updateStatusIfChanged(ctx, &isvc, desired)
 	}
 
@@ -176,11 +190,40 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			desired.Status.Profile.Revision = rev
 			setWorkloadsAppliedCondition(&desired.Status.Conditions, "", nil)
 		}
+
+		// Convergence steps (design §4.1 steps 5-7): endpoint reachability,
+		// route publish, and the Ready/Progressing aggregation. Failures here
+		// only set their own condition and never block the other aggregates.
+		endpoint, err := r.checkEndpoint(ctx, desired, resolved.profile)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		setEndpointReadyCondition(&desired.Status.Conditions, endpoint)
+		desired.Status.Endpoint = &aiv1alpha1.EndpointStatus{Internal: endpoint.Internal}
+
+		hostname := publicHostname(desired, r.GatewayDomain)
+		route, err := r.checkRoute(ctx, desired, resolved.profile, endpoint, hostname)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		setRouteReadyCondition(&desired.Status.Conditions, route)
+		if hostname != "" && route.Reason == "" {
+			desired.Status.Endpoint.Public = "https://" + hostname
+		}
+
+		setReadyCondition(&desired.Status.Conditions, rolesStatus)
+		setProgressingCondition(&desired.Status.Conditions, rolesStatus, applyRes.Progressing)
 	} else {
-		// A stale Provisioned from a previous spec must not persist when the
-		// current spec no longer renders.
+		// A stale Provisioned — and the applied-result conditions, whose steps
+		// only run on a successful render+apply — must not persist when the
+		// current spec no longer renders. Ready is kept: it reflects the
+		// running deployment (design §3.3 "Ready 继续反映当前部署的实际状态"),
+		// and Progressing is set to Converged — nothing is being applied.
 		meta.RemoveStatusCondition(&desired.Status.Conditions, aiv1alpha1.ConditionProvisioned)
 		meta.RemoveStatusCondition(&desired.Status.Conditions, aiv1alpha1.ConditionWorkloadsApplied)
+		meta.RemoveStatusCondition(&desired.Status.Conditions, aiv1alpha1.ConditionEndpointReady)
+		meta.RemoveStatusCondition(&desired.Status.Conditions, aiv1alpha1.ConditionRouteReady)
+		setProgressingCondition(&desired.Status.Conditions, nil, "")
 	}
 
 	return ctrl.Result{}, r.updateStatusIfChanged(ctx, &isvc, desired)

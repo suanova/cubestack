@@ -38,6 +38,26 @@ type applyResult struct {
 	// WaitingDependencies lists the roles whose creation is gated on a
 	// not-yet-ready dependency (WorkloadsApplied=False, WaitingForDependencies).
 	WaitingDependencies []string
+	// Progressing describes what the apply phase did this reconcile
+	// ("" when nothing was applied); the aggregate step turns it into the
+	// Progressing condition.
+	Progressing ProgressingReason
+}
+
+// setProgressing records what the apply loop did this reconcile, keeping the
+// most significant reason when multiple roles acted: a template change
+// (Rollout) dominates a replicas-only change (Scaling), which dominates
+// creation or dependency-waiting (Reconciling).
+func setProgressing(res *applyResult, reason ProgressingReason) {
+	if res.Progressing == ProgressingRollout || reason == ProgressingRollout {
+		res.Progressing = ProgressingRollout
+		return
+	}
+	if res.Progressing == ProgressingScaling || reason == ProgressingScaling {
+		res.Progressing = ProgressingScaling
+		return
+	}
+	res.Progressing = ProgressingReconciling
 }
 
 // serviceApplyErr marks an error from the Service apply step so the caller
@@ -100,12 +120,14 @@ func (r *InferenceServiceReconciler) applyWorkloads(ctx context.Context, isvc *a
 			}
 			if !ready {
 				res.WaitingDependencies = append(res.WaitingDependencies, role.Name)
+				setProgressing(res, ProgressingReconciling)
 				statuses = append(statuses, roleStatus(role, rr, isvc, nil, false))
 				continue
 			}
 			if err := r.applyWorkload(ctx, isvc, profile, role, rr, rendered, model); err != nil {
 				return statuses, nil, err
 			}
+			setProgressing(res, ProgressingReconciling)
 		case err != nil:
 			return statuses, nil, err
 		default:
@@ -119,6 +141,7 @@ func (r *InferenceServiceReconciler) applyWorkloads(ctx context.Context, isvc *a
 				if err := r.updateWorkload(ctx, existing, desired); err != nil {
 					return statuses, nil, err
 				}
+				setProgressing(res, ProgressingRollout)
 			case existingReplicas(existing) != desiredReplicas(desired) || existingGroupSize(existing) != desiredGroupSize(desired):
 				// Only the workload structure changed — replicas and/or the
 				// LWS group size (design §3.2: size may be an override
@@ -131,12 +154,14 @@ func (r *InferenceServiceReconciler) applyWorkloads(ctx context.Context, isvc *a
 					if err := r.updateWorkload(ctx, existing, desired); err != nil {
 						return statuses, nil, err
 					}
+					setProgressing(res, ProgressingScaling)
 				} else {
 					// Only replicas changed: scale without touching the
 					// template.
 					if err := r.scaleWorkload(ctx, existing, desiredReplicas(desired)); err != nil {
 						return statuses, nil, err
 					}
+					setProgressing(res, ProgressingScaling)
 				}
 			}
 		}

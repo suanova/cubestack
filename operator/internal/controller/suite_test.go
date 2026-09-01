@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
 	aiv1alpha1 "github.com/suanova/cubestack/api/v1alpha1"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 )
 
@@ -61,6 +62,7 @@ var _ = BeforeSuite(func() {
 		CRDDirectoryPaths: []string{
 			filepath.Join("..", "..", "config", "crd", "bases"),
 			filepath.Join("..", "..", "testdata", "lws-crd"),
+			filepath.Join("..", "..", "testdata", "gateway-crds"),
 		},
 	}
 	// kube-apiserver 1.36 takes ~60s to exit on SIGTERM while informer
@@ -76,6 +78,7 @@ var _ = BeforeSuite(func() {
 	utilruntime.Must(clientgoscheme.AddToScheme(testScheme))
 	utilruntime.Must(aiv1alpha1.AddToScheme(testScheme))
 	utilruntime.Must(leaderworkersetv1.AddToScheme(testScheme))
+	utilruntime.Must(gatewayv1.Install(testScheme))
 
 	k8sClient, err = client.New(cfg, client.Options{Scheme: testScheme})
 	Expect(err).NotTo(HaveOccurred())
