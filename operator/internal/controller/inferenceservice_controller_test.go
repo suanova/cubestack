@@ -41,6 +41,10 @@ const testOverridePrefillReplicas = "prefillReplicas"
 // testOverrideMode is the string-enum override name declared by validRenderProfile.
 const testOverrideMode = "mode"
 
+// testModelRef is the modelRef the owner-fixture services reference (the CRD
+// requires a non-empty value).
+const testModelRef = "model-ref"
+
 // testOverrideGroupSize is the override name the group-size spec appends to
 // validRenderProfile's declarations.
 const testOverrideGroupSize = "groupSize"

@@ -34,11 +34,12 @@ import (
 )
 
 // Reasons reported by checkRoute when the route is not published or cannot be
-// published ("" means the route is published).
+// published ("" means the route is published and accepted by the gateway).
 const (
 	RouteNotPublished         = "NotPublished"
 	RouteModelNameConflict    = "ModelNameConflict"
 	RouteGatewayNotConfigured = "GatewayNotConfigured"
+	RouteGatewayNotAccepted   = "GatewayNotAccepted"
 )
 
 // routeCheck reports the route-publish outcome.
@@ -172,7 +173,10 @@ func (r *InferenceServiceReconciler) checkRoute(ctx context.Context, isvc *aiv1a
 		if err := r.Create(ctx, desired); err != nil {
 			return routeErr(check, err)
 		}
-		return check, nil
+		// The route is persisted but not yet accepted by the gateway; the
+		// acceptance check below reports GatewayNotAccepted until the gateway
+		// controller writes status.parents (watched via enqueueForOwnedHTTPRoute).
+		return routeAcceptance(check, desired, r.GatewayName, r.GatewayNamespace), nil
 	}
 	if err != nil {
 		return routeErr(check, err)
@@ -186,7 +190,46 @@ func (r *InferenceServiceReconciler) checkRoute(ctx context.Context, isvc *aiv1a
 			return routeErr(check, err)
 		}
 	}
-	return check, nil
+	return routeAcceptance(check, existing, r.GatewayName, r.GatewayNamespace), nil
+}
+
+// routeAcceptance reports the route's acceptance at the configured Gateway:
+// RouteReady requires both Accepted=True and ResolvedRefs=True on the matching
+// status.parents entry — the route must be live at the gateway, not merely
+// persisted (the design's "已生成" is interpreted as "已生效"; a route without
+// acceptance is reported as GatewayNotAccepted).
+func routeAcceptance(check *routeCheck, route *gatewayv1.HTTPRoute, gatewayName, gatewayNamespace string) *routeCheck {
+	if routeAccepted(route, gatewayName, gatewayNamespace) {
+		return check // Reason stays "" — published and accepted.
+	}
+	check.Reason = RouteGatewayNotAccepted
+	return check
+}
+
+// routeAccepted reports whether the route's status.parents entry for the
+// configured Gateway reports Accepted=True and ResolvedRefs=True. The entry is
+// matched by parentRef name and — when set — namespace; without a matching
+// entry the gateway has not processed the route yet.
+func routeAccepted(route *gatewayv1.HTTPRoute, gatewayName, gatewayNamespace string) bool {
+	for _, parent := range route.Status.Parents {
+		if parent.ParentRef.Name != gatewayv1.ObjectName(gatewayName) {
+			continue
+		}
+		if parent.ParentRef.Namespace != nil && string(*parent.ParentRef.Namespace) != gatewayNamespace {
+			continue
+		}
+		var accepted, resolved bool
+		for _, cond := range parent.Conditions {
+			switch cond.Type {
+			case string(gatewayv1.RouteConditionAccepted):
+				accepted = cond.Status == metav1.ConditionTrue
+			case string(gatewayv1.RouteConditionResolvedRefs):
+				resolved = cond.Status == metav1.ConditionTrue
+			}
+		}
+		return accepted && resolved
+	}
+	return false
 }
 
 // endpointPort extracts the port from the reachable internal endpoint

@@ -52,7 +52,7 @@ func applyReconciler() *InferenceServiceReconciler {
 func isvcForApply(name string) *aiv1alpha1.InferenceService {
 	return &aiv1alpha1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
-		Spec:       aiv1alpha1.InferenceServiceSpec{ModelRef: "model-ref", ProfileRef: "prof"},
+		Spec:       aiv1alpha1.InferenceServiceSpec{ModelRef: testModelRef, ProfileRef: "prof"},
 	}
 }
 

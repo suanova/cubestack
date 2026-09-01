@@ -53,6 +53,25 @@ func routeReconciler() *InferenceServiceReconciler {
 	return &InferenceServiceReconciler{Client: k8sClient, Scheme: testScheme, GatewayDomain: testGatewayDomain, GatewayName: testGatewayName, GatewayNamespace: testGatewayNamespace}
 }
 
+// acceptRoute marks the route accepted by the platform gateway: envtest runs
+// no gateway controller, so the specs write status.parents directly.
+func acceptRoute(name string) {
+	route := &gatewayv1.HTTPRoute{}
+	Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-route", Namespace: testNamespace}, route)).To(Succeed())
+	route.Status.Parents = []gatewayv1.RouteParentStatus{{
+		ParentRef: gatewayv1.ParentReference{
+			Name:      gatewayv1.ObjectName(testGatewayName),
+			Namespace: ptrTo(gatewayv1.Namespace(testGatewayNamespace)),
+		},
+		ControllerName: gatewayv1.GatewayController("example.net/gateway-controller"),
+		Conditions: []metav1.Condition{
+			{Type: string(gatewayv1.RouteConditionAccepted), Status: metav1.ConditionTrue, Reason: "Accepted", LastTransitionTime: metav1.Now()},
+			{Type: string(gatewayv1.RouteConditionResolvedRefs), Status: metav1.ConditionTrue, Reason: "ResolvedRefs", LastTransitionTime: metav1.Now()},
+		},
+	}}
+	Expect(k8sClient.Status().Update(ctx, route)).To(Succeed())
+}
+
 var _ = Describe("checkRoute", func() {
 	readyEndpoint := func(name string) *endpointCheck {
 		return &endpointCheck{Internal: name + "-router.default.svc:8001", Role: testApplyRouterRole}
@@ -84,7 +103,14 @@ var _ = Describe("checkRoute", func() {
 		r := routeReconciler()
 		hostname := publicHostname(routeISVC(name, true), testGatewayDomain)
 		Expect(hostname).To(Equal(testRouteHostname))
+		// Created but not yet accepted by the gateway: RouteReady must wait.
 		check, err := r.checkRoute(ctx, mustGetISVC(ctx, name), routeProfile(name+"-prof"), readyEndpoint(name), hostname)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(check.Reason).To(Equal("GatewayNotAccepted"))
+
+		// The gateway accepts the route; the next check reports it ready.
+		acceptRoute(name)
+		check, err = r.checkRoute(ctx, mustGetISVC(ctx, name), routeProfile(name+"-prof"), readyEndpoint(name), hostname)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(check.Reason).To(BeEmpty())
 
@@ -152,6 +178,9 @@ var _ = Describe("checkRoute", func() {
 		r := routeReconciler()
 		hostname := publicHostname(isvc, testGatewayDomain)
 		Expect(hostname).To(Equal("update-model.example.com"))
+		_, err := r.checkRoute(ctx, mustGetISVC(ctx, name), routeProfile(name+"-prof"), readyEndpoint(name), hostname)
+		Expect(err).NotTo(HaveOccurred())
+		acceptRoute(name) // the gateway accepts; RouteReady reports "" below
 		check, err := r.checkRoute(ctx, mustGetISVC(ctx, name), routeProfile(name+"-prof"), readyEndpoint(name), hostname)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(check.Reason).To(BeEmpty())

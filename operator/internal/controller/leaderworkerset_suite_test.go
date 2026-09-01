@@ -49,7 +49,7 @@ var _ = Describe("enqueueForOwnedLWS", func() {
 	It("maps an owned LeaderWorkerSet to its InferenceService", func() {
 		owner := &aiv1alpha1.InferenceService{
 			ObjectMeta: metav1.ObjectMeta{Name: "svc-watch", Namespace: testNamespace},
-			Spec:       aiv1alpha1.InferenceServiceSpec{ModelRef: "model-ref", ProfileRef: "watch-prof"},
+			Spec:       aiv1alpha1.InferenceServiceSpec{ModelRef: testModelRef, ProfileRef: "watch-prof"},
 		}
 		Expect(k8sClient.Create(ctx, owner)).To(Succeed())
 		lws := &leaderworkersetv1.LeaderWorkerSet{
@@ -57,7 +57,7 @@ var _ = Describe("enqueueForOwnedLWS", func() {
 				Name:      "svc-watch-role",
 				Namespace: testNamespace,
 				OwnerReferences: []metav1.OwnerReference{{
-					APIVersion: "ai.cubestack.io/v1alpha1", Kind: "InferenceService",
+					APIVersion: "ai.cubestack.io/v1alpha1", Kind: inferenceServiceKind,
 					Name: owner.Name, UID: owner.UID, Controller: ptrTo(true),
 				}},
 			},

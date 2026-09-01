@@ -48,6 +48,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
 	aiv1alpha1 "github.com/suanova/cubestack/api/v1alpha1"
@@ -124,10 +125,16 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	if !resolved.resolved() {
-		// A stale Rendered from a previous spec must not persist.
+		// A stale Rendered from a previous spec must not persist, and the
+		// convergence conditions whose checks need the resolved references
+		// (endpoint role, route profile) cannot be verified — they are removed
+		// alongside the Status.Endpoint echo (line 104). Ready is kept: it
+		// reflects the running deployment (design §3.3).
 		meta.RemoveStatusCondition(&desired.Status.Conditions, aiv1alpha1.ConditionRendered)
 		meta.RemoveStatusCondition(&desired.Status.Conditions, aiv1alpha1.ConditionProvisioned)
 		meta.RemoveStatusCondition(&desired.Status.Conditions, aiv1alpha1.ConditionWorkloadsApplied)
+		meta.RemoveStatusCondition(&desired.Status.Conditions, aiv1alpha1.ConditionEndpointReady)
+		meta.RemoveStatusCondition(&desired.Status.Conditions, aiv1alpha1.ConditionRouteReady)
 		// Nothing is being applied: a stale True/Rollout must not linger.
 		setProgressingCondition(&desired.Status.Conditions, nil, "")
 		return ctrl.Result{}, r.updateStatusIfChanged(ctx, &isvc, desired)
@@ -259,6 +266,8 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(r.enqueueForSourceConfigMap)).
 		Watches(&leaderworkersetv1.LeaderWorkerSet{},
 			handler.EnqueueRequestsFromMapFunc(r.enqueueForOwnedLWS)).
+		Watches(&gatewayv1.HTTPRoute{},
+			handler.EnqueueRequestsFromMapFunc(r.enqueueForOwnedHTTPRoute)).
 		Complete(r)
 }
 
@@ -275,6 +284,18 @@ func (r *InferenceServiceReconciler) enqueueReferencingServices(ctx context.Cont
 		return nil
 	}
 	return r.referencingServices(ctx, indexKey, ref)
+}
+
+// enqueueForOwnedHTTPRoute maps an HTTPRoute to the InferenceService owning
+// it: gateway acceptance writes to the route status and external deletions or
+// edits must re-trigger the reconcile so RouteReady and the route object
+// recover promptly.
+func (r *InferenceServiceReconciler) enqueueForOwnedHTTPRoute(ctx context.Context, obj client.Object) []reconcile.Request {
+	route := obj.(*gatewayv1.HTTPRoute)
+	if owner := metav1.GetControllerOf(route); owner != nil && owner.Kind == inferenceServiceKind {
+		return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: route.Namespace, Name: owner.Name}}}
+	}
+	return nil
 }
 
 // enqueueForSourceConfigMap maps a ConfigMap in cubestack-system to the
@@ -299,7 +320,7 @@ func (r *InferenceServiceReconciler) enqueueForSourceConfigMap(ctx context.Conte
 // enqueueForOwnedLWS maps a LeaderWorkerSet to the InferenceService owning it.
 func (r *InferenceServiceReconciler) enqueueForOwnedLWS(ctx context.Context, obj client.Object) []reconcile.Request {
 	lws := obj.(*leaderworkersetv1.LeaderWorkerSet)
-	if owner := metav1.GetControllerOf(lws); owner != nil && owner.Kind == "InferenceService" {
+	if owner := metav1.GetControllerOf(lws); owner != nil && owner.Kind == inferenceServiceKind {
 		return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: lws.Namespace, Name: owner.Name}}}
 	}
 	return nil
@@ -324,6 +345,10 @@ func (r *InferenceServiceReconciler) referencingServices(ctx context.Context, in
 // deprecatedLabelKey marks an InferenceRuntimeProfile as deprecated; services
 // referencing one report the ProfileDeprecated warning condition.
 const deprecatedLabelKey = "ai.cubestack.io/deprecated"
+
+// inferenceServiceKind is the Kind of the owner-reference lookups of the
+// owned-resource watches (LWS, HTTPRoute).
+const inferenceServiceKind = "InferenceService"
 
 // setRenderedCondition sets the Rendered condition from the render outcome.
 // The reason is the first failure; the message aggregates all failures.

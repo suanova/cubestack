@@ -137,6 +137,21 @@ var _ = Describe("convergence", func() {
 			route := &gatewayv1.HTTPRoute{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-route", Namespace: testNamespace}, route)).To(Succeed())
 			g.Expect(route.Spec.Hostnames).To(Equal([]gatewayv1.Hostname{"conv-flash.example.com"}))
+			// No gateway controller runs in envtest — accept the route
+			// directly so RouteReady can converge.
+			route.Status.Parents = []gatewayv1.RouteParentStatus{{
+				ParentRef: gatewayv1.ParentReference{
+					Name:      gatewayv1.ObjectName(testGatewayName),
+					Namespace: ptrTo(gatewayv1.Namespace(testGatewayNamespace)),
+				},
+				ControllerName: gatewayv1.GatewayController("example.net/gateway-controller"),
+				Conditions: []metav1.Condition{
+					{Type: string(gatewayv1.RouteConditionAccepted), Status: metav1.ConditionTrue, Reason: "Accepted", LastTransitionTime: metav1.Now()},
+					{Type: string(gatewayv1.RouteConditionResolvedRefs), Status: metav1.ConditionTrue, Reason: "ResolvedRefs", LastTransitionTime: metav1.Now()},
+				},
+			}}
+			g.Expect(k8sClient.Status().Update(ctx, route)).To(Succeed())
+			g.Expect(reconcileConvergence(name)).To(Succeed())
 			got := &aiv1alpha1.InferenceService{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: testNamespace}, got)).To(Succeed())
 			g.Expect(meta.FindStatusCondition(got.Status.Conditions, aiv1alpha1.ConditionRouteReady).Status).To(Equal(metav1.ConditionTrue))

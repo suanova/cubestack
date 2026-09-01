@@ -21,9 +21,16 @@ import (
 	. "github.com/onsi/gomega"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+
+	aiv1alpha1 "github.com/suanova/cubestack/api/v1alpha1"
 )
+
+// testRouteWatchName is the owner-fixture name of the HTTPRoute mapFunc spec.
+const testRouteWatchName = "svc-route-watch"
 
 var _ = Describe("HTTPRoute CRD", func() {
 	It("creates and reads an HTTPRoute", func() {
@@ -48,5 +55,32 @@ var _ = Describe("HTTPRoute CRD", func() {
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: route.Name, Namespace: testNamespace}, got)).To(Succeed())
 		Expect(got.Spec.Hostnames).To(Equal([]gatewayv1.Hostname{"model.example.com"}))
 		Expect(k8sClient.Delete(ctx, route)).To(Succeed())
+	})
+})
+
+var _ = Describe("enqueueForOwnedHTTPRoute", func() {
+	It("maps an owned HTTPRoute to its InferenceService and ignores foreign ones", func() {
+		owner := &aiv1alpha1.InferenceService{
+			ObjectMeta: metav1.ObjectMeta{Name: testRouteWatchName, Namespace: testNamespace},
+			Spec:       aiv1alpha1.InferenceServiceSpec{ModelRef: testModelRef, ProfileRef: "watch-prof"},
+		}
+		Expect(k8sClient.Create(ctx, owner)).To(Succeed())
+		route := &gatewayv1.HTTPRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "svc-route-watch-route",
+				Namespace: testNamespace,
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: "ai.cubestack.io/v1alpha1", Kind: inferenceServiceKind,
+					Name: testRouteWatchName, UID: owner.UID, Controller: ptrTo(true),
+				}},
+			},
+		}
+		r := routeReconciler()
+		reqs := r.enqueueForOwnedHTTPRoute(ctx, route)
+		Expect(reqs).To(Equal([]reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testRouteWatchName}}}))
+		foreign := route.DeepCopy()
+		foreign.Name = "other-route"
+		foreign.OwnerReferences = nil
+		Expect(r.enqueueForOwnedHTTPRoute(ctx, foreign)).To(BeEmpty())
 	})
 })
