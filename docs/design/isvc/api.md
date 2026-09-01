@@ -800,7 +800,7 @@ ModelVersion 与 InferenceRuntimeProfile 的 spec 均不可变（§3.1、§3.2�
 | `storageClassName` 变化、`capacity` 缩小 | PVC 无法原地修改，滚动更新也不可行——新 Pod 必须在新 PVC 就绪后才能启动，而旧 PVC 受 `pvc-protection` 保护，在被 Pod 使用期间无法删除。Controller 按整体重建执行：先删除引用该 PVC 的工作负载，待 Pod 释放后删除并重建 PVC，再按新模板重新创建工作负载。重建只管理 PVC 对象本身，不影响共享存储内的模型数据（§3.1）；但服务在重建期间完全不可用，属计划内中断，灰度计划应将其计入（§5.2）。 |
 | `HostPath` ↔ `PVC` 互切 | 渲染出的 volume 结构不同，按模板变化滚动；切换到 PVC 时新建 PVC，从 PVC 切出后旧 PVC 按残留资源清理规则保留。 |
 
-**更新顺序**：模板变化时按 role 逐个更新：**被依赖的 role 先更新，端点 role 最后更新**（与创建时的拓扑序一致，见 §4.3）。一个 role 的工作负载更新完成且就绪后，才更新下一个（**目标行为**——当前实现按拓扑序单次下发所有变更，但已对模板变化的 role 做依赖就绪门控：依赖未更新完成且未就绪时该 role 的滚动等待，见 §7 TODO）；单个 role 内由该工作负载自身完成更新（LWS 与 Deployment 均为 `RollingUpdate{maxSurge: 0, maxUnavailable: 1}`，固定策略见 §4.3）。
+**更新顺序**：模板变化时按 role 逐个更新：**被依赖的 role 先更新，端点 role 最后更新**（与创建时的拓扑序一致，见 §4.3）。一个 role 的工作负载更新完成且就绪后，才更新下一个（**目标行为**——当前实现已对模板变化的 role 做依赖收敛门控：其 `dependsOn` 依赖未采用新模板且未就绪时该 role 的滚动等待；无依赖关系的 role 仍并行滚动，全局串行推进见 §7 TODO）；单个 role 内由该工作负载自身完成更新（LWS 与 Deployment 均为 `RollingUpdate{maxSurge: 0, maxUnavailable: 1}`，固定策略见 §4.3）。
 
 **校验或渲染失败**：新配置不会写入集群，已存在的有效配置保持不变（见 §2.2）。
 
@@ -848,6 +848,6 @@ ModelVersion 与 InferenceRuntimeProfile 的 spec 均不可变（§3.1、§3.2�
 - [ ] ModelVersion：支持更多的模型存储策略，如 puller sidecar / image volume
 - [ ] ModelVersion：PVC 策略支持静态供给的共享文件系统（如 CephFS 静态 PV）。
 - [ ] 模型存储配置变更的 PVC 处理（§5.1 表格）：`capacity` 增大的原地扩容（依赖 StorageClass 的 `allowVolumeExpansion`），以及 `storageClassName` 变化 / `capacity` 缩小的整体重建（先删除引用该 PVC 的工作负载 → 待 Pod 释放后删除并重建 PVC → 按新模板重建工作负载）。当前实现仅按模板变更滚动更新工作负载，PVC 对象本身创建后不更新（create-only）。
-- [ ] 更新顺序的逐 role 就绪门控（§5.1）：模板变化时一个 role 的工作负载更新完成且就绪后，才更新下一个（需跨 reconcile 状态跟踪）。当前实现按拓扑序单次下发所有变更，不等待就绪。
+- [ ] 更新顺序的全局串行推进（§5.1）：无依赖关系的 role 也逐个滚动——一个 role 的工作负载更新完成且就绪后，才更新下一个——使中断窗口可预测（§5.2）。**依赖收敛门控已实现**（模板变化的 role 等待其 `dependsOn` 依赖采用新模板且就绪，幂等推进无需跨 reconcile 状态）；剩余差距仅是无依赖关系 role 的并行滚动 vs 全局串行。
 - [ ] ModelVersion / InferenceRuntimeProfile 的 in-use finalizer：组织对象仍被引用时删除。
 - [ ] InferenceRuntimeProfile：增加 leaderPatch：为 leader 和 worker 提供差异化配置，通过受控合并写入 LWS `leaderTemplate`。仅在两者启动入口不同（如 Ray head/worker、MPI launcher）或 leader 资源不同的引擎中使用。
