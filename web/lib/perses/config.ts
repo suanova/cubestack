@@ -6,7 +6,7 @@
 export const PERSES_PROXY_BASE_PATH = "/api/perses";
 
 // Project the provisioned dashboards live in on the Perses server. Overridable
-// at build time; must match deploy/perses/provisioning/project.yaml.
+// at build time; must match e2e/deploy/perses/provisioning/project.yaml.
 export const PERSES_PROJECT = process.env.NEXT_PUBLIC_PERSES_PROJECT ?? "perses-dev";
 
 declare global {

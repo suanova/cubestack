@@ -5,6 +5,7 @@ on:
     branches: [main, 'release-*']
   pull_request:
     branches: [main, 'release-*']
+  workflow_dispatch:
 
 permissions: {}
 
@@ -20,6 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       portal: ${{ steps.filter.outputs.portal }}
+      e2e: ${{ steps.filter.outputs.e2e }}
     steps:
       - name: Clone the code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -35,6 +37,15 @@ jobs:
             portal:
               - 'web/**'
               - '.github/**'
+            e2e:
+              - 'web/e2e/**'
+              - 'web/playwright*.config.ts'
+              - 'web/package*.json'
+              - 'web/test/fixtures/**'
+              - 'web/app/**'
+              - 'operator/config/crd/**'
+              - 'operator/config/samples/**'
+              - '.github/workflows/ci-portal.yml'
 
   lint:
     needs: changes
@@ -108,8 +119,73 @@ jobs:
         run: npm run build
         working-directory: web
 
+  # Overview e2e — Suite A (mocked /api/overview, cheap) runs before KinD comes
+  # up so its failures are cheap; Suite B runs the real route against a KinD
+  # cluster + mock Prometheus (e2e/deploy/perses/local/run-preview.sh). Gated on
+  # its own paths-filter so unrelated portal changes don't pay for the cluster.
+  e2e:
+    needs: changes
+    if: needs.changes.outputs.e2e == 'true'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+        working-directory: web
+      - name: Install Playwright browser
+        run: npx playwright install chromium --only-shell
+        working-directory: web
+      # Suite A — deterministic, no cluster or Prometheus needed.
+      - name: Run UI e2e suite (mocked /api/overview)
+        run: npm run test:e2e
+        working-directory: web
+      # Suite B — real data path against a live cluster.
+      - name: Set up KinD cluster
+        uses: helm/kind-action@0b5c88445f37b7e12a2ce1ecca7805b9046a74db # v1
+        with:
+          cluster_name: cubestack
+          version: v0.33.0
+          wait: 120s
+      - name: Create namespaces
+        run: |
+          kubectl create namespace project-a
+          kubectl create namespace project-llm
+      - name: Install operator CRDs
+        run: kubectl apply -k operator/config/crd
+      - name: Wait for CRDs to establish
+        run: |
+          kubectl wait --for=condition=Established \
+            crd/inferenceservices.ai.cubestack.io \
+            crd/devenvironments.ai.cubestack.io \
+            crd/inferenceruntimeprofiles.ai.cubestack.io \
+            crd/modelversions.ai.cubestack.io \
+            --timeout=60s
+      - name: Apply sample CRs
+        run: kubectl apply -k operator/config/samples
+      - name: Run datapath e2e suite (real route + mock Prometheus)
+        run: npm run test:e2e:datapath
+        working-directory: web
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: playwright-report
+          path: web/playwright-report
+          if-no-files-found: ignore
+
   result:
-    needs: [lint, test, build]
+    needs: [lint, test, build, e2e]
     if: always()
     runs-on: ubuntu-latest
     steps:

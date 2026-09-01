@@ -1,0 +1,17 @@
+kind: GlobalDatasource
+metadata:
+  name: prometheus-datasource
+spec:
+  default: true
+  plugin:
+    kind: PrometheusDatasource
+    spec:
+      proxy:
+        kind: HTTPProxy
+        spec:
+          # Single deployment knob: the in-cluster Prometheus/Thanos service
+          # that the dashboards query. The browser never talks to it directly —
+          # the portal proxies /api/perses/* -> Perses, and Perses proxies
+          # /proxy/globaldatasources/prometheus-datasource -> this URL.
+          # Edit before `kubectl apply`; see deploy/perses/README.md.
+          url: http://prometheus-k8s.openshift-monitoring.svc:9090

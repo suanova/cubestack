@@ -32,3 +32,6 @@ go.work
 
 # Superpowers workflow artifacts (personal workflow, not team-shared)
 docs/superpowers/
+
+# Claude Code per-user local settings (not team-shared)
+.claude/settings.local.json

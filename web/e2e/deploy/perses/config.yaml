@@ -1,0 +1,15 @@
+# Perses server configuration. Mounted from the perses-config ConfigMap as
+# /etc/perses/config.yaml (overrides the image's baked-in default).
+security:
+  readonly: false
+
+database:
+  file:
+    folder: "/perses"
+    extension: "json"
+
+# Seed Project / GlobalDatasource / Dashboard resources from the provisioning
+# ConfigMap at startup (and re-inject them hourly).
+provisioning:
+  folders:
+    - /etc/perses/provisioning

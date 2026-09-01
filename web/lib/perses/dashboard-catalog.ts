@@ -5,9 +5,7 @@
 import type { MessageKey } from "@/lib/i18n";
 
 export const DASHBOARD_DESCRIPTIONS: Record<string, MessageKey> = {
-  "kubernetes-cluster-resources-overview": "dash.desc.cluster",
-  "kubernetes-node-resources-overview": "dash.desc.node",
   "metax-gpu": "dash.desc.metax",
   "sglang-dashboard": "dash.desc.sglang",
-  "oxed_c6wz": "dash.desc.dcgm",
+  "nvidia-dcgm": "dash.desc.dcgm",
 };

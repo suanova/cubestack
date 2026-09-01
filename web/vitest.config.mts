@@ -10,6 +10,9 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     setupFiles: ["./vitest.setup.ts"],
+    // Unit tests are *.test.ts(x); the Playwright specs in e2e/ use *.spec.ts
+    // and must not be collected by vitest.
+    include: ["**/*.test.{ts,tsx}"],
   },
   // tsconfig sets jsx: "preserve" for Next, which leaves JSX in the transform
   // output and trips vite's import-analysis lexer when a test imports a .tsx

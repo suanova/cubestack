@@ -17,7 +17,7 @@ const VERSION = "v1alpha1";
 
 // Prometheus is reached through the Perses datasource proxy (the same path
 // the perses panels use); the datasource is provisioned in
-// deploy/perses/provisioning/global-datasource.yaml.
+// e2e/deploy/perses/provisioning/global-datasource.yaml.
 const PERSES_SERVER_URL = process.env.PERSES_SERVER_URL ?? "http://localhost:8080";
 const PROMETHEUS_DATASOURCE = "prometheus-datasource";
 

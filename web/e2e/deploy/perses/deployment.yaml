@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: perses
+  labels:
+    app: perses
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: perses
+  template:
+    metadata:
+      labels:
+        app: perses
+    spec:
+      containers:
+        - name: perses
+          # Distroless/non-root image. Version must stay close to the portal's
+          # @perses-dev/* client packages (0.54 line) so the plugin/API surfaces
+          # stay compatible.
+          image: persesdev/perses:v0.54.0
+          ports:
+            - name: http
+              containerPort: 8080
+          volumeMounts:
+            # subPath keeps the image's baked-in /etc/perses/plugins-archive
+            # visible — mounting the whole /etc/perses directory would hide it.
+            - name: perses-config
+              mountPath: /etc/perses/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            - name: perses-provisioning
+              mountPath: /etc/perses/provisioning
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+      volumes:
+        - name: perses-config
+          configMap:
+            name: perses-config
+        - name: perses-provisioning
+          configMap:
+            name: perses-provisioning

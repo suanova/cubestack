@@ -4,6 +4,7 @@ import { act } from "react-dom/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import OverviewPage from "./page";
+import { overviewSummary as summary } from "@/test/fixtures/overview";
 
 // The test files avoid JSX because tsconfig sets jsx: "preserve" (for Next),
 // which vitest's import-analysis can't transform.
@@ -14,25 +15,6 @@ vi.mock("@/lib/perses/theme", () => ({
   },
   usePlatformTheme: () => "light",
 }));
-
-const POINTS = 48;
-
-/** The real-cluster shape /api/overview returns, with the prototype's demo
- *  magnitudes so the assertions read naturally. */
-function summary(overrides: { trend?: object | null } = {}) {
-  const util = new Array<number>(POINTS).fill(58);
-  const mem = new Array<number>(POINTS).fill(52);
-  util[POINTS - 1] = 62; // current utilization, matches the KPI foot
-  mem[POINTS - 1] = 58; // current memory, matches the KPI foot
-  return {
-    nodes: { total: 16, ready: 15, version: "v1.29" },
-    gpu: { vendors: 2, totalCards: 128, compute: 50, inference: 30, allocated: 80, free: 48 },
-    inference: { total: 12, ready: 11, scaling: 1 },
-    devenv: { total: 8, running: 5, stopped: 3 },
-    trend: { util, mem },
-    ...overrides,
-  };
-}
 
 function cardText(container: HTMLElement, dataOdId: string): string {
   return container.querySelector(`[data-od-id="${dataOdId}"]`)?.textContent ?? "";
