@@ -408,7 +408,7 @@ Controller 将此模板按 `workload.kind` 写入对应位置：`LeaderWorkerSet
 
 ##### roles[].service
 
-`service` 定义当前 role 的 Kubernetes Service。Controller 为每个 role 创建名称为 `<isvc>-<role>` 的普通 Service；其他 role 可通过 `{{ roles.<name>.serviceName }}` 获取该 Service 名称并访问它。
+`service` 定义当前 role 的 Kubernetes Service。Controller 为**声明了 `service` 字段**的 role 创建名称为 `<isvc>-<role>` 的普通 Service（Kubernetes 拒绝无端口的 ClusterIP Service，因此未声明 `service`——即没有端口列表——的 role 不生成 Service）；其他 role 可通过 `{{ roles.<name>.serviceName }}` 获取该 Service 名称并访问它。`endpoint.role` 的 L1 规则要求端点 role 必须声明 `service`，因此端点 Service 总是存在。
 
 | 字段 | 类型 | 校验规则 | 说明 |
 |---|---|---|---|
@@ -594,7 +594,7 @@ status:
 | `Provisioned` | 渲染后的 asset ConfigMap 与模型 PVC 已在服务 namespace 中创建成功。仅指对象创建成功；PVC 的绑定与存储供给由存储系统完成，其异常通过 Pod 事件体现。 | `AssetConfigMapFailed`、`PVCCreateFailed` |
 | `WorkloadsApplied` | 期望配置已完整写入 Service 与工作负载（LWS/Deployment），即渲染结果已下发到期望版本。只表示配置已应用，不表示就绪：滚动更新期间保持 `True`，Pod 未就绪由 `Ready` 与 `roles[]` 反映。 | `ServiceApplyFailed`、`WorkloadApplyFailed` |
 | `EndpointReady` | 无论 `publish` 取值，内部端点都必须实际可访问：`endpoint.role` 渲染后指向存在的 role，该 role 的 Service 中存在名为 `endpoint.portName`（默认 `http`）的端口，且该 Service 至少有一个就绪的后端端点（对应 Pod 已通过就绪探针）。该 condition 决定 `status.endpoint.internal` 是否有效；`RouteReady` 仅在它为 True 后才在网关上创建路由。 | `EndpointRoleNotFound`、`EndpointPortNotFound`、`EndpointNotReady` |
-| `RouteReady` | 仅覆盖网关侧的公开路由发布。`publish: true` 时，`modelName` 在发布范围内唯一，且以 `EndpointReady` 解析出的 Service 端口为后端的 HTTPRoute 已生成（依赖 `EndpointReady=True`）；`modelName` 与他人冲突时，保留先占用者当前有效的 HTTPRoute，本服务保持 False。`publish: false` 时为 `True`，reason 为 `NotPublished`，表示未请求创建公开路由。 | `ModelNameConflict`、`RouteRenderFailed` |
+| `RouteReady` | 仅覆盖网关侧的公开路由发布。`publish: true` 时，`modelName` 在发布范围内唯一，且以 `EndpointReady` 解析出的 Service 端口为后端的 HTTPRoute **已生成并被网关接受**（依赖 `EndpointReady=True`；接受 = 路由 `status.parents` 中匹配网关的条目 `Accepted=True` 且 `ResolvedRefs=True`）；`modelName` 与他人冲突时，保留先占用者当前有效的 HTTPRoute，本服务保持 False。等待网关接受期间为 `False`，reason 为 `GatewayNotAccepted`；平台网关未配置或网关 CRD 缺失时降级为 `False`，reason 为 `GatewayNotConfigured`。`publish: false` 时为 `True`，reason 为 `NotPublished`，表示未请求创建公开路由。 | `ModelNameConflict`、`GatewayNotAccepted`、`GatewayNotConfigured`、`EndpointNotReady` |
 | `Ready` | 按 `readinessPolicy.requireAllRoles` 聚合。v1 要求所有 role 的工作负载（LWS/Deployment）和 Pod 都就绪。 | `RolesNotReady`（message 包含各 role 的状态） |
 | `Progressing` | spec 变更后，Controller 是否仍在应用期望配置。该条件与 `Ready` 独立。 | `True`：`Reconciling`、`Rollout` 或 `Scaling`；`False`：`Converged` |
 | `ProfileDeprecated`（警示） | 引用的 Profile 带有 deprecated label（`ai.cubestack.io/deprecated`）。 | 不阻断；提示迁移 |
@@ -650,7 +650,8 @@ Controller 监听 `InferenceService` 及其引用关系的变化、解析引用�
         ▼
  6) 路由发布        仅 publish=true 且 EndpointReady=True
                     - modelName 全局唯一性（冲突保留先占用者的路由，本服务 False）
-                    - 在网关创建/更新 HTTPRoute
+                    - 在网关创建/更新 HTTPRoute，并等待网关接受
+                      （status.parents 的 Accepted 与 ResolvedRefs 均为 True）
         │ (RouteReady)
         ▼
  7) 聚合 status     roles[] / endpoint / revision / observedGeneration
@@ -690,7 +691,7 @@ env:
 |---|---|---|
 | LWS（`kind: LeaderWorkerSet` 的 role） | `<isvc>-<role>` | `ai.cubestack.io/{inference-service, role, profile, managed-by: inference-Controller}` |
 | Deployment（`kind: Deployment` 的 role） | `<isvc>-<role>` | 同上 |
-| Service（每 role） | `<isvc>-<role>`（headless：`<isvc>-<role>-hl`） | 同上 |
+| Service（声明 `service` 的 role） | `<isvc>-<role>`（headless：`<isvc>-<role>-hl`） | 同上；无 `service` 声明的 role 不生成 Service（§3.2） |
 | 创建 ConfigMap | `<isvc>-<asset>` | + `ai.cubestack.io/asset` |
 | 模型 PVC | `<isvc>-model-<key>` | + `ai.cubestack.io/model` |
 
@@ -720,7 +721,7 @@ env:
 | —（固定值，不开放） | `strategy: RollingUpdate{maxSurge: 0, maxUnavailable: 1}` | 与 LWS 同一策略：先杀后建不产生并发端口绑定；`replicas=1` 时等价 Recreate |
 | 调度约束 | 同 LWS 的合并规则 | — |
 
-**Service 映射**：`service.ports[]`（targetPort 可取容器端口名）；`service.headless: true` 额外生成 `<isvc>-<role>-hl`（ClusterIP: None）。Service 名即 `roles.<name>.serviceName` 上下文值，供跨 role 发现：`http://{{ roles.prefill.serviceName }}:30000`。
+**Service 映射**：`service.ports[]`（targetPort 可取容器端口名）；`service.headless: true` 额外生成 `<isvc>-<role>-hl`（ClusterIP: None）。Service 名即 `roles.<name>.serviceName` 上下文值，供跨 role 发现：`http://{{ roles.prefill.serviceName }}:30000`。未声明 `service` 的 role 没有 Service，`roles.<name>.serviceName` 指向不存在的对象——引用方应只依赖声明了 `service` 的 role。
 
 **资源映射**：`gpuPerPod` → `accelerator.vendor` 映射的资源名（metax → `metax-tech.com/gpu`，nvidia → `nvidia.com/gpu`）的 requests+limits；`cpu`/`memory` → requests。
 
@@ -774,10 +775,11 @@ ModelVersion 与 InferenceRuntimeProfile 的 spec 均不可变（§3.1、§3.2�
 
 **template-hash**：Controller 每次 reconcile 完整渲染后，为每个 role 的工作负载计算 template-hash，写入 Pod 模板 annotation（`ai.cubestack.io/template-hash` 及分项 hash），据此决定创建、滚动、扩缩容或跳过（§4.1 步骤 4）。hash 的输入包括：
 
-- 渲染后的 Pod 模板（LWS 为 `leaderWorkerTemplate.workerTemplate`，Deployment 为 `spec.template.spec`）；
-- 会影响模板的已解析 override；
+- 渲染后的 Pod 模板（LWS 为 `leaderWorkerTemplate.workerTemplate`，Deployment 为 `spec.template.spec`，含模板的 labels 与 annotations）；
 - 创建的 asset 内容 hash——必须参与计算，否则 ConfigMap 更新后不会有任何滚动，故障重建的 Pod 可能使用新脚本但保留旧模板配置；
 - 模型存储配置 hash——存储配置变化会使渲染后的工作负载配置随之变化，因此按模板变更处理并触发滚动更新（§3.1）。该项仅对声明了 `mounts[]` 的 role 参与计算：不挂模型的 role（如 router）不因模型存储变化而重启。
+
+已解析 override 不单独参与综合 hash：渲染后的 Pod 模板已内嵌被引用的 override 值（模板变化由 Pod 模板 hash 覆盖），只影响 asset 数据的 override 由 asset 内容 hash 覆盖。因此"仅副本数变化"（如 `workload.replicas` 绑定 `{{ overrides.* }}` 时只改该 override）不会改变综合 hash，按扩缩容处理而非滚动。
 
 比较的是**最终渲染结果**，而非 Profile 字段本身：例如用户值覆盖了被修改的默认值时，渲染结果未变，就不触发滚动，只更新 `status.profile.revision`。存储配置中的容量字段（`storage.pvc.capacity`）是 `resource.Quantity` 类型，参与 hash 前必须先解析并取规范序列化值（如 `1024Mi` 归一化为 `1Gi`），避免语义等量的不同书写被误判为存储配置变更。
 
@@ -845,5 +847,7 @@ ModelVersion 与 InferenceRuntimeProfile 的 spec 均不可变（§3.1、§3.2�
 - [ ] ModelVersion：支持模型溯源，如新增 `source{registry, repo, revision}` 记录来源，revision 可以考虑使用 HuggingFace/ModelScope 的 revision commit ID 。
 - [ ] ModelVersion：支持更多的模型存储策略，如 puller sidecar / image volume
 - [ ] ModelVersion：PVC 策略支持静态供给的共享文件系统（如 CephFS 静态 PV）。
+- [ ] 模型存储配置变更的 PVC 处理（§5.1 表格）：`capacity` 增大的原地扩容（依赖 StorageClass 的 `allowVolumeExpansion`），以及 `storageClassName` 变化 / `capacity` 缩小的整体重建（先删除引用该 PVC 的工作负载 → 待 Pod 释放后删除并重建 PVC → 按新模板重建工作负载）。当前实现仅按模板变更滚动更新工作负载，PVC 对象本身创建后不更新（create-only）。
+- [ ] 更新顺序的逐 role 就绪门控（§5.1）：模板变化时一个 role 的工作负载更新完成且就绪后，才更新下一个（需跨 reconcile 状态跟踪）。当前实现按拓扑序单次下发所有变更，不等待就绪。
 - [ ] ModelVersion / InferenceRuntimeProfile 的 in-use finalizer：组织对象仍被引用时删除。
 - [ ] InferenceRuntimeProfile：增加 leaderPatch：为 leader 和 worker 提供差异化配置，通过受控合并写入 LWS `leaderTemplate`。仅在两者启动入口不同（如 Ray head/worker、MPI launcher）或 leader 资源不同的引擎中使用。
