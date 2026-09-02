@@ -17,17 +17,14 @@ import { createServer } from "node:http";
 
 const PORT = Number(process.argv[2] ?? process.env.PORT ?? 9090);
 
-// SGLang (inference server) metrics are grouped by instance (server endpoint)
-// and model_name. The dashboard's `instance` variable is the only place an
-// `instance` label is queried, so the server endpoints live here rather than in
-// LABEL_VALUES (which the kubernetes-mixin dashboards use for node-style
-// instances).
-const SGLANG_INSTANCES = ["127.0.0.1:30000", "127.0.0.1:30001", "127.0.0.1:30002"];
-const SGLANG_MODELS = [
-  "meta-llama/Llama-3.1-8B-Instruct",
-  "meta-llama/Llama-3.1-70B-Instruct",
-  "Qwen/Qwen2.5-7B-Instruct",
-];
+// SGLang (inference server) metrics are grouped by the inference service
+// exposing them (the `instance` label is the service name, e.g. dsv4-flash-pd)
+// and by the single model that service serves (`model_name`). The dashboard's
+// `instance` variable is the only place an `instance` label is queried, so the
+// services live here rather than in LABEL_VALUES (which the kubernetes-mixin
+// dashboards use for node-style instances).
+const SGLANG_INSTANCES = ["dsv4-flash-pd", "dsv4-pro-pd"];
+const SGLANG_MODELS = ["deepseek-v4-flash", "deepseek-v4-pro"];
 // Histogram bucket [lower, upper] bounds (seconds) for the two latency families.
 const SGLANG_HISTOGRAM_BUCKETS = {
   e2e: [
@@ -58,8 +55,8 @@ const METAX_EID_INFO = [
 // Canned label values, grouped by the label names the kubernetes-mixin
 // dashboards filter on. Enough variety for the variable dropdowns to feel real.
 const LABEL_VALUES = {
-  instance: ["node-a", "node-b", "node-c", "node-d"],
-  node: ["node-a", "node-b", "node-c", "node-d"],
+  instance: ["node-a", "node-b", "dev-test-1", "dev-demo-1"],
+  node: ["node-a", "node-b", "dev-test-1", "dev-demo-1"],
   pod: ["prometheus-0", "kube-state-metrics-0", "etcd-0", "kube-apiserver-0"],
   namespace: ["default", "kube-system", "openshift-monitoring", "openshift-etcd"],
   container: ["POD", "kube-rbac-proxy", "prometheus", "etcd"],
@@ -166,26 +163,22 @@ function sglangValueRange(metric) {
   return [1, 100, 5];
 }
 
-// Every instance x model combination (used for native-histogram / matcher lookups).
+// One series per inference service carrying its own model (each service serves
+// exactly one model, so no instance x model cross product), used for
+// native-histogram / matcher lookups.
 function sglangSeries() {
-  const series = [];
-  for (const instance of SGLANG_INSTANCES) {
-    for (const model_name of SGLANG_MODELS) {
-      series.push({ instance, model_name, job: "sglang", cluster: "perses-dev" });
-    }
-  }
-  return series;
-}
-
-// One series per instance (distinct model each) for the plain gauges/counters,
-// so the `{{instance}}` legend stays one line per server.
-function sglangInstanceSeries() {
   return SGLANG_INSTANCES.map((instance, i) => ({
     instance,
     model_name: SGLANG_MODELS[i % SGLANG_MODELS.length],
     job: "sglang",
     cluster: "perses-dev",
   }));
+}
+
+// One series per instance for the plain gauges/counters, so the `{{instance}}`
+// legend stays one line per server. Identical to sglangSeries (one model each).
+function sglangInstanceSeries() {
+  return sglangSeries();
 }
 
 // A native histogram sample: `[time, {count, sum, buckets: [[idx, lower, upper, count]]}]`
@@ -301,14 +294,17 @@ function metaxSeriesFor(metric) {
 // are parsed and applied against the catalog.
 
 const GPU_CLUSTER = "perses-dev";
-const GPU_NODES = ["node-a", "node-b", "node-c", "node-d"];
+// node-a / node-b carry the inference services; dev-test-1 / dev-demo-1 are the
+// Dev Environment pool's machines (the instance values the Dev Environment
+// dashboard lists).
+const GPU_NODES = ["node-a", "node-b", "dev-test-1", "dev-demo-1"];
 const GPU_COUNT_PER_NODE = 4;
 // Usage is a flat per-GPU label; each node's devices serve one workload kind.
 const USAGE_OF_NODE = {
   "node-a": "inference server",
   "node-b": "inference server",
-  "node-c": "devEnvironment",
-  "node-d": "devEnvironment",
+  "dev-test-1": "devEnvironment",
+  "dev-demo-1": "devEnvironment",
 };
 
 function gpuDeviceSeries() {
@@ -326,6 +322,56 @@ function gpuDeviceSeries() {
     }
   }
   return series;
+}
+
+// Node host-resource usage (the GPU overview's CPU / memory / RDMA row and the
+// Dev Environment dashboard's CPU / memory / network / storage row) is per
+// node, not per device, so these families answer from a one-series-per-node
+// catalog on the same nodes the DCGM devices live on. The generic node-metric
+// path below would give these random per-family labels, so they must be
+// intercepted before it.
+const NODE_HOST_METRICS = new Set([
+  "node_cpu_usage",
+  "node_memory_usage",
+  "node_network_usage",
+  "node_storage_usage",
+  "rdma_usage",
+]);
+
+function isNodeHostMetric(metric) {
+  return NODE_HOST_METRICS.has(metric);
+}
+
+// Plausible % band per node host metric family (min, max, amplitude).
+function nodeHostValueRange(metric) {
+  const m = metric.toLowerCase();
+  if (m.includes("memory")) return [45, 92, 5];
+  if (m.includes("cpu")) return [20, 85, 7];
+  if (m.includes("rdma")) return [5, 70, 10];
+  if (m.includes("network")) return [10, 85, 12];
+  if (m.includes("storage")) return [40, 95, 3];
+  return [20, 90, 6];
+}
+
+function nodeHostSeries() {
+  return GPU_NODES.map((node) => ({
+    cluster: GPU_CLUSTER,
+    node,
+    instance: node,
+    usage: USAGE_OF_NODE[node],
+    job: "node-exporter",
+  }));
+}
+
+// Detect an aggregation collapsed onto a label group ("avg by (node) ( ... )"
+// / "avg by (instance) ( ... )") so the mock can return one series per group
+// value instead of every device series. The GPU Usage rows (GPU Overview's
+// avg by (node), Dev Environment's avg by (instance)) collapse the per-GPU
+// DCGM devices up to one line per machine.
+function parseGroupBy(expr) {
+  const m = /(avg|sum)\s*by\s*\(\s*([a-zA-Z_][a-zA-Z0-9_]*(?:\s*,\s*[a-zA-Z_][a-zA-Z0-9_]*)*)\s*\)\s*\(/.exec(expr);
+  if (!m) return null;
+  return { op: m[1], labels: m[2].split(/\s*,\s*/).map((s) => s.trim()) };
 }
 
 // Parse the `{label=~"value",...}` selector out of a PromQL expression.
@@ -436,7 +482,9 @@ function makeSeries(metric, start, end, step, index = 0, device = null) {
       ? gpuValueRange(metric)
       : isMetaxMetric(metric)
         ? metaxValueRange(metric)
-        : null;
+        : isNodeHostMetric(metric)
+          ? nodeHostValueRange(metric)
+          : null;
   const base = isCounter ? rand(0, 10) : valueRange ? rand(valueRange[0], valueRange[1]) : rand(0.1, 0.9);
   const amp = valueRange ? valueRange[2] : rand(0.05, 0.4);
   const phase = rand(0, Math.PI * 2);
@@ -532,8 +580,20 @@ const server = createServer(async (req, res) => {
     if (metric && isMetaxMetric(metric)) catalog = metaxSeriesFor(metric);
     else if (metric && isSglangMetric(metric)) catalog = sglangSeries();
     else if (metric && isGpuMetric(metric)) catalog = gpuDeviceSeries();
+    else if (metric && isNodeHostMetric(metric)) catalog = nodeHostSeries();
     if (catalog) {
-      const values = [...new Set(catalog.map((l) => l[name]).filter((v) => v !== undefined && v !== ""))];
+      // A dependent variable scopes its label lookup to the parent's selection
+      // via matchers (e.g. model_name for a chosen inference service), so apply
+      // them against the catalog before collecting distinct values.
+      const matchers = parseMatchers(match);
+      const values = [
+        ...new Set(
+          catalog
+            .filter((l) => matchersMatch(l, matchers))
+            .map((l) => l[name])
+            .filter((v) => v !== undefined && v !== ""),
+        ),
+      ];
       send(res, 200, { status: "success", data: values });
       return;
     }
@@ -567,6 +627,11 @@ const server = createServer(async (req, res) => {
     } else if (isMetaxMetric(metric)) {
       const matchers = parseMatchers(match);
       for (const labels of metaxSeriesFor(metric).filter((l) => matchersMatch(l, matchers))) {
+        result.push({ ...labels, __name__: metric });
+      }
+    } else if (isNodeHostMetric(metric)) {
+      const matchers = parseMatchers(match);
+      for (const labels of nodeHostSeries().filter((l) => matchersMatch(l, matchers))) {
         result.push({ ...labels, __name__: metric });
       }
     } else {
@@ -627,14 +692,54 @@ const server = createServer(async (req, res) => {
       // Answer GPU queries from the fixed device catalog so the node / usage
       // matchers actually narrow the returned series.
       const matchers = parseMatchers(query);
-      for (const device of gpuDeviceSeries().filter((l) => matchersMatch(l, matchers))) {
-        result.push(makeSeries(metric, start, end, step, 0, device));
+      const devices = gpuDeviceSeries().filter((l) => matchersMatch(l, matchers));
+      const group = parseGroupBy(query);
+      if (group) {
+        // avg/sum by (label): collapse the matching per-device series into one
+        // series per group value (computed here, since the mock cannot run the
+        // real PromQL aggregation). Keeps the GPU Usage row to one line/node.
+        const grouped = new Map();
+        for (const device of devices) {
+          const series = makeSeries(metric, start, end, step, 0, device);
+          const key = JSON.stringify(group.labels.map((l) => device[l] ?? ""));
+          let members = grouped.get(key);
+          if (members === undefined) {
+            members = [];
+            grouped.set(key, members);
+          }
+          members.push(series);
+        }
+        for (const [key, members] of grouped) {
+          const count = members[0].values.length;
+          const values = [];
+          for (let i = 0; i < count; i++) {
+            const time = members[0].values[i][0];
+            let acc = 0;
+            for (const member of members) acc += Number(member.values[i][1]);
+            const value = group.op === "sum" ? acc : acc / members.length;
+            values.push([time, value.toFixed(3)]);
+          }
+          const labels = { cluster: GPU_CLUSTER };
+          group.labels.forEach((label, i) => {
+            labels[label] = JSON.parse(key)[i];
+          });
+          result.push({ metric: labels, values });
+        }
+      } else {
+        for (const device of devices) result.push(makeSeries(metric, start, end, step, 0, device));
       }
     } else if (isMetaxMetric(metric)) {
       // Answer MetaX queries from the server x device catalog so the Hostname /
       // deviceId matchers actually narrow the returned series.
       const matchers = parseMatchers(query);
       for (const device of metaxSeriesFor(metric).filter((l) => matchersMatch(l, matchers))) {
+        result.push(makeSeries(metric, start, end, step, 0, device));
+      }
+    } else if (isNodeHostMetric(metric)) {
+      // Node host usage is one series per node (see nodeHostSeries), so the
+      // node matcher narrows the row to the selected node.
+      const matchers = parseMatchers(query);
+      for (const device of nodeHostSeries().filter((l) => matchersMatch(l, matchers))) {
         result.push(makeSeries(metric, start, end, step, 0, device));
       }
     } else {
@@ -677,6 +782,12 @@ const server = createServer(async (req, res) => {
       const matchers = parseMatchers(query);
       const [gMin, gMax] = metaxValueRange(metric);
       for (const device of metaxSeriesFor(metric).filter((l) => matchersMatch(l, matchers))) {
+        result.push({ metric: device, value: [time, rand(gMin, gMax).toFixed(3)] });
+      }
+    } else if (isNodeHostMetric(metric)) {
+      const matchers = parseMatchers(query);
+      const [gMin, gMax] = nodeHostValueRange(metric);
+      for (const device of nodeHostSeries().filter((l) => matchersMatch(l, matchers))) {
         result.push({ metric: device, value: [time, rand(gMin, gMax).toFixed(3)] });
       }
     } else {

@@ -22,6 +22,8 @@ interface PersesIslandOptions {
   project: string;
   dashboardName: string;
   dashboardResource: DashboardResource;
+  variableRowSpacing?: string;
+  scope?: string;
 }
 
 interface PersesIslandApi {
@@ -84,12 +86,16 @@ export interface PersesIslandHostProps {
   project: string;
   dashboardName: string;
   dashboardResource: DashboardResource;
+  variableRowSpacing?: string;
+  scope?: string;
 }
 
 export function PersesIslandHost({
   project,
   dashboardName,
   dashboardResource,
+  variableRowSpacing,
+  scope,
 }: PersesIslandHostProps) {
   const { t } = useI18n();
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -114,6 +120,8 @@ export function PersesIslandHost({
           project,
           dashboardName,
           dashboardResource,
+          variableRowSpacing,
+          scope,
         });
         if (!cancelled) setIsLoading(false);
       } catch (err) {
@@ -129,7 +137,7 @@ export function PersesIslandHost({
       cancelled = true;
       unmount?.();
     };
-  }, [project, dashboardName, dashboardResource]);
+  }, [project, dashboardName, dashboardResource, variableRowSpacing, scope]);
 
   if (mountError) {
     return <Typography color="error">{t("dash.viewError", { error: mountError })}</Typography>;

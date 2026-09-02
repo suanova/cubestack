@@ -109,8 +109,9 @@ the host, or a port-forwarded in-cluster Prometheus).
 - `config.yaml` — server config (file DB in `/perses`, provisioning folders).
 - `provisioning/` — resources seeded at startup: the project and the global
   Prometheus datasource (all the CI e2e needs). The GPU dashboards
-  (`metax-gpu`, `sglang-dashboard`, `nvidia-dcgm`) are parked at
-  `deploy/perses/provisioning/` (repo root) pending a decision; re-add them
-  here and to `kustomization.yaml` if we keep them.
+  (`resource-overview-dashboard`, `inference-service-dashboard`,
+  `dev-environment-dashboard`) are parked at `deploy/perses/provisioning/`
+  (repo root) pending a decision; re-add them here and to `kustomization.yaml`
+  if we keep them.
 - `deployment.yaml` / `service.yaml` — the Deployment and ClusterIP Service.
 - `kustomization.yaml` — wires the above together.

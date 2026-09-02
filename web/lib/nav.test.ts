@@ -12,7 +12,7 @@ describe("isActive", () => {
   it("marks /dashboards active on the landing and every dashboard page", () => {
     expect(isActive("/dashboards", "/dashboards")).toBe(true);
     expect(isActive("/dashboards", "/dashboards/metax-gpu")).toBe(true);
-    expect(isActive("/dashboards", "/dashboards/sglang-dashboard")).toBe(true);
+    expect(isActive("/dashboards", "/dashboards/inference-service-dashboard")).toBe(true);
     expect(
       isActive("/dashboards", "/dashboards/kubernetes-node-resources-overview"),
     ).toBe(true);
