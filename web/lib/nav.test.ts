@@ -19,8 +19,10 @@ describe("isActive", () => {
     expect(isActive("/dashboards", "/")).toBe(false);
   });
 
-  it("never marks non-route modules active", () => {
-    expect(isActive("/inference-services", "/inference-services")).toBe(false);
+  it("marks /inference-services active, but never other placeholder modules", () => {
+    expect(isActive("/inference-services", "/inference-services")).toBe(true);
+    expect(isActive("/inference-services", "/inference-services/svc-a")).toBe(true);
     expect(isActive("/devenv", "/dashboards")).toBe(false);
+    expect(isActive("/playground", "/inference-services")).toBe(false);
   });
 });

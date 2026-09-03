@@ -18,6 +18,7 @@ import { MessageKey, useI18n } from "@/lib/i18n";
 function crumbKey(pathname: string): MessageKey | null {
   if (pathname === "/") return "nav.overview";
   if (pathname.startsWith("/dashboards")) return "nav.monitoring";
+  if (pathname === "/inference-services") return "nav.inference";
   return null;
 }
 
