@@ -74,7 +74,7 @@ test.describe("inference services landing (mocked data)", () => {
     await expect(pro).toContainText("deepseek-v4-pro-w8a8-v1");
   });
 
-  test("filters rows by Ready / 未就绪 tab", async ({ page }) => {
+  test("filters rows by Ready / 扩缩容中 tab", async ({ page }) => {
     const list = [
       inferenceServiceSummary({ name: "dsv4-pro-pd", ready: true, progressing: false, routeModelName: "dsv4-pro" }),
       inferenceServiceSummary({ name: "dsv4-flash-pd", ready: false, progressing: true, routeModelName: "dsv4-flash" }),
@@ -94,8 +94,8 @@ test.describe("inference services landing (mocked data)", () => {
     await expect(page.locator('[data-od-id="svc-row-dsv4-pro-pd"]')).toBeVisible();
     await expect(page.locator('[data-od-id="svc-row-dsv4-flash-pd"]')).toHaveCount(0);
 
-    // 未就绪 -> the other one only.
-    await tabs.filter({ hasText: "未就绪" }).click();
+    // 扩缩容中 (scaling, inclusive of every not-ready service) -> the other one only.
+    await tabs.filter({ hasText: "扩缩容中" }).click();
     await expect(page.locator('[data-od-id="svc-row-dsv4-flash-pd"]')).toBeVisible();
     await expect(page.locator('[data-od-id="svc-row-dsv4-pro-pd"]')).toHaveCount(0);
   });

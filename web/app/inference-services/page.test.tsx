@@ -4,7 +4,7 @@ import { act } from "react-dom/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import InferenceServicesPage from "./page";
-import { inferenceServiceList } from "@/test/fixtures/inferenceservices";
+import { inferenceServiceList, inferenceServiceSummary } from "@/test/fixtures/inferenceservices";
 
 // The test files avoid JSX because tsconfig sets jsx: "preserve" (for Next),
 // which vitest's import-analysis can't transform.
@@ -99,6 +99,54 @@ describe("inference services page", () => {
     });
     // The selected row is highlighted via accent background (assert by route marker).
     expect((flashRow as HTMLElement).style.background).toBe("var(--accent-soft)");
+
+    act(() => root.unmount());
+  });
+
+  it("scales the service in the selected namespace when names collide", async () => {
+    // The same service name in two namespaces: selecting team-b's row and
+    // applying must PATCH team-b, not the first name match (team-a).
+    const list = [
+      inferenceServiceSummary({ name: "api", namespace: "team-a", createdAt: "2026-09-01T07:00:00Z" }),
+      inferenceServiceSummary({ name: "api", namespace: "team-b", createdAt: "2026-09-01T06:00:00Z" }),
+    ];
+    const patches: Array<Record<string, unknown> | undefined> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method === "PATCH") {
+          patches.push(JSON.parse(String(init.body)));
+          return { ok: true, status: 200, json: async () => ({ ok: true }) };
+        }
+        return { ok: true, status: 200, json: async () => ({ items: list }) };
+      }),
+    );
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    // Select team-b's row (second row — both share the bare name "api").
+    const rows = container.querySelectorAll('[data-od-id^="svc-row-"]');
+    expect(rows).toHaveLength(2);
+    await act(async () => {
+      (rows[1] as HTMLElement).click();
+    });
+
+    // Change decodeReplicas and apply.
+    const decodeInput = container.querySelector('input[type="number"]') as HTMLInputElement;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
+      setter.call(decodeInput, "3");
+      decodeInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const applyBtn = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "应用");
+    expect(applyBtn).toBeDefined();
+    await act(async () => {
+      (applyBtn as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    expect(patches).toHaveLength(1);
+    expect(patches[0]).toMatchObject({ namespace: "team-b", name: "api" });
 
     act(() => root.unmount());
   });

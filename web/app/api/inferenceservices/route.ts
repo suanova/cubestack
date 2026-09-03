@@ -176,7 +176,7 @@ function overrideError(
     const o = declared.get(key);
     if (!o) return `不认识的 override '${key}'。`;
     const kind = { integer: 1, string: 2, boolean: 3 }[o.type ?? "integer"] ?? 1;
-    if (kind === 1 && typeof value !== "number") return `override '${key}' 需要整数。`;
+    if (kind === 1 && !Number.isInteger(value)) return `override '${key}' 需要整数。`;
     if (o.enum && !o.enum.some((e) => e === value)) return `override '${key}' 取值不在允许集合内。`;
     if (kind === 1 && typeof value === "number") {
       if (o.min !== undefined && value < o.min) return `override '${key}' 小于最小值 ${o.min}。`;
@@ -534,13 +534,16 @@ const PROMETHEUS_TIMEOUT_MS = 3_000;
 
 /**
  * Per-service label matcher for the engine exporters. The operator namespaces
- * the engine pods, so scope to the service's namespace plus a service-name
- * prefix on the `service` label. Best-effort: if the exporter is absent (or
- * uses different labels) the match yields no samples and the service shows its
- * empty state — never another service's or the cluster's aggregate.
+ * the engine pods and generates `<inference-service>-<role>` services, so scope
+ * to the service's namespace plus an anchored name-or-role-suffix match on the
+ * `service` label — a bare prefix would also capture sibling services whose
+ * name merely starts with this one (e.g. `llm2-router` for `llm`). Best-effort:
+ * if the exporter is absent (or uses different labels) the match yields no
+ * samples and the service shows its empty state — never another service's or
+ * the cluster's aggregate.
  */
 function serviceMatcher(namespace: string, name: string): string {
-  return `namespace="${namespace}",service=~"${name}.*"`;
+  return `namespace="${namespace}",service=~"^${name}(-.*)?$"`;
 }
 
 /**
@@ -600,7 +603,7 @@ async function queryRange(
     step: String(step),
   });
   const url = `${PERSES_SERVER_URL}/proxy/globaldatasources/${PROMETHEUS_DATASOURCE}/api/v1/query_range?${params}`;
-  const res = await fetch(url, { cache: "no-store" });
+  const res = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(PROMETHEUS_TIMEOUT_MS) });
   if (!res.ok) return null;
   const body = (await res.json()) as {
     data?: { result?: Array<{ values?: Array<[number, string]> }> };

@@ -184,6 +184,39 @@ describe("inference services route", () => {
     }
   });
 
+  it("scopes metrics queries to the exact service, not a name prefix", async () => {
+    // Two services whose names share a prefix: an unanchored `service=~"llm.*"`
+    // would also capture llm2's generated services (e.g. llm2-router) and mix
+    // the two services' QPS/P95/TPS.
+    const base = listClusterCustomObject.getMockImplementation()!;
+    listClusterCustomObject.mockImplementation(({ plural }: { plural: string }) => {
+      if (plural !== "inferenceservices") return base({ plural });
+      return Promise.resolve({
+        items: ["llm", "llm2"].map((name) => ({
+          metadata: { name, namespace: "project-a", creationTimestamp: "2026-09-01T06:12:00Z" },
+          spec: { modelRef: "deepseek-v4-flash-w8a8-v1", profileRef: "metax-sglang-dsv4-pd" },
+        })),
+      });
+    });
+    const queries: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        queries.push(new URL(String(input)).searchParams.get("query") ?? "");
+        return { ok: true, status: 200, json: async () => ({ data: { result: [] } }) };
+      }),
+    );
+
+    const { GET } = await importRoute();
+    const res = await GET();
+    expect(res.status).toBe(200);
+
+    // Each service's queries anchor on its exact name (or -<role> suffix);
+    // llm must not match llm2-*.
+    const matchers = queries.map((q) => q.match(/service=~"([^"]+)"/)?.[1] ?? "");
+    expect(new Set(matchers)).toEqual(new Set(["^llm(-.*)?$", "^llm2(-.*)?$"]));
+  });
+
   it("patches the overrides via a merge patch on PATCH", async () => {
     patchNamespacedCustomObject.mockResolvedValue({});
     const { PATCH } = await importRoute();
@@ -254,6 +287,22 @@ describe("inference services route", () => {
         namespace: "project-a",
         name: "dsv4-flash-pd",
         overrides: { groupSize: 8 }, // enum is [1,2,4]
+      }),
+    });
+    const res = await PATCH(req);
+    expect(res.status).toBe(400);
+    expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
+  it("rejects a PATCH with a decimal value for an integer override", async () => {
+    const { PATCH } = await importRoute();
+    const req = new NextRequest("http://localhost/api/inferenceservices", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        namespace: "project-a",
+        name: "dsv4-flash-pd",
+        overrides: { decodeReplicas: 1.5 },
       }),
     });
     const res = await PATCH(req);
@@ -387,6 +436,21 @@ describe("inference services create (POST)", () => {
         profileRef: "metax-sglang-dsv4-pd",
         modelRef: "deepseek-v4-flash-w8a8-v1",
         overrides: { decodeReplicas: 99 },
+      }),
+    );
+    expect(res.status).toBe(400);
+    expect(createNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
+  it("rejects a decimal value for an integer override", async () => {
+    const { POST } = await importRoute();
+    const res = await POST(
+      buildPost({
+        namespace: "project-a",
+        name: "ok-name",
+        profileRef: "metax-sglang-dsv4-pd",
+        modelRef: "deepseek-v4-flash-w8a8-v1",
+        overrides: { decodeReplicas: 1.5 },
       }),
     );
     expect(res.status).toBe(400);

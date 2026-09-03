@@ -16,7 +16,10 @@ import type { InferenceServiceSummary } from "@/app/api/inferenceservices/route"
 import { useI18n } from "@/lib/i18n";
 import { platformPalette, usePlatformTheme } from "@/lib/perses/theme";
 
-type Filter = "all" | "ready" | "pending";
+// The prototype's filter set is 全部 / Ready / 扩缩容中, where "scaling" keeps
+// the prototype's inclusive predicate: every service that is not ready yet
+// (provisioning, mid-scale, or errored).
+type Filter = "all" | "ready" | "scaling";
 
 // Status hues derived from the platform accent, matching the semantic tokens the
 // prototype derives in public/inference-services.html. Light-theme values, used
@@ -97,11 +100,17 @@ function ReplicaRows({ s }: { s: InferenceServiceSummary }) {
 
 const numFmt = (n: number | null): string => (n === null ? "—" : String(Math.round(n)));
 
+// The list spans all namespaces, and the same service name can exist in two of
+// them (team-a/api and team-b/api). Selection, lookup and row keys therefore
+// use the composite namespace/name — never the bare name, which would resolve
+// to the first match and could scale the wrong namespace's service.
+const svcKey = (s: { namespace: string; name: string }): string => `${s.namespace}/${s.name}`;
+
 export default function InferenceServicesPage() {
   const { t } = useI18n();
 
   const [items, setItems] = useState<InferenceServiceSummary[]>([]);
-  const [selName, setSelName] = useState<string | null>(null);
+  const [selKey, setSelKey] = useState<string | null>(null);
   const [filter, setFilter] = useState<Filter>("all");
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
@@ -113,7 +122,8 @@ export default function InferenceServicesPage() {
   const [deployOpen, setDeployOpen] = useState(false);
 
   // After a successful deploy, select the just-created service on the next
-  // reload (the ref is consumed by load()).
+  // reload (the ref is consumed by load()). Holds the composite namespace/name
+  // key so a same-named service in another namespace cannot steal the selection.
   const selectAfterLoad = useRef<string | null>(null);
 
   const load = useCallback(() => {
@@ -126,11 +136,11 @@ export default function InferenceServicesPage() {
         setErrorMsg("");
         // Keep the selection stable across refreshes; honor a pending select
         // (from a just-created service) and fall back to the first item.
-        setSelName((prev) => {
-          if (selectAfterLoad.current && d.items.some((s) => s.name === selectAfterLoad.current)) {
+        setSelKey((prev) => {
+          if (selectAfterLoad.current && d.items.some((s) => svcKey(s) === selectAfterLoad.current)) {
             return selectAfterLoad.current;
           }
-          return prev && d.items.some((s) => s.name === prev) ? prev : d.items[0]?.name ?? null;
+          return prev && d.items.some((s) => svcKey(s) === prev) ? prev : d.items[0] ? svcKey(d.items[0]) : null;
         });
         selectAfterLoad.current = null;
       })
@@ -162,11 +172,11 @@ export default function InferenceServicesPage() {
     };
   }, [reloadKey, load]);
 
-  const selected = items.find((s) => s.name === selName) ?? null;
+  const selected = items.find((s) => svcKey(s) === selKey) ?? null;
 
   const visible = items.filter((s) => {
     if (filter === "ready") return s.ready === true;
-    if (filter === "pending") return s.ready !== true;
+    if (filter === "scaling") return s.ready !== true;
     return true;
   });
 
@@ -265,7 +275,7 @@ export default function InferenceServicesPage() {
                 [
                   ["all", t("inf.filter.all")],
                   ["ready", t("inf.filter.ready")],
-                  ["pending", t("inf.filter.pending")],
+                  ["scaling", t("inf.filter.scaling")],
                 ] as Array<[Filter, string]>
               ).map(([key, label]) => {
                 const on = filter === key;
@@ -311,7 +321,7 @@ export default function InferenceServicesPage() {
           </Box>
 
           <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", lg: "minmax(0,1fr) 348px" }, gap: "14px", alignItems: "start" }}>
-            <ServiceTable items={visible} selectedName={selected?.name ?? null} onSelect={setSelName} />
+            <ServiceTable items={visible} selectedKey={selected ? svcKey(selected) : null} onSelect={setSelKey} />
             {items.length === 0 ? (
               <Box sx={{ border: 1, borderColor: "divider", borderRadius: "var(--radius)", bgcolor: "background.paper", p: "48px 20px", textAlign: "center", fontSize: 13, color: "text.secondary" }}>
                 {t("inf.empty")}
@@ -336,8 +346,8 @@ export default function InferenceServicesPage() {
       key={deployOpen ? "open" : "closed"}
       open={deployOpen}
       onClose={() => setDeployOpen(false)}
-      onCreated={(name) => {
-        selectAfterLoad.current = name;
+      onCreated={(namespace, name) => {
+        selectAfterLoad.current = `${namespace}/${name}`;
         setDeployOpen(false);
         load();
       }}
@@ -350,12 +360,12 @@ export default function InferenceServicesPage() {
 
 function ServiceTable({
   items,
-  selectedName,
+  selectedKey,
   onSelect,
 }: {
   items: InferenceServiceSummary[];
-  selectedName: string | null;
-  onSelect: (name: string) => void;
+  selectedKey: string | null;
+  onSelect: (key: string) => void;
 }) {
   const { t } = useI18n();
   const thSx = {
@@ -394,18 +404,18 @@ function ServiceTable({
           </thead>
           <tbody>
             {items.map((s) => {
-              const sel = s.name === selectedName;
+              const sel = svcKey(s) === selectedKey;
               return (
                 <tr
-                  key={s.name}
+                  key={svcKey(s)}
                   data-od-id={`svc-row-${s.name}`}
                   tabIndex={0}
                   aria-selected={sel}
-                  onClick={() => onSelect(s.name)}
+                  onClick={() => onSelect(svcKey(s))}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" || e.key === " ") {
                       e.preventDefault();
-                      onSelect(s.name);
+                      onSelect(svcKey(s));
                     }
                   }}
                   style={{
@@ -811,7 +821,7 @@ function DeployWizard({
 }: {
   open: boolean;
   onClose: () => void;
-  onCreated: (name: string) => void;
+  onCreated: (namespace: string, name: string) => void;
 }) {
   const { t } = useI18n();
   const [step, setStep] = useState(1);
@@ -917,7 +927,7 @@ function DeployWizard({
       .then(async (res) => {
         const data = (await res.json().catch(() => ({}))) as { error?: string; name?: string };
         if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
-        onCreated(data.name ?? draft.name.trim());
+        onCreated(draft.namespace, data.name ?? draft.name.trim());
       })
       .catch((err: Error) => setCreateError(err.message))
       .finally(() => setCreateBusy(false));
