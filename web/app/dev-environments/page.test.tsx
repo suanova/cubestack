@@ -151,6 +151,93 @@ describe("dev environments page", () => {
     act(() => root.unmount());
   });
 
+  it("Delete is confirmed: sends DELETE for the selected environment", async () => {
+    const deletes: Array<Record<string, unknown> | undefined> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method === "DELETE") {
+          deletes.push(JSON.parse(String(init.body)));
+          return { ok: true, status: 200, json: async () => ({ ok: true }) };
+        }
+        return { ok: true, status: 200, json: async () => ({ items: devEnvironmentList() }) };
+      }),
+    );
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    const delBtn = container.querySelector('[data-od-id="act-del-ssh-dataset-prep"]');
+    expect(delBtn).not.toBeNull();
+    await act(async () => {
+      (delBtn as HTMLElement).click();
+    });
+    await act(async () => {});
+    expect(deletes).toHaveLength(1);
+    expect(deletes[0]).toEqual({ namespace: "project-a", name: "ssh-dataset-prep" });
+
+    act(() => root.unmount());
+  });
+
+  it("Delete is cancelled: no DELETE request is sent", async () => {
+    const deletes: Array<unknown> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method === "DELETE") deletes.push(init.body);
+        return { ok: true, status: 200, json: async () => ({ items: devEnvironmentList() }) };
+      }),
+    );
+    vi.spyOn(window, "confirm").mockReturnValue(false);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    const delBtn = container.querySelector('[data-od-id="act-del-ssh-dataset-prep"]');
+    await act(async () => {
+      (delBtn as HTMLElement).click();
+    });
+    await act(async () => {});
+    expect(deletes).toHaveLength(0);
+
+    act(() => root.unmount());
+  });
+
+  it("refreshes and applies the newer phase after an action", async () => {
+    // First fetch returns jupyter running; the post-action refresh flips it to Stopped.
+    let flipped = false;
+    const list = () =>
+      devEnvironmentList().map((e) =>
+        e.name === "jupyter-nlp-ln"
+          ? { ...e, running: !flipped, phase: flipped ? "Stopped" : "Running" }
+          : e,
+      );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method === "PATCH") {
+          flipped = true;
+          return { ok: true, status: 200, json: async () => ({ ok: true }) };
+        }
+        return { ok: true, status: 200, json: async () => ({ items: list() }) };
+      }),
+    );
+    const { container, root } = renderPage();
+    await act(async () => {});
+    const row = container.querySelector('[data-od-id="dev-row-jupyter-nlp-ln"]');
+    expect(row?.textContent).toContain("Running");
+
+    // Stop via the row action -> triggers a refresh that returns Stopped.
+    const stopBtn = container.querySelector('[data-od-id="act-stop-jupyter-nlp-ln"]');
+    expect(stopBtn).not.toBeNull();
+    await act(async () => {
+      (stopBtn as HTMLElement).click();
+    });
+    await act(async () => {});
+    expect(row?.textContent).toContain("Stopped");
+
+    act(() => root.unmount());
+  });
+
   it("shows an error with a retry button when the cluster request fails", async () => {
     stubData([], false);
     const { container, root } = renderPage();
@@ -226,6 +313,64 @@ describe("create wizard", () => {
     expect(document.body.querySelector('[data-step="2"]')).not.toBeNull();
     expect(document.body.textContent).toContain("GPU 类型");
     expect(document.body.textContent).toContain("持久化存储(Gi)");
+
+    act(() => root.unmount());
+  });
+
+  it("blocks advancing past step 2 on invalid GPU / storage values", async () => {
+    const { container, root } = renderWithBoth();
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="create-env-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    // fill a valid name, advance to step 2
+    const input = document.body.querySelector('input[placeholder="e.g. jupyter-nlp-ln"]') as HTMLInputElement;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
+      setter.call(input, "my-env");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {});
+    await act(async () => {
+      (Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent === "下一步") as HTMLElement).click();
+    });
+    await act(async () => {});
+    expect(document.body.querySelector('[data-step="2"]')).not.toBeNull();
+
+    // number inputs in step 2: [gpuCount, storageGi]
+    const nums = Array.from(document.body.querySelectorAll('[data-step="2"] input[type="number"]')) as HTMLInputElement[];
+    expect(nums).toHaveLength(2);
+    const setNum = (el: HTMLInputElement, v: string) => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
+      setter.call(el, v);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+    await act(async () => {
+      setNum(nums[0], "1.5"); // fractional gpuCount
+      setNum(nums[1], "10"); // storage below 20
+    });
+    await act(async () => {});
+    await act(async () => {
+      (Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent === "下一步") as HTMLElement).click();
+    });
+    await act(async () => {});
+    // still on step 2 and per-field errors surfaced
+    expect(document.body.querySelector('[data-step="3"]')).toBeNull();
+    expect(document.body.textContent).toContain("GPU 卡数须为 1–16 的整数。");
+    expect(document.body.textContent).toContain("持久化存储须为 20–800(Gi) 的整数。");
+
+    // fixing both lets the wizard proceed
+    await act(async () => {
+      setNum(nums[0], "2");
+      setNum(nums[1], "200");
+    });
+    await act(async () => {});
+    await act(async () => {
+      (Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent === "下一步") as HTMLElement).click();
+    });
+    await act(async () => {});
+    expect(document.body.querySelector('[data-step="3"]')).not.toBeNull();
 
     act(() => root.unmount());
   });

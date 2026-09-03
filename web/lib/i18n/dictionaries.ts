@@ -242,6 +242,8 @@ const zhCN = {
   "dev.wizard.creating": "创建中…",
   "dev.wizard.loadError": "加载创建选项失败: {error}",
   "dev.wizard.loading": "加载中…",
+  "dev.wizard.errGpu": "GPU 卡数须为 1–16 的整数。",
+  "dev.wizard.errStorage": "持久化存储须为 20–800(Gi) 的整数。",
   "dev.createError": "创建失败: {error}",
   "dev.delete.confirm": "删除开发环境「{name}」?持久化存储卷将按 pvcRetention 策略处理。",
 } as const;
@@ -477,6 +479,8 @@ const zhTW: Dictionary = {
   "dev.wizard.creating": "建立中…",
   "dev.wizard.loadError": "載入建立選項失敗: {error}",
   "dev.wizard.loading": "載入中…",
+  "dev.wizard.errGpu": "GPU 卡數須為 1–16 的整數。",
+  "dev.wizard.errStorage": "持久化儲存須為 20–800(Gi) 的整數。",
   "dev.createError": "建立失敗: {error}",
   "dev.delete.confirm": "刪除開發環境「{name}」?持久化儲存卷將依 pvcRetention 策略處理。",
 };
@@ -709,6 +713,8 @@ const en: Dictionary = {
   "dev.wizard.creating": "Creating…",
   "dev.wizard.loadError": "Failed to load create options: {error}",
   "dev.wizard.loading": "Loading…",
+  "dev.wizard.errGpu": "GPU cards must be an integer between 1 and 16.",
+  "dev.wizard.errStorage": "Persistent storage must be an integer between 20 and 800 Gi.",
   "dev.createError": "Failed to create: {error}",
   "dev.delete.confirm": "Delete dev environment \"{name}\"? The persistent storage volume is handled per the pvcRetention policy.",
 };

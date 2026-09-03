@@ -236,7 +236,7 @@ describe("PATCH /api/devenvironments", () => {
     vi.restoreAllMocks();
   });
 
-  it("toggles spec.running via a JSON Patch", async () => {
+  it("toggles spec.running via a merge patch", async () => {
     patchNamespacedCustomObject.mockResolvedValue({});
     const { PATCH } = await importRoute();
     const res = await PATCH(
@@ -244,8 +244,26 @@ describe("PATCH /api/devenvironments", () => {
     );
     expect(res.status).toBe(200);
     const arg = patchNamespacedCustomObject.mock.calls[0][0];
-    expect(arg.body).toEqual([{ op: "replace", path: "/spec/running", value: false }]);
+    // Merge-patch object body (not a JSON-Patch `replace` array) so the API
+    // server creates /spec/running when the resource omits it.
+    expect(arg.body).toEqual({ spec: { running: false } });
     expect(arg.fieldManager).toBe("cubestack-web");
+  });
+
+  it("patches an existing resource that omits spec.running (merge creates the field)", async () => {
+    // The clustered fixture includes an env (ssh-dataset-prep) whose spec has
+    // no `running` key; the merge-patch body must be sent unchanged so the API
+    // server creates spec.running rather than failing a `replace` on an absent
+    // target.
+    patchNamespacedCustomObject.mockResolvedValue({});
+    const { PATCH } = await importRoute();
+    const res = await PATCH(
+      new NextRequest("http://x", { method: "PATCH", body: JSON.stringify({ namespace: "project-a", name: "ssh-dataset-prep", running: true }) }),
+    );
+    expect(res.status).toBe(200);
+    const arg = patchNamespacedCustomObject.mock.calls[0][0];
+    expect(arg.name).toBe("ssh-dataset-prep");
+    expect(arg.body).toEqual({ spec: { running: true } });
   });
 
   it("rejects a missing running boolean", async () => {

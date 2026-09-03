@@ -262,8 +262,11 @@ export async function POST(req: NextRequest) {
 /**
  * PATCH /api/devenvironments
  *
- * Starts or stops one environment by setting its `spec.running` via a JSON
- * Patch. Body: `{ namespace, name, running: boolean }`.
+ * Starts or stops one environment by setting its `spec.running`. Body:
+ * `{ namespace, name, running: boolean }`. A merge-patch body is used (an
+ * object, not a JSON-Patch array) so `spec.running` is created when the listed
+ * resource omits it (existing resources created before the field was added to
+ * the API), instead of `replace`, which would fail when the target is absent.
  */
 export async function PATCH(req: NextRequest) {
   try {
@@ -278,7 +281,8 @@ export async function PATCH(req: NextRequest) {
       namespace: body.namespace,
       plural: PLURAL_DEVENV,
       name: body.name,
-      body: [{ op: "replace", path: "/spec/running", value: body.running }],
+      // application/json merge-patch semantics: creates /spec/running if absent.
+      body: { spec: { running: body.running } },
       fieldManager: "cubestack-web",
     });
     return Response.json({ ok: true });

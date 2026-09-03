@@ -141,11 +141,17 @@ export default function DevEnvironmentsPage() {
 
   // After a successful create, select the just-created env on next reload.
   const selectAfterLoad = useRef<string | null>(null);
+  // Monotonic generation counter for load(): if a newer request started while
+  // an older one was in flight, only the newest may commit its result to state,
+  // so a slow poll response cannot overwrite the fresher list / selection.
+  const loadGen = useRef(0);
 
   const load = useCallback(() => {
+    const gen = ++loadGen.current;
     fetch("/api/devenvironments")
       .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
       .then((d: { items: DevEnvironmentSummary[] }) => {
+        if (gen !== loadGen.current) return; // a newer load started; ignore this one
         setItems(d.items);
         setLoading(false);
         setFailed(false);
@@ -159,6 +165,7 @@ export default function DevEnvironmentsPage() {
         selectAfterLoad.current = null;
       })
       .catch((err: Error) => {
+        if (gen !== loadGen.current) return; // a newer load started; ignore this one
         setLoading(false);
         setFailed(true);
         setErrorMsg(err.message);
@@ -668,7 +675,16 @@ function SpecCard({ e }: { e: DevEnvironmentSummary }) {
           <Typography data-od-id="env-conds-empty" sx={{ fontSize: 12, color: "text.secondary" }}>{t("dev.cond.empty")}</Typography>
         ) : (
           e.conditions.map((c) => {
-            const pending = c.status === "Unknown";
+            // Green only for an observed True condition; False (a real failure
+            // or an expected non-ready state like a stopped Ready) and Unknown
+            // (pending) get distinct non-success styling.
+            const cls = c.status === "True" ? "ok" : c.status === "Unknown" ? "pending" : "err";
+            const [chip, dot] =
+              cls === "ok"
+                ? [STATUS_OK, STATUS_OK]
+                : cls === "pending"
+                  ? [STATUS_WARN, STATUS_WARN]
+                  : [soft(STATUS_ERR, 55), STATUS_ERR];
             return (
               <Box
                 key={c.type}
@@ -682,8 +698,8 @@ function SpecCard({ e }: { e: DevEnvironmentSummary }) {
                   py: "2px",
                   borderRadius: 999,
                   fontSize: 12,
-                  bgcolor: pending ? soft(STATUS_WARN) : soft(STATUS_OK),
-                  color: pending ? `color-mix(in oklch, ${STATUS_WARN} 66%, var(--fg))` : "inherit",
+                  bgcolor: cls === "ok" ? soft(STATUS_OK) : soft(chip),
+                  color: cls === "ok" ? "inherit" : `color-mix(in oklch, ${chip} 66%, var(--fg))`,
                   whiteSpace: "nowrap",
                 }}
               >
@@ -693,7 +709,7 @@ function SpecCard({ e }: { e: DevEnvironmentSummary }) {
                     width: 6,
                     height: 6,
                     borderRadius: "50%",
-                    bgcolor: pending ? STATUS_WARN : STATUS_OK,
+                    bgcolor: dot,
                     flex: "none",
                   }}
                 />
@@ -792,7 +808,13 @@ function CreateWizard({
 
   const nameValid = DNS_LABEL_RE.test(draft.name.trim()) && draft.name.trim().length > 0;
   const step1Valid = nameValid && !!draft.namespace && !!draft.image;
-  const step2Valid = draft.gpuCount >= 1 && draft.gpuCount <= 16;
+  // Client-side validation mirrors the server (POST) rules so a user cannot
+  // advance or submit out-of-range / fractional GPU or storage values.
+  const gpuValid = Number.isInteger(draft.gpuCount) && draft.gpuCount >= 1 && draft.gpuCount <= 16;
+  const storageValid = Number.isInteger(draft.storageGi) && draft.storageGi >= 20 && draft.storageGi <= 800;
+  const step2Valid = gpuValid && storageValid;
+  const [gpuError, setGpuError] = useState(false);
+  const [storageError, setStorageError] = useState(false);
 
   const next = () => {
     if (step === 1) {
@@ -801,11 +823,20 @@ function CreateWizard({
         return;
       }
       setNameError(false);
+    } else if (step === 2) {
+      setGpuError(!gpuValid);
+      setStorageError(!storageValid);
+      if (!step2Valid) return;
     }
     setStep((s) => Math.min(3, s + 1));
   };
 
   const create = () => {
+    // Defense in depth: never submit out-of-range / fractional GPU or storage
+    // values even if the wizard state is manipulated directly.
+    setGpuError(!gpuValid);
+    setStorageError(!storageValid);
+    if (!step2Valid) return;
     setCreateBusy(true);
     setCreateError(null);
     const body = {
@@ -921,7 +952,7 @@ function CreateWizard({
                       <MenuItem value="metax">metax</MenuItem>
                     </Select>
                   </WizField>
-                  <WizField label={t("dev.wizard.gpuCount")}>
+                  <WizField label={t("dev.wizard.gpuCount")} error={gpuError} errorText={t("dev.wizard.errGpu")}>
                     <TextField size="small" fullWidth type="number" inputProps={{ min: 1, max: 16 }} value={draft.gpuCount} onChange={(e) => setField("gpuCount", Number(e.target.value))} />
                   </WizField>
                   <WizField label={t("dev.wizard.cpu")}>
@@ -938,7 +969,7 @@ function CreateWizard({
                       ))}
                     </Select>
                   </WizField>
-                  <WizField label={t("dev.wizard.storage")} hint={t("dev.wizard.storageHint")}>
+                  <WizField label={t("dev.wizard.storage")} hint={t("dev.wizard.storageHint")} error={storageError} errorText={t("dev.wizard.errStorage")}>
                     <TextField size="small" fullWidth type="number" inputProps={{ min: 20, max: 800 }} value={draft.storageGi} onChange={(e) => setField("storageGi", Number(e.target.value))} />
                   </WizField>
                   <WizField label={t("dev.wizard.idle")} hint={t("dev.wizard.idleHint")}>
@@ -967,7 +998,7 @@ function CreateWizard({
                     [t("dev.wizard.cpu"), `${draft.cpu}C`],
                     [t("dev.wizard.memory"), draft.memory],
                     [t("dev.wizard.storage"), `${draft.storageGi}Gi`],
-                    [t("dev.wizard.idle"), draft.idle === 0 ? t("dev.spec.idleOff") : `${draft.idle / 60} 分钟`],
+                    [t("dev.wizard.idle"), draft.idle === 0 ? t("dev.spec.idleOff") : t("dev.spec.idleMin", { minutes: String(draft.idle / 60) })],
                   ]}
                 />
                 {createError ? (
