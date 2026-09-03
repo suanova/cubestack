@@ -160,6 +160,37 @@ function profileOverride(profile: Profile | undefined, name: string): ProfileOve
   return profile?.spec?.overrides?.find((o) => o.name === name) ?? {};
 }
 
+/**
+ * Validate a set of override values against a profile's declared parameters.
+ * Returns an error message, or null when every key is declared and in range.
+ * Shared by POST (create) and PATCH (scale) so both enforce the same contract
+ * before touching the cluster.
+ */
+function overrideError(
+  overrides: Record<string, unknown>,
+  profile: Profile | undefined,
+): string | null {
+  if (!profile) return null; // profile unresolvable; the operator re-validates
+  const declared = new Map((profile.spec?.overrides ?? []).map((o) => [o.name ?? "", o]));
+  for (const [key, value] of Object.entries(overrides)) {
+    const o = declared.get(key);
+    if (!o) return `不认识的 override '${key}'。`;
+    const kind = { integer: 1, string: 2, boolean: 3 }[o.type ?? "integer"] ?? 1;
+    if (kind === 1 && typeof value !== "number") return `override '${key}' 需要整数。`;
+    if (o.enum && !o.enum.some((e) => e === value)) return `override '${key}' 取值不在允许集合内。`;
+    if (kind === 1 && typeof value === "number") {
+      if (o.min !== undefined && value < o.min) return `override '${key}' 小于最小值 ${o.min}。`;
+      if (o.max !== undefined && value > o.max) return `override '${key}' 大于最大值 ${o.max}。`;
+    }
+  }
+  return null;
+}
+
+/** RFC 6901 JSON Pointer escape for an object key used in a patch path. */
+function jsonPointerEscape(key: string): string {
+  return key.replace(/~/g, "~0").replace(/\//g, "~1");
+}
+
 /** Project one InferenceService + its resolved profile into a page-ready record. */
 function project(
   isvc: Isvc,
@@ -266,10 +297,13 @@ export async function GET() {
     const profiles: Profile[] = profileRes.items ?? [];
     const byProfile = new Map(profiles.map((p) => [p.metadata?.name ?? "", p]));
 
-    // Best-effort metrics for each service in parallel; a failure degrades that
-    // service to `metrics: null` (the page then shows its empty state).
+    // Best-effort, per-service metrics in parallel; a failure (or a stalled
+    // backend, which now times out) degrades that service to `metrics: null`
+    // (the page then shows its empty state).
     const metrics = await Promise.all(
-      isvcs.map(() => loadMetrics().catch(() => null)),
+      isvcs.map((isvc) =>
+        loadMetrics(isvc.metadata?.namespace ?? "", isvc.metadata?.name ?? "").catch(() => null),
+      ),
     );
 
     const items = isvcs.map((isvc, i) =>
@@ -288,10 +322,11 @@ export async function GET() {
 /**
  * PATCH /api/inferenceservices
  *
- * Updates the `spec.overrides` of one service via a merge patch. Body:
- * `{ namespace, name, overrides: Record<string, number|string> }`. Only the
- * keys present are touched; validation (against the profile's overrides) is
- * done before touching the cluster. Requires RBAC to patch the CR.
+ * Updates the `spec.overrides` of one service via an RFC 6902 JSON Patch. Body:
+ * `{ namespace, name, overrides: Record<string, number|string|boolean> }`. Only
+ * the keys present are touched; the values are resolved against the service's
+ * InferenceRuntimeProfile and validated (same contract as POST) before the
+ * cluster write. Requires RBAC to get and patch the CR.
  */
 export async function PATCH(req: NextRequest) {
   try {
@@ -308,14 +343,44 @@ export async function PATCH(req: NextRequest) {
     }
 
     const co = getCustomObjectsClient();
+    // Resolve the target service and its profile so the override values can be
+    // validated against the profile's declared parameters (same contract as
+    // POST) before touching the cluster.
+    let profile: Profile | undefined;
+    try {
+      const [svc, profileRes] = await Promise.all([
+        co.getNamespacedCustomObject({
+          group: GROUP,
+          version: VERSION,
+          namespace: body.namespace,
+          plural: PLURAL_ISVC,
+          name: body.name,
+        }),
+        co.listClusterCustomObject({ group: GROUP, version: VERSION, plural: PLURAL_PROFILE }),
+      ]);
+      const profileRef = (svc as { spec?: { profileRef?: string } })?.spec?.profileRef;
+      const profiles = (profileRes.items ?? []) as Profile[];
+      profile = profileRef ? profiles.find((p) => p.metadata?.name === profileRef) : undefined;
+    } catch (err) {
+      console.error("Failed to resolve inference service for validation:", err);
+      const sc = (err as { statusCode?: number })?.statusCode;
+      if (sc === 404) {
+        return Response.json({ error: `服务 '${body.name}' 不存在。` }, { status: 404 });
+      }
+      return Response.json({ error: "Failed to update inference service" }, { status: 500 });
+    }
+    const oerr = overrideError(body.overrides, profile);
+    if (oerr) return Response.json({ error: oerr }, { status: 400 });
+
     // The generated CustomObjectsApi patches custom objects with an RFC 6902
     // JSON Patch (application/json-patch+json). `add` replaces the value of an
     // existing member, and inserts it when absent — so it covers both keys the
     // spec already carries (decodeReplicas) and keys not yet present
-    // (groupSize), matching the generated object-param style of the other calls.
+    // (groupSize). RFC 6901-escape each key (~ -> ~0, / -> ~1) so a key that
+    // contains those characters targets the intended member.
     const patch = Object.entries(body.overrides).map(([k, v]) => ({
       op: "add",
-      path: `/spec/overrides/${k}`,
+      path: `/spec/overrides/${jsonPointerEscape(k)}`,
       value: v,
     }));
     await co.patchNamespacedCustomObject({
@@ -412,19 +477,9 @@ export async function POST(req: NextRequest) {
     );
     if (exists) return ValidationError(`服务 '${body.name}' 已存在。`);
 
-    // Overrides must satisfy the profile's declared parameters.
-    const declared = new Map((profile.spec?.overrides ?? []).map((o) => [o.name, o]));
-    for (const [key, value] of Object.entries(body.overrides ?? {})) {
-      const o = declared.get(key);
-      if (!o) return ValidationError(`不认识的 override '${key}'。`);
-      const regex = { integer: 1, string: 2, boolean: 3 }[o.type ?? "integer"] ?? 1;
-      if (regex === 1 && typeof value !== "number") return ValidationError(`override '${key}' 需要整数。`);
-      if (o.enum && !o.enum.some((e) => e === value)) return ValidationError(`override '${key}' 取值不在允许集合内。`);
-      if (regex === 1 && typeof value === "number") {
-        if (o.min !== undefined && value < o.min) return ValidationError(`override '${key}' 小于最小值 ${o.min}。`);
-        if (o.max !== undefined && value > o.max) return ValidationError(`override '${key}' 大于最大值 ${o.max}。`);
-      }
-    }
+    // Overrides must satisfy the profile's declared parameters (shared with PATCH).
+    const oerr = overrideError(body.overrides ?? {}, profile);
+    if (oerr) return ValidationError(oerr);
 
     // Route: publishing requires a valid single DNS-label modelName.
     const timeout = body.route?.timeoutSeconds;
@@ -473,25 +528,44 @@ export async function POST(req: NextRequest) {
 const SPARK_POINTS = 12;
 const SPARK_STEP_SECONDS = 150; // 12 points x 150s = a 30-minute window
 
+// Bound each Prometheus request so a stalled backend degrades that service to
+// metrics:null instead of hanging the whole list response (best-effort).
+const PROMETHEUS_TIMEOUT_MS = 3_000;
+
+/**
+ * Per-service label matcher for the engine exporters. The operator namespaces
+ * the engine pods, so scope to the service's namespace plus a service-name
+ * prefix on the `service` label. Best-effort: if the exporter is absent (or
+ * uses different labels) the match yields no samples and the service shows its
+ * empty state — never another service's or the cluster's aggregate.
+ */
+function serviceMatcher(namespace: string, name: string): string {
+  return `namespace="${namespace}",service=~"${name}.*"`;
+}
+
 /**
  * Standard selectors for the engine exporters (vLLM / SGLang) exposed through
- * Prometheus. These are the same metric families the provisioned dashboards
- * use; without a live exporter the queries return nothing and the service
- * shows its empty state.
+ * Prometheus, scoped to one inference service. Without a live exporter the
+ * queries return nothing and the service shows its empty state.
  */
-const QPS_QUERY = 'sum(rate({__name__=~"sglang:.*:num_generate_tokens_total|vllm:.*:requests_total"}[5m])) by (cpu)';
-const P95_QUERY = 'histogram_quantile(0.95, sum(rate({__name__=~"sglang.*e2e_latency_seconds|vllm.*latency.*bucket"}[5m])) by (le))';
-const TPS_QUERY = 'sum(rate({__name__=~"sglang:.*:num_generate_tokens_total|vllm.*num_generated_tokens_total"}[5m])) by (cpu)';
-const SPARK_QUERY = QPS_QUERY;
+const qpsQuery = (ns: string, name: string) =>
+  `sum(rate({__name__=~"sglang:.*:num_generate_tokens_total|vllm:.*:requests_total",${serviceMatcher(ns, name)}}[5m]))`;
+const p95Query = (ns: string, name: string) =>
+  `histogram_quantile(0.95, sum(rate({__name__=~"sglang.*e2e_latency_seconds|vllm.*latency.*bucket",${serviceMatcher(ns, name)}}[5m])) by (le))`;
+const tpsQuery = (ns: string, name: string) =>
+  `sum(rate({__name__=~"sglang:.*:num_generate_tokens_total|vllm.*num_generated_tokens_total",${serviceMatcher(ns, name)}}[5m]))`;
 
-async function loadMetrics(): Promise<NonNullable<InferenceServiceSummary["metrics"]> | null> {
+async function loadMetrics(
+  namespace: string,
+  name: string,
+): Promise<NonNullable<InferenceServiceSummary["metrics"]> | null> {
   const now = Math.floor(Date.now() / 1000);
   const start = now - SPARK_POINTS * SPARK_STEP_SECONDS;
   const [qps, p95, tps, spark] = await Promise.all([
-    queryInstant(QPS_QUERY),
-    queryInstant(P95_QUERY),
-    queryInstant(TPS_QUERY),
-    queryRange(SPARK_QUERY, start, now, SPARK_STEP_SECONDS, SPARK_POINTS),
+    queryInstant(qpsQuery(namespace, name)),
+    queryInstant(p95Query(namespace, name)),
+    queryInstant(tpsQuery(namespace, name)),
+    queryRange(qpsQuery(namespace, name), start, now, SPARK_STEP_SECONDS, SPARK_POINTS),
   ]);
   // Without a single sample across any family we treat it as "no data".
   if (qps === null && p95 === null && tps === null && !spark) return null;
@@ -501,7 +575,7 @@ async function loadMetrics(): Promise<NonNullable<InferenceServiceSummary["metri
 async function queryInstant(query: string): Promise<number | null> {
   const params = new URLSearchParams({ query });
   const url = `${PERSES_SERVER_URL}/proxy/globaldatasources/${PROMETHEUS_DATASOURCE}/api/v1/query?${params}`;
-  const res = await fetch(url, { cache: "no-store" });
+  const res = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(PROMETHEUS_TIMEOUT_MS) });
   if (!res.ok) throw new Error(`Prometheus query failed (${res.status})`);
   const body = (await res.json()) as {
     data?: { result?: Array<{ value?: [number, string] | string }> };

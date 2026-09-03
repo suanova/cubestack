@@ -143,13 +143,21 @@ export default function InferenceServicesPage() {
 
   useEffect(() => {
     load();
-    const timer = setInterval(load, 30_000);
+    let timer: ReturnType<typeof setInterval> | null = setInterval(load, 30_000);
     const onVis = () => {
-      if (document.hidden) clearInterval(timer);
+      if (document.hidden) {
+        if (timer) clearInterval(timer);
+        timer = null;
+      } else if (!timer) {
+        // The tab became visible again: refresh immediately and resume the 30s
+        // cycle so the poll doesn't stop permanently after a hidden period.
+        load();
+        timer = setInterval(load, 30_000);
+      }
     };
     document.addEventListener("visibilitychange", onVis);
     return () => {
-      clearInterval(timer);
+      if (timer) clearInterval(timer);
       document.removeEventListener("visibilitychange", onVis);
     };
   }, [reloadKey, load]);
@@ -391,7 +399,15 @@ function ServiceTable({
                 <tr
                   key={s.name}
                   data-od-id={`svc-row-${s.name}`}
+                  tabIndex={0}
+                  aria-selected={sel}
                   onClick={() => onSelect(s.name)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      onSelect(s.name);
+                    }
+                  }}
                   style={{
                     cursor: "pointer",
                     background: sel ? "var(--accent-soft)" : "transparent",
@@ -512,9 +528,9 @@ function Kvs({ rows }: { rows: Array<[string, string]> }) {
 function EndpointsCard({ s }: { s: InferenceServiceSummary }) {
   const { t } = useI18n();
   const internal = s.internalEndpoint ?? "—";
-  const external = s.published && s.routeModelName
-    ? `https://gateway.cubestack.local/v1/models/${s.routeModelName}`
-    : "—";
+  // The public endpoint is the observed value the operator reports (the gateway
+  // host differs per cluster); fall back to "—" when it isn't published yet.
+  const external = s.publicEndpoint ?? "—";
   return (
     <Card title={t("inf.endpoints.title")}>
       <Box sx={{ px: "18px", py: "14px" }}>
@@ -613,15 +629,20 @@ function ScaleCard({
   const [prefill, setPrefill] = useState(s.prefill.current);
   const [group, setGroup] = useState(s.groupSize.current);
 
-  // Re-sync local state when a different service is selected. Intentionally
-  // reset the inputs before editing the newly selected service.
-  /* eslint-disable react-hooks/set-state-in-effect */
+  // Re-sync local state when the selected service changes, or when its reported
+  // values actually change (e.g. the controller applied a scale). Depends on the
+  // service identity + the specific values read — NOT on the `s` object
+  // reference or the `s.decode` object (whose identity changes on every poll
+  // refresh) — so a 30s poll refresh (same values) must not clobber in-progress
+  // edits. exhaustive-deps is suppressed because the correct deps here are the
+  // primitive values, not the enclosing `s.*` objects.
+  /* eslint-disable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps */
   useEffect(() => {
     setDecode(s.decode.current);
     setPrefill(s.prefill.current);
     setGroup(s.groupSize.current);
-  }, [s]);
-  /* eslint-enable react-hooks/set-state-in-effect */
+  }, [s.namespace, s.name, s.decode.current, s.prefill.current, s.groupSize.current]);
+  /* eslint-enable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps */
 
   const decodeInvalid = decode < s.decode.min || decode > s.decode.max;
   const prefillInvalid = prefill < s.prefill.min || prefill > s.prefill.max;
@@ -960,7 +981,7 @@ function DeployWizard({
                   </Select>
                 </WizField>
                 <WizField label={t("inf.deploy.profile")} hint={profile ? profileSummary(profile) : undefined}>
-                  <Select size="small" fullWidth value={draft.profileRef} onChange={(e) => setField("profileRef", e.target.value)}>
+                  <Select size="small" fullWidth value={draft.profileRef} onChange={(e) => setDraft((prev) => ({ ...prev, profileRef: e.target.value, modelRef: "", overrides: {} }))}>
                     {(options?.profiles ?? []).map((p) => (
                       <MenuItem key={p.name} value={p.name}>{p.name}</MenuItem>
                     ))}
@@ -978,7 +999,6 @@ function DeployWizard({
                     value={draft.modelRef}
                     onChange={(e) => {
                       setField("modelRef", e.target.value);
-                      // Prefill overrides from the (first compatible) model's default profile values on profile switch.
                     }}
                     displayEmpty
                     renderValue={(v) => (v ? v : t("inf.deploy.selectModel"))}

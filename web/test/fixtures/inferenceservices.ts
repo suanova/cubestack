@@ -46,6 +46,9 @@ export function inferenceServiceList(): InferenceServiceSummary[] {
       routeModelName: "dsv4-pro",
       modelRef: "deepseek-v4-pro-w8a8-v1",
       createdAt: "2026-09-01T07:55:53Z",
+      // The operator-reported public endpoint (a non-default host, to prove the
+      // page renders the observed value rather than a hardcoded gateway host).
+      publicEndpoint: "https://gw.prod.cubestack.example/v1/models/dsv4-pro",
     }),
     inferenceServiceSummary({}),
   ];

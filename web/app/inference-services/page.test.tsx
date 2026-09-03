@@ -76,6 +76,8 @@ describe("inference services page", () => {
     // First in the list is selected (newest): its engine/value params show.
     expect(container.textContent).toContain("访问端点");
     expect(container.textContent).toContain("dsv4-pro");
+    // The public endpoint is the operator-reported value (not a hardcoded host).
+    expect(container.textContent).toContain("https://gw.prod.cubestack.example/v1/models/dsv4-pro");
     // No controller status -> metrics and conditions show their empty states.
     expect(container.querySelector('[data-od-id="metrics-empty"]')).not.toBeNull();
     expect(container.textContent).toContain("扩缩容");

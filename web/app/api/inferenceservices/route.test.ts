@@ -1,21 +1,42 @@
 import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { listNamespace, listClusterCustomObject, patchNamespacedCustomObject, createNamespacedCustomObject } = vi.hoisted(() => ({
+const { listNamespace, listClusterCustomObject, patchNamespacedCustomObject, createNamespacedCustomObject, getNamespacedCustomObject } = vi.hoisted(() => ({
   listNamespace: vi.fn(),
   listClusterCustomObject: vi.fn(),
   patchNamespacedCustomObject: vi.fn(),
   createNamespacedCustomObject: vi.fn(),
+  getNamespacedCustomObject: vi.fn(),
 }));
 
 vi.mock("@/lib/kubernetes", () => ({
   getCoreClient: () => ({ listNamespace }),
-  getCustomObjectsClient: () => ({ listClusterCustomObject, patchNamespacedCustomObject, createNamespacedCustomObject }),
+  getCustomObjectsClient: () => ({ listClusterCustomObject, patchNamespacedCustomObject, createNamespacedCustomObject, getNamespacedCustomObject }),
 }));
 
 /** The cluster fixture mirrors the real KinD data: 2 services, 1 profile. */
 function stubCluster() {
   listNamespace.mockResolvedValue({ items: [{ metadata: { name: "project-a" } }, { metadata: { name: "default" } }] });
+  // getNamespacedCustomObject returns the single CR body (not a wrapped list);
+  // unknown names reject with a 404-shaped error like the real client.
+  const modelFor: Record<string, string> = {
+    "dsv4-flash-pd": "deepseek-v4-flash-w8a8-v1",
+    "dsv4-pro-pd": "deepseek-v4-pro-w8a8-v1",
+  };
+  getNamespacedCustomObject.mockImplementation(({ name, namespace }: { name: string; namespace: string }) => {
+    const modelRef = modelFor[name];
+    if (!modelRef) {
+      const e = new Error("not found") as Error & { statusCode: number };
+      e.statusCode = 404;
+      return Promise.reject(e);
+    }
+    return Promise.resolve({
+      apiVersion: "ai.cubestack.io/v1alpha1",
+      kind: "InferenceService",
+      metadata: { name, namespace },
+      spec: { modelRef, profileRef: "metax-sglang-dsv4-pd" },
+    });
+  });
   listClusterCustomObject.mockImplementation(({ plural }: { plural: string }) => {
     if (plural === "inferenceservices") {
       return Promise.resolve({
@@ -110,6 +131,7 @@ describe("inference services route", () => {
     listClusterCustomObject.mockReset();
     patchNamespacedCustomObject.mockReset();
     createNamespacedCustomObject.mockReset();
+    getNamespacedCustomObject.mockReset();
     vi.unstubAllGlobals();
   });
 
@@ -204,6 +226,70 @@ describe("inference services route", () => {
     });
     const res = await PATCH(req);
     expect(res.status).toBe(400);
+    expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
+  it("rejects a PATCH with an override above the profile's max", async () => {
+    const { PATCH } = await importRoute();
+    const req = new NextRequest("http://localhost/api/inferenceservices", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        namespace: "project-a",
+        name: "dsv4-flash-pd",
+        overrides: { decodeReplicas: 99 }, // profile max is 16
+      }),
+    });
+    const res = await PATCH(req);
+    expect(res.status).toBe(400);
+    expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
+  it("rejects a PATCH with an override value outside the declared enum", async () => {
+    const { PATCH } = await importRoute();
+    const req = new NextRequest("http://localhost/api/inferenceservices", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        namespace: "project-a",
+        name: "dsv4-flash-pd",
+        overrides: { groupSize: 8 }, // enum is [1,2,4]
+      }),
+    });
+    const res = await PATCH(req);
+    expect(res.status).toBe(400);
+    expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
+  it("rejects a PATCH with an override key the profile does not declare", async () => {
+    const { PATCH } = await importRoute();
+    const req = new NextRequest("http://localhost/api/inferenceservices", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        namespace: "project-a",
+        name: "dsv4-flash-pd",
+        overrides: { bogus: 1 },
+      }),
+    });
+    const res = await PATCH(req);
+    expect(res.status).toBe(400);
+    expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
+  it("returns 404 when the target service does not exist", async () => {
+    const { PATCH } = await importRoute();
+    const req = new NextRequest("http://localhost/api/inferenceservices", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        namespace: "project-a",
+        name: "does-not-exist",
+        overrides: { decodeReplicas: 2 },
+      }),
+    });
+    const res = await PATCH(req);
+    expect(res.status).toBe(404);
     expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
   });
 

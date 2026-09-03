@@ -109,7 +109,7 @@ test.describe("inference services landing (mocked data)", () => {
     const detail = page.locator("body"); // Detail cards render beside the table.
     await expect(detail).toContainText("访问端点");
     await expect(detail).toContainText("外部端点(AI Gateway)");
-    await expect(detail).toContainText("https://gateway.cubestack.local/v1/models/dsv4-pro");
+    await expect(detail).toContainText("https://gw.prod.cubestack.example/v1/models/dsv4-pro");
     await expect(detail).toContainText("运行指标");
     await expect(page.locator('[data-od-id="metrics-empty"]')).toContainText("暂无监控数据");
     await expect(detail).toContainText("扩缩容");
