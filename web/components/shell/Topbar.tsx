@@ -21,6 +21,7 @@ function crumbKey(pathname: string): MessageKey | null {
   // Match the exact-or-slash-prefixed rule used by lib/nav.ts isActive, so nested
   // service routes (e.g. /inference-services/svc-a) still show the breadcrumb.
   if (pathname === "/inference-services" || pathname.startsWith("/inference-services/")) return "nav.inference";
+  if (pathname === "/dev-environments" || pathname.startsWith("/dev-environments/")) return "nav.devenv";
   return null;
 }
 

@@ -33,7 +33,7 @@ const LINK_ITEMS: NavItem[] = [
   },
   { key: "nav.inference", href: "/inference-services", icon: "server", dataOdId: "nav-inference" },
   { key: "nav.playground", icon: "terminal", dataOdId: "nav-playground" },
-  { key: "nav.devenv", icon: "code", dataOdId: "nav-devenv" },
+  { key: "nav.devenv", href: "/dev-environments", icon: "code", dataOdId: "nav-devenv" },
   { key: "nav.copilot", icon: "spark", dataOdId: "nav-copilot" },
 ];
 
