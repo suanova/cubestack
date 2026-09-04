@@ -1,17 +1,15 @@
+// @vitest-environment node
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { NextRequest } from "next/server";
+import { authedRequest } from "@/test/auth";
 
 // The route reads PERSES_SERVER_URL at module load, so each test imports the
 // module after stubbing the env var.
 const UPSTREAM = "http://perses.test";
 
+/** Build an authenticated request carrying a valid session cookie. */
 function makeRequest(method: string, url: string) {
-  return {
-    method,
-    nextUrl: new URL(url),
-    headers: new Headers({ accept: "application/json" }),
-  } as unknown as NextRequest;
+  return authedRequest({ method }, url);
 }
 
 function mockUpstream(status = 200, body = "{}") {
@@ -34,7 +32,7 @@ describe("perses proxy route", () => {
     const upstream = mockUpstream(200, '{"status":"success"}');
     const search = "?query=up";
 
-    const request = makeRequest(
+    const request = await makeRequest(
       "GET",
       `http://localhost/api/perses/proxy/globaldatasources/prometheus/api/v1/query_range${search}`,
     );
@@ -55,7 +53,7 @@ describe("perses proxy route", () => {
     const { POST } = await import("./route");
     const upstream = mockUpstream();
 
-    const request = makeRequest("POST", "http://localhost/api/perses/api/v1/projects/demo/dashboards");
+    const request = await makeRequest("POST", "http://localhost/api/perses/api/v1/projects/demo/dashboards");
     const res = await POST(request, {
       params: Promise.resolve({ path: ["api/v1/projects/demo/dashboards"] }),
     });
@@ -69,7 +67,7 @@ describe("perses proxy route", () => {
     const { POST } = await import("./route");
     const upstream = mockUpstream(200, "{}");
 
-    const request = makeRequest("POST", "http://localhost/api/perses/proxy/globaldatasources/prometheus/api/v1/query_range");
+    const request = await makeRequest("POST", "http://localhost/api/perses/proxy/globaldatasources/prometheus/api/v1/query_range");
     const res = await POST(request, {
       params: Promise.resolve({ path: ["proxy", "globaldatasources", "prometheus", "api/v1/query_range"] }),
     });

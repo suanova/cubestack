@@ -1,5 +1,7 @@
-import { NextRequest } from "next/server";
+// @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { authedGet, authedRequest } from "@/test/auth";
 
 const { listNamespace, listClusterCustomObject, patchNamespacedCustomObject, createNamespacedCustomObject, deleteNamespacedCustomObject } = vi.hoisted(() => ({
   listNamespace: vi.fn(),
@@ -85,7 +87,7 @@ describe("GET /api/devenvironments", () => {
 
   it("lists every environment, newest first, projected with resolved spec/status", async () => {
     const { GET } = await importRoute();
-    const res = await GET();
+    const res = await GET(await authedGet(), undefined);
     expect(res.status).toBe(200);
     const body = await res.json();
     // Newest first: jupyter-nlp-ln (09-01) before ssh-dataset-prep (08-30).
@@ -123,7 +125,7 @@ describe("GET /api/devenvironments", () => {
       ],
     });
     const { GET } = await importRoute();
-    const res = await GET();
+    const res = await GET(await authedGet(), undefined);
     const body = await res.json();
     expect(body.items[0]).toEqual({
       name: "minimal",
@@ -157,14 +159,14 @@ describe("POST /api/devenvironments", () => {
 
   it("rejects a non-DNS-1123 name", async () => {
     const { POST } = await importRoute();
-    const res = await POST(new NextRequest("http://x", { method: "POST", body: JSON.stringify({ name: "Bad Name", namespace: "project-a", type: "jupyter", image: "img", gpuCount: 1 }) }));
+    const res = await POST(await authedRequest({ method: "POST", body: JSON.stringify({ name: "Bad Name", namespace: "project-a", type: "jupyter", image: "img", gpuCount: 1 }) }), undefined);
     expect(res.status).toBe(400);
     expect(createNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
   it("rejects an unknown namespace", async () => {
     const { POST } = await importRoute();
-    const res = await POST(new NextRequest("http://x", { method: "POST", body: JSON.stringify({ name: "ok-name", namespace: "missing", type: "jupyter", image: "img", gpuCount: 1 }) }));
+    const res = await POST(await authedRequest({ method: "POST", body: JSON.stringify({ name: "ok-name", namespace: "missing", type: "jupyter", image: "img", gpuCount: 1 }) }), undefined);
     expect(res.status).toBe(400);
     expect((await res.json()).error).toContain("不存在");
     expect(createNamespacedCustomObject).not.toHaveBeenCalled();
@@ -172,7 +174,7 @@ describe("POST /api/devenvironments", () => {
 
   it("rejects a duplicate env name in the namespace", async () => {
     const { POST } = await importRoute();
-    const res = await POST(new NextRequest("http://x", { method: "POST", body: JSON.stringify({ name: "jupyter-nlp-ln", namespace: "project-a", type: "jupyter", image: "img", gpuCount: 1 }) }));
+    const res = await POST(await authedRequest({ method: "POST", body: JSON.stringify({ name: "jupyter-nlp-ln", namespace: "project-a", type: "jupyter", image: "img", gpuCount: 1 }) }), undefined);
     expect(res.status).toBe(400);
     expect((await res.json()).error).toContain("已存在");
     expect(createNamespacedCustomObject).not.toHaveBeenCalled();
@@ -180,7 +182,7 @@ describe("POST /api/devenvironments", () => {
 
   it("rejects an out-of-range gpuCount", async () => {
     const { POST } = await importRoute();
-    const res = await POST(new NextRequest("http://x", { method: "POST", body: JSON.stringify({ name: "ok-name", namespace: "project-a", type: "jupyter", image: "img", gpuCount: 0 }) }));
+    const res = await POST(await authedRequest({ method: "POST", body: JSON.stringify({ name: "ok-name", namespace: "project-a", type: "jupyter", image: "img", gpuCount: 0 }) }), undefined);
     expect(res.status).toBe(400);
     expect(createNamespacedCustomObject).not.toHaveBeenCalled();
   });
@@ -190,7 +192,7 @@ describe("POST /api/devenvironments", () => {
     listClusterCustomObject.mockResolvedValue({ items: [{ metadata: { name: "jupyter-nlp-ln", namespace: "project-a" } }] });
     const { POST } = await importRoute();
     const res = await POST(
-      new NextRequest("http://x", {
+      await authedRequest({
         method: "POST",
         body: JSON.stringify({
           name: "jupyter-recsys",
@@ -205,6 +207,7 @@ describe("POST /api/devenvironments", () => {
           idleTimeout: 1800,
         }),
       }),
+      undefined,
     );
     expect(res.status).toBe(201);
     const arg = createNamespacedCustomObject.mock.calls[0][0];
@@ -240,7 +243,8 @@ describe("PATCH /api/devenvironments", () => {
     patchNamespacedCustomObject.mockResolvedValue({});
     const { PATCH } = await importRoute();
     const res = await PATCH(
-      new NextRequest("http://x", { method: "PATCH", body: JSON.stringify({ namespace: "project-a", name: "jupyter-nlp-ln", running: false }) }),
+      await authedRequest({ method: "PATCH", body: JSON.stringify({ namespace: "project-a", name: "jupyter-nlp-ln", running: false }) }),
+      undefined,
     );
     expect(res.status).toBe(200);
     const arg = patchNamespacedCustomObject.mock.calls[0][0];
@@ -258,7 +262,8 @@ describe("PATCH /api/devenvironments", () => {
     patchNamespacedCustomObject.mockResolvedValue({});
     const { PATCH } = await importRoute();
     const res = await PATCH(
-      new NextRequest("http://x", { method: "PATCH", body: JSON.stringify({ namespace: "project-a", name: "ssh-dataset-prep", running: true }) }),
+      await authedRequest({ method: "PATCH", body: JSON.stringify({ namespace: "project-a", name: "ssh-dataset-prep", running: true }) }),
+      undefined,
     );
     expect(res.status).toBe(200);
     const arg = patchNamespacedCustomObject.mock.calls[0][0];
@@ -269,7 +274,7 @@ describe("PATCH /api/devenvironments", () => {
   it("rejects a missing running boolean", async () => {
     patchNamespacedCustomObject.mockResolvedValue({});
     const { PATCH } = await importRoute();
-    const res = await PATCH(new NextRequest("http://x", { method: "PATCH", body: JSON.stringify({ namespace: "project-a", name: "x" }) }));
+    const res = await PATCH(await authedRequest({ method: "PATCH", body: JSON.stringify({ namespace: "project-a", name: "x" }) }), undefined);
     expect(res.status).toBe(400);
     expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
   });
@@ -288,7 +293,7 @@ describe("DELETE /api/devenvironments", () => {
   it("deletes the named environment", async () => {
     deleteNamespacedCustomObject.mockResolvedValue({});
     const { DELETE } = await importRoute();
-    const res = await DELETE(new NextRequest("http://x", { method: "DELETE", body: JSON.stringify({ namespace: "project-a", name: "ssh-dataset-prep" }) }));
+    const res = await DELETE(await authedRequest({ method: "DELETE", body: JSON.stringify({ namespace: "project-a", name: "ssh-dataset-prep" }) }), undefined);
     expect(res.status).toBe(200);
     const arg = deleteNamespacedCustomObject.mock.calls[0][0];
     expect(arg).toMatchObject({ namespace: "project-a", name: "ssh-dataset-prep", plural: "devenvironments" });
@@ -297,7 +302,7 @@ describe("DELETE /api/devenvironments", () => {
   it("rejects a missing name", async () => {
     deleteNamespacedCustomObject.mockResolvedValue({});
     const { DELETE } = await importRoute();
-    const res = await DELETE(new NextRequest("http://x", { method: "DELETE", body: JSON.stringify({ namespace: "project-a" }) }));
+    const res = await DELETE(await authedRequest({ method: "DELETE", body: JSON.stringify({ namespace: "project-a" }) }), undefined);
     expect(res.status).toBe(400);
     expect(deleteNamespacedCustomObject).not.toHaveBeenCalled();
   });

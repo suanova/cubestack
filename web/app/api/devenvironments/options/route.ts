@@ -1,4 +1,5 @@
 import { getCoreClient } from "@/lib/kubernetes";
+import { withAuth } from "@/lib/auth/guard";
 
 // @kubernetes/client-node needs Node APIs (TLS, fs), not the Edge runtime.
 export const runtime = "nodejs";
@@ -29,7 +30,7 @@ export interface DevEnvOptionsResponse {
  * Namespaces come from the live cluster; the image catalog is static. The
  * wizard uses these to populate its namespace select and image select.
  */
-export async function GET() {
+export const GET = withAuth(async () => {
   try {
     const core = getCoreClient();
     const nsRes = await core.listNamespace();
@@ -48,4 +49,4 @@ export async function GET() {
     console.error("Failed to load dev-environment create options:", err);
     return Response.json({ error: "Failed to load create options" }, { status: 500 });
   }
-}
+});

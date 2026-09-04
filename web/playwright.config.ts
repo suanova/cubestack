@@ -23,5 +23,10 @@ export default defineConfig({
     url: "http://localhost:3000",
     timeout: 120_000,
     reuseExistingServer: !process.env.CI,
+    env: {
+      // Fixed signing key so the specs can mint session cookies the auth
+      // proxy/guard will accept (see e2e/auth.ts). Keep in sync there.
+      SESSION_SECRET: "e2e-session-secret",
+    },
   },
 });

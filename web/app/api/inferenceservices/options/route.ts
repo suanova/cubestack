@@ -1,4 +1,5 @@
 import { getCoreClient, getCustomObjectsClient } from "@/lib/kubernetes";
+import { withAuth } from "@/lib/auth/guard";
 
 // @kubernetes/client-node needs Node APIs (TLS, fs), not the Edge runtime.
 export const runtime = "nodejs";
@@ -83,7 +84,7 @@ function num(v: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
 }
 
-export async function GET() {
+export const GET = withAuth(async () => {
   try {
     const core = getCoreClient();
     const co = getCustomObjectsClient();
@@ -146,4 +147,4 @@ export async function GET() {
     console.error("Failed to load inference-service create options:", err);
     return Response.json({ error: "Failed to load create options" }, { status: 500 });
   }
-}
+});

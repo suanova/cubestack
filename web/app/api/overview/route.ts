@@ -1,6 +1,7 @@
 import type { V1Node } from "@kubernetes/client-node";
 
 import { getCoreClient, getCustomObjectsClient } from "@/lib/kubernetes";
+import { withAuth } from "@/lib/auth/guard";
 
 // @kubernetes/client-node needs Node APIs (TLS, fs), not the Edge runtime.
 export const runtime = "nodejs";
@@ -147,7 +148,7 @@ function clusterVersion(nodes: V1Node[]): string | null {
  * the trend is best-effort: a missing/unreachable Prometheus yields
  * `trend: null` instead of failing the whole page.
  */
-export async function GET() {
+export const GET = withAuth(async () => {
   try {
     const api = getCoreClient();
     const co = getCustomObjectsClient();
@@ -230,7 +231,7 @@ export async function GET() {
     console.error("Failed to load overview:", err);
     return Response.json({ error: "Failed to load overview" }, { status: 500 });
   }
-}
+});
 
 /** Query a cluster-wide metric over the rolling 24h window; null when empty. */
 async function loadTrend(): Promise<{ util: number[]; mem: number[] } | null> {
