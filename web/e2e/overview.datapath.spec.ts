@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { seedSession } from "./auth";
 
 // Suite B — one smoke spec for the *real* /api/overview data path. The node
 // and CR figures come from the live KinD cluster; the 24h trend comes from
@@ -9,7 +10,10 @@ import { expect, test } from "@playwright/test";
 // Requires the KinD cluster + the preview stack (playwright.datapath.config.ts
 // starts it via e2e/deploy/perses/local/run-preview.sh).
 
-test("real route renders cluster KPIs and a Prometheus trend", async ({ page }) => {
+test("real route renders cluster KPIs and a Prometheus trend", async ({ context, page }) => {
+  // The portal is behind the auth guard even for real-data smoke tests, so
+  // seed a signed session cookie before navigating.
+  await seedSession(context);
   // The live /api/overview resolves the node/CR reads plus four Prometheus
   // proxy round-trips, and the first-hit Next compile for the whole portal
   // happens on this route, so the overview data can take a few seconds to
