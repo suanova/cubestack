@@ -114,6 +114,21 @@ func Render(isvc *aiv1alpha1.InferenceService, profile *aiv1alpha1.InferenceRunt
 		ctx.role = roleV
 		rr.PodTemplate, res.Errors = renderPodTemplate(ctx, rr.PodTemplate, res.Errors)
 		rr.UsesCredentials = roleV.usesCredentials
+		// A role that will receive the injected S3 credentials volume must not
+		// declare a podTemplate volume of the same name: the pod template would
+		// carry two volumes named model-credentials and Kubernetes would reject
+		// it at apply time (design §4.5).
+		if roleV.usesCredentials {
+			for _, v := range rr.PodTemplate.Volumes {
+				if v.Name == aiv1alpha1.ModelCredentialsVolumeName {
+					res.Errors = append(res.Errors, Error{
+						Reason: ReasonReservedVolumeName,
+						Msg:    fmt.Sprintf("role %q declares volume %q which is reserved for the S3 credentials copy", role.Name, v.Name),
+					})
+					break
+				}
+			}
+		}
 		res.Roles = append(res.Roles, rr)
 	}
 	ctx.role = nil

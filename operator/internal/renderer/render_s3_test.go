@@ -100,4 +100,35 @@ var _ = Describe("Render (S3 strategy)", func() {
 		Expect(res.Errors).To(HaveLen(1))
 		Expect(res.Errors[0].Reason).To(Equal(ReasonPhaseViolation))
 	})
+
+	It("rejects a role volume named after the reserved S3 credentials volume", func() {
+		// The role will receive the injected credentials volume: declaring a
+		// podTemplate volume of the same name would duplicate it in the pod
+		// template, which Kubernetes rejects at apply time (design §4.5).
+		p := renderProfile()
+		p.Spec.Roles[0].PodTemplate.Mounts = nil
+		p.Spec.Roles[0].PodTemplate.Volumes = []aiv1alpha1.Volume{{Name: aiv1alpha1.ModelCredentialsVolumeName}}
+		p.Spec.Roles[0].PodTemplate.Env = []aiv1alpha1.EnvVar{
+			envValue("CREDS_FILE", "{{ model.credentialsPath }}"),
+		}
+		res := Render(renderISVC(), p, s3RenderModel(true), nil)
+		Expect(res.Errors).To(HaveLen(1))
+		Expect(res.Errors[0].Reason).To(Equal(ReasonReservedVolumeName))
+		Expect(res.Errors[0].Msg).To(ContainSubstring("reserved"))
+		Expect(res.Roles[0].UsesCredentials).To(BeTrue())
+	})
+
+	It("allows the reserved volume name when the role does not reference credentials", func() {
+		// No credentials volume is injected without the reference, so the
+		// declared volume name does not collide.
+		p := renderProfile()
+		p.Spec.Roles[0].PodTemplate.Mounts = nil
+		p.Spec.Roles[0].PodTemplate.Volumes = []aiv1alpha1.Volume{{Name: aiv1alpha1.ModelCredentialsVolumeName}}
+		p.Spec.Roles[0].PodTemplate.Env = []aiv1alpha1.EnvVar{
+			envValue("MODEL_PATH", "{{ model.path }}"),
+		}
+		res := Render(renderISVC(), p, s3RenderModel(true), nil)
+		Expect(res.Errors).To(BeEmpty())
+		Expect(res.Roles[0].UsesCredentials).To(BeFalse())
+	})
 })

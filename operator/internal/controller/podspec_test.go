@@ -135,14 +135,14 @@ var _ = Describe("buildPodSpec", func() {
 
 		Expect(spec.Volumes).To(HaveLen(1))
 		vol := spec.Volumes[0]
-		Expect(vol.Name).To(Equal(credentialsVolumeName))
+		Expect(vol.Name).To(Equal(aiv1alpha1.ModelCredentialsVolumeName))
 		Expect(vol.Secret.SecretName).To(Equal("svc-a-model-main-credentials"))
 		Expect(vol.Secret.Items).To(Equal([]corev1.KeyToPath{
 			{Key: aiv1alpha1.ModelCredentialsKey, Path: aiv1alpha1.ModelCredentialsFile},
 		}))
 		Expect(vol.Secret.DefaultMode).To(Equal(ptrTo(int32(0444))))
 		Expect(spec.Containers[0].VolumeMounts).To(Equal([]corev1.VolumeMount{{
-			Name:      credentialsVolumeName,
+			Name:      aiv1alpha1.ModelCredentialsVolumeName,
 			MountPath: aiv1alpha1.ModelCredentialsDir,
 			ReadOnly:  true,
 		}}))

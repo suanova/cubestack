@@ -32,6 +32,9 @@ const (
 	// ReasonModelCredentialsUnresolved marks {{ model.credentialsPath }} with an
 	// S3 ModelVersion that sets no storage.s3.credentialsRef.
 	ReasonModelCredentialsUnresolved ErrorReason = "ModelCredentialsUnresolved"
+	// ReasonReservedVolumeName marks a role declaring a podTemplate volume whose
+	// name is reserved for the injected S3 credentials copy (design §4.5).
+	ReasonReservedVolumeName ErrorReason = "ReservedVolumeName"
 )
 
 // Error is a single render failure.

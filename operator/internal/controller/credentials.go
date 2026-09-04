@@ -39,10 +39,6 @@ const (
 	credentialsVersionAnnotationKey = "ai.cubestack.io/credentials-source-version"
 )
 
-// credentialsVolumeName is the volume name of the S3 credentials copy inside
-// the pods of roles that reference {{ model.credentialsPath }} (design §4.5).
-const credentialsVolumeName = "model-credentials"
-
 // provisionModelCredentials creates or syncs the S3 credentials Secret copy
 // <isvc>-model-<key>-credentials in the service namespace (design §3.1 S3
 // strategy): content copied verbatim from the source Secret in
@@ -133,7 +129,7 @@ func (r *InferenceServiceReconciler) provisionModelCredentials(ctx context.Conte
 // mounted read-only as the fixed file ModelCredentialsFilePath.
 func addCredentialsVolume(spec *corev1.PodSpec, isvcName string) {
 	volume := corev1.Volume{
-		Name: credentialsVolumeName,
+		Name: aiv1alpha1.ModelCredentialsVolumeName,
 		VolumeSource: corev1.VolumeSource{
 			Secret: &corev1.SecretVolumeSource{
 				SecretName: fmt.Sprintf("%s-model-%s-credentials", isvcName, modelKeyMain),
@@ -147,7 +143,7 @@ func addCredentialsVolume(spec *corev1.PodSpec, isvcName string) {
 	}
 	spec.Volumes = append(spec.Volumes, volume)
 	spec.Containers[0].VolumeMounts = append(spec.Containers[0].VolumeMounts, corev1.VolumeMount{
-		Name:      credentialsVolumeName,
+		Name:      aiv1alpha1.ModelCredentialsVolumeName,
 		MountPath: aiv1alpha1.ModelCredentialsDir,
 		ReadOnly:  true,
 	})

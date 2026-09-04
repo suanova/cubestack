@@ -277,6 +277,20 @@ var _ = Describe("ModelVersion", func() {
 					s.Storage.S3.URI = "http://model-registry/deepseek-v4-flash"
 				},
 				"spec.storage.s3.uri"),
+			Entry("s3 uri with a bare s3:// (no bucket)",
+				"mv-invalid-s3-uri-no-bucket",
+				func(s *ModelVersionSpec) {
+					s.Storage = validS3Storage()
+					s.Storage.S3.URI = "s3://"
+				},
+				"spec.storage.s3.uri"),
+			Entry("s3 uri with a missing bucket (s3:///path)",
+				"mv-invalid-s3-uri-missing-bucket",
+				func(s *ModelVersionSpec) {
+					s.Storage = validS3Storage()
+					s.Storage.S3.URI = "s3:///deepseek-v4-flash"
+				},
+				"spec.storage.s3.uri"),
 			Entry("s3 credentialsRef without a name",
 				"mv-invalid-s3-credentials-name",
 				func(s *ModelVersionSpec) {

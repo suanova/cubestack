@@ -131,8 +131,11 @@ spec:
                         - name
                         type: object
                       uri:
-                        description: URI is the S3 prefix of the model data, <bucket>/<prefix>/<model>/<version>.
-                        pattern: ^s3://
+                        description: |-
+                          URI is the S3 prefix of the model data, <bucket>/<prefix>/<model>/<version>.
+                          The bucket must be non-empty: a bare "s3://" or a missing bucket
+                          ("s3:///path") has no addressable model store (design §3.1).
+                        pattern: ^s3://[^/]+(/.*)?$
                         type: string
                     required:
                     - uri

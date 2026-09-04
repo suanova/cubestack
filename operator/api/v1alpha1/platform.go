@@ -34,6 +34,11 @@ const (
 	// the value of {{ model.credentialsPath }}.
 	ModelCredentialsFilePath = ModelCredentialsDir + "/" + ModelCredentialsFile
 
+	// ModelCredentialsVolumeName is the volume name of the S3 credentials copy
+	// injected into roles that reference {{ model.credentialsPath }}. It is
+	// reserved: podTemplate.volumes[] must not declare this name.
+	ModelCredentialsVolumeName = "model-credentials"
+
 	// ModelCredentialsKey is the single data key contract of the source
 	// credentials Secret; the copy must carry it for the mount to succeed.
 	ModelCredentialsKey = "credentials"

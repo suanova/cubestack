@@ -1430,7 +1430,7 @@ var _ = Describe("InferenceService controller", func() {
 			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-router", Namespace: testNamespace}, dep)).To(Succeed())
 			var vol *corev1.Volume
 			for i := range dep.Spec.Template.Spec.Volumes {
-				if dep.Spec.Template.Spec.Volumes[i].Name == credentialsVolumeName {
+				if dep.Spec.Template.Spec.Volumes[i].Name == aiv1alpha1.ModelCredentialsVolumeName {
 					vol = &dep.Spec.Template.Spec.Volumes[i]
 				}
 			}
@@ -1439,7 +1439,7 @@ var _ = Describe("InferenceService controller", func() {
 			Expect(vol.Secret.Items).To(Equal([]corev1.KeyToPath{{Key: aiv1alpha1.ModelCredentialsKey, Path: aiv1alpha1.ModelCredentialsFile}}))
 			Expect(vol.Secret.DefaultMode).To(Equal(ptrTo(int32(0444))))
 			Expect(dep.Spec.Template.Spec.Containers[0].VolumeMounts).To(ContainElement(
-				corev1.VolumeMount{Name: credentialsVolumeName, MountPath: aiv1alpha1.ModelCredentialsDir, ReadOnly: true}))
+				corev1.VolumeMount{Name: aiv1alpha1.ModelCredentialsVolumeName, MountPath: aiv1alpha1.ModelCredentialsDir, ReadOnly: true}))
 			envs := dep.Spec.Template.Spec.Containers[0].Env
 			Expect(envs).To(ContainElement(corev1.EnvVar{Name: testEnvModelPath, Value: mv.Spec.Storage.S3.URI}))
 			Expect(envs).To(ContainElement(corev1.EnvVar{Name: "CREDS_FILE", Value: aiv1alpha1.ModelCredentialsFilePath}))

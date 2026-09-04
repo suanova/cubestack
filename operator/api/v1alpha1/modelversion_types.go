@@ -91,7 +91,9 @@ type S3CredentialsRef struct {
 // identity only (design §3.1 S3 strategy).
 type S3Storage struct {
 	// URI is the S3 prefix of the model data, <bucket>/<prefix>/<model>/<version>.
-	// +kubebuilder:validation:Pattern="^s3://"
+	// The bucket must be non-empty: a bare "s3://" or a missing bucket
+	// ("s3:///path") has no addressable model store (design §3.1).
+	// +kubebuilder:validation:Pattern="^s3://[^/]+(/.*)?$"
 	URI string `json:"uri"`
 
 	// CredentialsRef optionally names the credentials Secret in cubestack-system
