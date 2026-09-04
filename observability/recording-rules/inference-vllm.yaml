@@ -1,0 +1,98 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: cubestack-inference-vllm
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: cubestack-observability
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: cubestack.inference_service.vllm
+      interval: 60s
+      rules:
+        # Running requests per InferenceService (vllm)
+        # vllm label: model_name, engine; no pod-level label — sum across engines per IS
+        # Join via kube_pod_labels to get inference_service label (same pattern as sglang rules)
+        - record: cubestack_inference_requests_running:sum
+          expr: |
+            sum by (namespace, inference_service, role) (
+              label_replace(
+                label_replace(
+                  label_replace(
+                    vllm:num_requests_running
+                    * on(namespace, pod) group_left(label_cubestack_io_inference_service)
+                    kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-inference"},
+                    "inference_service", "$1", "label_cubestack_io_inference_service", "(.*)"
+                  ),
+                  "role", "prefill", "", ""
+                ),
+                "dummy", "", "engine", ".*"
+              )
+            )
+
+        # Waiting requests per InferenceService (vllm)
+        - record: cubestack_inference_requests_waiting:sum
+          expr: |
+            sum by (namespace, inference_service) (
+              label_replace(
+                vllm:num_requests_waiting
+                * on(namespace, pod) group_left(label_cubestack_io_inference_service)
+                kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-inference"},
+                "inference_service", "$1", "label_cubestack_io_inference_service", "(.*)"
+              )
+            )
+
+        # KV cache usage per InferenceService (vllm)
+        # vllm:kv_cache_usage_perc is already 0-1 ratio (perc = fraction, not percent)
+        - record: cubestack_inference_kv_cache_usage_ratio:max
+          expr: |
+            max by (namespace, inference_service) (
+              label_replace(
+                vllm:kv_cache_usage_perc
+                * on(namespace, pod) group_left(label_cubestack_io_inference_service)
+                kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-inference"},
+                "inference_service", "$1", "label_cubestack_io_inference_service", "(.*)"
+              )
+            )
+
+        # Prefix cache hit ratio per InferenceService (vllm)
+        # vllm does not expose a direct ratio — compute from hits_total / queries_total rate
+        - record: cubestack_inference_cache_hit_ratio:avg
+          expr: |
+            avg by (namespace, inference_service) (
+              label_replace(
+                (
+                  rate(vllm:prefix_cache_hits_total[5m])
+                  /
+                  (rate(vllm:prefix_cache_queries_total[5m]) > 0)
+                )
+                * on(namespace, pod) group_left(label_cubestack_io_inference_service)
+                kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-inference"},
+                "inference_service", "$1", "label_cubestack_io_inference_service", "(.*)"
+              )
+            )
+
+        # Prompt token throughput per InferenceService (vllm)
+        - record: cubestack_inference_prompt_tokens:rate5m
+          expr: |
+            sum by (namespace, inference_service) (
+              label_replace(
+                rate(vllm:prompt_tokens_total[5m])
+                * on(namespace, pod) group_left(label_cubestack_io_inference_service)
+                kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-inference"},
+                "inference_service", "$1", "label_cubestack_io_inference_service", "(.*)"
+              )
+            )
+
+        # Generation token throughput per InferenceService (vllm)
+        - record: cubestack_inference_generation_tokens:rate5m
+          expr: |
+            sum by (namespace, inference_service) (
+              label_replace(
+                rate(vllm:generation_tokens_total[5m])
+                * on(namespace, pod) group_left(label_cubestack_io_inference_service)
+                kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-inference"},
+                "inference_service", "$1", "label_cubestack_io_inference_service", "(.*)"
+              )
+            )

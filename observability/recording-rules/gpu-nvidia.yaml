@@ -1,0 +1,119 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: cubestack-gpu-nvidia
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: cubestack-observability
+    release: kube-prometheus-stack
+spec:
+  groups:
+    # -------------------------------------------------------------------------
+    # 注意：node 级 GPU 容量/分配/利用率规则（cluster_node:cubestack_gpu_*）
+    # 统一由 gpu.yaml 维护，使用 resource=~"nvidia.com/gpu|metax-tech.com/gpu"
+    # 覆盖所有厂商，此文件不重复定义。
+    # 此文件只负责 NVIDIA DCGM 专有的 per-card 和 workload GPU 指标。
+    # -------------------------------------------------------------------------
+    # Per-card GPU rules (NVIDIA DCGM)
+    # Produces the same record names as MetaX per-card rules in gpu.yaml
+    # Dashboard can query these without knowing the underlying vendor.
+    # -------------------------------------------------------------------------
+    - name: cubestack.gpu.per_card.nvidia
+      interval: 60s
+      rules:
+        # Per-card GPU utilization ratio
+        - record: cubestack_gpu_utilization_ratio
+          expr: |
+            label_replace(
+              DCGM_FI_DEV_GPU_UTIL / 100,
+              "node", "$1", "Hostname", "(.*)"
+            )
+
+        # Per-card VRAM utilization ratio
+        # DCGM_FI_DEV_FB_USED / DCGM_FI_DEV_FB_TOTAL (both in MiB)
+        - record: cubestack_gpu_memory_utilization_ratio
+          expr: |
+            label_replace(
+              DCGM_FI_DEV_FB_USED / DCGM_FI_DEV_FB_TOTAL,
+              "node", "$1", "Hostname", "(.*)"
+            )
+
+        # Per-card GPU temperature (celsius)
+        - record: cubestack_gpu_temperature_celsius
+          expr: |
+            label_replace(
+              DCGM_FI_DEV_GPU_TEMP,
+              "node", "$1", "Hostname", "(.*)"
+            )
+
+        # Per-card GPU power (watts)
+        # DCGM_FI_DEV_POWER_USAGE is already in watts (unlike MetaX which is milliwatts)
+        - record: cubestack_gpu_power_watts
+          expr: |
+            label_replace(
+              DCGM_FI_DEV_POWER_USAGE,
+              "node", "$1", "Hostname", "(.*)"
+            )
+
+    # -------------------------------------------------------------------------
+    # Per-workload GPU rules (NVIDIA DCGM)
+    # Covers both InferenceService and DevEnvironment in one group to avoid
+    # duplicate record names across groups (promtool lint requirement).
+    # Each rule uses `or` to merge IS and DevEnv series into one time series set.
+    # -------------------------------------------------------------------------
+    - name: cubestack.workload.gpu.nvidia
+      interval: 60s
+      rules:
+        # GPU utilization per InferenceService or DevEnvironment (NVIDIA)
+        - record: cubestack_gpu_utilization_ratio:max
+          expr: |
+            max by (namespace, inference_service, uuid) (
+              label_replace(
+                label_replace(
+                  DCGM_FI_DEV_GPU_UTIL / 100,
+                  "namespace", "$1", "exported_namespace", "(.*)"
+                ),
+                "pod", "$1", "exported_pod", "(.*)"
+              )
+              * on(namespace, pod) group_left(label_cubestack_io_inference_service)
+              kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-inference"}
+            )
+            or
+            max by (namespace, devenv, uuid) (
+              label_replace(
+                label_replace(
+                  DCGM_FI_DEV_GPU_UTIL / 100,
+                  "namespace", "$1", "exported_namespace", "(.*)"
+                ),
+                "pod", "$1", "exported_pod", "(.*)"
+              )
+              * on(namespace, pod) group_left(label_cubestack_io_devenv)
+              kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv"}
+            )
+
+        # GPU VRAM utilization per InferenceService or DevEnvironment (NVIDIA)
+        - record: cubestack_gpu_memory_utilization_ratio:max
+          expr: |
+            max by (namespace, inference_service, uuid) (
+              label_replace(
+                label_replace(
+                  DCGM_FI_DEV_FB_USED / DCGM_FI_DEV_FB_TOTAL,
+                  "namespace", "$1", "exported_namespace", "(.*)"
+                ),
+                "pod", "$1", "exported_pod", "(.*)"
+              )
+              * on(namespace, pod) group_left(label_cubestack_io_inference_service)
+              kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-inference"}
+            )
+            or
+            max by (namespace, devenv, uuid) (
+              label_replace(
+                label_replace(
+                  DCGM_FI_DEV_FB_USED / DCGM_FI_DEV_FB_TOTAL,
+                  "namespace", "$1", "exported_namespace", "(.*)"
+                ),
+                "pod", "$1", "exported_pod", "(.*)"
+              )
+              * on(namespace, pod) group_left(label_cubestack_io_devenv)
+              kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv"}
+            )
