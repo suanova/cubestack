@@ -1,0 +1,7 @@
+apiVersion: v2
+name: cubestack-operator
+description: CubeStack operator — installs the ai.cubestack.io CRDs, VAPs and controller manager
+type: application
+version: 0.1.0
+appVersion: v0.0.1
+kubeVersion: ">=1.30.0-0"

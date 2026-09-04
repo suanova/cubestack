@@ -1,0 +1,900 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: inferenceruntimeprofiles.ai.cubestack.io
+spec:
+  group: ai.cubestack.io
+  names:
+    kind: InferenceRuntimeProfile
+    listKind: InferenceRuntimeProfileList
+    plural: inferenceruntimeprofiles
+    singular: inferenceruntimeprofile
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.accelerator.vendor
+      name: Vendor
+      type: string
+    - jsonPath: .spec.engine.name
+      name: Engine
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: InferenceRuntimeProfile is the Schema for the inferenceruntimeprofiles
+          API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of InferenceRuntimeProfile
+            properties:
+              accelerator:
+                description: Accelerator specifies the GPU vendor and the allowed
+                  GPU models.
+                properties:
+                  models:
+                    description: |-
+                      Models restricts the schedulable GPU models, e.g. MXC500. The controller
+                      injects node selection constraints based on the declared models.
+                    items:
+                      type: string
+                    minItems: 1
+                    type: array
+                  vendor:
+                    description: |-
+                      Vendor is the GPU vendor, mapped to a Kubernetes GPU extended resource
+                      name, e.g. metax -> metax-tech.com/gpu, nvidia -> nvidia.com/gpu.
+                    enum:
+                    - metax
+                    - nvidia
+                    type: string
+                required:
+                - models
+                - vendor
+                type: object
+              assets:
+                description: Assets lists the ConfigMap templates used by the profile.
+                items:
+                  description: |-
+                    Asset declares a ConfigMap template used by the profile. The controller
+                    renders its data with service-level variables and creates a copy named
+                    <isvc>-<name> in the service namespace.
+                  properties:
+                    configMapRef:
+                      description: ConfigMapRef names the source ConfigMap.
+                      properties:
+                        name:
+                          description: |-
+                            Name is the source ConfigMap name. Assets are always read from the
+                            cubestack-system namespace, so no namespace needs to be specified.
+                          minLength: 1
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    envFrom:
+                      description: EnvFrom injects the rendered ConfigMap keys as
+                        environment variables.
+                      type: boolean
+                    mount:
+                      description: Mount mounts the rendered ConfigMap as files at
+                        the declared path.
+                      properties:
+                        mode:
+                          description: Mode is the file mode applied to the mounted
+                            files, e.g. 0755.
+                          format: int32
+                          type: integer
+                        path:
+                          description: Path is the absolute path where the ConfigMap
+                            files are mounted.
+                          pattern: ^/
+                          type: string
+                      required:
+                      - mode
+                      - path
+                      type: object
+                    name:
+                      description: |-
+                        Name is the asset alias, unique within the profile; the rendered
+                        ConfigMap is named <isvc>-<name>.
+                      minLength: 1
+                      type: string
+                  required:
+                  - configMapRef
+                  - name
+                  type: object
+                  x-kubernetes-validations:
+                  - message: exactly one of mount or envFrom must be set
+                    rule: '(has(self.mount) ? 1 : 0) + (has(self.envFrom) ? 1 : 0)
+                      == 1'
+                type: array
+              endpoint:
+                description: Endpoint selects the role serving as the service endpoint.
+                properties:
+                  portName:
+                    default: http
+                    description: PortName is the endpoint Service port name; defaults
+                      to http.
+                    type: string
+                  role:
+                    description: Role is the endpoint role name; it must exist in
+                      roles and define a service.
+                    minLength: 1
+                    type: string
+                required:
+                - role
+                type: object
+              engine:
+                description: Engine identifies the inference engine and its validated
+                  version.
+                properties:
+                  name:
+                    description: Name is the inference engine name, e.g. sglang.
+                    minLength: 1
+                    type: string
+                  version:
+                    description: Version is the validated engine version, e.g. vendor-0.5.12-rc1.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                - version
+                type: object
+              modelRequirements:
+                description: ModelRequirements declares the supported model architectures
+                  and quantizations.
+                properties:
+                  architectures:
+                    description: Architectures lists the supported model architectures,
+                      e.g. deepseek_v4.
+                    items:
+                      type: string
+                    minItems: 1
+                    type: array
+                  quantization:
+                    description: Quantization lists the supported weight quantization
+                      methods, e.g. w8a8.
+                    items:
+                      type: string
+                    minItems: 1
+                    type: array
+                required:
+                - architectures
+                - quantization
+                type: object
+              overrides:
+                description: Overrides declares the user-adjustable parameters.
+                items:
+                  description: |-
+                    Override declares a user-adjustable parameter. Users provide values in
+                    InferenceService.spec.overrides; parameters without a user value use Default.
+                  properties:
+                    default:
+                      description: Default is the value used when the user does not
+                        provide the parameter.
+                      x-kubernetes-preserve-unknown-fields: true
+                    description:
+                      description: Description explains the parameter's purpose to
+                        users.
+                      type: string
+                    enum:
+                      description: Enum lists the acceptable values.
+                      items:
+                        x-kubernetes-preserve-unknown-fields: true
+                      type: array
+                    max:
+                      description: Max is the maximum value for numeric parameters.
+                      format: int64
+                      type: integer
+                    min:
+                      description: Min is the minimum value for numeric parameters.
+                      format: int64
+                      type: integer
+                    name:
+                      description: Name is the parameter name, used as the key in
+                        InferenceService.spec.overrides.
+                      minLength: 1
+                      type: string
+                    type:
+                      description: Type is the parameter type, deciding how override
+                        values are parsed.
+                      enum:
+                      - integer
+                      - string
+                      - boolean
+                      type: string
+                  required:
+                  - name
+                  - type
+                  type: object
+                type: array
+              readinessPolicy:
+                description: ReadinessPolicy aggregates the service readiness condition.
+                properties:
+                  requireAllRoles:
+                    default: true
+                    description: |-
+                      RequireAllRoles requires all roles' workloads and Pods to be ready
+                      before the InferenceService is marked Ready; fixed to true in v1alpha1.
+                    type: boolean
+                required:
+                - requireAllRoles
+                type: object
+                x-kubernetes-validations:
+                - message: requireAllRoles is fixed to true in v1alpha1
+                  rule: self.requireAllRoles == true
+              roles:
+                description: Roles defines the workloads of the profile.
+                items:
+                  description: |-
+                    Role defines one workload of the profile. The generated resources are named
+                    <isvc>-<role>; the role name is the reference anchor for endpoint.role,
+                    dependsOn and templates.
+                  properties:
+                    dependsOn:
+                      description: |-
+                        DependsOn lists roles that must be ready before this one is created,
+                        forming a DAG.
+                      items:
+                        type: string
+                      type: array
+                    name:
+                      description: Name is the role name, unique within the profile.
+                      minLength: 1
+                      type: string
+                    podTemplate:
+                      description: PodTemplate is the Pod template of the role.
+                      properties:
+                        annotations:
+                          additionalProperties:
+                            type: string
+                          description: Annotations are passed through to the Pods,
+                            e.g. Prometheus annotations.
+                          type: object
+                        args:
+                          description: Args are the container arguments; supports
+                            {{ }} rendering.
+                          items:
+                            type: string
+                          type: array
+                        command:
+                          description: Command is the container command; supports
+                            {{ }} rendering.
+                          items:
+                            type: string
+                          type: array
+                        dnsPolicy:
+                          description: DNSPolicy is the Pod DNS policy.
+                          enum:
+                          - ClusterFirst
+                          - Default
+                          - ClusterFirstWithHostNet
+                          - None
+                          type: string
+                        env:
+                          description: Env lists environment variables, each with
+                            either a static value or a fieldRef.
+                          items:
+                            description: EnvVar is an environment variable with either
+                              a static value or a fieldRef.
+                            properties:
+                              fieldRef:
+                                description: FieldRef selects a downward API field,
+                                  e.g. status.hostIP.
+                                properties:
+                                  fieldPath:
+                                    description: FieldPath is the path of the field
+                                      to select, e.g. status.hostIP.
+                                    minLength: 1
+                                    type: string
+                                required:
+                                - fieldPath
+                                type: object
+                              name:
+                                description: Name is the environment variable name.
+                                minLength: 1
+                                type: string
+                              value:
+                                description: Value is the static value; may contain
+                                  templates.
+                                type: string
+                            required:
+                            - name
+                            type: object
+                            x-kubernetes-validations:
+                            - message: exactly one of value or fieldRef must be set
+                              rule: '(has(self.value) ? 1 : 0) + (has(self.fieldRef)
+                                ? 1 : 0) == 1'
+                          type: array
+                        envFromAssets:
+                          description: EnvFromAssets injects the listed rendered ConfigMaps
+                            as environment variables.
+                          items:
+                            type: string
+                          type: array
+                        hostNetwork:
+                          description: |-
+                            HostNetwork uses the host network namespace. When enabled the controller
+                            backfills ports[].containerPort as hostPort.
+                          type: boolean
+                        image:
+                          description: Image is the container image.
+                          minLength: 1
+                          type: string
+                        imagePullPolicy:
+                          description: ImagePullPolicy is the image pull policy.
+                          enum:
+                          - Always
+                          - Never
+                          - IfNotPresent
+                          type: string
+                        imagePullSecrets:
+                          description: ImagePullSecrets references private registry
+                            pull secrets.
+                          items:
+                            description: |-
+                              LocalObjectReference contains enough information to let you locate the
+                              referenced object inside the same namespace.
+                            properties:
+                              name:
+                                default: ""
+                                description: |-
+                                  Name of the referent.
+                                  This field is effectively required, but due to backwards compatibility is
+                                  allowed to be empty. Instances of this type with an empty value here are
+                                  almost certainly wrong.
+                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                type: string
+                            type: object
+                            x-kubernetes-map-type: atomic
+                          type: array
+                        labels:
+                          additionalProperties:
+                            type: string
+                          description: Labels are passed through to the Pods.
+                          type: object
+                        mounts:
+                          description: Mounts declares the model volume mounts of
+                            the role.
+                          items:
+                            description: |-
+                              ModelMount declares the model volume mount of a role. v1alpha1 supports a
+                              single main model; the profile fixes the in-container path while the
+                              ModelVersion fixes the storage strategy.
+                            properties:
+                              at:
+                                description: At is the in-container mount path.
+                                pattern: ^/
+                                type: string
+                              model:
+                                description: Model is the model key; v1alpha1 fixes
+                                  it to main.
+                                enum:
+                                - main
+                                type: string
+                              readOnly:
+                                description: ReadOnly is fixed to true in v1alpha1;
+                                  the model volume does not support writes.
+                                type: boolean
+                            required:
+                            - at
+                            - model
+                            - readOnly
+                            type: object
+                            x-kubernetes-validations:
+                            - message: model must be 'main' and readOnly must be true
+                              rule: self.model == 'main' && self.readOnly == true
+                          type: array
+                        nodeSelector:
+                          additionalProperties:
+                            type: string
+                          description: |-
+                            NodeSelector constrains scheduling to the declared node labels, e.g. a
+                            node pool with the pre-distributed model.
+                          type: object
+                        ports:
+                          description: Ports lists the container ports.
+                          items:
+                            description: ContainerPort declares a container port.
+                            properties:
+                              containerPort:
+                                description: ContainerPort is the port number.
+                                format: int32
+                                maximum: 65535
+                                minimum: 1
+                                type: integer
+                              name:
+                                description: Name is the port name, referenced by
+                                  service targetPort.
+                                minLength: 1
+                                type: string
+                            required:
+                            - containerPort
+                            - name
+                            type: object
+                          type: array
+                        probes:
+                          description: Probes defines the startup, readiness and liveness
+                            probes.
+                          properties:
+                            liveness:
+                              description: Liveness is the liveness probe.
+                              properties:
+                                failureThreshold:
+                                  description: FailureThreshold is the consecutive
+                                    failure count before giving up.
+                                  format: int32
+                                  type: integer
+                                httpGet:
+                                  description: HTTPGet performs an HTTP GET probe.
+                                  properties:
+                                    path:
+                                      description: Path is the HTTP path.
+                                      type: string
+                                    port:
+                                      anyOf:
+                                      - type: integer
+                                      - type: string
+                                      description: Port is the port to probe, either
+                                        a number or a container port name.
+                                      x-kubernetes-int-or-string: true
+                                  required:
+                                  - port
+                                  type: object
+                                initialDelaySeconds:
+                                  description: InitialDelaySeconds is the delay before
+                                    the first probe.
+                                  format: int32
+                                  type: integer
+                                periodSeconds:
+                                  description: PeriodSeconds is the probe period.
+                                  format: int32
+                                  type: integer
+                                tcpSocket:
+                                  description: TCPSocket performs a TCP connect probe.
+                                  properties:
+                                    port:
+                                      anyOf:
+                                      - type: integer
+                                      - type: string
+                                      description: Port is the port to probe, either
+                                        a number or a container port name.
+                                      x-kubernetes-int-or-string: true
+                                  required:
+                                  - port
+                                  type: object
+                                timeoutSeconds:
+                                  description: TimeoutSeconds is the probe timeout.
+                                  format: int32
+                                  type: integer
+                              type: object
+                              x-kubernetes-validations:
+                              - message: exactly one of httpGet or tcpSocket must
+                                  be set
+                                rule: '(has(self.httpGet) ? 1 : 0) + (has(self.tcpSocket)
+                                  ? 1 : 0) == 1'
+                            readiness:
+                              description: Readiness is the readiness probe.
+                              properties:
+                                failureThreshold:
+                                  description: FailureThreshold is the consecutive
+                                    failure count before giving up.
+                                  format: int32
+                                  type: integer
+                                httpGet:
+                                  description: HTTPGet performs an HTTP GET probe.
+                                  properties:
+                                    path:
+                                      description: Path is the HTTP path.
+                                      type: string
+                                    port:
+                                      anyOf:
+                                      - type: integer
+                                      - type: string
+                                      description: Port is the port to probe, either
+                                        a number or a container port name.
+                                      x-kubernetes-int-or-string: true
+                                  required:
+                                  - port
+                                  type: object
+                                initialDelaySeconds:
+                                  description: InitialDelaySeconds is the delay before
+                                    the first probe.
+                                  format: int32
+                                  type: integer
+                                periodSeconds:
+                                  description: PeriodSeconds is the probe period.
+                                  format: int32
+                                  type: integer
+                                tcpSocket:
+                                  description: TCPSocket performs a TCP connect probe.
+                                  properties:
+                                    port:
+                                      anyOf:
+                                      - type: integer
+                                      - type: string
+                                      description: Port is the port to probe, either
+                                        a number or a container port name.
+                                      x-kubernetes-int-or-string: true
+                                  required:
+                                  - port
+                                  type: object
+                                timeoutSeconds:
+                                  description: TimeoutSeconds is the probe timeout.
+                                  format: int32
+                                  type: integer
+                              type: object
+                              x-kubernetes-validations:
+                              - message: exactly one of httpGet or tcpSocket must
+                                  be set
+                                rule: '(has(self.httpGet) ? 1 : 0) + (has(self.tcpSocket)
+                                  ? 1 : 0) == 1'
+                            startup:
+                              description: Startup is the startup probe.
+                              properties:
+                                failureThreshold:
+                                  description: FailureThreshold is the consecutive
+                                    failure count before giving up.
+                                  format: int32
+                                  type: integer
+                                httpGet:
+                                  description: HTTPGet performs an HTTP GET probe.
+                                  properties:
+                                    path:
+                                      description: Path is the HTTP path.
+                                      type: string
+                                    port:
+                                      anyOf:
+                                      - type: integer
+                                      - type: string
+                                      description: Port is the port to probe, either
+                                        a number or a container port name.
+                                      x-kubernetes-int-or-string: true
+                                  required:
+                                  - port
+                                  type: object
+                                initialDelaySeconds:
+                                  description: InitialDelaySeconds is the delay before
+                                    the first probe.
+                                  format: int32
+                                  type: integer
+                                periodSeconds:
+                                  description: PeriodSeconds is the probe period.
+                                  format: int32
+                                  type: integer
+                                tcpSocket:
+                                  description: TCPSocket performs a TCP connect probe.
+                                  properties:
+                                    port:
+                                      anyOf:
+                                      - type: integer
+                                      - type: string
+                                      description: Port is the port to probe, either
+                                        a number or a container port name.
+                                      x-kubernetes-int-or-string: true
+                                  required:
+                                  - port
+                                  type: object
+                                timeoutSeconds:
+                                  description: TimeoutSeconds is the probe timeout.
+                                  format: int32
+                                  type: integer
+                              type: object
+                              x-kubernetes-validations:
+                              - message: exactly one of httpGet or tcpSocket must
+                                  be set
+                                rule: '(has(self.httpGet) ? 1 : 0) + (has(self.tcpSocket)
+                                  ? 1 : 0) == 1'
+                          type: object
+                        resources:
+                          description: Resources declares CPU, memory and per-Pod
+                            GPU requests.
+                          properties:
+                            cpu:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              description: CPU is written to requests.cpu.
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            gpuPerPod:
+                              description: |-
+                                GPUPerPod is the number of GPUs per Pod, mapped to the vendor's extended
+                                resource and written to both requests and limits.
+                              format: int64
+                              minimum: 1
+                              type: integer
+                            memory:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              description: Memory is written to requests.memory.
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                          type: object
+                        securityContext:
+                          description: SecurityContext is the supported Pod security
+                            context subset.
+                          properties:
+                            privileged:
+                              description: Privileged runs the container in privileged
+                                mode.
+                              type: boolean
+                            runAsGroup:
+                              description: RunAsGroup is the group ID of the container
+                                process.
+                              format: int64
+                              type: integer
+                            runAsUser:
+                              description: RunAsUser is the user ID of the container
+                                process.
+                              format: int64
+                              type: integer
+                          type: object
+                        terminationGracePeriodSeconds:
+                          default: 30
+                          description: |-
+                            TerminationGracePeriodSeconds is the grace period before forced termination;
+                            defaults to 30.
+                          format: int64
+                          type: integer
+                        volumes:
+                          description: |-
+                            Volumes lists additional volumes from the supported subset, e.g. shm
+                            emptyDir or InfiniBand hostPath.
+                          items:
+                            description: 'Volume is a supported subset of Kubernetes
+                              Volumes: emptyDir and hostPath.'
+                            properties:
+                              emptyDir:
+                                description: EmptyDir is an empty directory volume,
+                                  e.g. for /dev/shm.
+                                type: object
+                              hostPath:
+                                description: HostPath is a host path volume, e.g.
+                                  for InfiniBand devices.
+                                properties:
+                                  path:
+                                    description: Path is the absolute host path.
+                                    pattern: ^/
+                                    type: string
+                                required:
+                                - path
+                                type: object
+                              name:
+                                description: Name is the volume name.
+                                minLength: 1
+                                type: string
+                            required:
+                            - name
+                            type: object
+                            x-kubernetes-validations:
+                            - message: exactly one of emptyDir or hostPath must be
+                                set
+                              rule: '(has(self.emptyDir) ? 1 : 0) + (has(self.hostPath)
+                                ? 1 : 0) == 1'
+                          type: array
+                        workingDir:
+                          description: WorkingDir is the container working directory.
+                          type: string
+                      required:
+                      - image
+                      type: object
+                    service:
+                      description: Service defines the role's Kubernetes Service.
+                      properties:
+                        headless:
+                          description: |-
+                            Headless additionally creates a headless Service <isvc>-<role>-hl
+                            (ClusterIP: None) for per-Pod discovery.
+                          type: boolean
+                        ports:
+                          description: Ports lists the Service ports.
+                          items:
+                            description: ServicePort is a Service port.
+                            properties:
+                              name:
+                                description: Name is the port name, referenced by
+                                  endpoint.portName.
+                                minLength: 1
+                                type: string
+                              port:
+                                description: Port is the Service port number.
+                                format: int32
+                                maximum: 65535
+                                minimum: 1
+                                type: integer
+                              targetPort:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                description: TargetPort is the target port, either
+                                  a number or a container port name.
+                                x-kubernetes-int-or-string: true
+                            required:
+                            - name
+                            - port
+                            type: object
+                          type: array
+                      type: object
+                    workload:
+                      description: Workload defines the instance count and in-group
+                        topology.
+                      properties:
+                        group:
+                          description: Group is the in-group topology, required when
+                            kind is LeaderWorkerSet.
+                          properties:
+                            size:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              description: |-
+                                Size is the number of Pods per group, including the leader. May be a
+                                template referencing overrides; 1 is a single-Pod group.
+                              x-kubernetes-int-or-string: true
+                            startupPolicy:
+                              description: StartupPolicy is the group startup order;
+                                v1alpha1 fixes it to LeaderCreated.
+                              enum:
+                              - LeaderCreated
+                              type: string
+                          required:
+                          - size
+                          - startupPolicy
+                          type: object
+                        kind:
+                          description: Kind selects the workload type.
+                          enum:
+                          - LeaderWorkerSet
+                          - Deployment
+                          type: string
+                        replicas:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          description: |-
+                            Replicas is the number of instance groups (LeaderWorkerSet) or Pods
+                            (Deployment). May be a template referencing overrides.
+                          x-kubernetes-int-or-string: true
+                      required:
+                      - kind
+                      type: object
+                  required:
+                  - name
+                  - podTemplate
+                  - workload
+                  type: object
+                minItems: 1
+                type: array
+              vars:
+                additionalProperties:
+                  type: string
+                description: Vars are admin-defined template constants, referenced
+                  as {{ profile.vars.<key> }}.
+                type: object
+            required:
+            - accelerator
+            - endpoint
+            - engine
+            - modelRequirements
+            - roles
+            type: object
+          status:
+            description: status defines the observed state of InferenceRuntimeProfile
+            properties:
+              conditions:
+                description: |-
+                  conditions represent the current state of the InferenceRuntimeProfile resource.
+                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
+
+                  Standard condition types include (see conditions.go for the constants):
+                  - ConditionAssetsResolved: all assets[].configMapRef.name exist in cubestack-system
+                  - ConditionInUse: the InferenceRuntimeProfile is referenced by at least one InferenceService
+
+                  The status of each condition is one of True, False, or Unknown.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              usedBy:
+                description: |-
+                  UsedBy lists the InferenceServices currently referencing this
+                  InferenceRuntimeProfile.
+                items:
+                  description: ObjectRef identifies an InferenceService referencing
+                    this ModelVersion.
+                  properties:
+                    name:
+                      description: Name is the name of the referencing InferenceService.
+                      type: string
+                    namespace:
+                      description: Namespace is the namespace of the referencing InferenceService.
+                      type: string
+                  required:
+                  - name
+                  - namespace
+                  type: object
+                type: array
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

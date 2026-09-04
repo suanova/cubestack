@@ -76,7 +76,8 @@ type ProfileStatus struct {
 
 	// Revision is the combined hash of the profile spec and asset contents at
 	// the last successful apply; the baseline for same-name-recreation detection.
-	Revision string `json:"revision"`
+	// +optional
+	Revision string `json:"revision,omitempty"`
 }
 
 // ModelStatus echoes the resolved ModelVersion.

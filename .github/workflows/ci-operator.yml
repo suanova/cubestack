@@ -98,13 +98,41 @@ jobs:
           echo "${KIND_SHA256}  ./kind" | sha256sum --check --strict
           chmod +x ./kind
           sudo mv ./kind /usr/local/bin/kind
-      - name: Verify kind installation
-        run: kind version
-      - name: Running Test e2e
-        run: make test-e2e
+      - name: Install the operator via helm into a kind cluster
+        run: make helm-e2e-install
+        working-directory: operator
+      - name: Verify CRDs, VAPs and RBAC
+        run: make helm-e2e-crd-check
+        working-directory: operator
+      - name: Run the gpu-less ISVC happy-path verification
+        run: make helm-e2e-verify
+        working-directory: operator
+      - name: Clean up the kind cluster
+        if: always()
+        run: make helm-e2e-cleanup
+        working-directory: operator
+
+  helm-drift:
+    needs: changes
+    if: needs.changes.outputs.operator == 'true'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Setup Go
+        uses: ./.github/actions/setup-go
+        with:
+          go-version-file: operator/go.mod
+      - name: Check helm resources are in sync
+        run: make helm-resources-check
+        working-directory: operator
 
   result:
-    needs: [lint, test, test-e2e]
+    needs: [lint, test, test-e2e, helm-drift]
     if: always()
     runs-on: ubuntu-latest
     steps:

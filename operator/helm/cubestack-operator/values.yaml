@@ -1,0 +1,13 @@
+image:
+  repository: harbor.isuanova.com/suanova/cubestack-operator
+  tag: latest
+
+replicaCount: 1
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 128Mi
+  requests:
+    cpu: 10m
+    memory: 64Mi

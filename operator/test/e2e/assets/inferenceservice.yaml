@@ -1,0 +1,10 @@
+apiVersion: ai.cubestack.io/v1alpha1
+kind: InferenceService
+metadata:
+  name: e2e-service
+  namespace: demo
+spec:
+  modelRef: e2e-model-v1
+  profileRef: nvidia-echo-e2e
+  overrides:
+    verbosity: 9

@@ -96,6 +96,138 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
 
+# ---- Helm-based e2e (dedicated kind cluster, independent of test-e2e) ----
+KIND_CLUSTER_HELM ?= cubestack-helm-e2e
+# kubectl/helm pinned to the dedicated cluster regardless of the ambient
+# kubeconfig context.
+HELM_E2E_KUBECTL = $(KUBECTL) --context kind-$(KIND_CLUSTER_HELM)
+HELM_E2E_HELM = $(HELM) --kube-context kind-$(KIND_CLUSTER_HELM)
+HELM_NAMESPACE ?= cubestack-system
+HELM_CHART_DIR ?= helm/cubestack-operator
+ECHO_IMG ?= example.com/cubestack-e2e-echo:v0.0.1
+HELM_RELEASE ?= cubestack
+# Manager image for the helm e2e flow. Defaults to the same registry image as
+# the top-of-file IMG default; the chart Deployment template bakes
+# imagePullPolicy=IfNotPresent, so the kind-loaded image wins over the
+# registry even for the :latest tag. Derives from IMG when the caller sets
+# IMG explicitly (command line or environment).
+ifeq ($(origin IMG),file)
+HELM_E2E_IMG ?= harbor.isuanova.com/suanova/cubestack-operator:latest
+else
+HELM_E2E_IMG ?= $(IMG)
+endif
+# Split on the LAST colon so registries with a port (reg:5000/img:tag) work.
+HELM_E2E_IMAGE_REPO = $(shell echo '$(HELM_E2E_IMG)' | sed -E 's/:[^:]*$$//')
+HELM_E2E_IMAGE_TAG = $(shell echo '$(HELM_E2E_IMG)' | sed -E 's/^.*://')
+
+.PHONY: helm-e2e-setup
+helm-e2e-setup: ## Create the dedicated kind cluster for helm e2e if it does not exist
+	@command -v $(KIND) >/dev/null 2>&1 || { echo "Kind is not installed. Please install Kind manually."; exit 1; }
+	@if $(KIND) get clusters | grep -Fxq "$(KIND_CLUSTER_HELM)"; then \
+		echo "Kind cluster '$(KIND_CLUSTER_HELM)' already exists. Skipping creation."; \
+	else \
+		echo "Creating Kind cluster '$(KIND_CLUSTER_HELM)'..."; \
+		$(KIND) create cluster --name $(KIND_CLUSTER_HELM); \
+	fi
+	@echo "Installing gateway-api CRDs (the manager watches Gateway/HTTPRoute/TCPRoute)..." ; \
+	GW_VER="$$(awk '$$1=="sigs.k8s.io/gateway-api" {print $$2}' go.mod)"; \
+	[ -n "$$GW_VER" ] || { echo "sigs.k8s.io/gateway-api not found in go.mod"; exit 1; }; \
+	go mod download sigs.k8s.io/gateway-api; \
+	GW_CRD_DIR="$$(go env GOMODCACHE)/sigs.k8s.io/gateway-api@$${GW_VER}/config/crd/standard"; \
+	[ -d "$$GW_CRD_DIR" ] || { echo "gateway-api CRD dir not found: $${GW_CRD_DIR}"; exit 1; }; \
+	$(HELM_E2E_KUBECTL) apply -f "$${GW_CRD_DIR}"
+	@echo "Provisioning the upstream LeaderWorkerSet controller (image from the pinned lws go module)..." ; \
+	KIND_CLUSTER_HELM="$(KIND_CLUSTER_HELM)" KIND="$(KIND)" KUBECTL="$(KUBECTL)" hack/install-lws-controller.sh
+
+.PHONY: helm-e2e-images
+helm-e2e-images: ## Build and load manager + echo images into the helm kind cluster
+	$(MAKE) docker-build IMG=$(HELM_E2E_IMG)
+	@if [ -f test/e2e/assets/echo/Dockerfile ]; then \
+		docker build -f test/e2e/assets/echo/Dockerfile -t $(ECHO_IMG) test/e2e/assets/echo; \
+		$(KIND) load docker-image $(ECHO_IMG) --name $(KIND_CLUSTER_HELM); \
+	else \
+		echo "echo image not present yet (created by a later task) — skipping echo build/load"; \
+	fi
+	$(KIND) load docker-image $(HELM_E2E_IMG) --name $(KIND_CLUSTER_HELM)
+
+.PHONY: helm-e2e-install
+helm-e2e-install: helm-e2e-setup helm-e2e-images manifests generate fmt vet ## Install the operator via helm into the dedicated kind cluster
+	$(HELM_E2E_HELM) upgrade --install $(HELM_RELEASE) $(HELM_CHART_DIR) \
+		--namespace $(HELM_NAMESPACE) --create-namespace \
+		--set image.repository=$(HELM_E2E_IMAGE_REPO) \
+		--set image.tag=$(HELM_E2E_IMAGE_TAG) \
+		--wait --timeout 5m
+	@echo "manager rollout status:"
+	$(HELM_E2E_KUBECTL) rollout status deployment/cubestack-controller-manager -n $(HELM_NAMESPACE) --timeout=3m
+
+.PHONY: helm-e2e-crd-check
+helm-e2e-crd-check: ## Verify CRDs, VAPs and RBAC installed by the chart (phase-1 acceptance)
+	@set -e; \
+	echo "CRDs:"; $(HELM_E2E_KUBECTL) get crd | grep -E "ai\.cubestack\.io|leaderworkerset\.x-k8s\.io|disaggregatedset\.x-k8s\.io"; \
+	for crd in devenvironments.ai.cubestack.io inferenceruntimeprofiles.ai.cubestack.io inferenceservices.ai.cubestack.io modelversions.ai.cubestack.io leaderworkersets.leaderworkerset.x-k8s.io disaggregatedsets.disaggregatedset.x-k8s.io disaggregatedsetrolescalers.disaggregatedset.x-k8s.io; do \
+		$(HELM_E2E_KUBECTL) get crd $$crd >/dev/null || { echo "MISSING CRD: $$crd"; exit 1; }; \
+	done; \
+	echo "VAPs:"; $(HELM_E2E_KUBECTL) get validatingadmissionpolicy | grep -E "modelversions|inferenceservices|inferenceruntimeprofiles"; \
+	echo "VAP bindings:"; $(HELM_E2E_KUBECTL) get validatingadmissionpolicybinding | grep -E "modelversions|inferenceservices|inferenceruntimeprofiles"; \
+	echo "RBAC:"; $(HELM_E2E_KUBECTL) get clusterrole cubestack-manager-role >/dev/null; \
+	$(HELM_E2E_KUBECTL) get clusterrole cubestack-metrics-reader >/dev/null; \
+	$(HELM_E2E_KUBECTL) get clusterrolebinding cubestack-manager-rolebinding >/dev/null; \
+	$(HELM_E2E_KUBECTL) get sa cubestack-controller-manager -n $(HELM_NAMESPACE) >/dev/null; \
+	echo "schema validation (invalid MV must be rejected):"; \
+	if printf '%s\n' 'apiVersion: ai.cubestack.io/v1alpha1' 'kind: ModelVersion' 'metadata:' '  name: e2e-invalid-should-fail' 'spec:' '  model: x' | $(HELM_E2E_KUBECTL) apply -f -; then \
+		echo "ERROR: invalid ModelVersion was accepted — CRD schema not enforced"; \
+		exit 1; \
+	fi
+	@echo "helm-e2e-crd-check: OK"
+
+.PHONY: helm-e2e-verify
+helm-e2e-verify: helm-e2e-setup helm-e2e-install ## Full gpu-less happy path: ISVC to Ready=True with rendered-arg assertion
+	@set -e; \
+	KIND_NODE="$$($(KIND) get nodes --name $(KIND_CLUSTER_HELM) 2>/dev/null || echo $(KIND_CLUSTER_HELM)-control-plane)"; \
+	echo "pre-creating the HostPath model directory on the kind node (HostPathDirectory)"; \
+	docker exec $$KIND_NODE mkdir -p /mnt/cubestack-e2e-model; \
+	$(HELM_E2E_KUBECTL) create ns demo --dry-run=client -o yaml | $(HELM_E2E_KUBECTL) apply -f - >/dev/null; \
+	$(HELM_E2E_KUBECTL) apply -f test/e2e/assets/modelversion.yaml >/dev/null; \
+	$(HELM_E2E_KUBECTL) apply -f test/e2e/assets/inferenceruntimeprofile.yaml >/dev/null; \
+	$(HELM_E2E_KUBECTL) apply -f test/e2e/assets/inferenceservice.yaml >/dev/null; \
+	echo "waiting for the rendered override to reach the pod logs (up to 4m)..."; \
+	# Poll-before-wait is deliberate: the log poll guarantees a pod from this \
+	# spec exists before kubectl wait, which would otherwise early-return on a \
+	# stale Ready=True from a previous spec. Do not reorder. \
+	POD=""; \
+	for i in $$(seq 1 80); do \
+		for p in $$($(HELM_E2E_KUBECTL) get pods -n demo -l leaderworkerset.sigs.k8s.io/name=e2e-service-router -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do \
+			if $(HELM_E2E_KUBECTL) logs -n demo $$p 2>/dev/null | grep -q "ECHO_ARGV:--verbosity=9"; then POD=$$p; break 2; fi; \
+		done; \
+		sleep 3; \
+	done; \
+	[ -n "$$POD" ] || { echo "rendered arg --verbosity=9 not found in any e2e-service-router pod log within 4m"; $(HELM_E2E_KUBECTL) get pods -n demo; exit 1; }; \
+	echo "rendered arg asserted in pod $$POD"; \
+	echo "waiting for ISVC Ready (gpu-less, up to 4m)..."; \
+	$(HELM_E2E_KUBECTL) wait --for=condition=Ready inferenceservice/e2e-service -n demo --timeout=4m; \
+	echo "condition dump:"; \
+	$(HELM_E2E_KUBECTL) get inferenceservice e2e-service -n demo -o jsonpath='{range .status.conditions[*]}{.type}={.status} {end}'; echo; \
+	echo "asserting hostPath volume mount:"; \
+	$(HELM_E2E_KUBECTL) get pod -n demo $$POD -o jsonpath='{range .spec.volumes[*]}{.name}={.hostPath.path}{"\n"}{end}' | grep -q "/mnt/cubestack-e2e-model" || { echo "hostPath volume missing"; exit 1; }; \
+	$(HELM_E2E_KUBECTL) get endpoints -n demo e2e-service-router -o jsonpath='{.subsets[0].addresses}' | grep -q . || { echo "no ready endpoints"; exit 1; }; \
+	echo "helm-e2e-verify: OK"
+
+.PHONY: helm-e2e-uninstall
+helm-e2e-uninstall: ## Uninstall the helm release; CRDs intentionally remain
+	$(HELM_E2E_HELM) uninstall $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
+
+.PHONY: helm-e2e-cleanup
+helm-e2e-cleanup: ## Delete the dedicated kind cluster
+	@$(KIND) delete cluster --name $(KIND_CLUSTER_HELM)
+
+.PHONY: helm-resources-update
+helm-resources-update: ## Regenerate chart resources from config/ sources
+	hack/update-helm-resources.sh
+
+.PHONY: helm-resources-check
+helm-resources-check: ## Fail if chart resources are out of sync with config/ sources
+	hack/update-helm-resources.sh && git diff --exit-code -- helm hack/update-helm-resources.sh || { echo "chart resources out of date — run: make helm-resources-update"; exit 1; }
+
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
 	"$(GOLANGCI_LINT)" run
@@ -186,6 +318,7 @@ $(LOCALBIN):
 ## Tool Binaries
 KUBECTL ?= kubectl
 KIND ?= kind
+HELM ?= helm
 KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest

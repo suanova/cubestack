@@ -1,0 +1,15 @@
+apiVersion: ai.cubestack.io/v1alpha1
+kind: ModelVersion
+metadata:
+  # VAP rule (config/vap/modelversion_policy.yaml): name must equal
+  # spec.model + "-" + spec.version.
+  name: e2e-model-v1
+spec:
+  model: e2e-model
+  version: v1
+  architecture: e2edummy
+  quantization: none
+  storage:
+    strategy: HostPath
+    hostPath:
+      path: /mnt/cubestack-e2e-model

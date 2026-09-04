@@ -1,0 +1,50 @@
+apiVersion: ai.cubestack.io/v1alpha1
+kind: InferenceRuntimeProfile
+metadata:
+  # VAP rule (config/vap/inferenceruntimeprofile_policy.yaml): name must start
+  # with <accelerator.vendor>-<engine.name>-.
+  name: nvidia-echo-e2e
+spec:
+  accelerator:
+    vendor: nvidia
+    models: [e2e-dummy]
+  engine:
+    name: echo
+    version: v1
+  modelRequirements:
+    architectures: [e2edummy]
+    quantization: [none]
+  overrides:
+  - name: verbosity
+    type: integer
+    min: 1
+    max: 99
+    default: 7
+    description: "echo verbosity, rendered into the pod args"
+  roles:
+  - name: router
+    workload:
+      kind: LeaderWorkerSet
+      replicas: "1"
+      group:
+        size: "1"
+        startupPolicy: LeaderCreated
+    podTemplate:
+      image: example.com/cubestack-e2e-echo:v0.0.1
+      args:
+      - "--verbosity={{ overrides.verbosity }}"
+      - "--model-dir=/workspace/model"
+      ports:
+      - name: http
+        containerPort: 8080
+      mounts:
+      - model: main
+        at: /workspace/model
+        readOnly: true
+    service:
+      ports:
+      - name: http
+        port: 8001
+        targetPort: http
+  endpoint:
+    role: router
