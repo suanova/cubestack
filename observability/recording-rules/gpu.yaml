@@ -1,0 +1,134 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: cubestack-gpu
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: cubestack-observability
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: cubestack.node.gpu
+      interval: 60s
+      rules:
+        # Per-node GPU capacity (allocatable)
+        - record: cluster_node:cubestack_gpu_capacity:sum
+          expr: |
+            sum by (node) (
+              kube_node_status_allocatable{resource=~"nvidia.com/gpu|metax-tech.com/gpu"}
+            )
+
+        # Per-node GPU allocated
+        - record: cluster_node:cubestack_gpu_allocated:sum
+          expr: |
+            sum by (node) (
+              label_replace(
+                kube_pod_container_resource_requests{resource=~"nvidia.com/gpu|metax-tech.com/gpu"},
+                "node", "$1", "node", "(.*)"
+              )
+              * on(namespace, pod) group_left(node)
+              kube_pod_info
+            )
+
+        # Per-node GPU utilization average (MetaX)
+        - record: cluster_node:cubestack_gpu_utilization_ratio:avg
+          expr: |
+            avg by (node) (
+              label_replace(
+                mx_gpu_usage / 100,
+                "node", "$1", "Hostname", "(.*)"
+              )
+            )
+
+    - name: cubestack.workload.gpu
+      interval: 60s
+      rules:
+        # GPU utilization per InferenceService or DevEnvironment (MetaX)
+        - record: cubestack_gpu_utilization_ratio:max
+          expr: |
+            max by (namespace, inference_service, uuid) (
+              label_replace(
+                label_replace(
+                  mx_gpu_usage / 100,
+                  "namespace", "$1", "exported_namespace", "(.*)"
+                ),
+                "pod", "$1", "exported_pod", "(.*)"
+              )
+              * on(namespace, pod) group_left(label_cubestack_io_inference_service)
+              kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-inference"}
+            )
+            or
+            max by (namespace, devenv, uuid) (
+              label_replace(
+                label_replace(
+                  mx_gpu_usage / 100,
+                  "namespace", "$1", "exported_namespace", "(.*)"
+                ),
+                "pod", "$1", "exported_pod", "(.*)"
+              )
+              * on(namespace, pod) group_left(label_cubestack_io_devenv)
+              kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv"}
+            )
+
+        # GPU VRAM utilization per InferenceService or DevEnvironment (MetaX)
+        - record: cubestack_gpu_memory_utilization_ratio:max
+          expr: |
+            max by (namespace, inference_service, uuid) (
+              label_replace(
+                label_replace(
+                  mx_hbm_bw_util / 100,
+                  "namespace", "$1", "exported_namespace", "(.*)"
+                ),
+                "pod", "$1", "exported_pod", "(.*)"
+              )
+              * on(namespace, pod) group_left(label_cubestack_io_inference_service)
+              kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-inference"}
+            )
+            or
+            max by (namespace, devenv, uuid) (
+              label_replace(
+                label_replace(
+                  mx_hbm_bw_util / 100,
+                  "namespace", "$1", "exported_namespace", "(.*)"
+                ),
+                "pod", "$1", "exported_pod", "(.*)"
+              )
+              * on(namespace, pod) group_left(label_cubestack_io_devenv)
+              kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv"}
+            )
+
+    - name: cubestack.gpu.per_card
+      interval: 60s
+      rules:
+        # Per-card GPU utilization ratio (for Node GPU detail panel)
+        - record: cubestack_gpu_utilization_ratio
+          expr: |
+            label_replace(
+              mx_gpu_usage / 100,
+              "node", "$1", "Hostname", "(.*)"
+            )
+
+        # Per-card VRAM utilization ratio
+        # mx_hbm_bw_util is HBM bandwidth utilization (0-100)
+        - record: cubestack_gpu_memory_utilization_ratio
+          expr: |
+            label_replace(
+              mx_hbm_bw_util / 100,
+              "node", "$1", "Hostname", "(.*)"
+            )
+
+        # Per-card GPU temperature (celsius)
+        - record: cubestack_gpu_temperature_celsius
+          expr: |
+            label_replace(
+              mx_chip_hotspot_temp,
+              "node", "$1", "Hostname", "(.*)"
+            )
+
+        # Per-card GPU power (watts, converted from milliwatts)
+        - record: cubestack_gpu_power_watts
+          expr: |
+            label_replace(
+              mx_board_power / 1000,
+              "node", "$1", "Hostname", "(.*)"
+            )

@@ -1,0 +1,191 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: cubestack-devenv
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: cubestack-observability
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: cubestack.devenv
+      interval: 60s
+      rules:
+        # Per-DevEnvironment GPU allocated count
+        - record: cubestack_devenv_gpu_allocated:sum
+          expr: |
+            sum by (namespace, devenv) (
+              label_replace(
+                kube_pod_container_resource_requests{resource=~"nvidia.com/gpu|metax-tech.com/gpu"}
+                * on(namespace, pod) group_left(label_cubestack_io_devenv)
+                kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv"},
+                "devenv", "$1", "label_cubestack_io_devenv", "(.*)"
+              )
+            )
+
+        # Per-DevEnvironment CPU usage (from cAdvisor)
+        - record: cubestack_devenv_cpu_usage_cores:sum
+          expr: |
+            sum by (namespace, devenv) (
+              label_replace(
+                rate(container_cpu_usage_seconds_total{container!=""}[5m])
+                * on(namespace, pod) group_left(label_cubestack_io_devenv)
+                kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv"},
+                "devenv", "$1", "label_cubestack_io_devenv", "(.*)"
+              )
+            )
+
+        # Per-DevEnvironment CPU request (from KSM)
+        - record: cubestack_devenv_cpu_request_cores:sum
+          expr: |
+            sum by (namespace, devenv) (
+              label_replace(
+                kube_pod_container_resource_requests{resource="cpu"}
+                * on(namespace, pod) group_left(label_cubestack_io_devenv)
+                kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv"},
+                "devenv", "$1", "label_cubestack_io_devenv", "(.*)"
+              )
+            )
+
+        # Per-DevEnvironment memory working set (from cAdvisor)
+        - record: cubestack_devenv_memory_working_set_bytes:sum
+          expr: |
+            sum by (namespace, devenv) (
+              label_replace(
+                container_memory_working_set_bytes{container!=""}
+                * on(namespace, pod) group_left(label_cubestack_io_devenv)
+                kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv"},
+                "devenv", "$1", "label_cubestack_io_devenv", "(.*)"
+              )
+            )
+
+        # Per-DevEnvironment memory request
+        - record: cubestack_devenv_memory_request_bytes:sum
+          expr: |
+            sum by (namespace, devenv) (
+              label_replace(
+                kube_pod_container_resource_requests{resource="memory"}
+                * on(namespace, pod) group_left(label_cubestack_io_devenv)
+                kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv"},
+                "devenv", "$1", "label_cubestack_io_devenv", "(.*)"
+              )
+            )
+
+        # Per-DevEnvironment pod ready status (min across all pods = all must be ready)
+        - record: cubestack_devenv_pod_ready:min
+          expr: |
+            min by (namespace, devenv) (
+              label_replace(
+                kube_pod_status_ready
+                * on(namespace, pod) group_left(label_cubestack_io_devenv)
+                kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv"},
+                "devenv", "$1", "label_cubestack_io_devenv", "(.*)"
+              )
+            )
+
+        # Per-DevEnvironment container ready status (min)
+        - record: cubestack_devenv_container_ready:min
+          expr: |
+            min by (namespace, devenv) (
+              label_replace(
+                kube_pod_container_status_ready
+                * on(namespace, pod) group_left(label_cubestack_io_devenv)
+                kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv"},
+                "devenv", "$1", "label_cubestack_io_devenv", "(.*)"
+              )
+            )
+
+        # Per-DevEnvironment container restart count (sum)
+        - record: cubestack_devenv_container_restarts_total:sum
+          expr: |
+            sum by (namespace, devenv) (
+              label_replace(
+                kube_pod_container_status_restarts_total
+                * on(namespace, pod) group_left(label_cubestack_io_devenv)
+                kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv"},
+                "devenv", "$1", "label_cubestack_io_devenv", "(.*)"
+              )
+            )
+
+        # Per-DevEnvironment network receive bytes rate
+        - record: cubestack_devenv_network_receive_bytes:rate5m
+          expr: |
+            sum by (namespace, devenv) (
+              label_replace(
+                rate(container_network_receive_bytes_total{pod!=""}[5m])
+                * on(namespace, pod) group_left(label_cubestack_io_devenv)
+                kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv"},
+                "devenv", "$1", "label_cubestack_io_devenv", "(.*)"
+              )
+            )
+
+        # Per-DevEnvironment network transmit bytes rate
+        - record: cubestack_devenv_network_transmit_bytes:rate5m
+          expr: |
+            sum by (namespace, devenv) (
+              label_replace(
+                rate(container_network_transmit_bytes_total{pod!=""}[5m])
+                * on(namespace, pod) group_left(label_cubestack_io_devenv)
+                kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv"},
+                "devenv", "$1", "label_cubestack_io_devenv", "(.*)"
+              )
+            )
+
+        # Per-DevEnvironment filesystem read bytes rate
+        - record: cubestack_devenv_fs_read_bytes:rate5m
+          expr: |
+            sum by (namespace, devenv) (
+              label_replace(
+                rate(container_fs_reads_bytes_total{container!=""}[5m])
+                * on(namespace, pod) group_left(label_cubestack_io_devenv)
+                kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv"},
+                "devenv", "$1", "label_cubestack_io_devenv", "(.*)"
+              )
+            )
+
+        # Per-DevEnvironment filesystem write bytes rate
+        - record: cubestack_devenv_fs_write_bytes:rate5m
+          expr: |
+            sum by (namespace, devenv) (
+              label_replace(
+                rate(container_fs_writes_bytes_total{container!=""}[5m])
+                * on(namespace, pod) group_left(label_cubestack_io_devenv)
+                kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv"},
+                "devenv", "$1", "label_cubestack_io_devenv", "(.*)"
+              )
+            )
+
+        # Per-DevEnvironment PVC bound status (min = all PVCs must be bound)
+        # Requires join: pod → PVC → bound status
+        - record: cubestack_devenv_pvc_bound:min
+          expr: |
+            min by (namespace, devenv) (
+              label_replace(
+                label_replace(
+                  kube_persistentvolumeclaim_status_phase{phase="Bound"} * 0 + 1,
+                  "pod", "$1", "pod", "(.*)"
+                )
+                * on(namespace, persistentvolumeclaim) group_left(pod)
+                kube_pod_spec_volumes_persistentvolumeclaims_info,
+                "dummy", "", "", ""
+              )
+              * on(namespace, pod) group_left(label_cubestack_io_devenv)
+              kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv"}
+            )
+
+        # Per-DevEnvironment PVC requested capacity
+        - record: cubestack_devenv_pvc_requested_capacity_bytes:sum
+          expr: |
+            sum by (namespace, devenv) (
+              label_replace(
+                label_replace(
+                  kube_persistentvolumeclaim_resource_requests_storage_bytes,
+                  "pod", "$1", "pod", "(.*)"
+                )
+                * on(namespace, persistentvolumeclaim) group_left(pod)
+                kube_pod_spec_volumes_persistentvolumeclaims_info,
+                "dummy", "", "", ""
+              )
+              * on(namespace, pod) group_left(label_cubestack_io_devenv)
+              kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv"}
+            )

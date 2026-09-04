@@ -1,0 +1,179 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: cubestack-inference
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: cubestack-observability
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: cubestack.inference_service
+      interval: 60s
+      rules:
+        # Per-InferenceService GPU allocated count
+        # Requires: kube_pod_labels has label_cubestack_io_inference_service (KSM allowlist)
+        - record: cubestack_inference_gpu_allocated:sum
+          expr: |
+            sum by (namespace, inference_service) (
+              label_replace(
+                kube_pod_container_resource_requests{resource=~"nvidia.com/gpu|metax-tech.com/gpu"}
+                * on(namespace, pod) group_left(label_cubestack_io_inference_service)
+                kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-inference"},
+                "inference_service", "$1", "label_cubestack_io_inference_service", "(.*)"
+              )
+            )
+
+        # Per-InferenceService request rate (keyed by gen_ai_request_model)
+        # NOTE: Envoy AI Gateway metrics carry only model-level labels; per-IS rate
+        # is approximated by model name until Gateway exposes IS-level labels.
+        # See docs/dependencies.md §Gateway.
+        - record: cubestack_inference_requests:rate5m
+          expr: |
+            sum by (gen_ai_request_model) (
+              rate(gen_ai_server_request_duration_seconds_count[5m])
+            )
+
+        - record: cubestack_inference_prompt_tokens:rate5m
+          expr: |
+            sum by (gen_ai_request_model) (
+              rate(gen_ai_client_token_usage_count{gen_ai_token_type="input"}[5m])
+            )
+
+        - record: cubestack_inference_generation_tokens:rate5m
+          expr: |
+            sum by (gen_ai_request_model) (
+              rate(gen_ai_client_token_usage_count{gen_ai_token_type="output"}[5m])
+            )
+
+        # E2E request duration percentiles (from Envoy AI Gateway histogram)
+        - record: cubestack_inference_request_duration_seconds:p50_rate5m
+          expr: |
+            histogram_quantile(0.50,
+              sum by (gen_ai_request_model, le) (
+                rate(gen_ai_server_request_duration_seconds_bucket[5m])
+              )
+            )
+
+        - record: cubestack_inference_request_duration_seconds:p95_rate5m
+          expr: |
+            histogram_quantile(0.95,
+              sum by (gen_ai_request_model, le) (
+                rate(gen_ai_server_request_duration_seconds_bucket[5m])
+              )
+            )
+
+        - record: cubestack_inference_request_duration_seconds:p99_rate5m
+          expr: |
+            histogram_quantile(0.99,
+              sum by (gen_ai_request_model, le) (
+                rate(gen_ai_server_request_duration_seconds_bucket[5m])
+              )
+            )
+
+        # TTFT percentiles
+        - record: cubestack_inference_time_to_first_token_seconds:p50_rate5m
+          expr: |
+            histogram_quantile(0.50,
+              sum by (gen_ai_request_model, le) (
+                rate(gen_ai_server_time_to_first_token_seconds_bucket[5m])
+              )
+            )
+
+        - record: cubestack_inference_time_to_first_token_seconds:p95_rate5m
+          expr: |
+            histogram_quantile(0.95,
+              sum by (gen_ai_request_model, le) (
+                rate(gen_ai_server_time_to_first_token_seconds_bucket[5m])
+              )
+            )
+
+        - record: cubestack_inference_time_to_first_token_seconds:p99_rate5m
+          expr: |
+            histogram_quantile(0.99,
+              sum by (gen_ai_request_model, le) (
+                rate(gen_ai_server_time_to_first_token_seconds_bucket[5m])
+              )
+            )
+
+        # TPOT percentiles
+        - record: cubestack_inference_time_per_output_token_seconds:p50_rate5m
+          expr: |
+            histogram_quantile(0.50,
+              sum by (gen_ai_request_model, le) (
+                rate(gen_ai_server_time_per_output_token_seconds_bucket[5m])
+              )
+            )
+
+        - record: cubestack_inference_time_per_output_token_seconds:p95_rate5m
+          expr: |
+            histogram_quantile(0.95,
+              sum by (gen_ai_request_model, le) (
+                rate(gen_ai_server_time_per_output_token_seconds_bucket[5m])
+              )
+            )
+
+        - record: cubestack_inference_time_per_output_token_seconds:p99_rate5m
+          expr: |
+            histogram_quantile(0.99,
+              sum by (gen_ai_request_model, le) (
+                rate(gen_ai_server_time_per_output_token_seconds_bucket[5m])
+              )
+            )
+
+        # Running requests per InferenceService (with role label for PD split)
+        - record: cubestack_inference_requests_running:sum
+          expr: |
+            sum by (namespace, inference_service, role) (
+              label_replace(
+                label_replace(
+                  sglang_num_running_reqs
+                  * on(namespace, pod) group_left(label_cubestack_io_inference_service, label_cubestack_io_role)
+                  kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-inference"},
+                  "inference_service", "$1", "label_cubestack_io_inference_service", "(.*)"
+                ),
+                "role", "$1", "label_cubestack_io_role", "(.*)"
+              )
+            )
+
+        # Waiting requests per InferenceService
+        - record: cubestack_inference_requests_waiting:sum
+          expr: |
+            sum by (namespace, inference_service, role) (
+              label_replace(
+                label_replace(
+                  sglang_num_waiting_reqs
+                  * on(namespace, pod) group_left(label_cubestack_io_inference_service, label_cubestack_io_role)
+                  kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-inference"},
+                  "inference_service", "$1", "label_cubestack_io_inference_service", "(.*)"
+                ),
+                "role", "$1", "label_cubestack_io_role", "(.*)"
+              )
+            )
+
+        # KV cache usage per InferenceService (max pressure across workers)
+        - record: cubestack_inference_kv_cache_usage_ratio:max
+          expr: |
+            max by (namespace, inference_service, role) (
+              label_replace(
+                label_replace(
+                  sglang_token_usage
+                  * on(namespace, pod) group_left(label_cubestack_io_inference_service, label_cubestack_io_role)
+                  kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-inference"},
+                  "inference_service", "$1", "label_cubestack_io_inference_service", "(.*)"
+                ),
+                "role", "$1", "label_cubestack_io_role", "(.*)"
+              )
+            )
+
+        # Prefix cache hit ratio per InferenceService
+        - record: cubestack_inference_cache_hit_ratio:avg
+          expr: |
+            avg by (namespace, inference_service) (
+              label_replace(
+                sglang_cache_hit_rate
+                * on(namespace, pod) group_left(label_cubestack_io_inference_service)
+                kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-inference"},
+                "inference_service", "$1", "label_cubestack_io_inference_service", "(.*)"
+              )
+            )
