@@ -216,6 +216,24 @@ spec:
               model:
                 description: Model echoes the resolved ModelVersion.
                 properties:
+                  credentials:
+                    description: |-
+                      Credentials echoes the synced S3 credentials copy source, only present
+                      when the ModelVersion storage strategy is S3 and sets credentialsRef
+                      (design §3.3).
+                    properties:
+                      resourceVersion:
+                        description: ResourceVersion is the source Secret resourceVersion
+                          the copy was synced from.
+                        type: string
+                      source:
+                        description: Source is the source credentials Secret name
+                          in cubestack-system.
+                        type: string
+                    required:
+                    - resourceVersion
+                    - source
+                    type: object
                   name:
                     description: Name is the model name from the resolved ModelVersion.
                     type: string

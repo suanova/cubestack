@@ -80,13 +80,16 @@ func (r *ModelVersionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	return ctrl.Result{}, nil
 }
 
-// setStorageResolvedCondition sets the StorageResolved condition: for PVC
+// setStorageResolvedCondition sets the StorageResolved condition. For Dynamic
 // storage the referenced StorageClass must exist; for HostPath storage it is
-// always True, since the controller cannot confirm the pre-distributed
-// directory on every node. A transient lookup error is returned so the
-// reconcile is retried instead of leaving the condition stale.
+// always True; for Static storage the condition is not managed here — it is set
+// by the storage-side integration (go-ceph getpath/quota checks, design §3.1).
+// In the manual-testing phase, the operator leaves a manually-patched
+// StorageResolved condition untouched. A transient lookup error is returned so
+// the reconcile is retried instead of leaving the condition stale.
 func (r *ModelVersionReconciler) setStorageResolvedCondition(ctx context.Context, conditions *[]metav1.Condition, mv *aiv1alpha1.ModelVersion) error {
-	if mv.Spec.Storage.Strategy != aiv1alpha1.StorageStrategyPVC {
+	switch mv.Spec.Storage.Strategy {
+	case aiv1alpha1.StorageStrategyHostPath:
 		meta.SetStatusCondition(conditions, metav1.Condition{
 			Type:    aiv1alpha1.ConditionStorageResolved,
 			Status:  metav1.ConditionTrue,
@@ -94,29 +97,37 @@ func (r *ModelVersionReconciler) setStorageResolvedCondition(ctx context.Context
 			Message: "HostPath storage does not require a StorageClass",
 		})
 		return nil
-	}
 
-	sc := &storagev1.StorageClass{}
-	err := r.Get(ctx, types.NamespacedName{Name: mv.Spec.Storage.PVC.StorageClassName}, sc)
-	if apierrors.IsNotFound(err) {
+	case aiv1alpha1.StorageStrategyStatic, aiv1alpha1.StorageStrategyS3:
+		// Static/S3: the storage-side integration manages this condition
+		// (getpath/quota for Static; prefix/credentials resolution for S3). In
+		// the manual-testing phase (no storage controller), the operator does
+		// not touch the condition — it may be patched manually.
+		return nil
+
+	default: // Dynamic
+		sc := &storagev1.StorageClass{}
+		err := r.Get(ctx, types.NamespacedName{Name: mv.Spec.Storage.Dynamic.StorageClassName}, sc)
+		if apierrors.IsNotFound(err) {
+			meta.SetStatusCondition(conditions, metav1.Condition{
+				Type:    aiv1alpha1.ConditionStorageResolved,
+				Status:  metav1.ConditionFalse,
+				Reason:  "StorageClassNotFound",
+				Message: fmt.Sprintf("StorageClass %q does not exist", mv.Spec.Storage.Dynamic.StorageClassName),
+			})
+			return nil
+		}
+		if err != nil {
+			return err
+		}
 		meta.SetStatusCondition(conditions, metav1.Condition{
 			Type:    aiv1alpha1.ConditionStorageResolved,
-			Status:  metav1.ConditionFalse,
-			Reason:  "StorageClassNotFound",
-			Message: fmt.Sprintf("StorageClass %q does not exist", mv.Spec.Storage.PVC.StorageClassName),
+			Status:  metav1.ConditionTrue,
+			Reason:  "StorageClassExists",
+			Message: fmt.Sprintf("StorageClass %q exists", mv.Spec.Storage.Dynamic.StorageClassName),
 		})
 		return nil
 	}
-	if err != nil {
-		return err
-	}
-	meta.SetStatusCondition(conditions, metav1.Condition{
-		Type:    aiv1alpha1.ConditionStorageResolved,
-		Status:  metav1.ConditionTrue,
-		Reason:  "StorageClassExists",
-		Message: fmt.Sprintf("StorageClass %q exists", mv.Spec.Storage.PVC.StorageClassName),
-	})
-	return nil
 }
 
 // referringServices lists the InferenceServices whose spec.modelRef points at

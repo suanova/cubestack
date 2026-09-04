@@ -72,21 +72,9 @@ spec:
               storage:
                 description: Storage defines where and how the model is provided.
                 properties:
-                  hostPath:
-                    description: HostPath is the pre-distributed model configuration,
-                      required when strategy is HostPath.
-                    properties:
-                      path:
-                        description: Path is the absolute path of the pre-distributed
-                          model root directory.
-                        pattern: ^/
-                        type: string
-                    required:
-                    - path
-                    type: object
-                  pvc:
-                    description: PVC is the shared-storage configuration, required
-                      when strategy is PVC.
+                  dynamic:
+                    description: Dynamic is the shared-storage configuration, required
+                      when strategy is Dynamic.
                     properties:
                       capacity:
                         anyOf:
@@ -111,21 +99,87 @@ spec:
                     - storageClassName
                     - subPath
                     type: object
+                  hostPath:
+                    description: HostPath is the pre-distributed model configuration,
+                      required when strategy is HostPath.
+                    properties:
+                      path:
+                        description: Path is the absolute path of the pre-distributed
+                          model root directory.
+                        pattern: ^/
+                        type: string
+                    required:
+                    - path
+                    type: object
+                  s3:
+                    description: S3 is the direct-S3 configuration, required when
+                      strategy is S3.
+                    properties:
+                      credentialsRef:
+                        description: |-
+                          CredentialsRef optionally names the credentials Secret in cubestack-system
+                          that the controller copies into the service namespace. Absent means
+                          anonymous reads or node-level identity.
+                        properties:
+                          name:
+                            description: |-
+                              Name is the credentials Secret name in cubestack-system, scoped read-only
+                              to the model's uri prefix by the platform admin.
+                            minLength: 1
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      uri:
+                        description: URI is the S3 prefix of the model data, <bucket>/<prefix>/<model>/<version>.
+                        pattern: ^s3://
+                        type: string
+                    required:
+                    - uri
+                    type: object
+                  static:
+                    description: Static is the pre-provisioned PV configuration, required
+                      when strategy is Static.
+                    properties:
+                      capacity:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: |-
+                          Capacity declares the model storage size; it is written to the PVC request and
+                          validated against the storage-side quota by the storage integration.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      storageClassName:
+                        description: StorageClassName references the no-provisioner
+                          StorageClass of the pre-created PVs.
+                        minLength: 1
+                        type: string
+                    required:
+                    - capacity
+                    - storageClassName
+                    type: object
                   strategy:
                     description: Strategy selects how the model storage is provided.
                     enum:
                     - HostPath
-                    - PVC
+                    - Dynamic
+                    - Static
+                    - S3
                     type: string
                 required:
                 - strategy
                 type: object
                 x-kubernetes-validations:
-                - message: strategy HostPath requires hostPath and forbids pvc; strategy
-                    PVC requires pvc and forbids hostPath
-                  rule: 'self.strategy == ''HostPath'' ? (has(self.hostPath) && !has(self.pvc))
-                    : (self.strategy == ''PVC'' ? (has(self.pvc) && !has(self.hostPath))
-                    : true)'
+                - message: Exactly one of hostPath, dynamic, static, or s3 must be
+                    set for the chosen strategy
+                  rule: 'self.strategy == ''HostPath'' ? (has(self.hostPath) && !has(self.dynamic)
+                    && !has(self.static) && !has(self.s3)) : (self.strategy == ''Dynamic''
+                    ? (has(self.dynamic) && !has(self.hostPath) && !has(self.static)
+                    && !has(self.s3)) : (self.strategy == ''Static'' ? (has(self.static)
+                    && !has(self.hostPath) && !has(self.dynamic) && !has(self.s3))
+                    : (self.strategy == ''S3'' ? (has(self.s3) && !has(self.hostPath)
+                    && !has(self.dynamic) && !has(self.static)) : true)))'
               version:
                 description: |-
                   Version is the model version. Model names may contain '-', so the version
@@ -148,7 +202,9 @@ spec:
                   Each condition has a unique type and reflects the status of a specific aspect of the resource.
 
                   Standard condition types include (see conditions.go for the constants):
-                  - ConditionStorageResolved: the referenced StorageClass exists (PVC strategy only)
+                  - ConditionStorageResolved: Dynamic — the referenced StorageClass exists;
+                    Static/S3 — the storage unit is resolvable (handled by storage-side
+                    integration, currently patched manually); HostPath — always True.
                   - ConditionInUse: the ModelVersion is referenced by at least one InferenceService
 
                   The status of each condition is one of True, False, or Unknown.
@@ -210,6 +266,13 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              rootPath:
+                description: |-
+                  RootPath is the resolved storage unit identifier for the Static strategy
+                  (design §3.1): the real path (including the storage-generated uuid) parsed
+                  by the storage-side integration (currently patched manually for testing).
+                  Empty for Dynamic/HostPath/S3 — S3 has no storage-side resolution product.
+                type: string
               usedBy:
                 description: UsedBy lists the InferenceServices currently referencing
                   this ModelVersion.

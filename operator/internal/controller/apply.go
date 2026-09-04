@@ -305,6 +305,11 @@ func (r *InferenceServiceReconciler) applyWorkload(ctx context.Context, isvc *ai
 // template-hash annotations (design §5.1).
 func (r *InferenceServiceReconciler) desiredWorkload(isvc *aiv1alpha1.InferenceService, profile *aiv1alpha1.InferenceRuntimeProfile, role *aiv1alpha1.Role, rr *renderer.RenderedRole, rendered *renderer.Result, model *aiv1alpha1.ModelVersion) client.Object {
 	podSpec := buildPodSpec(rr.PodTemplate, isvc.Name, model, profile.Spec.Accelerator.Vendor)
+	// Roles that referenced {{ model.credentialsPath }} get the S3 credentials
+	// Secret volume injected (design §4.5).
+	if rr.UsesCredentials {
+		addCredentialsVolume(&podSpec, isvc.Name)
+	}
 	mountsModel := len(rr.PodTemplate.Mounts) > 0
 	// Hash the labels that are actually written to the pod template: a
 	// podTemplate.labels change must roll out (design §5.1 hashes the rendered
@@ -490,7 +495,7 @@ func (r *InferenceServiceReconciler) roleReady(ctx context.Context, isvc *aiv1al
 	if int64(workloadReadyReplicas(existing)) < desiredReplicas {
 		return false, nil
 	}
-	if len(role.PodTemplate.Mounts) > 0 && model != nil && model.Spec.Storage.Strategy == aiv1alpha1.StorageStrategyPVC {
+	if len(role.PodTemplate.Mounts) > 0 && model != nil && (model.Spec.Storage.Strategy == aiv1alpha1.StorageStrategyDynamic || model.Spec.Storage.Strategy == aiv1alpha1.StorageStrategyStatic) {
 		pvc := &corev1.PersistentVolumeClaim{}
 		err := r.Get(ctx, client.ObjectKey{Name: fmt.Sprintf("%s-model-%s", isvc.Name, modelKeyMain), Namespace: isvc.Namespace}, pvc)
 		if apierrors.IsNotFound(err) {

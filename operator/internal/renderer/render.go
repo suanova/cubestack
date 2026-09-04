@@ -37,6 +37,11 @@ type RenderedRole struct {
 	Replicas    int64
 	GroupSize   int64
 	PodTemplate aiv1alpha1.PodTemplate
+
+	// UsesCredentials is true when the role's pod template referenced
+	// {{ model.credentialsPath }}: the controller injects the S3 credentials
+	// volume only into these roles (design §4.5).
+	UsesCredentials bool
 }
 
 // Render renders the full profile for one InferenceService: validates and
@@ -75,6 +80,10 @@ func Render(isvc *aiv1alpha1.InferenceService, profile *aiv1alpha1.InferenceRunt
 		route:        routeVars,
 		profileVars:  profile.Spec.Vars,
 		serviceNames: serviceNames,
+		// model.path resolves to the S3 uri and model.credentialsPath is only
+		// available when credentialsRef is set (design §4.5).
+		storageStrategy:  model.Spec.Storage.Strategy,
+		s3CredentialsSet: model.Spec.Storage.Strategy == aiv1alpha1.StorageStrategyS3 && model.Spec.Storage.S3 != nil && model.Spec.Storage.S3.CredentialsRef != nil,
 	}
 
 	// Roles: structure first, then pod template. Errors accumulate; later
@@ -95,8 +104,16 @@ func Render(isvc *aiv1alpha1.InferenceService, profile *aiv1alpha1.InferenceRunt
 				break
 			}
 		}
+		// S3 strategy: the engine consumes the model by URI — the role never
+		// mounts it, and {{ model.path }} resolves to the uri for every role.
+		// (A profile declaring mounts[] with an S3 ModelVersion is rejected at
+		// Resolved, so the two never combine here.)
+		if roleV.modelPath == "" && model.Spec.Storage.Strategy == aiv1alpha1.StorageStrategyS3 && model.Spec.Storage.S3 != nil {
+			roleV.modelPath = model.Spec.Storage.S3.URI
+		}
 		ctx.role = roleV
 		rr.PodTemplate, res.Errors = renderPodTemplate(ctx, rr.PodTemplate, res.Errors)
+		rr.UsesCredentials = roleV.usesCredentials
 		res.Roles = append(res.Roles, rr)
 	}
 	ctx.role = nil
@@ -162,6 +179,10 @@ type renderContext struct {
 	route        map[string]string
 	profileVars  map[string]string
 	serviceNames map[string]string
+	// storageStrategy and s3CredentialsSet describe the referenced
+	// ModelVersion's storage for model.path/model.credentialsPath.
+	storageStrategy  aiv1alpha1.StorageStrategy
+	s3CredentialsSet bool
 	// role is the role currently being rendered; nil in service-level
 	// contexts (asset data).
 	role *roleVars
@@ -172,6 +193,9 @@ type roleVars struct {
 	name      string
 	groupSize string // "" for Deployment roles
 	modelPath string // "" when the role declares no model:main mount
+	// usesCredentials is set when the role referenced {{ model.credentialsPath }}
+	// and it resolved: the role then needs the S3 credentials volume injected.
+	usesCredentials bool
 }
 
 // allowedFunc reports whether a variable namespace is allowed in the current
@@ -297,6 +321,19 @@ func resolveModelVar(ctx *renderContext, parts []string, path string) (string, *
 			return "", &Error{Reason: ReasonModelNotMounted, Msg: fmt.Sprintf("role %q references {{ model.path }} but declares no model:main mount", ctx.role.name)}
 		}
 		return ctx.role.modelPath, nil
+	}
+	if parts[1] == "credentialsPath" {
+		if ctx.role == nil {
+			return "", &Error{Reason: ReasonPhaseViolation, Msg: fmt.Sprintf("variable %q is not available in this context", path)}
+		}
+		if ctx.storageStrategy != aiv1alpha1.StorageStrategyS3 {
+			return "", &Error{Reason: ReasonUnknownPlaceholder, Msg: fmt.Sprintf("role %q references {{ model.credentialsPath }} but the model storage strategy is not S3", ctx.role.name)}
+		}
+		if !ctx.s3CredentialsSet {
+			return "", &Error{Reason: ReasonModelCredentialsUnresolved, Msg: fmt.Sprintf("role %q references {{ model.credentialsPath }} but the ModelVersion sets no storage.s3.credentialsRef", ctx.role.name)}
+		}
+		ctx.role.usesCredentials = true
+		return aiv1alpha1.ModelCredentialsFilePath, nil
 	}
 	if v, ok := ctx.model[parts[1]]; ok {
 		return v, nil

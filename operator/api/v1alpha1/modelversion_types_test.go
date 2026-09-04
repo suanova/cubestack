@@ -59,13 +59,32 @@ func validModelVersion(name string) *ModelVersion {
 	}
 }
 
-func validPVCStorage() ModelStorage {
+func validDynamicStorage() ModelStorage {
 	return ModelStorage{
-		Strategy: StorageStrategyPVC,
-		PVC: &PVCStorage{
+		Strategy: StorageStrategyDynamic,
+		Dynamic: &DynamicStorage{
 			StorageClassName: testStorageClassName,
 			SubPath:          testModelSubPath,
 			Capacity:         resource.MustParse("320Gi"),
+		},
+	}
+}
+
+func validStaticStorage() ModelStorage {
+	return ModelStorage{
+		Strategy: StorageStrategyStatic,
+		Static: &StaticStorage{
+			StorageClassName: testStorageClassName,
+			Capacity:         resource.MustParse("320Gi"),
+		},
+	}
+}
+
+func validS3Storage() ModelStorage {
+	return ModelStorage{
+		Strategy: StorageStrategyS3,
+		S3: &S3Storage{
+			URI: "s3://model-registry/deepseek-v4-flash/w8a8-v1",
 		},
 	}
 }
@@ -84,9 +103,25 @@ var _ = Describe("ModelVersion", func() {
 			Expect(k8sClient.Delete(ctx, mv)).To(Succeed())
 		})
 
-		It("accepts a PVC ModelVersion", func() {
-			mv := validModelVersion("mv-pvc")
-			mv.Spec.Storage = validPVCStorage()
+		It("accepts a Dynamic ModelVersion", func() {
+			mv := validModelVersion("mv-dynamic")
+			mv.Spec.Storage = validDynamicStorage()
+
+			Expect(k8sClient.Create(ctx, mv)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, mv)).To(Succeed())
+		})
+
+		It("accepts a Static ModelVersion", func() {
+			mv := validModelVersion("mv-static")
+			mv.Spec.Storage = validStaticStorage()
+
+			Expect(k8sClient.Create(ctx, mv)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, mv)).To(Succeed())
+		})
+
+		It("accepts an S3 ModelVersion", func() {
+			mv := validModelVersion("mv-s3")
+			mv.Spec.Storage = validS3Storage()
 
 			Expect(k8sClient.Create(ctx, mv)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, mv)).To(Succeed())
@@ -156,43 +191,99 @@ var _ = Describe("ModelVersion", func() {
 			Entry("HostPath strategy without hostPath block",
 				"mv-invalid-hostpath-missing-block",
 				func(s *ModelVersionSpec) { s.Storage.HostPath = nil },
-				"requires hostPath and forbids pvc"),
-			Entry("HostPath strategy with pvc block",
-				"mv-invalid-hostpath-with-pvc",
+				"Exactly one of hostPath, dynamic, static, or s3"),
+			Entry("HostPath strategy with dynamic block",
+				"mv-invalid-hostpath-with-dynamic",
 				func(s *ModelVersionSpec) {
 					s.Storage.HostPath = nil
-					s.Storage.PVC = &PVCStorage{
+					s.Storage.Dynamic = &DynamicStorage{
 						StorageClassName: testStorageClassName,
 						SubPath:          testModelSubPath,
 						Capacity:         resource.MustParse("320Gi"),
 					}
 				},
-				"requires hostPath and forbids pvc"),
-			Entry("PVC strategy without pvc block",
-				"mv-invalid-pvc-missing-block",
+				"Exactly one of hostPath, dynamic, static, or s3"),
+			Entry("Dynamic strategy without dynamic block",
+				"mv-invalid-dynamic-missing-block",
 				func(s *ModelVersionSpec) {
-					s.Storage.Strategy = StorageStrategyPVC
+					s.Storage.Strategy = StorageStrategyDynamic
 					s.Storage.HostPath = nil
 				},
-				"requires pvc and forbids hostPath"),
-			Entry("PVC strategy with hostPath block",
-				"mv-invalid-pvc-with-hostpath",
-				func(s *ModelVersionSpec) { s.Storage.Strategy = StorageStrategyPVC },
-				"requires pvc and forbids hostPath"),
-			Entry("pvc block without storageClassName",
-				"mv-invalid-pvc-missing-storageclass",
+				"Exactly one of hostPath, dynamic, static, or s3"),
+			Entry("Dynamic strategy with hostPath block",
+				"mv-invalid-dynamic-with-hostpath",
+				func(s *ModelVersionSpec) { s.Storage.Strategy = StorageStrategyDynamic },
+				"Exactly one of hostPath, dynamic, static, or s3"),
+			Entry("Static strategy without static block",
+				"mv-invalid-static-missing-block",
 				func(s *ModelVersionSpec) {
-					s.Storage = validPVCStorage()
-					s.Storage.PVC.StorageClassName = ""
+					s.Storage.Strategy = StorageStrategyStatic
+					s.Storage.HostPath = nil
 				},
-				"spec.storage.pvc.storageClassName"),
-			Entry("pvc block without subPath",
-				"mv-invalid-pvc-missing-subpath",
+				"Exactly one of hostPath, dynamic, static, or s3"),
+			Entry("Static strategy with dynamic block",
+				"mv-invalid-static-with-dynamic",
 				func(s *ModelVersionSpec) {
-					s.Storage = validPVCStorage()
-					s.Storage.PVC.SubPath = ""
+					s.Storage = validStaticStorage()
+					s.Storage.Dynamic = &DynamicStorage{
+						StorageClassName: testStorageClassName,
+						SubPath:          testModelSubPath,
+						Capacity:         resource.MustParse("320Gi"),
+					}
 				},
-				"spec.storage.pvc.subPath"),
+				"Exactly one of hostPath, dynamic, static, or s3"),
+			Entry("dynamic block without storageClassName",
+				"mv-invalid-dynamic-missing-storageclass",
+				func(s *ModelVersionSpec) {
+					s.Storage = validDynamicStorage()
+					s.Storage.Dynamic.StorageClassName = ""
+				},
+				"spec.storage.dynamic.storageClassName"),
+			Entry("dynamic block without subPath",
+				"mv-invalid-dynamic-missing-subpath",
+				func(s *ModelVersionSpec) {
+					s.Storage = validDynamicStorage()
+					s.Storage.Dynamic.SubPath = ""
+				},
+				"spec.storage.dynamic.subPath"),
+			Entry("static block without storageClassName",
+				"mv-invalid-static-missing-storageclass",
+				func(s *ModelVersionSpec) {
+					s.Storage = validStaticStorage()
+					s.Storage.Static.StorageClassName = ""
+				},
+				"spec.storage.static.storageClassName"),
+			Entry("S3 strategy without s3 block",
+				"mv-invalid-s3-missing-block",
+				func(s *ModelVersionSpec) {
+					s.Storage.Strategy = StorageStrategyS3
+					s.Storage.HostPath = nil
+				},
+				"Exactly one of hostPath, dynamic, static, or s3"),
+			Entry("S3 strategy with static block",
+				"mv-invalid-s3-with-static",
+				func(s *ModelVersionSpec) {
+					s.Storage = validS3Storage()
+					s.Storage.Static = &StaticStorage{
+						StorageClassName: testStorageClassName,
+						Capacity:         resource.MustParse("320Gi"),
+					}
+				},
+				"Exactly one of hostPath, dynamic, static, or s3"),
+			Entry("s3 uri without the s3 scheme",
+				"mv-invalid-s3-uri-scheme",
+				func(s *ModelVersionSpec) {
+					s.Storage = validS3Storage()
+					s.Storage.S3.URI = "http://model-registry/deepseek-v4-flash"
+				},
+				"spec.storage.s3.uri"),
+			Entry("s3 credentialsRef without a name",
+				"mv-invalid-s3-credentials-name",
+				func(s *ModelVersionSpec) {
+					s.Storage = validS3Storage()
+					s.Storage.S3.CredentialsRef = &S3CredentialsRef{}
+				},
+				"spec.storage.s3.credentialsRef.name"),
 			Entry("relative hostPath",
 				"mv-invalid-relative-path",
 				func(s *ModelVersionSpec) {
@@ -201,10 +292,10 @@ var _ = Describe("ModelVersion", func() {
 				"spec.storage.hostPath.path"),
 		)
 
-		// The pvc fields cannot be omitted with the typed client (a resource.Quantity
+		// The dynamic fields cannot be omitted with the typed client (a resource.Quantity
 		// always serializes), so these cases are created as raw objects.
-		DescribeTable("rejects a pvc block with invalid raw values",
-			func(name string, pvc map[string]any, wantMessage string) {
+		DescribeTable("rejects a dynamic block with invalid raw values",
+			func(name string, dynamicBlock map[string]any, wantMessage string) {
 				obj := map[string]any{
 					"apiVersion": "ai.cubestack.io/v1alpha1",
 					"kind":       "ModelVersion",
@@ -215,8 +306,8 @@ var _ = Describe("ModelVersion", func() {
 						"architecture": "deepseek_v4",
 						"quantization": "w8a8",
 						"storage": map[string]any{
-							"strategy": "PVC",
-							"pvc":      pvc,
+							"strategy": "Dynamic",
+							"dynamic":  dynamicBlock,
 						},
 					},
 				}
@@ -229,12 +320,12 @@ var _ = Describe("ModelVersion", func() {
 				Expect(err.Error()).To(ContainSubstring(wantMessage))
 			},
 			Entry("missing capacity",
-				"mv-invalid-pvc-missing-capacity",
+				"mv-invalid-dynamic-missing-capacity",
 				map[string]any{
 					"storageClassName": testStorageClassName,
 					"subPath":          testModelSubPath,
 				},
-				"spec.storage.pvc.capacity"),
+				"spec.storage.dynamic.capacity"),
 			Entry("invalid capacity format",
 				"mv-invalid-capacity",
 				map[string]any{
@@ -242,7 +333,7 @@ var _ = Describe("ModelVersion", func() {
 					"subPath":          testModelSubPath,
 					"capacity":         "not-a-quantity",
 				},
-				"spec.storage.pvc.capacity"),
+				"spec.storage.dynamic.capacity"),
 		)
 	})
 })

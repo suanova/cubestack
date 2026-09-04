@@ -47,6 +47,9 @@ const (
 
 	assetSourceAnnotationKey = "ai.cubestack.io/asset-source"
 	assetHashAnnotationKey   = "ai.cubestack.io/asset-hash"
+
+	// modelVersionLabelKey is used on static PVs for PVC selector binding (design §3.1).
+	modelVersionLabelKey = "ai.cubestack.io/model-version"
 )
 
 // modelKeyMain is the model key of the main model; model volumes are named
@@ -181,7 +184,7 @@ func setProvisionedCondition(conditions *[]metav1.Condition, reason string, prov
 			Type:    aiv1alpha1.ConditionProvisioned,
 			Status:  metav1.ConditionTrue,
 			Reason:  "Provisioned",
-			Message: "Rendered asset ConfigMaps and model PVCs are provisioned",
+			Message: "Rendered asset ConfigMaps, model PVCs and S3 credentials copies are provisioned",
 		})
 		return
 	}

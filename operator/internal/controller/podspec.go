@@ -137,7 +137,7 @@ func modelVolumes(mounts []aiv1alpha1.ModelMount, isvcName string, model *aiv1al
 	for _, m := range mounts {
 		vol := corev1.Volume{Name: fmt.Sprintf("model-%s", m.Model)}
 		switch model.Spec.Storage.Strategy {
-		case aiv1alpha1.StorageStrategyPVC:
+		case aiv1alpha1.StorageStrategyDynamic, aiv1alpha1.StorageStrategyStatic:
 			vol.PersistentVolumeClaim = &corev1.PersistentVolumeClaimVolumeSource{
 				ClaimName: fmt.Sprintf("%s-model-%s", isvcName, m.Model),
 				ReadOnly:  true,
@@ -151,14 +151,15 @@ func modelVolumes(mounts []aiv1alpha1.ModelMount, isvcName string, model *aiv1al
 }
 
 // modelVolumeMounts builds the model volume mount of each mount: readOnly
-// comes from the mount (the API CEL rule requires true), subPath only for PVC
-// storage (design §4.5).
+// comes from the mount (the API CEL rule requires true), subPath only for
+// Dynamic storage (design §4.5). Static strategy mounts the entire storage
+// unit at the mount path with no subPath.
 func modelVolumeMounts(mounts []aiv1alpha1.ModelMount, model *aiv1alpha1.ModelVersion) []corev1.VolumeMount {
 	mounts_ := make([]corev1.VolumeMount, 0, len(mounts))
 	for _, m := range mounts {
 		mount := corev1.VolumeMount{Name: fmt.Sprintf("model-%s", m.Model), MountPath: m.At, ReadOnly: m.ReadOnly}
-		if model.Spec.Storage.Strategy == aiv1alpha1.StorageStrategyPVC {
-			mount.SubPath = model.Spec.Storage.PVC.SubPath
+		if model.Spec.Storage.Strategy == aiv1alpha1.StorageStrategyDynamic {
+			mount.SubPath = model.Spec.Storage.Dynamic.SubPath
 		}
 		mounts_ = append(mounts_, mount)
 	}

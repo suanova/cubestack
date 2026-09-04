@@ -29,6 +29,9 @@ const (
 	ReasonUnknownPlaceholder ErrorReason = "UnknownPlaceholder"
 	// ReasonModelNotMounted marks {{ model.path }} in a role without a model mount.
 	ReasonModelNotMounted ErrorReason = "ModelNotMounted"
+	// ReasonModelCredentialsUnresolved marks {{ model.credentialsPath }} with an
+	// S3 ModelVersion that sets no storage.s3.credentialsRef.
+	ReasonModelCredentialsUnresolved ErrorReason = "ModelCredentialsUnresolved"
 )
 
 // Error is a single render failure.

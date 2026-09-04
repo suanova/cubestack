@@ -20,6 +20,7 @@ limitations under the License.
 // +kubebuilder:rbac:groups=ai.cubestack.io,resources=modelversions,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=leaderworkerset.x-k8s.io,resources=leaderworkersets,verbs=get;list;watch;create;update;patch;delete
@@ -172,7 +173,23 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			// status write must not swallow it.
 			return ctrl.Result{}, err
 		}
+		credStatus, err := r.provisionModelCredentials(ctx, &isvc, resolved.model)
+		if err != nil {
+			setProvisionedCondition(&desired.Status.Conditions, "SecretCopyFailed", err)
+			statusErr := r.updateStatusIfChanged(ctx, &isvc, desired)
+			if statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+			// Return the provision error so the reconcile is requeued; the
+			// status write must not swallow it.
+			return ctrl.Result{}, err
+		}
 		desired.Status.Assets = assetStatuses
+		// The credentials echo is only filled on a fully provisioned state; on
+		// any earlier path desired.Status.Model.Credentials stays nil.
+		if credStatus != nil && desired.Status.Model != nil {
+			desired.Status.Model.Credentials = credStatus
+		}
 		setProvisionedCondition(&desired.Status.Conditions, "", nil)
 
 		rolesStatus, applyRes, err := r.applyWorkloads(ctx, desired, resolved.profile, &rendered, resolved.model)
@@ -256,6 +273,7 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&aiv1alpha1.InferenceService{}).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
+		Owns(&corev1.Secret{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Watches(&aiv1alpha1.ModelVersion{},
@@ -264,6 +282,8 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(r.enqueueReferencingServices)).
 		Watches(&corev1.ConfigMap{},
 			handler.EnqueueRequestsFromMapFunc(r.enqueueForSourceConfigMap)).
+		Watches(&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(r.enqueueForSourceCredentialsSecret)).
 		Watches(&leaderworkersetv1.LeaderWorkerSet{},
 			handler.EnqueueRequestsFromMapFunc(r.enqueueForOwnedLWS)).
 		Watches(&gatewayv1.HTTPRoute{},
@@ -313,6 +333,28 @@ func (r *InferenceServiceReconciler) enqueueForSourceConfigMap(ctx context.Conte
 	var reqs []reconcile.Request
 	for _, irp := range irpList.Items {
 		reqs = append(reqs, r.referencingServices(ctx, profileRefIndexKey, irp.Name)...)
+	}
+	return reqs
+}
+
+// enqueueForSourceCredentialsSecret maps a Secret in cubestack-system to the
+// services whose ModelVersion references it via storage.s3.credentialsRef:
+// rotating the source Secret re-syncs the credentials copies (design §3.1).
+// Unrelated Secrets short-circuit cheaply.
+func (r *InferenceServiceReconciler) enqueueForSourceCredentialsSecret(ctx context.Context, obj client.Object) []reconcile.Request {
+	secret := obj.(*corev1.Secret)
+	if secret.Namespace != systemNamespace {
+		return nil
+	}
+	mvList := &aiv1alpha1.ModelVersionList{}
+	if err := r.List(ctx, mvList, client.MatchingFields{credentialsRefIndexKey: secret.Name}); err != nil {
+		// A failed index lookup drops the event; the copy is still re-synced on
+		// the next service reconcile.
+		return nil
+	}
+	var reqs []reconcile.Request
+	for _, mv := range mvList.Items {
+		reqs = append(reqs, r.referencingServices(ctx, modelRefIndexKey, mv.Name)...)
 	}
 	return reqs
 }

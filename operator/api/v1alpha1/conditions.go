@@ -23,8 +23,11 @@ package v1alpha1
 type ConditionType = string
 
 const (
-	// ConditionStorageResolved indicates that the StorageClass referenced by
-	// the PVC storage strategy exists. Always True for HostPath. (ModelVersion)
+	// ConditionStorageResolved indicates that the referenced storage is
+	// resolvable: Dynamic — the referenced StorageClass exists; Static — the
+	// storage unit is resolvable (handled by the storage-side integration); S3 —
+	// the uri prefix and credentials Secret are resolvable (same integration);
+	// HostPath — always True. (ModelVersion)
 	ConditionStorageResolved ConditionType = "StorageResolved"
 
 	// ConditionAssetsResolved indicates that all assets[].configMapRef.name

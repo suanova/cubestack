@@ -86,6 +86,22 @@ type ModelStatus struct {
 
 	// Version is the model version from the resolved ModelVersion.
 	Version string `json:"version"`
+
+	// Credentials echoes the synced S3 credentials copy source, only present
+	// when the ModelVersion storage strategy is S3 and sets credentialsRef
+	// (design §3.3).
+	// +optional
+	Credentials *ModelCredentialsStatus `json:"credentials,omitempty"`
+}
+
+// ModelCredentialsStatus reports which source version the S3 credentials copy
+// has been synced to (audit chain, no content hash).
+type ModelCredentialsStatus struct {
+	// Source is the source credentials Secret name in cubestack-system.
+	Source string `json:"source"`
+
+	// ResourceVersion is the source Secret resourceVersion the copy was synced from.
+	ResourceVersion string `json:"resourceVersion"`
 }
 
 // RoleStatus reports the resolved topology of one role, for billing and quota.

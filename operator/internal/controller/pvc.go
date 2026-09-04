@@ -30,16 +30,28 @@ import (
 )
 
 // provisionModelPVC creates the model PVC <isvc>-model-main when the storage
-// strategy is PVC (design §3.1: ReadOnlyMany, storageClassName and capacity
-// from the ModelVersion, ownerRef to the service). HostPath storage needs no
-// PVC. The PVC is create-only in this phase: it is never updated and never
-// cleaned up (design §5.1).
+// strategy is Dynamic or Static (design §3.1: ReadOnlyMany, storageClassName and
+// capacity from the ModelVersion, ownerRef to the service). HostPath storage needs
+// no PVC. For Static, the PVC includes a selector matching the pre-created PV's
+// ai.cubestack.io/model-version label. The PVC is create-only in this phase: it is
+// never updated and never cleaned up (design §5.1).
 func (r *InferenceServiceReconciler) provisionModelPVC(ctx context.Context, isvc *aiv1alpha1.InferenceService, model *aiv1alpha1.ModelVersion) error {
-	if model.Spec.Storage.Strategy != aiv1alpha1.StorageStrategyPVC {
+	strategy := model.Spec.Storage.Strategy
+	if strategy != aiv1alpha1.StorageStrategyDynamic && strategy != aiv1alpha1.StorageStrategyStatic {
 		return nil
 	}
 
-	sc := model.Spec.Storage.PVC.StorageClassName
+	var sc string
+	var capacity corev1.ResourceList
+	switch strategy {
+	case aiv1alpha1.StorageStrategyDynamic:
+		sc = model.Spec.Storage.Dynamic.StorageClassName
+		capacity = corev1.ResourceList{corev1.ResourceStorage: model.Spec.Storage.Dynamic.Capacity}
+	case aiv1alpha1.StorageStrategyStatic:
+		sc = model.Spec.Storage.Static.StorageClassName
+		capacity = corev1.ResourceList{corev1.ResourceStorage: model.Spec.Storage.Static.Capacity}
+	}
+
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-model-main", isvc.Name),
@@ -55,11 +67,19 @@ func (r *InferenceServiceReconciler) provisionModelPVC(ctx context.Context, isvc
 			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadOnlyMany},
 			StorageClassName: &sc,
 			Resources: corev1.VolumeResourceRequirements{
-				Requests: corev1.ResourceList{
-					corev1.ResourceStorage: model.Spec.Storage.PVC.Capacity,
-				},
+				Requests: capacity,
 			},
 		},
+	}
+
+	// Static strategy: bind the PVC to a pre-created PV via a label selector
+	// matching the ModelVersion name (design §3.1 Static render contract).
+	if strategy == aiv1alpha1.StorageStrategyStatic {
+		pvc.Spec.Selector = &metav1.LabelSelector{
+			MatchLabels: map[string]string{
+				modelVersionLabelKey: model.Name,
+			},
+		}
 	}
 	if err := ctrl.SetControllerReference(isvc, pvc, r.Scheme); err != nil {
 		return err

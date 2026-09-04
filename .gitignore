@@ -35,3 +35,11 @@ docs/superpowers/
 
 # Claude Code per-user local settings (not team-shared)
 .claude/settings.local.json
+
+# CodeGraph (not team-shared)
+.codegraph
+
+# Local tool caches (not team-shared)
+.gocache/
+.golangci-cache/
+.xdgcache/

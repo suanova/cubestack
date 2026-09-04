@@ -14,6 +14,8 @@ import (
 const (
 	overridePrefillReplicas = "prefillReplicas"
 	bootstrapAsset          = "bootstrap"
+	// assetDataKey is the single asset data key of the render specs.
+	assetDataKey = "key"
 )
 
 func envValue(name, value string) aiv1alpha1.EnvVar {
@@ -85,7 +87,7 @@ func renderModel() *aiv1alpha1.ModelVersion {
 
 var _ = Describe("Render", func() {
 	It("renders all variable namespaces and resolves workload structure", func() {
-		res := Render(renderISVC(), renderProfile(), renderModel(), map[string]map[string]string{bootstrapAsset: {"key": "value"}})
+		res := Render(renderISVC(), renderProfile(), renderModel(), map[string]map[string]string{bootstrapAsset: {assetDataKey: "value"}})
 		Expect(res.Errors).To(BeEmpty())
 		Expect(res.Overrides).To(Equal(map[string]string{overridePrefillReplicas: "3", overrideMode: "pd"}))
 
@@ -106,7 +108,7 @@ var _ = Describe("Render", func() {
 		Expect(prefill.PodTemplate.Env[0].Value).To(Equal(stringPtr("3")))
 		Expect(prefill.PodTemplate.Env[1].Value).To(Equal(stringPtr("prefill")))
 
-		Expect(res.Assets).To(Equal(map[string]map[string]string{bootstrapAsset: {"key": "value"}}))
+		Expect(res.Assets).To(Equal(map[string]map[string]string{bootstrapAsset: {assetDataKey: "value"}}))
 	})
 
 	It("defaults replicas to 1 when unset", func() {

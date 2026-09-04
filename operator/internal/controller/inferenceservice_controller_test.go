@@ -20,6 +20,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -51,6 +52,16 @@ const testOverrideGroupSize = "groupSize"
 
 // testForeignDataKey is the data key of the foreign-resource specs.
 const testForeignDataKey = "foreign"
+
+// testEnvModelPath is the env name the render specs wire {{ model.path }} to.
+const testEnvModelPath = "MODEL_PATH"
+
+// Storage-resolved patch constants of the manual-testing phase (design §3.1):
+// admins patch StorageResolved=True on Static/S3 ModelVersions.
+const (
+	testStorageResolvedReason  = "ManuallyResolved"
+	testStorageResolvedMessage = "patched by the platform admin"
+)
 
 // validResolveProfile returns a profile whose assets reference unique source
 // ConfigMaps in cubestack-system, plus the matching immutable ConfigMaps.
@@ -95,8 +106,26 @@ func validRenderProfile(name string) *aiv1alpha1.InferenceRuntimeProfile {
 	irp.Spec.Roles[0].PodTemplate.Env = append(irp.Spec.Roles[0].PodTemplate.Env,
 		aiv1alpha1.EnvVar{Name: "LAUNCHER", Value: ptrTo("{{ profile.vars.launcher }}")})
 	irp.Spec.Roles[0].PodTemplate.Env = append(irp.Spec.Roles[0].PodTemplate.Env,
-		aiv1alpha1.EnvVar{Name: "MODEL_PATH", Value: ptrTo("{{ model.path }}")})
+		aiv1alpha1.EnvVar{Name: testEnvModelPath, Value: ptrTo("{{ model.path }}")})
 	irp.Spec.Roles[0].PodTemplate.Mounts = []aiv1alpha1.ModelMount{{Model: "main", At: testModelPath, ReadOnly: true}}
+	return irp
+}
+
+// s3RenderProfile returns a mounts-free profile (S3 engines consume the model
+// by URI, design §4.5) with one Deployment role referencing {{ model.path }}
+// and — when credsEnv is set — {{ model.credentialsPath }}. Whether the
+// referenced ModelVersion sets a credentialsRef is the test's choice.
+func s3RenderProfile(name string, credsEnv bool) *aiv1alpha1.InferenceRuntimeProfile {
+	irp := validRenderProfile(name)
+	irp.Spec.Roles[0].PodTemplate.Mounts = nil
+	envs := []aiv1alpha1.EnvVar{
+		{Name: "LAUNCHER", Value: ptrTo("{{ profile.vars.launcher }}")},
+		{Name: testEnvModelPath, Value: ptrTo("{{ model.path }}")},
+	}
+	if credsEnv {
+		envs = append(envs, aiv1alpha1.EnvVar{Name: "CREDS_FILE", Value: ptrTo("{{ model.credentialsPath }}")})
+	}
+	irp.Spec.Roles[0].PodTemplate.Env = envs
 	return irp
 }
 
@@ -192,6 +221,166 @@ var _ = Describe("InferenceService controller", func() {
 				g.Expect(cond).ToNot(BeNil())
 				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 				g.Expect(cond.Reason).To(Equal("ModelIncompatible"))
+			}, "15s", "200ms").Should(Succeed())
+		})
+
+		It("marks Resolved false with ModelStorageUnresolved when the Static model storage is not resolved", func() {
+			irp := validResolveProfile("isvc-resolve-unresolved")
+			Expect(k8sClient.Create(ctx, irp)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, irp) }()
+
+			mv := validStaticModelVersion("isvc-resolve-unresolved-mv")
+			Expect(k8sClient.Create(ctx, mv)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, mv) }()
+
+			isvc := validInferenceService("isvc-resolve-unresolved", mv.Name)
+			isvc.Spec.ProfileRef = irp.Name
+			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, isvc) }()
+
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.InferenceService{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: isvc.Name, Namespace: testNamespace}, got)).To(Succeed())
+				cond := meta.FindStatusCondition(got.Status.Conditions, aiv1alpha1.ConditionResolved)
+				g.Expect(cond).ToNot(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(cond.Reason).To(Equal("ModelStorageUnresolved"))
+			}, "15s", "200ms").Should(Succeed())
+
+			// The storage-side integration is manual in this phase: patch
+			// StorageResolved=True (as an admin would) and the gate opens.
+			Eventually(func() error {
+				got := &aiv1alpha1.ModelVersion{}
+				if err := k8sClient.Get(ctx, client.ObjectKey{Name: mv.Name}, got); err != nil {
+					return err
+				}
+				meta.SetStatusCondition(&got.Status.Conditions, metav1.Condition{
+					Type:    aiv1alpha1.ConditionStorageResolved,
+					Status:  metav1.ConditionTrue,
+					Reason:  testStorageResolvedReason,
+					Message: testStorageResolvedMessage,
+				})
+				return k8sClient.Status().Update(ctx, got)
+			}, "15s", "200ms").Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.InferenceService{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: isvc.Name, Namespace: testNamespace}, got)).To(Succeed())
+				g.Expect(meta.IsStatusConditionTrue(got.Status.Conditions, aiv1alpha1.ConditionResolved)).To(BeTrue())
+			}, "15s", "200ms").Should(Succeed())
+		})
+
+		It("reports AssetNotFound before ModelStorageUnresolved when both fail", func() {
+			// Reason priority is the documented check order (design §3.3):
+			// the asset check precedes the Static storage gate.
+			irp := validResolveProfile("isvc-resolve-order")
+			irp.Spec.Assets = []aiv1alpha1.Asset{
+				{Name: testAssetName, ConfigMapRef: aiv1alpha1.AssetConfigMapRef{Name: "isvc-resolve-order-missing-cm"}, EnvFrom: ptrTo(true)},
+			}
+			Expect(k8sClient.Create(ctx, irp)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, irp) }()
+
+			mv := validStaticModelVersion("isvc-resolve-order-mv")
+			Expect(k8sClient.Create(ctx, mv)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, mv) }()
+
+			isvc := validInferenceService("isvc-resolve-order", mv.Name)
+			isvc.Spec.ProfileRef = irp.Name
+			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, isvc) }()
+
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.InferenceService{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: isvc.Name, Namespace: testNamespace}, got)).To(Succeed())
+				cond := meta.FindStatusCondition(got.Status.Conditions, aiv1alpha1.ConditionResolved)
+				g.Expect(cond).ToNot(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(cond.Reason).To(Equal("AssetNotFound"))
+				g.Expect(cond.Message).To(ContainSubstring("storage is not resolved"))
+			}, "15s", "200ms").Should(Succeed())
+		})
+
+		It("marks Resolved false with ModelStorageUnresolved until the S3 storage is resolved", func() {
+			irp := s3RenderProfile("isvc-s3-resolve", false)
+			Expect(k8sClient.Create(ctx, irp)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, irp) }()
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: irp.Spec.Assets[0].ConfigMapRef.Name, Namespace: systemNamespace},
+				Immutable:  ptrTo(true),
+				Data:       map[string]string{testConfigMapDataKey: testConfigMapDataValue},
+			}
+			Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, cm) }()
+
+			mv := validS3ModelVersion("isvc-s3-resolve-mv", "")
+			Expect(k8sClient.Create(ctx, mv)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, mv) }()
+
+			isvc := validInferenceService("isvc-s3-resolve", mv.Name)
+			isvc.Spec.ProfileRef = irp.Name
+			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, isvc) }()
+
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.InferenceService{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: isvc.Name, Namespace: testNamespace}, got)).To(Succeed())
+				cond := meta.FindStatusCondition(got.Status.Conditions, aiv1alpha1.ConditionResolved)
+				g.Expect(cond).ToNot(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(cond.Reason).To(Equal("ModelStorageUnresolved"))
+			}, "15s", "200ms").Should(Succeed())
+
+			// The S3 existence checks are storage-side; patch StorageResolved=True
+			// as an admin would (design §3.1) and the gate opens.
+			Eventually(func() error {
+				got := &aiv1alpha1.ModelVersion{}
+				if err := k8sClient.Get(ctx, client.ObjectKey{Name: mv.Name}, got); err != nil {
+					return err
+				}
+				meta.SetStatusCondition(&got.Status.Conditions, metav1.Condition{
+					Type:    aiv1alpha1.ConditionStorageResolved,
+					Status:  metav1.ConditionTrue,
+					Reason:  testStorageResolvedReason,
+					Message: testStorageResolvedMessage,
+				})
+				return k8sClient.Status().Update(ctx, got)
+			}, "15s", "200ms").Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.InferenceService{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: isvc.Name, Namespace: testNamespace}, got)).To(Succeed())
+				g.Expect(meta.IsStatusConditionTrue(got.Status.Conditions, aiv1alpha1.ConditionResolved)).To(BeTrue())
+			}, "15s", "200ms").Should(Succeed())
+		})
+
+		It("marks Resolved false with ModelStorageIncompatible when the profile declares mounts with S3 storage", func() {
+			// validRenderProfile's role declares mounts[] — the volume-consumption
+			// contract, incompatible with an S3 engine that pulls by URI.
+			irp := validRenderProfile("isvc-s3-incompat")
+			Expect(k8sClient.Create(ctx, irp)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, irp) }()
+
+			mv := validS3ModelVersion("isvc-s3-incompat-mv", "")
+			Expect(k8sClient.Create(ctx, mv)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, mv) }()
+
+			isvc := validInferenceService("isvc-s3-incompat", mv.Name)
+			isvc.Spec.ProfileRef = irp.Name
+			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, isvc) }()
+
+			// Reason priority: ModelStorageIncompatible precedes AssetNotFound
+			// (the profile's asset source ConfigMap does not exist here) and
+			// ModelStorageUnresolved (the S3 ModelVersion is unresolved) —
+			// design §3.3 Resolved.
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.InferenceService{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: isvc.Name, Namespace: testNamespace}, got)).To(Succeed())
+				cond := meta.FindStatusCondition(got.Status.Conditions, aiv1alpha1.ConditionResolved)
+				g.Expect(cond).ToNot(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(cond.Reason).To(Equal("ModelStorageIncompatible"))
+				g.Expect(cond.Message).To(ContainSubstring("mounts"))
 			}, "15s", "200ms").Should(Succeed())
 		})
 
@@ -457,6 +646,53 @@ var _ = Describe("InferenceService controller", func() {
 				g.Expect(cond).ToNot(BeNil())
 				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 				g.Expect(cond.Reason).To(Equal("ModelNotMounted"))
+			}, "15s", "200ms").Should(Succeed())
+		})
+
+		It("marks Rendered false with ModelCredentialsUnresolved when credentials are referenced but not configured", func() {
+			irp := s3RenderProfile("isvc-s3-creds-missing", true) // env references {{ model.credentialsPath }}
+			Expect(k8sClient.Create(ctx, irp)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, irp) }()
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: irp.Spec.Assets[0].ConfigMapRef.Name, Namespace: systemNamespace},
+				Immutable:  ptrTo(true),
+				Data:       map[string]string{testConfigMapDataKey: testConfigMapDataValue},
+			}
+			Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, cm) }()
+
+			// The S3 ModelVersion resolves storage manually but sets no
+			// credentialsRef; the render gate must reject the reference.
+			mv := validS3ModelVersion("isvc-s3-creds-missing-mv", "")
+			Expect(k8sClient.Create(ctx, mv)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, mv) }()
+			Eventually(func() error {
+				got := &aiv1alpha1.ModelVersion{}
+				if err := k8sClient.Get(ctx, client.ObjectKey{Name: mv.Name}, got); err != nil {
+					return err
+				}
+				meta.SetStatusCondition(&got.Status.Conditions, metav1.Condition{
+					Type:    aiv1alpha1.ConditionStorageResolved,
+					Status:  metav1.ConditionTrue,
+					Reason:  testStorageResolvedReason,
+					Message: testStorageResolvedMessage,
+				})
+				return k8sClient.Status().Update(ctx, got)
+			}, "15s", "200ms").Should(Succeed())
+
+			isvc := validInferenceService("isvc-s3-creds-missing", mv.Name)
+			isvc.Spec.ProfileRef = irp.Name
+			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, isvc) }()
+
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.InferenceService{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: isvc.Name, Namespace: testNamespace}, got)).To(Succeed())
+				cond := meta.FindStatusCondition(got.Status.Conditions, aiv1alpha1.ConditionRendered)
+				g.Expect(cond).ToNot(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(cond.Reason).To(Equal("ModelCredentialsUnresolved"))
+				g.Expect(cond.Message).To(ContainSubstring("storage.s3.credentialsRef"))
 			}, "15s", "200ms").Should(Succeed())
 		})
 
@@ -845,7 +1081,7 @@ var _ = Describe("InferenceService controller", func() {
 			Expect(apierrors.IsNotFound(err)).To(BeTrue())
 		})
 
-		It("creates the model PVC for PVC storage", func() {
+		It("creates the model PVC for Dynamic storage", func() {
 			name := "isvc-provision-pvc"
 			irp := validRenderProfile(name)
 			Expect(k8sClient.Create(ctx, irp)).To(Succeed())
@@ -855,7 +1091,7 @@ var _ = Describe("InferenceService controller", func() {
 				Data:       map[string]string{testConfigMapDataKey: testConfigMapDataValue},
 			}
 			Expect(k8sClient.Create(ctx, cm)).To(Succeed())
-			mv := validPVCModelVersion(name+"-mv", "standard")
+			mv := validDynamicModelVersion(name+"-mv", "standard")
 			Expect(k8sClient.Create(ctx, mv)).To(Succeed())
 			isvc := validInferenceService(name, mv.Name)
 			isvc.Spec.ProfileRef = irp.Name
@@ -880,6 +1116,223 @@ var _ = Describe("InferenceService controller", func() {
 			Expect(pvc.Labels[modelLabelKey]).To(Equal("main"))
 			Expect(pvc.Labels[managedByLabelKey]).To(Equal(managedByValue))
 			Expect(pvc.OwnerReferences).To(ContainElement(HaveField("Kind", "InferenceService")))
+		})
+
+		It("creates the model PVC with a selector for Static storage", func() {
+			name := "isvc-provision-static"
+			irp := validRenderProfile(name)
+			Expect(k8sClient.Create(ctx, irp)).To(Succeed())
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: name + "-cm", Namespace: systemNamespace},
+				Immutable:  ptrTo(true),
+				Data:       map[string]string{testConfigMapDataKey: testConfigMapDataValue},
+			}
+			Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+			mv := validStaticModelVersion(name + "-mv")
+			Expect(k8sClient.Create(ctx, mv)).To(Succeed())
+			isvc := validInferenceService(name, mv.Name)
+			isvc.Spec.ProfileRef = irp.Name
+
+			// Static storage resolves via the storage-side integration; patch
+			// it manually as an admin would (design §3.1).
+			Eventually(func() error {
+				got := &aiv1alpha1.ModelVersion{}
+				if err := k8sClient.Get(ctx, client.ObjectKey{Name: mv.Name}, got); err != nil {
+					return err
+				}
+				meta.SetStatusCondition(&got.Status.Conditions, metav1.Condition{
+					Type:    aiv1alpha1.ConditionStorageResolved,
+					Status:  metav1.ConditionTrue,
+					Reason:  testStorageResolvedReason,
+					Message: testStorageResolvedMessage,
+				})
+				return k8sClient.Status().Update(ctx, got)
+			}, "15s", "200ms").Should(Succeed())
+
+			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
+			defer func() {
+				_ = k8sClient.Delete(ctx, isvc)
+				_ = k8sClient.Delete(ctx, mv)
+				_ = k8sClient.Delete(ctx, irp)
+			}()
+
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.InferenceService{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: testNamespace}, got)).To(Succeed())
+				g.Expect(meta.IsStatusConditionTrue(got.Status.Conditions, aiv1alpha1.ConditionProvisioned)).To(BeTrue())
+			}, "15s", "200ms").Should(Succeed())
+
+			pvc := &corev1.PersistentVolumeClaim{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-model-main", Namespace: testNamespace}, pvc)).To(Succeed())
+			Expect(pvc.Spec.AccessModes).To(Equal([]corev1.PersistentVolumeAccessMode{corev1.ReadOnlyMany}))
+			Expect(pvc.Spec.StorageClassName).To(Equal(ptrTo("cephfs-model-static")))
+			Expect(pvc.Spec.Selector).NotTo(BeNil())
+			Expect(pvc.Spec.Selector.MatchLabels).To(Equal(map[string]string{modelVersionLabelKey: mv.Name}))
+			Expect(pvc.OwnerReferences).To(ContainElement(HaveField("Kind", "InferenceService")))
+		})
+
+		It("provisions the S3 credentials copy and re-syncs it on rotation", func() {
+			name := "isvc-s3-credentials"
+			irp := s3RenderProfile(name, true)
+			Expect(k8sClient.Create(ctx, irp)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, irp) }()
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: name + "-cm", Namespace: systemNamespace},
+				Immutable:  ptrTo(true),
+				Data:       map[string]string{testConfigMapDataKey: testConfigMapDataValue},
+			}
+			Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, cm) }()
+			source := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "s3-model-registry-ro", Namespace: systemNamespace},
+				Type:       corev1.SecretTypeOpaque,
+				Data: map[string][]byte{
+					aiv1alpha1.ModelCredentialsKey: []byte("first-credentials"),
+				},
+			}
+			Expect(k8sClient.Create(ctx, source)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, source) }()
+
+			mv := validS3ModelVersion(name+"-mv", source.Name)
+			Expect(k8sClient.Create(ctx, mv)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, mv) }()
+			// Static/S3 resolve via the storage-side integration; patch it
+			// manually as an admin would (design §3.1).
+			Eventually(func() error {
+				got := &aiv1alpha1.ModelVersion{}
+				if err := k8sClient.Get(ctx, client.ObjectKey{Name: mv.Name}, got); err != nil {
+					return err
+				}
+				meta.SetStatusCondition(&got.Status.Conditions, metav1.Condition{
+					Type:    aiv1alpha1.ConditionStorageResolved,
+					Status:  metav1.ConditionTrue,
+					Reason:  testStorageResolvedReason,
+					Message: testStorageResolvedMessage,
+				})
+				return k8sClient.Status().Update(ctx, got)
+			}, "15s", "200ms").Should(Succeed())
+
+			isvc := validInferenceService(name, mv.Name)
+			isvc.Spec.ProfileRef = irp.Name
+			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, isvc) }()
+
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.InferenceService{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: testNamespace}, got)).To(Succeed())
+				g.Expect(meta.IsStatusConditionTrue(got.Status.Conditions, aiv1alpha1.ConditionProvisioned)).To(BeTrue())
+			}, "15s", "200ms").Should(Succeed())
+
+			// The credentials copy exists with the source content, labels,
+			// ownerRef and the source-version annotations.
+			copyName := name + "-model-main-credentials"
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: source.Name, Namespace: systemNamespace}, source)).To(Succeed())
+			copy := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: copyName, Namespace: testNamespace}, copy)).To(Succeed())
+			Expect(copy.Data).To(Equal(source.Data))
+			Expect(copy.Type).To(Equal(corev1.SecretTypeOpaque))
+			Expect(copy.Labels).To(HaveKeyWithValue(inferenceServiceLabelKey, name))
+			Expect(copy.Labels).To(HaveKeyWithValue(modelLabelKey, modelKeyMain))
+			Expect(copy.OwnerReferences).To(ContainElement(HaveField("Kind", "InferenceService")))
+			Expect(copy.Annotations[credentialsSourceAnnotationKey]).To(Equal(source.Name))
+			Expect(copy.Annotations[credentialsVersionAnnotationKey]).To(Equal(source.ResourceVersion))
+
+			// The role that referenced {{ model.credentialsPath }} got the
+			// single-file credentials volume; {{ model.path }} resolved to the uri.
+			dep := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-router", Namespace: testNamespace}, dep)).To(Succeed())
+			var vol *corev1.Volume
+			for i := range dep.Spec.Template.Spec.Volumes {
+				if dep.Spec.Template.Spec.Volumes[i].Name == credentialsVolumeName {
+					vol = &dep.Spec.Template.Spec.Volumes[i]
+				}
+			}
+			Expect(vol).ToNot(BeNil())
+			Expect(vol.Secret.SecretName).To(Equal(copyName))
+			Expect(vol.Secret.Items).To(Equal([]corev1.KeyToPath{{Key: aiv1alpha1.ModelCredentialsKey, Path: aiv1alpha1.ModelCredentialsFile}}))
+			Expect(vol.Secret.DefaultMode).To(Equal(ptrTo(int32(0444))))
+			Expect(dep.Spec.Template.Spec.Containers[0].VolumeMounts).To(ContainElement(
+				corev1.VolumeMount{Name: credentialsVolumeName, MountPath: aiv1alpha1.ModelCredentialsDir, ReadOnly: true}))
+			envs := dep.Spec.Template.Spec.Containers[0].Env
+			Expect(envs).To(ContainElement(corev1.EnvVar{Name: testEnvModelPath, Value: mv.Spec.Storage.S3.URI}))
+			Expect(envs).To(ContainElement(corev1.EnvVar{Name: "CREDS_FILE", Value: aiv1alpha1.ModelCredentialsFilePath}))
+
+			// The status echo records the synced source version.
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.InferenceService{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: testNamespace}, got)).To(Succeed())
+				g.Expect(got.Status.Model.Credentials).ToNot(BeNil())
+				g.Expect(got.Status.Model.Credentials.Source).To(Equal(source.Name))
+				g.Expect(got.Status.Model.Credentials.ResourceVersion).To(Equal(source.ResourceVersion))
+			}, "15s", "200ms").Should(Succeed())
+
+			// Rotate the source Secret in place: the copy re-syncs and the echo
+			// follows — without any rollout (rotation is not a template change).
+			Eventually(func() error {
+				got := &corev1.Secret{}
+				if err := k8sClient.Get(ctx, client.ObjectKey{Name: source.Name, Namespace: systemNamespace}, got); err != nil {
+					return err
+				}
+				got.Data = map[string][]byte{aiv1alpha1.ModelCredentialsKey: []byte("rotated-credentials")}
+				return k8sClient.Update(ctx, got)
+			}, "15s", "200ms").Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				got := &corev1.Secret{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: source.Name, Namespace: systemNamespace}, got)).To(Succeed())
+				copyGot := &corev1.Secret{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: copyName, Namespace: testNamespace}, copyGot)).To(Succeed())
+				g.Expect(copyGot.Data).To(Equal(got.Data))
+				g.Expect(copyGot.Annotations[credentialsVersionAnnotationKey]).To(Equal(got.ResourceVersion))
+				svc := &aiv1alpha1.InferenceService{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: testNamespace}, svc)).To(Succeed())
+				g.Expect(svc.Status.Model.Credentials.ResourceVersion).To(Equal(got.ResourceVersion))
+			}, "15s", "200ms").Should(Succeed())
+		})
+
+		It("marks Provisioned false with SecretCopyFailed when the source credentials Secret is missing", func() {
+			name := "isvc-s3-secret-missing"
+			irp := s3RenderProfile(name, true)
+			Expect(k8sClient.Create(ctx, irp)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, irp) }()
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: name + "-cm", Namespace: systemNamespace},
+				Immutable:  ptrTo(true),
+				Data:       map[string]string{testConfigMapDataKey: testConfigMapDataValue},
+			}
+			Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, cm) }()
+
+			mv := validS3ModelVersion(name+"-mv", "missing-source-secret")
+			Expect(k8sClient.Create(ctx, mv)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, mv) }()
+			Eventually(func() error {
+				got := &aiv1alpha1.ModelVersion{}
+				if err := k8sClient.Get(ctx, client.ObjectKey{Name: mv.Name}, got); err != nil {
+					return err
+				}
+				meta.SetStatusCondition(&got.Status.Conditions, metav1.Condition{
+					Type:    aiv1alpha1.ConditionStorageResolved,
+					Status:  metav1.ConditionTrue,
+					Reason:  testStorageResolvedReason,
+					Message: testStorageResolvedMessage,
+				})
+				return k8sClient.Status().Update(ctx, got)
+			}, "15s", "200ms").Should(Succeed())
+
+			isvc := validInferenceService(name, mv.Name)
+			isvc.Spec.ProfileRef = irp.Name
+			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, isvc) }()
+
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.InferenceService{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: testNamespace}, got)).To(Succeed())
+				cond := meta.FindStatusCondition(got.Status.Conditions, aiv1alpha1.ConditionProvisioned)
+				g.Expect(cond).ToNot(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(cond.Reason).To(Equal("SecretCopyFailed"))
+			}, "15s", "200ms").Should(Succeed())
 		})
 
 		It("creates no PVC for HostPath storage", func() {
@@ -908,7 +1361,7 @@ var _ = Describe("InferenceService controller", func() {
 				Data:       map[string]string{testConfigMapDataKey: testConfigMapDataValue},
 			}
 			Expect(k8sClient.Create(ctx, cm)).To(Succeed())
-			mv := validPVCModelVersion(name+"-mv", "standard")
+			mv := validDynamicModelVersion(name+"-mv", "standard")
 			Expect(k8sClient.Create(ctx, mv)).To(Succeed())
 			isvc := validInferenceService(name, mv.Name)
 			isvc.Spec.ProfileRef = irp.Name
@@ -985,7 +1438,7 @@ var _ = Describe("InferenceService controller", func() {
 				Data:       map[string]string{testConfigMapDataKey: testConfigMapDataValue},
 			}
 			Expect(k8sClient.Create(ctx, cm)).To(Succeed())
-			mv := validPVCModelVersion(name+"-mv", "standard")
+			mv := validDynamicModelVersion(name+"-mv", "standard")
 			Expect(k8sClient.Create(ctx, mv)).To(Succeed())
 			isvc := validInferenceService(name, mv.Name)
 			isvc.Spec.ProfileRef = irp.Name

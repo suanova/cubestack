@@ -23,6 +23,10 @@ const (
 	// assetConfigMapRefIndexKey is the cache index field for
 	// InferenceRuntimeProfile assets[].configMapRef.name.
 	assetConfigMapRefIndexKey = "assets[].configMapRef.name"
+
+	// credentialsRefIndexKey is the cache index field for
+	// ModelVersion storage.s3.credentialsRef.name.
+	credentialsRefIndexKey = "storage.s3.credentialsRef.name"
 )
 
 var (
@@ -56,7 +60,7 @@ func registerAllIndexes(mgr ctrl.Manager) error {
 		}); err != nil {
 		return err
 	}
-	return mgr.GetCache().IndexField(ctx, &aiv1alpha1.InferenceRuntimeProfile{}, assetConfigMapRefIndexKey,
+	if err := mgr.GetCache().IndexField(ctx, &aiv1alpha1.InferenceRuntimeProfile{}, assetConfigMapRefIndexKey,
 		func(o client.Object) []string {
 			irp := o.(*aiv1alpha1.InferenceRuntimeProfile)
 			refs := make([]string, 0, len(irp.Spec.Assets))
@@ -64,5 +68,18 @@ func registerAllIndexes(mgr ctrl.Manager) error {
 				refs = append(refs, asset.ConfigMapRef.Name)
 			}
 			return refs
+		}); err != nil {
+		return err
+	}
+	// Only S3 ModelVersions with a credentialsRef participate; the index entry
+	// must stay empty for every other storage strategy.
+	return mgr.GetCache().IndexField(ctx, &aiv1alpha1.ModelVersion{}, credentialsRefIndexKey,
+		func(o client.Object) []string {
+			mv := o.(*aiv1alpha1.ModelVersion)
+			if mv.Spec.Storage.Strategy != aiv1alpha1.StorageStrategyS3 ||
+				mv.Spec.Storage.S3 == nil || mv.Spec.Storage.S3.CredentialsRef == nil {
+				return nil
+			}
+			return []string{mv.Spec.Storage.S3.CredentialsRef.Name}
 		})
 }

@@ -27,6 +27,17 @@ rules:
   - list
   - watch
 - apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - ai.cubestack.io
   resources:
   - inferenceruntimeprofiles

@@ -87,12 +87,12 @@ var _ = Describe("buildPodSpec", func() {
 		}))
 	})
 
-	It("composes a PVC model volume with subPath", func() {
+	It("composes a Dynamic model volume with subPath", func() {
 		mv := &aiv1alpha1.ModelVersion{Spec: aiv1alpha1.ModelVersionSpec{
 			Model: "m", Version: "v1",
 			Storage: aiv1alpha1.ModelStorage{
-				Strategy: aiv1alpha1.StorageStrategyPVC,
-				PVC: &aiv1alpha1.PVCStorage{
+				Strategy: aiv1alpha1.StorageStrategyDynamic,
+				Dynamic: &aiv1alpha1.DynamicStorage{
 					StorageClassName: "shared", SubPath: "m/v1",
 					Capacity: resource.MustParse("1Ti"),
 				},
@@ -106,6 +106,46 @@ var _ = Describe("buildPodSpec", func() {
 		Expect(spec.Volumes[0].PersistentVolumeClaim.ClaimName).To(Equal("other-model-main"))
 		Expect(spec.Volumes[0].PersistentVolumeClaim.ReadOnly).To(BeTrue())
 		Expect(spec.Containers[0].VolumeMounts[0].SubPath).To(Equal("m/v1"))
+	})
+
+	It("composes a Static model volume without subPath", func() {
+		mv := &aiv1alpha1.ModelVersion{Spec: aiv1alpha1.ModelVersionSpec{
+			Model: "m", Version: "v1",
+			Storage: aiv1alpha1.ModelStorage{
+				Strategy: aiv1alpha1.StorageStrategyStatic,
+				Static: &aiv1alpha1.StaticStorage{
+					StorageClassName: "cephfs-model-static",
+					Capacity:         resource.MustParse("320Gi"),
+				},
+			},
+		}}
+		pt := aiv1alpha1.PodTemplate{
+			Image:  testEngineImage,
+			Mounts: []aiv1alpha1.ModelMount{{Model: modelKeyMain, At: testModelPath, ReadOnly: true}},
+		}
+		spec := buildPodSpec(pt, "other", mv, aiv1alpha1.AcceleratorVendorMetax)
+		Expect(spec.Volumes[0].PersistentVolumeClaim.ClaimName).To(Equal("other-model-main"))
+		Expect(spec.Volumes[0].PersistentVolumeClaim.ReadOnly).To(BeTrue())
+		Expect(spec.Containers[0].VolumeMounts[0].SubPath).To(BeEmpty())
+	})
+
+	It("injects the S3 credentials volume as a single read-only file", func() {
+		spec := &corev1.PodSpec{Containers: []corev1.Container{{Name: mainContainerName}}}
+		addCredentialsVolume(spec, "svc-a")
+
+		Expect(spec.Volumes).To(HaveLen(1))
+		vol := spec.Volumes[0]
+		Expect(vol.Name).To(Equal(credentialsVolumeName))
+		Expect(vol.Secret.SecretName).To(Equal("svc-a-model-main-credentials"))
+		Expect(vol.Secret.Items).To(Equal([]corev1.KeyToPath{
+			{Key: aiv1alpha1.ModelCredentialsKey, Path: aiv1alpha1.ModelCredentialsFile},
+		}))
+		Expect(vol.Secret.DefaultMode).To(Equal(ptrTo(int32(0444))))
+		Expect(spec.Containers[0].VolumeMounts).To(Equal([]corev1.VolumeMount{{
+			Name:      credentialsVolumeName,
+			MountPath: aiv1alpha1.ModelCredentialsDir,
+			ReadOnly:  true,
+		}}))
 	})
 
 	It("converts envFromAssets to envFrom ConfigMap refs named <isvc>-<asset>", func() {

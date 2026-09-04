@@ -23,15 +23,24 @@ import (
 )
 
 // StorageStrategy defines how the model storage is provided.
-// +kubebuilder:validation:Enum=HostPath;PVC
+// +kubebuilder:validation:Enum=HostPath;Dynamic;Static;S3
 type StorageStrategy string
 
 const (
 	// StorageStrategyHostPath means the model has been pre-distributed on nodes.
 	StorageStrategyHostPath StorageStrategy = "HostPath"
 
-	// StorageStrategyPVC means the controller creates a PVC in the service namespace.
-	StorageStrategyPVC StorageStrategy = "PVC"
+	// StorageStrategyDynamic means the controller creates a PVC in the service namespace.
+	StorageStrategyDynamic StorageStrategy = "Dynamic"
+
+	// StorageStrategyStatic means the model data is pre-provisioned; the controller creates
+	// a PVC with a selector that binds to a statically created PV. (CephFS subvolume for now)
+	StorageStrategyStatic StorageStrategy = "Static"
+
+	// StorageStrategyS3 means the model data lives under an S3 object prefix and the
+	// engine pulls it directly by URI; the platform only passes location and identity
+	// (design §3.1 S3 strategy).
+	StorageStrategyS3 StorageStrategy = "S3"
 )
 
 // HostPathStorage specifies the pre-distributed model root directory on nodes.
@@ -41,8 +50,9 @@ type HostPathStorage struct {
 	Path string `json:"path"`
 }
 
-// PVCStorage specifies the shared-storage configuration used to create the model PVC.
-type PVCStorage struct {
+// DynamicStorage holds the configuration for the Dynamic storage strategy:
+// the controller creates a PVC from the named StorageClass (design §3.1).
+type DynamicStorage struct {
 	// StorageClassName references a StorageClass created by the platform admin.
 	// +kubebuilder:validation:MinLength=1
 	StorageClassName string `json:"storageClassName"`
@@ -55,9 +65,45 @@ type PVCStorage struct {
 	Capacity resource.Quantity `json:"capacity"`
 }
 
+// StaticStorage holds the configuration for the Static storage strategy:
+// the controller creates a PVC with a selector to bind to a pre-created PV (design §3.1).
+type StaticStorage struct {
+	// StorageClassName references the no-provisioner StorageClass of the pre-created PVs.
+	// +kubebuilder:validation:MinLength=1
+	StorageClassName string `json:"storageClassName"`
+
+	// Capacity declares the model storage size; it is written to the PVC request and
+	// validated against the storage-side quota by the storage integration.
+	Capacity resource.Quantity `json:"capacity"`
+}
+
+// S3CredentialsRef names the platform-held credentials Secret in
+// cubestack-system; the controller copies it into the service namespace.
+type S3CredentialsRef struct {
+	// Name is the credentials Secret name in cubestack-system, scoped read-only
+	// to the model's uri prefix by the platform admin.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+}
+
+// S3Storage holds the configuration for the S3 strategy: the engine pulls the
+// model directly from the object prefix; the platform passes location and
+// identity only (design §3.1 S3 strategy).
+type S3Storage struct {
+	// URI is the S3 prefix of the model data, <bucket>/<prefix>/<model>/<version>.
+	// +kubebuilder:validation:Pattern="^s3://"
+	URI string `json:"uri"`
+
+	// CredentialsRef optionally names the credentials Secret in cubestack-system
+	// that the controller copies into the service namespace. Absent means
+	// anonymous reads or node-level identity.
+	// +optional
+	CredentialsRef *S3CredentialsRef `json:"credentialsRef,omitempty"`
+}
+
 // ModelStorage defines where and how the model is provided.
-// strategy selects one of the storage configurations; the other block must be absent.
-// +kubebuilder:validation:XValidation:rule="self.strategy == 'HostPath' ? (has(self.hostPath) && !has(self.pvc)) : (self.strategy == 'PVC' ? (has(self.pvc) && !has(self.hostPath)) : true)",message="strategy HostPath requires hostPath and forbids pvc; strategy PVC requires pvc and forbids hostPath"
+// strategy selects one of the storage configurations; the other blocks must be absent.
+// +kubebuilder:validation:XValidation:rule="self.strategy == 'HostPath' ? (has(self.hostPath) && !has(self.dynamic) && !has(self.static) && !has(self.s3)) : (self.strategy == 'Dynamic' ? (has(self.dynamic) && !has(self.hostPath) && !has(self.static) && !has(self.s3)) : (self.strategy == 'Static' ? (has(self.static) && !has(self.hostPath) && !has(self.dynamic) && !has(self.s3)) : (self.strategy == 'S3' ? (has(self.s3) && !has(self.hostPath) && !has(self.dynamic) && !has(self.static)) : true)))",message="Exactly one of hostPath, dynamic, static, or s3 must be set for the chosen strategy"
 type ModelStorage struct {
 	// Strategy selects how the model storage is provided.
 	// +kubebuilder:validation:Required
@@ -67,9 +113,17 @@ type ModelStorage struct {
 	// +optional
 	HostPath *HostPathStorage `json:"hostPath,omitempty"`
 
-	// PVC is the shared-storage configuration, required when strategy is PVC.
+	// Dynamic is the shared-storage configuration, required when strategy is Dynamic.
 	// +optional
-	PVC *PVCStorage `json:"pvc,omitempty"`
+	Dynamic *DynamicStorage `json:"dynamic,omitempty"`
+
+	// Static is the pre-provisioned PV configuration, required when strategy is Static.
+	// +optional
+	Static *StaticStorage `json:"static,omitempty"`
+
+	// S3 is the direct-S3 configuration, required when strategy is S3.
+	// +optional
+	S3 *S3Storage `json:"s3,omitempty"`
 }
 
 // ModelVersionSpec defines the desired state of ModelVersion
@@ -116,11 +170,20 @@ type ModelVersionStatus struct {
 	// +optional
 	UsedBy []ObjectRef `json:"usedBy,omitempty"`
 
+	// RootPath is the resolved storage unit identifier for the Static strategy
+	// (design §3.1): the real path (including the storage-generated uuid) parsed
+	// by the storage-side integration (currently patched manually for testing).
+	// Empty for Dynamic/HostPath/S3 — S3 has no storage-side resolution product.
+	// +optional
+	RootPath string `json:"rootPath,omitempty"`
+
 	// conditions represent the current state of the ModelVersion resource.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
 	//
 	// Standard condition types include (see conditions.go for the constants):
-	// - ConditionStorageResolved: the referenced StorageClass exists (PVC strategy only)
+	// - ConditionStorageResolved: Dynamic — the referenced StorageClass exists;
+	//   Static/S3 — the storage unit is resolvable (handled by storage-side
+	//   integration, currently patched manually); HostPath — always True.
 	// - ConditionInUse: the ModelVersion is referenced by at least one InferenceService
 	//
 	// The status of each condition is one of True, False, or Unknown.

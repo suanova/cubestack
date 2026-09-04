@@ -79,14 +79,14 @@ var _ = Describe("applyWorkloads", func() {
 		}}
 	}
 
-	// pvcModel is the PVC-storage variant of model(): the readiness of
+	// dynamicModel is the Dynamic-storage variant of model(): the readiness of
 	// model-mounting roles is gated on the model PVC being bound (design §4.3).
-	pvcModel := func() *aiv1alpha1.ModelVersion {
+	dynamicModel := func() *aiv1alpha1.ModelVersion {
 		return &aiv1alpha1.ModelVersion{Spec: aiv1alpha1.ModelVersionSpec{
 			Model: "m", Version: "v1",
 			Storage: aiv1alpha1.ModelStorage{
-				Strategy: aiv1alpha1.StorageStrategyPVC,
-				PVC: &aiv1alpha1.PVCStorage{
+				Strategy: aiv1alpha1.StorageStrategyDynamic,
+				Dynamic: &aiv1alpha1.DynamicStorage{
 					StorageClassName: "standard", SubPath: "m/v2",
 					Capacity: resource.MustParse("1Gi"),
 				},
@@ -282,7 +282,7 @@ var _ = Describe("applyWorkloads", func() {
 			roleResult(roles[0], 1),
 			roleResult(roles[1], 1),
 		}
-		mv := pvcModel()
+		mv := dynamicModel()
 
 		// The model PVC exists (the Provisioned step creates it on the
 		// reconcile path; here it is created by hand) but is not yet bound:

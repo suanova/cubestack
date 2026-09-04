@@ -82,11 +82,22 @@ spec:
     hostPath:
       path: /workspace/wnma/model/DeepSeek-V4-Flash-FlexSMQ-AWQ-W8A8
     # Or:
-    # strategy: PVC
-    # pvc:
+    # strategy: Dynamic
+    # dynamic:
     #   storageClassName: juicefs-model-cache
     #   subPath: models/deepseek-v4-flash/w8a8-v1
     #   capacity: 320Gi
+    # Or:
+    # strategy: Static
+    # static:
+    #   storageClassName: cephfs-model-static
+    #   capacity: 2Ti
+    # Or:
+    # strategy: S3
+    # s3:
+    #   uri: s3://model-registry/deepseek-v4-flash/w8a8-v1
+    #   credentialsRef:
+    #     name: s3-model-registry-ro
 ```
 
 #### 命名规则与不可变性
@@ -98,7 +109,7 @@ spec:
 
 **同名重建** 
 
-VAP 校验无法防止 DELETE+CREATE 组合操作，平台允许该组合操作，管理员在删除操作前应检查 `ModelVersion` 的状态，（见删除正在使用的 ModelVersion）。
+VAP 校验无法防止 DELETE+CREATE 组合操作，平台允许该组合操作，管理员在删除操作前应检查 `ModelVersion` 的状态，（见删除正在使用的 ModelVersion）。`Static` 策略下还需注意存储侧残留：subvolume 的删除不在 `ModelVersion` 删除流程内，同名重建前必须确认同名 subvolume 已被清理，否则重建的服务会通过 `getpath` 挂载到旧数据。
 
 #### 字段
 
@@ -109,37 +120,62 @@ VAP 校验无法防止 DELETE+CREATE 组合操作，平台允许该组合操作�
 | `architecture` | string | L0：必填；L2：作为 InferenceRuntimeProfile `modelRequirements` 兼容校验的输入 | 模型的架构标识，来自 HuggingFace 或内部 `config.json` 中的 `model_type`，例如 `deepseek_v4` / `glm4`。当前在模型注册时记录，未来可由模型导入流程自动提取并填充；同时作为 `model.architecture` 提供给渲染上下文。 |
 | `quantization` | string | L0：必填；L2：兼容校验输入 | 模型的权重量化方式，例如 `w8a8`。不同的量化方式可能需要特定的推理引擎和 GPU 才能正常运行，因此参与模型兼容性校验。 |
 | `meta` | map | L0：可选 | 管理员维护的自由 map，用于处理厂商 launcher 所需名称与 `architecture` 不一致的情况。若 launcher 直接使用架构名，Profile 模板应直接引用 `{{ model.architecture }}`，避免重复维护同一信息。 |
-| `storage.strategy` | enum（`HostPath`\|`PVC`） | L0：必填、枚举；strategy 与对应配置块 oneOf | v1alpha1 支持 `HostPath`（模型已预分发到节点）和 `PVC`（controller 在用户 namespace 中创建 PVC）。|
+| `storage.strategy` | enum（`HostPath`\|`Dynamic`\|`Static`\|`S3`） | L0：必填、枚举；strategy 与对应配置块 oneOf | 供给方式：`HostPath`（模型已预分发到节点）、`Dynamic`（controller 在用户 namespace 创建 PVC，由 StorageClass 动态供给；原 `PVC` 值在 v1alpha1 内更名为 `Dynamic`）、`Static`（引用管理员预建的 CephFS subvolume，controller 解析后渲染静态 PV/PVC，见下文 Static 策略小节）、`S3`（模型数据在 S3 对象前缀，引用传递 URI 与凭据，引擎自行拉取，见下文 S3 策略小节）。 |
 | `storage.hostPath.path` | string | L0：绝对路径；仅 `strategy: HostPath` 时必填 | 预分发模型根目录；多机 `workload.group.size>1` 时要求组内全部节点已预分发该模型。 |
-| `storage.pvc.storageClassName` | string | L0：仅 `strategy: PVC` 时必填 | 引用平台管理员预先创建的 StorageClass。 |
-| `storage.pvc.subPath` | string | L0：仅 `strategy: PVC` 时必填 | 共享存储内的模型目录；同一 StorageClass 下按 `<model>/<version>` 组织。 |
-| `storage.pvc.capacity` | Quantity (k8s) | L0：仅 `strategy: PVC` 时必填 | 创建 PVC 时写入 `spec.resources.requests.storage`。模型大小是否装得下由平台管理员在注册时保证，controller 不做校验。 |
+| `storage.dynamic.storageClassName` | string | L0：仅 `strategy: Dynamic` 时必填 | 引用平台管理员预先创建的 StorageClass（动态供给）。 |
+| `storage.dynamic.subPath` | string | L0：仅 `strategy: Dynamic` 时必填 | 共享存储内的模型目录；同一 StorageClass 下按 `<model>/<version>` 组织。生效前提：动态供给出的卷能看到共享根目录及其中已预放的模型目录。 |
+| `storage.dynamic.capacity` | Quantity (k8s) | L0：仅 `strategy: Dynamic` 时必填 | 创建 PVC 时写入 `spec.resources.requests.storage`。模型大小是否装得下由平台管理员在注册时保证，controller 不做校验。 |
+| `storage.static.storageClassName` | string | L0：仅 `strategy: Static` 时必填 | no-provisioner StorageClass，作为静态 PV/PVC 的绑定匹配键。 |
+| `storage.static.capacity` | Quantity (k8s) | L0：仅 `strategy: Static` 时必填 | 管理员声明的模型容量：渲染为静态 PV capacity 与 PVC request，并在解析时校验 `capacity ≤ subvolume quota`（见 Static 策略小节）。 |
+| `storage.s3.uri` | string | L0：仅 `strategy: S3` 时必填、`s3://` scheme | 模型数据所在的 S3 前缀，约定 `<bucket>/<prefix>/<model>/<version>`（与存储单元命名不变量一致）。平台不供给数据通路：无节点预分发要求、任意节点可调度。引擎以 URI 为模型源直接拉取（vLLM/SGLang 系引擎对 `s3://` 源的原生支持），下载落点与缓存策略属引擎内部实现、平台不感知——Pod 每次重建均需重新拉取，下载与加载耗时计入服务启动时间，探针阈值与中断预算见 §4.3 与 §5.2。 |
+| `storage.s3.credentialsRef.name` | string | L0：仅 `strategy: S3` 时可选 | 读取凭据 Secret 的名称，Secret 位于 `cubestack-system`（平台持有，应按 `uri` 前缀授予只读 scope）。缺省表示匿名读或依赖节点级身份。设置时 controller 将其复制为用户 namespace 的 `<isvc>-model-<key>-credentials` 并注入引用 `{{ model.credentialsPath }}` 的 role（见 S3 策略小节）；轮换 = 原地更新 Secret 内容（引用不变、不触发滚动），更换引用 = 新建 `ModelVersion`。 |
 
 #### 存储与 PVC 创建规则
 
-当 `storage.strategy: PVC` 时，controller 在 `InferenceService` 所在的 namespace 中创建模型 PVC，并遵循以下规则。
+当 `storage.strategy` 为 `Dynamic` 或 `Static` 时，controller 在 `InferenceService` 所在的 namespace 中创建模型 PVC，并遵循以下规则。
 
 - PVC 名称为 `<isvc>-model-<key>`;
 - PVC 设置 `ownerReference` 指向对应的 `InferenceService`;
 - PVC 固定使用 `accessModes: [ReadOnlyMany]`；
 - `InferenceRuntimeProfile` 中的 `mounts[]` 已规定模型卷必须以 `readOnly: true` 挂载，因此模型 PVC 不支持写入数据；
 - 删除 `InferenceService` 时，Kubernetes 会根据 ownerReference 回收该 PVC；
-- PVC 的创建和删除仅管理 PVC 对象本身，不影响底层模型数据。
+- PVC 的创建和删除仅管理 PVC 对象本身，不影响底层模型数据。`Dynamic` 依赖其 StorageClass/存储的回收语义不随 PVC 删除回收共享数据（由平台管理员保证）；`Static` 由静态 PV 的 `Retain` 与 subvolume 生命周期保证。
+
+#### Static 策略 
+
+`Static` 引用管理员/存储管理的 Controller 预建的专用存储单元（当前后端为 CephFS subvolume）。存储侧机制——供给流程、`getpath` 解析与 quota 读取、静态 PV 属性、平台常量与生命周期——由模型存储设计文档承载，本文只约定 API 契约：
+
+- **粒度不变量**：一个 `ModelVersion` 对应一个存储单元，存储单元名 = `metadata.name`（即 `<model>-<version>`），不设显式字段；与 `spec` 不可变一致——模型内容或存储变更 = 新建 `ModelVersion` = 新建存储单元。
+- **`status.rootPath`**：存储侧解析出的真实路径（含存储生成的 uuid），按解析产物归 status 的约定由 controller 回显，不由管理员填写；服务渲染静态 PV 时消费。
+- **`StorageResolved`（Static）**：存储单元可解析且满足声明——存在（`SubvolumeNotFound`）、quota 已设置（`QuotaNotSet`）、`spec.static.capacity ≤ quota`（`CapacityExceedsQuota`）、Ceph 不可达（`CephUnavailable`，退避重试）。
+- **渲染契约**：controller 在用户 namespace 创建 ROX PVC（ownerRef → isvc），通过 `spec.selector` 匹配静态 PV 标签 `ai.cubestack.io/model-version: <mv-name>` 绑定（叠加 `storageClassName` 匹配）。Kubernetes 中一个 PV 只能绑定一个 PVC，因此同一 `ModelVersion` 的每个并发消费者各自需要一个静态 PV；同一存储单元的多个 PV 语义等价（同 rootPath、同 StorageClass），任一 Available PV 均可绑定。volumeMount 不带 `subPath`——存储单元即模型根目录（`subPath` 是 `Dynamic` 的卷内寻址字段，见 §4.5）。静态 PV 的创建主体与 Released 回收见 §7 TODO。
 
 **配置变更与滚动更新**
 
-- 模型存储配置会参与 `template-hash` 的计算，包括 `strategy` 以及对应配置块中的 `capacity`、`subPath` 和 `storageClassName`。
+- 模型存储配置会参与 `template-hash` 的计算，包括 `strategy` 以及对应配置块中的字段：`Dynamic` 为 `storageClassName`、`subPath`、`capacity`；`Static` 为 `storageClassName`、`capacity`；`S3` 为 `uri`（`credentialsRef` 不参与——凭据轮换是原地更新 Secret 内容，不应触发滚动）。
 - 当模型存储配置发生变化时，渲染后的工作负载配置也会发生变化，因此按模板变更处理并触发滚动更新；上述滚动更新以 PVC 可原地变更为前提，`storageClassName` 变化、`capacity` 缩小等情形需要整体重建，处理规则见 §5.1。
+
+#### S3 策略
+
+`S3` 表示模型数据已就位于对象存储的某个前缀（`storage.s3.uri`）。与 `Static` 不同，平台**不供给数据通路**：没有 subvolume、静态 PV 那样的存储单元物化步骤，controller 只传递"位置 + 身份"（URI 与凭据），由推理引擎以 URI 自行拉取；引擎内部是否有缓存属引擎实现，平台不感知。本节（S3 直连，引擎按 URI 自行拉取）只约定 API 契约；存储侧设计（operator 配置段与凭据根约定、controller 存在性检查的自身凭据来源、带宽特征、数据完整性）需在模型存储设计中展开——该文档现有 §7 的 S3 懒加载缓存 CSI 是 **Static 契约的后端变体**，与本节是两条独立设计线，不可混读。endpoint、region 等平台坐标不进 `spec`（同 Static 的 CephFS 坐标约定）。
+
+- **粒度不变量与完整性**：一个 `ModelVersion` 对应一个 `uri` 前缀。对象存储前缀可被覆盖，而 `spec` 不可变只是 API 对象属性——覆盖前缀数据对 API 层不可见，完整性兜底（revision 入前缀约定、manifest/etag 校验）归入模型导入管线（§7 TODO）。
+- **`credentialsRef` 与轮换**：凭据 Secret 由平台在 `cubestack-system` 持有并按 `uri` 前缀授予只读 scope。轮换 = 原地更新 Secret 内容，引用名不变，不触发任何滚动；更换引用（换 bucket/凭据集）= 存储变更 = 新建 `ModelVersion`。因此该引用虽位于不可变的 `spec` 中，不与不可变约束冲突。
+- **`StorageResolved`（S3）**：每次 reconcile 校验——`uri` 前缀可列举且**非空**（数据已就位；前缀不存在或为空对象均为 `DataNotFound`）；`credentialsRef` 设置时其 Secret 存在（否则 `CredentialNotFound`）；S3 不可达为 `S3Unavailable`（退避重试）。
+- **渲染契约**：不生成模型 volume/volumeMount，`{{ model.path }}` 解析为 `spec.storage.s3.uri`（见 §4.5）。`credentialsRef` 设置时，controller 在服务 namespace 创建凭据 Secret 副本 `<isvc>-model-<key>-credentials`（ownerRef → isvc，命名对齐模型 PVC；内容原样复制，平台不解释内容格式，约定单键 `credentials` 以便挂载为单文件），并注入引用 `{{ model.credentialsPath }}` 的 role（readOnly 挂载到平台固定路径）。声明 `mounts[]` 的 Profile 与 `S3` 策略的 ModelVersion 不兼容，在 `Resolved` 阶段拒绝（`ModelStorageIncompatible`）。
+- **副本生命周期与同步**：controller 监听 `credentialsRef` 指向的源 Secret，内容变化时重新同步副本（副本 annotation 记录源名称与源 resourceVersion，并回显到 InferenceService 的 `status.model.credentials`，见 §3.3）；同步失败置 `Provisioned=False, reason=SecretCopyFailed`。凭据副本内容不参与 template-hash（轮换不触发滚动，见 §5.1）；与模型 PVC 一样不参与残留资源清理，保留至 isvc 删除时由 GC 回收。轮换对运行中 Pod 不即时生效：副本随源更新，但引擎通常在启动时读取凭据，运行中 Pod 保持旧凭据直至下次重启/重建；凭据被撤销时运行中 Pod 不感知，重启后才生效。删除 `ModelVersion` 不影响源 Secret 与桶内数据。
 
 #### Status
 
 ModelVersion 的 status 主要帮助管理员确认：
 
-- PVC 存储策略引用的 StorageClass 是否可用？
+- 存储策略引用的外部资源是否可用（`Dynamic` 的 StorageClass、`Static` 的 subvolume 与 quota、`S3` 的数据前缀与凭据 Secret）？
 - 当前有哪些服务正在引用该模型版本，是否适合删除或弃用？
 
 ```yaml
 status:
+  # 存储单元标识：仅 Static 为 controller 解析回显的真实路径（含 uuid）；Dynamic/HostPath/S3 为空
+  rootPath: /volumes/models/deepseek-v4-flash-w8a8-v1/6f0e...
   usedBy:
   - namespace: project-a
     name: dsv4-flash-pd
@@ -156,13 +192,16 @@ status:
 
 | 字段/条件 | 语义 |
 |---|---|
-| `StorageResolved` | 使用 PVC 时，引用的 `storageClassName` 是否存在。使用 HostPath 时恒为 `True`，因为 Controller 无法在集群范围内确认每个节点上的目录是否存在；相关错误会在服务的 condition 和 Pod 事件中显示。 |
+| `rootPath` | 存储单元标识。仅 `Static` 策略非空：controller 通过 subvolume `getpath` 解析出的真实路径（含 uuid），供服务渲染静态 PV 使用；`Dynamic`/`HostPath`/`S3` 下为空（S3 无存储侧解析产物，`uri` 已在 spec 中，不回显）。 |
+| `StorageResolved` | `Dynamic`：引用的 `storageClassName` 是否存在。`Static`：subvolume 是否可解析且满足声明——getpath 成功、quota 已设置、`spec.static.capacity ≤ quota`（reason 见 Static 策略小节）。`S3`：`uri` 前缀可列举、`credentialsRef`（若设置）指向的 Secret 存在（reason 见 S3 策略小节）。`HostPath` 恒为 `True`，因为 Controller 无法在集群范围内确认每个节点上的目录是否存在；相关错误会在服务的 condition 和 Pod 事件中显示。 |
 | `usedBy[]` | 正在引用该 ModelVersion 的 InferenceService 列表。条目固定为 `{namespace, name}`，kind 为 `InferenceService`。Controller 会完整重建该列表；将来需要支持其他引用者时，可扩展为 `{group, kind, namespace, name}`。 |
 | `InUse` | 是否存在引用该 ModelVersion 的服务。`True` 仅作为删除或弃用前的警告，不阻止删除。 |
 
 #### 删除正在使用的 ModelVersion
 
 在 `v1alpha1` 中不使用 `finalizer` 阻止删除正在被 InferenceService 引用的 ModelVersion。删除 ModelVersion 不会立即修改已经创建的 `LWS`/`Deployment`、`Service`、`ConfigMap` 等资源，因此现有 Pod 可以继续运行。Controller 只会在后续 reconcile 时重新解析 `modelRef`。如果此时引用的 `ModelVersion` 已被删除，`InferenceService` 将显示：`Resolved=False, reason=ModelNotFound` 同时 Controller 不再创建或更新后续资源。
+
+删除 `ModelVersion` 同样不触发任何存储侧清理：`Static` 策略的 subvolume 与静态 PV、`Dynamic` 策略的共享存储数据、`S3` 策略的桶内数据与源 Secret 均保持不变，由管理员按存储流程清理（自动化见 §7 TODO）。
 
 因此，`v1alpha1` 中仅通过 `usedBy` 和 `InUse` 提示对象仍被引用，不阻止删除。管理员删除 `ModelVersion` 前，应根据 `usedBy` 确认没有服务仍依赖该版本。后续版本可以在不改变现有引用语义的前提下，通过 `finalizer` 增加对正在使用的 `ModelVersion` 的删除保护。
 
@@ -395,7 +434,7 @@ Controller 将此模板按 `workload.kind` 写入对应位置：`LeaderWorkerSet
 | `resources` | object | — | `{cpu, memory, gpuPerPod}`。`cpu` 和 `memory` 写入 requests；`gpuPerPod` 按 GPU 厂商映射为扩展资源，并同时写入 requests 和 limits。 |
 | `securityContext` | object | — | `{privileged?, runAsUser?, runAsGroup?}`。三个字段可分别设置。 |
 | `terminationGracePeriodSeconds` | int | L0：可选，默认 30 | 需要等待连接摘流或 checkpoint 写入时可适当增大。 |
-| `mounts[]` | list | L0：`model` 固定 `main`、`readOnly` 固定 `true` | 模型挂载声明：`{model: main, at: <容器内路径>, readOnly: true}`。Profile 指定容器内挂载位置，ModelVersion 指定模型的存储方式。 |
+| `mounts[]` | list | L0：`model` 固定 `main`、`readOnly` 固定 `true` | 模型挂载声明：`{model: main, at: <容器内路径>, readOnly: true}`。Profile 指定容器内挂载位置，ModelVersion 指定模型的存储方式。仅卷类策略（`HostPath`/`Dynamic`/`Static`）声明；`S3` 策略以 URI 消费模型，不声明 `mounts[]`（§4.5）。 |
 | `volumes[]` | list | L0：仅支持 Kubernetes Volume 的受控子集 | 附加卷，例如 shm `emptyDir` 或 InfiniBand `hostPath`。 |
 | `nodeSelector` | map | L0：可选 | 多机使用 HostPath 时，用于限定到已预分发模型的节点池。多个 role 共用的约束可引用 `{{ profile.vars.* }}`。只有管理员明确希望用户决定调度位置时，才应引用 `{{ overrides.* }}`。 |
 | `ports[]` | list | — | 容器端口：`{name, containerPort}`。 |
@@ -529,6 +568,9 @@ status:
   model:
     name: deepseek-v4-flash
     version: w8a8-v1  # 回显自解析出的 ModelVersion（非用户输入字段）
+    credentials:      # 仅 S3 策略：凭据副本已同步到的源版本（审计链，无内容 hash）
+      source: s3-model-registry-ro
+      resourceVersion: "123456"
   conditions:
   - type: Resolved
     status: "True"
@@ -583,15 +625,15 @@ status:
     hash: sha256:9f2c...
 ```
 
-**observedGeneration**: 表示 Controller 已处理到的 InferenceService generation；若该值小于 `metadata.generation`，则当前 status 可能仍对应旧 spec。`roles[].replicas` 表示期望实例组数量（Deployment 时为 Pod 数量），`roles[].readyReplicas` 表示当前就绪的实例组数量；`ready` 是该 role 是否已就绪的汇总结果。`groupSize` 仅 `kind: LeaderWorkerSet` 的 role 出现，Deployment 的 role 没有该字段。
+**observedGeneration**: 表示 Controller 已处理到的 InferenceService generation；若该值小于 `metadata.generation`，则当前 status 可能仍对应旧 spec。`roles[].replicas` 表示期望实例组数量（Deployment 时为 Pod 数量），`roles[].readyReplicas` 表示当前就绪的实例组数量；`ready` 是该 role 是否已就绪的汇总结果。`groupSize` 仅 `kind: LeaderWorkerSet` 的 role 出现，Deployment 的 role 没有该字段。`S3` 策略下 `status.model.credentials` 回显凭据副本已同步到的源 Secret 名称与 resourceVersion；源 Secret 轮换后 controller 重新同步副本并更新该回显，同步失败由 `Provisioned=False, reason=SecretCopyFailed` 反映。
 
 下表中 `Resolved`、`Rendered`、`EndpointReady`、`RouteReady` 即 §2.1 中的 L2 校验点；`Provisioned` 和 `WorkloadsApplied` 标记生成步骤（§4.1 步骤 3–4）的应用结果：
 
 | Condition | 检查 | 失败 reason 示例 |
 |---|---|---|
-| `Resolved` | 引用解析：`profileRef` 指向的 Profile 存在；`modelRef` 指向的 ModelVersion 存在，且模型的 `architecture` 和 `quantization` 都满足 Profile 的要求；所有 asset 源都存在于 `cubestack-system`。三项校验全部执行，任一失败即为 `False`：reason 按上述顺序取第一个失败项，`message` 汇总全部失败。Profile 对象上的 `AssetsResolved` 预检（§3.2）不依赖服务存在，用于提前发现问题；服务解析时仍会再次校验，避免源对象在两次操作之间被删除。 | `ProfileNotFound`、`ModelNotFound`、`ModelIncompatible`、`AssetNotFound` |
-| `Rendered` | override 值合法；Phase 1 只使用允许的变量；所有占位符都在允许的变量范围内；引用 `{{ model.path }}` 的 role 已挂载对应模型。 | `UnknownOverride`、`InvalidOverride`、`PhaseViolation`、`UnknownPlaceholder`、`ModelNotMounted` |
-| `Provisioned` | 渲染后的 asset ConfigMap 与模型 PVC 已在服务 namespace 中创建成功。仅指对象创建成功；PVC 的绑定与存储供给由存储系统完成，其异常通过 Pod 事件体现。 | `AssetConfigMapFailed`、`PVCCreateFailed` |
+| `Resolved` | 引用解析：`profileRef` 指向的 Profile 存在；`modelRef` 指向的 ModelVersion 存在，且模型的 `architecture` 和 `quantization` 都满足 Profile 的要求；模型的存储策略与 Profile 的模型消费方式兼容（`S3` 策略不能搭配声明 `mounts[]` 的 Profile）；所有 asset 源都存在于 `cubestack-system`。`Static` 与 `S3` 存储策略额外要求 ModelVersion 的 `StorageResolved=True`（Static 下即 `status.rootPath` 已解析并回显），否则 `Resolved=False, reason=ModelStorageUnresolved`，不创建模型 PVC、凭据 Secret 副本与工作负载。各项校验全部执行，任一失败即为 `False`：reason 按上述顺序取第一个失败项，`message` 汇总全部失败。Profile 对象上的 `AssetsResolved` 预检（§3.2）不依赖服务存在，用于提前发现问题；服务解析时仍会再次校验，避免源对象在两次操作之间被删除。 | `ProfileNotFound`、`ModelNotFound`、`ModelIncompatible`、`ModelStorageIncompatible`、`AssetNotFound`、`ModelStorageUnresolved` |
+| `Rendered` | override 值合法；Phase 1 只使用允许的变量；所有占位符都在允许的变量范围内；引用 `{{ model.path }}` 的 role 已挂载对应模型；引用 `{{ model.credentialsPath }}` 的 role 要求对应 ModelVersion 已设置 `storage.s3.credentialsRef`。 | `UnknownOverride`、`InvalidOverride`、`PhaseViolation`、`UnknownPlaceholder`、`ModelNotMounted`、`ModelCredentialsUnresolved` |
+| `Provisioned` | 渲染后的 asset ConfigMap、模型 PVC 与 S3 凭据 Secret 副本（§3.1 S3 策略）已在服务 namespace 中创建成功；源 Secret 轮换后副本的重新同步同样由该 condition 反映。仅指对象创建/同步成功；PVC 的绑定与存储供给由存储系统完成，其异常通过 Pod 事件体现。 | `AssetConfigMapFailed`、`PVCCreateFailed`、`SecretCopyFailed` |
 | `WorkloadsApplied` | 期望配置已完整写入 Service 与工作负载（LWS/Deployment），即渲染结果已下发到期望版本。只表示配置已应用，不表示就绪：滚动更新期间保持 `True`，Pod 未就绪由 `Ready` 与 `roles[]` 反映。 | `ServiceApplyFailed`、`WorkloadApplyFailed` |
 | `EndpointReady` | 无论 `publish` 取值，内部端点都必须实际可访问：`endpoint.role` 渲染后指向存在的 role，该 role 的 Service 中存在名为 `endpoint.portName`（默认 `http`）的端口，且该 Service 至少有一个就绪的后端端点（对应 Pod 已通过就绪探针）。该 condition 决定 `status.endpoint.internal` 是否有效；`RouteReady` 仅在它为 True 后才在网关上创建路由。 | `EndpointRoleNotFound`、`EndpointPortNotFound`、`EndpointNotReady` |
 | `RouteReady` | 仅覆盖网关侧的公开路由发布。`publish: true` 时，`modelName` 在发布范围内唯一，且以 `EndpointReady` 解析出的 Service 端口为后端的 HTTPRoute **已生成并被网关接受**（依赖 `EndpointReady=True`；接受 = 路由 `status.parents` 中匹配网关的条目 `Accepted=True` 且 `ResolvedRefs=True`）；`modelName` 与他人冲突时，保留先占用者当前有效的 HTTPRoute，本服务保持 False。等待网关接受期间为 `False`，reason 为 `GatewayNotAccepted`；平台网关未配置或网关 CRD 缺失时降级为 `False`，reason 为 `GatewayNotConfigured`。`publish: false` 时为 `True`，reason 为 `NotPublished`，表示未请求创建公开路由。 | `ModelNameConflict`、`GatewayNotAccepted`、`GatewayNotConfigured`、`EndpointNotReady` |
@@ -621,6 +663,10 @@ Controller 监听 `InferenceService` 及其引用关系的变化、解析引用�
 - `cubestack-system` namespace 下的 `ConfigMap`：平台管理员可写（create/update/delete）；controller 需要 get/list/watch 和 status 写权限；
 - `InferenceService`：用户可在各自 namespace 创建；
 - Controller 需要在用户 namespace 下创建 LWS/Deployment/Service/ConfigMap/PVC 的权限。
+- `Static` 策略下，controller 需要读取 operator 配置引用的 Ceph 凭据（rook-ceph namespace 中的 Secret/ConfigMap）并访问 Ceph mon，用于 subvolume 的 `getpath` 与 quota 只读解析。
+- 静态 PV 的 controller 自动化（§7 TODO）落地后，controller 还需要 `persistentvolumes` 的 create/delete 权限。
+- `S3` 策略下，controller 需要读取 `ModelVersion.storage.s3.credentialsRef` 指向的 `cubestack-system` Secret（get/list/watch），并在用户 namespace 创建凭据 Secret 副本 `<isvc>-model-<key>-credentials`。
+- 平台安全前提：用户 namespace 的 RBAC 不直接授予 Pod/PVC 创建权限，模型存储只能通过 InferenceService 渲染出的只读挂载访问。`Dynamic` 引用的模型 StorageClass 是集群级资源，其访问边界依赖该前提；`Static` 的写入入口（模型下载）只存在于平台侧存储流程，不出现在用户 namespace。`S3` 策略的凭据会进入消费模型的 Pod——以只读 Secret 卷挂载（不经环境变量、不出现在 Pod spec 明文中），凭据本身应按 `uri` 前缀授予只读 scope，使泄露影响限定在单个模型的数据读取。
 
 ## 4. 渲染与资源创建
 
@@ -638,7 +684,7 @@ Controller 监听 `InferenceService` 及其引用关系的变化、解析引用�
                     podTemplate/asset data/endpoint 静态解析
         │ (Rendered)
         ▼
- 3) 创建资源        asset ConfigMap / 模型 PVC → 用户 ns（ownerRef → isvc）
+ 3) 创建资源        asset ConfigMap / 模型 PVC / S3 凭据 Secret 副本 → 用户 ns（ownerRef → isvc）
          │ (Provisioned)
  4) 创建工作负载     Service + 工作负载（LWS/Deployment）
                     - 按 dependsOn DAG 拓扑序创建；被依赖 role 就绪后才创建依赖 role
@@ -694,6 +740,7 @@ env:
 | Service（声明 `service` 的 role） | `<isvc>-<role>`（headless：`<isvc>-<role>-hl`） | 同上；无 `service` 声明的 role 不生成 Service（§3.2） |
 | 创建 ConfigMap | `<isvc>-<asset>` | + `ai.cubestack.io/asset` |
 | 模型 PVC | `<isvc>-model-<key>` | + `ai.cubestack.io/model` |
+| S3 凭据 Secret 副本 | `<isvc>-model-<key>-credentials`（仅 `storage.strategy: S3` 且 `credentialsRef` 设置时） | 同模型 PVC |
 
 全部带 ownerReference → InferenceService（GC 与 reconcile 归属）。
 
@@ -741,23 +788,27 @@ env:
 
 | 输入 | 维护者 | 职责 |
 |---|---|---|
-| `ModelVersion.storage` | 平台管理员 | 模型物理上存在哪里、以什么方式提供：节点本地 HostPath（已预分发）或共享存储 PVC。 |
+| `ModelVersion.storage` | 平台管理员 | 模型物理上存在哪里、以什么方式提供：节点本地 HostPath（已预分发）、共享存储动态 PVC（`Dynamic`）、预建存储单元的静态 PV（`Static`），或 S3 对象前缀的引用传递（`S3`：URI + 凭据，引擎自行拉取）。 |
 | `roles[].podTemplate.mounts[]` | Profile 管理员 | 模型在容器内出现的位置（`at`）。推理引擎的 launcher 通常硬编码模型路径，因此 `at` 必须与引擎期望一致——这是引擎契约。 |
 
 v1alpha1 每个服务只有一个主模型：`mounts[].model` 固定为 `main`；多模型（`models.<key>`）已预留（见 TODO）。下文资源与卷名中的 `<key>` 即模型 key，v1 恒为 `main`。
 
-**渲染规则**（按 role）：对 `mounts[]` 的每一项，Controller 生成一个 volume 和一个 volumeMount：
+**渲染规则**（按 role）：卷类策略（`HostPath`/`Dynamic`/`Static`）对 `mounts[]` 的每一项，Controller 生成一个 volume 和一个 volumeMount；`S3` 策略无模型卷，见下行：
 
 | strategy | 生成的 volume | 生成的 volumeMount |
 |---|---|---|
 | HostPath | `hostPath{path: storage.hostPath.path, type: Directory}`，卷名 `model-<key>` | `{name: model-<key>, mountPath: at, readOnly: true}` |
-| PVC | `persistentVolumeClaim{claimName: <isvc>-model-<key>}`；PVC 由 Controller 在用户 ns 创建（accessModes 固定 `ReadOnlyMany`；`storageClassName`/`capacity` 来自配方；ownerRef → isvc） | 同左，另加 `subPath: storage.pvc.subPath`（共享存储内的模型目录 `<model>/<version>`） |
+| Dynamic | `persistentVolumeClaim{claimName: <isvc>-model-<key>}`；PVC 由 Controller 在用户 ns 创建（accessModes 固定 `ReadOnlyMany`；`storageClassName`/`capacity` 来自 ModelVersion；ownerRef → isvc） | 同左，另加 `subPath: storage.dynamic.subPath`（共享存储内的模型目录 `<model>/<version>`） |
+| Static | `persistentVolumeClaim{claimName: <isvc>-model-<key>}`；PVC 由 Controller 在用户 ns 创建（ownerRef → isvc），通过 `selector` 匹配 PV 标签 `ai.cubestack.io/model-version` 绑定到指向 `status.rootPath` 的静态 PV（`Retain`；PV 创建主体见 §7 TODO） | 同 HostPath：不带 `subPath`——subvolume 即模型根目录 |
+| S3 | 无模型卷。`credentialsRef` 设置时，为引用 `{{ model.credentialsPath }}` 的 role 注入 secret 卷 `secret{secretName: <isvc>-model-<key>-credentials}`（平台凭据副本，§3.1 S3 策略） | 模型无 volumeMount；凭据卷以 readOnly 挂载到平台固定路径；`{{ model.path }}` 解析为 `storage.s3.uri` |
 
 - `readOnly` 在 v1 固定为 `true`：模型卷只读，不支持通过该 API 写入模型数据（§3.1）。
 - 生成的 volume/volumeMount 作用于该 role 的所有 Pod（LWS 的 leader 与 worker 共享同一模板，见 §3.2）。
 - 不需要模型的 role（如 PD 分离的 router）不声明 `mounts[]`，也就不会有模型卷。
 
-**`{{ model.path }}`**：按 role 解析，等于该 role 的 `mounts[]` 中 `model: main` 一项的 `at`，供模板引用模型路径而不硬编码。引用 `{{ model.path }}` 但未声明 `model: main` 挂载的 role，Controller 设置 `Rendered=False, reason=ModelNotMounted`。
+**`{{ model.path }}`**：按 role 解析的"引擎视角模型位置"。卷类策略（`HostPath`/`Dynamic`/`Static`）下等于该 role 的 `mounts[]` 中 `model: main` 一项的 `at`，供模板引用模型路径而不硬编码；`S3` 策略下等于 `storage.s3.uri`。卷类策略下引用 `{{ model.path }}` 但未声明 `model: main` 挂载的 role，Controller 设置 `Rendered=False, reason=ModelNotMounted`；`S3` 策略的 ModelVersion 与声明 `mounts[]` 的 Profile 在 `Resolved` 阶段拒绝（`ModelStorageIncompatible`）——挂载与 URI 是两种引擎契约，不允许渲染期静默切换。
+
+**`{{ model.credentialsPath }}`**：S3 凭据文件的平台固定路径（约定 `/var/run/cubestack/model-credentials`，**单文件**：源 Secret 约定单键 `credentials`，Controller 以 volumeMount `items` 映射为单文件；内容格式平台不解释——AWS 系、自建 S3（MinIO 等）或其他对象存储的凭据表示均由源 Secret 的内容决定），仅 `S3` 策略可用。Controller 只对引用该变量的 role 注入凭据 Secret 卷（readOnly；副本与同步见 §3.1 S3 策略）；引擎侧如何消费该文件由 Profile 的 `args`/`env` 接线（按其 SDK/CLI 的凭据文件机制指向此路径），endpoint、region 等坐标同样由 Profile env 静态传入。需要凭据的 role 通常同时引用两个变量：`{{ model.path }}` 传 URI、`{{ model.credentialsPath }}` 接线凭据。`storage.s3.credentialsRef` 未设置时引用该变量，Controller 设置 `Rendered=False, reason=ModelCredentialsUnresolved`。
 
 **多机 HostPath**：`workload.group.size>1` 时，组内所有节点都必须已预分发该模型；`nodeSelector` 和 GPU 型号节点池用于限制可调度节点（与 §3.1 `storage.hostPath.path` 说明一致）。
 
@@ -777,11 +828,11 @@ ModelVersion 与 InferenceRuntimeProfile 的 spec 均不可变（§3.1、§3.2�
 
 - 渲染后的 Pod 模板（LWS 为 `leaderWorkerTemplate.workerTemplate`，Deployment 为 `spec.template.spec`，含模板的 labels 与 annotations）；
 - 创建的 asset 内容 hash——必须参与计算，否则 ConfigMap 更新后不会有任何滚动，故障重建的 Pod 可能使用新脚本但保留旧模板配置；
-- 模型存储配置 hash——存储配置变化会使渲染后的工作负载配置随之变化，因此按模板变更处理并触发滚动更新（§3.1）。该项仅对声明了 `mounts[]` 的 role 参与计算：不挂模型的 role（如 router）不因模型存储变化而重启。
+- 模型存储配置 hash——存储配置变化会使渲染后的工作负载配置随之变化，因此按模板变更处理并触发滚动更新（§3.1）。该项仅对消费模型的 role 参与计算：卷类策略下为声明 `mounts[]` 的 role，`S3` 策略下为引用 `{{ model.path }}` 的 role；不消费模型的 role（如 router）不因模型存储变化而重启。`S3` 的凭据 Secret 副本内容不参与 hash（轮换不触发滚动）。
 
 已解析 override 不单独参与综合 hash：渲染后的 Pod 模板已内嵌被引用的 override 值（模板变化由 Pod 模板 hash 覆盖），只影响 asset 数据的 override 由 asset 内容 hash 覆盖。因此"仅副本数变化"（如 `workload.replicas` 绑定 `{{ overrides.* }}` 时只改该 override）不会改变综合 hash，按扩缩容处理而非滚动。
 
-比较的是**最终渲染结果**，而非 Profile 字段本身：例如用户值覆盖了被修改的默认值时，渲染结果未变，就不触发滚动，只更新 `status.profile.revision`。存储配置中的容量字段（`storage.pvc.capacity`）是 `resource.Quantity` 类型，参与 hash 前必须先解析并取规范序列化值（如 `1024Mi` 归一化为 `1Gi`），避免语义等量的不同书写被误判为存储配置变更。
+比较的是**最终渲染结果**，而非 Profile 字段本身：例如用户值覆盖了被修改的默认值时，渲染结果未变，就不触发滚动，只更新 `status.profile.revision`。存储配置中的容量字段（`storage.dynamic.capacity` / `storage.static.capacity`）是 `resource.Quantity` 类型，参与 hash 前必须先解析并取规范序列化值（如 `1024Mi` 归一化为 `1Gi`），避免语义等量的不同书写被误判为存储配置变更。
 
 按变更类型，Controller 的处理方式如下：
 
@@ -791,14 +842,15 @@ ModelVersion 与 InferenceRuntimeProfile 的 spec 均不可变（§3.1、§3.2�
 | 模板变化（切换 `modelRef` / `profileRef`，或修改影响模板的 override、`route.modelName` 等） | 变化 | 按下文的更新顺序按 role 逐个更新（`Progressing=Rollout`）；涉及 PVC 重建的存储变更除外，见下文。 |
 | role / asset 集合变化（切换到拓扑不同的 Profile） | —— | 新增资源按拓扑序创建并做就绪门控（§4.3）；不再期望的旧资源按下文规则清理。 |
 
-**模型存储配置变更与 PVC**：模型存储配置参与 template-hash（§3.1），变更按模板更新处理。但 PVC 的部分字段创建后不可原地修改，滚动更新无法覆盖所有情形，需按下表处理（**目标行为**——当前实现仅按模板变更滚动更新工作负载，PVC 对象本身创建后不更新，见 §7 TODO）：
+**模型存储配置变更与 PVC**：模型存储配置参与 template-hash（§3.1），变更按模板更新处理。但 PVC 的部分字段创建后不可原地修改，滚动更新无法覆盖所有情形，需按下表处理（**目标行为**——当前实现仅按模板变更滚动更新工作负载，PVC 对象本身创建后不更新，见 §7 TODO）。下表适用于 `Dynamic`；`Static` 的静态 PV/PVC 变更处理见 §7 TODO：
 
 | 存储变更 | 处理方式 |
 |---|---|
 | `subPath` 变化 | 只在 volumeMount 中体现，随 Pod 模板滚动更新，PVC 对象不变。 |
 | `capacity` 增大（`storageClassName` 不变） | 原地扩容 PVC 后滚动更新；前提是对应 StorageClass 开启 `allowVolumeExpansion`，否则按下一条重建。 |
 | `storageClassName` 变化、`capacity` 缩小 | PVC 无法原地修改，滚动更新也不可行——新 Pod 必须在新 PVC 就绪后才能启动，而旧 PVC 受 `pvc-protection` 保护，在被 Pod 使用期间无法删除。Controller 按整体重建执行：先删除引用该 PVC 的工作负载，待 Pod 释放后删除并重建 PVC，再按新模板重新创建工作负载。重建只管理 PVC 对象本身，不影响共享存储内的模型数据（§3.1）；但服务在重建期间完全不可用，属计划内中断，灰度计划应将其计入（§5.2）。 |
-| `HostPath` ↔ `PVC` 互切 | 渲染出的 volume 结构不同，按模板变化滚动；切换到 PVC 时新建 PVC，从 PVC 切出后旧 PVC 按残留资源清理规则保留。 |
+| `HostPath` ↔ `Dynamic` 互切 | 渲染出的 volume 结构不同，按模板变化滚动；切换到 `Dynamic` 时新建 PVC，切出后旧 PVC 按残留资源清理规则保留。 |
+| `S3` ↔ 其他策略互切 | 渲染产物结构不同（无模型卷、新增凭据 Secret 卷），按模板变化滚动；切到 `S3` 时创建凭据 Secret 副本，切出后副本与模型 PVC 一样不参与清理，保留至 isvc 删除。 |
 
 **更新顺序**：模板变化时按 role 逐个更新：**被依赖的 role 先更新，端点 role 最后更新**（与创建时的拓扑序一致，见 §4.3）。一个 role 的工作负载更新完成且就绪后，才更新下一个（**目标行为**——当前实现已对模板变化的 role 做依赖收敛门控：其 `dependsOn` 依赖未采用新模板且未就绪时该 role 的滚动等待；无依赖关系的 role 仍并行滚动，全局串行推进见 §7 TODO）；单个 role 内由该工作负载自身完成更新（LWS 与 Deployment 均为 `RollingUpdate{maxSurge: 0, maxUnavailable: 1}`，固定策略见 §4.3）。
 
@@ -844,10 +896,15 @@ ModelVersion 与 InferenceRuntimeProfile 的 spec 均不可变（§3.1、§3.2�
 
 ## 7. TODO
 
-- [ ] ModelVersion：支持模型溯源，如新增 `source{registry, repo, revision}` 记录来源，revision 可以考虑使用 HuggingFace/ModelScope 的 revision commit ID 。
-- [ ] ModelVersion：支持更多的模型存储策略，如 puller sidecar / image volume
-- [ ] ModelVersion：PVC 策略支持静态供给的共享文件系统（如 CephFS 静态 PV）。
-- [ ] 模型存储配置变更的 PVC 处理（§5.1 表格）：`capacity` 增大的原地扩容（依赖 StorageClass 的 `allowVolumeExpansion`），以及 `storageClassName` 变化 / `capacity` 缩小的整体重建（先删除引用该 PVC 的工作负载 → 待 Pod 释放后删除并重建 PVC → 按新模板重建工作负载）。当前实现仅按模板变更滚动更新工作负载，PVC 对象本身创建后不更新（create-only）。
+- [ ] ModelVersion：支持模型溯源，如新增 `source{registry, repo, revision}` 记录来源，revision 可以考虑使用 HuggingFace/ModelScope 的 revision commit ID（与模型导入管线合并考虑）。
+- [ ] ModelVersion：支持更多的模型存储策略，如 puller sidecar / image volume，以及节点缓存（S3 拉取到节点本地缓存后直接挂载节点路径——HostPath 家族的自动化演进，与 Static 的共享存储单元形状不同，设计要点见模型存储设计文档待办）。
+- [ ] S3 直连策略（`storage.strategy: S3`，API 契约见 §3.1 / §4.5）的存储侧设计，在模型存储设计文档另起一节展开（与该文档 §7 的 S3 懒加载缓存 CSI——Static 契约的后端变体——区分，勿混读）：operator 配置段（endpoint 与凭据根约定）、controller 存在性检查的自身凭据来源（区别于消费侧 `credentialsRef`）、凭据 Secret 的 scope 管理与轮换流程、每 Pod 全量拉取的带宽特征、数据完整性（前缀 revision 约定、manifest/etag 校验，与模型导入管线合并考虑）。
+- [ ] Static（CephFS 静态供给）的剩余实现项（API 与消费侧设计已完成，见 §3.1）：静态 PV 的 controller 自动创建与回收（需集群级 PV RBAC 与 Released PV 回收；PV 携带 `ai.cubestack.io/model-version` 标签供 PVC selector 绑定，契约见 §3.1）；subvolume 删除重建（uuid 变化、`status.rootPath` 更新）后的 PV 重建流程；operator 与 Ceph 的只读集成（go-ceph FSAdmin 的 `getpath` 与 quota 读取，凭据复用 rook-ceph 既有 Secret，网络可达 mon）。
+- [ ] 静态 PV 自动化的目标设计需要在模型存储设计文档中展开：PV 创建/回收的时机与策略、与当前手工 runbook 的过渡与共存。
+- [ ] 模型导入管线（Static 供给侧自动化，目标设计待展开）：`spec.source{registry, repo, revision}` 下载来源声明；供给状态机（创建/确认 subvolume 与 quota → 下载 → 校验 → `DataReady`）；subvolume 内 manifest（记录 ModelVersion UID + revision）校验，防止同名重建后 `getpath` 挂载到旧数据；下载载体选型（Job vs puller sidecar）。当前由平台管理员按存储供给流程手工完成。
+- [ ] ModelVersion 删除的存储清理：finalizer + `subvolume rm`（与导入管线共享 go-ceph 基础设施）；"无消费者"的精确定义（`usedBy` 为空 + 无 Bound 消费者 PV，Released PV 的处理待定）；Ceph 不可达时 finalizer 的失败语义（避免永久阻塞对象删除）。当前为手工 runbook（同名重建的存储侧残留规则见 §3.1）。
+- [ ] 平台验证（`Dynamic` 前提）：确认模型 StorageClass（如 JuiceFS）的实际供给机制满足"动态供给出的卷可见共享根目录及其中已预放的 `<model>/<version>`"，且 reclaimPolicy 在 PVC 删除时不会回收共享数据——§3.1 存储与 PVC 创建规则的两条安全前提依赖该验证。
+- [ ] 模型存储配置变更的 PVC 处理（§5.1 表格，`Dynamic`）：`capacity` 增大的原地扩容（依赖 StorageClass 的 `allowVolumeExpansion`），以及 `storageClassName` 变化 / `capacity` 缩小的整体重建（先删除引用该 PVC 的工作负载 → 待 Pod 释放后删除并重建 PVC → 按新模板重建工作负载）。当前实现仅按模板变更滚动更新工作负载，PVC 对象本身创建后不更新（create-only）。
 - [ ] 更新顺序的全局串行推进（§5.1）：无依赖关系的 role 也逐个滚动——一个 role 的工作负载更新完成且就绪后，才更新下一个——使中断窗口可预测（§5.2）。**依赖收敛门控已实现**（模板变化的 role 等待其 `dependsOn` 依赖采用新模板且就绪，幂等推进无需跨 reconcile 状态）；剩余差距仅是无依赖关系 role 的并行滚动 vs 全局串行。
 - [ ] ModelVersion / InferenceRuntimeProfile 的 in-use finalizer：组织对象仍被引用时删除。
 - [ ] InferenceRuntimeProfile：增加 leaderPatch：为 leader 和 worker 提供差异化配置，通过受控合并写入 LWS `leaderTemplate`。仅在两者启动入口不同（如 Ray head/worker、MPI launcher）或 leader 资源不同的引擎中使用。

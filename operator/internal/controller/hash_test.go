@@ -19,8 +19,8 @@ var _ = Describe("templateHashAnnotations", func() {
 		return &aiv1alpha1.ModelVersion{Spec: aiv1alpha1.ModelVersionSpec{
 			Model: "m", Version: "v1",
 			Storage: aiv1alpha1.ModelStorage{
-				Strategy: aiv1alpha1.StorageStrategyPVC,
-				PVC: &aiv1alpha1.PVCStorage{
+				Strategy: aiv1alpha1.StorageStrategyDynamic,
+				Dynamic: &aiv1alpha1.DynamicStorage{
 					StorageClassName: "shared", SubPath: "m/v1",
 					Capacity: resource.MustParse("1Ti"),
 				},
@@ -68,7 +68,7 @@ var _ = Describe("templateHashAnnotations", func() {
 	It("normalizes equivalent capacity spellings", func() {
 		m1 := model()
 		m2 := model()
-		m2.Spec.Storage.PVC.Capacity = resource.MustParse("1024Gi")
+		m2.Spec.Storage.Dynamic.Capacity = resource.MustParse("1024Gi")
 		a1 := templateHashAnnotations(podSpecWithImage("img:v1"), nil, nil, nil, nil, m1, true)
 		a2 := templateHashAnnotations(podSpecWithImage("img:v1"), nil, nil, nil, nil, m2, true)
 		Expect(a1).To(Equal(a2))

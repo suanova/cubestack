@@ -46,8 +46,9 @@ type resolveResult struct {
 func (rr *resolveResult) resolved() bool { return len(rr.failures) == 0 }
 
 // resolve runs the Resolved checks in order: profile exists, model exists and
-// is compatible, all asset sources exist in cubestack-system. All checks run
-// so the message aggregates every failure; reason is the first one.
+// is compatible, all asset sources exist in cubestack-system, and Static model
+// storage is resolved. All checks run so the message aggregates every failure;
+// reason is the first one (design §3.3).
 func (r *InferenceServiceReconciler) resolve(ctx context.Context, isvc *aiv1alpha1.InferenceService) (*resolveResult, error) {
 	rr := &resolveResult{assets: map[string]map[string]string{}}
 
@@ -88,6 +89,24 @@ func (r *InferenceServiceReconciler) resolve(ctx context.Context, isvc *aiv1alph
 				rr.reason = "ModelIncompatible"
 			}
 		}
+
+		// S3 storage is consumed by URI, never by a mounted volume: a profile
+		// declaring podTemplate mounts[] is incompatible with an S3 ModelVersion.
+		// Checked before the asset sources so the reason priority follows the
+		// documented order (design §3.3 Resolved).
+		if rr.model.Spec.Storage.Strategy == aiv1alpha1.StorageStrategyS3 {
+			for _, role := range rr.profile.Spec.Roles {
+				if len(role.PodTemplate.Mounts) > 0 {
+					rr.failures = append(rr.failures, fmt.Sprintf(
+						"ModelVersion %s uses S3 storage but profile %s declares podTemplate mounts[] (an S3 engine consumes the model by URI, design §4.5)",
+						rr.model.Name, rr.profile.Name))
+					if rr.reason == "" {
+						rr.reason = "ModelStorageIncompatible"
+					}
+					break
+				}
+			}
+		}
 	}
 
 	if rr.profile != nil {
@@ -104,6 +123,24 @@ func (r *InferenceServiceReconciler) resolve(ctx context.Context, isvc *aiv1alph
 				}
 			} else {
 				rr.assets[asset.Name] = cm.Data
+			}
+		}
+	}
+
+	// Static/S3 strategy: require StorageResolved=True on the ModelVersion
+	// (the storage unit resolved by the storage-side integration or patched
+	// manually; design §3.3 Resolved). This check runs last so the reason
+	// priority follows the documented order: ProfileNotFound → ModelNotFound
+	// → ModelIncompatible → ModelStorageIncompatible → AssetNotFound →
+	// ModelStorageUnresolved.
+	if rr.model != nil && (rr.model.Spec.Storage.Strategy == aiv1alpha1.StorageStrategyStatic ||
+		rr.model.Spec.Storage.Strategy == aiv1alpha1.StorageStrategyS3) {
+		if !meta.IsStatusConditionTrue(rr.model.Status.Conditions, aiv1alpha1.ConditionStorageResolved) {
+			rr.failures = append(rr.failures, fmt.Sprintf(
+				"ModelVersion %s storage is not resolved (StorageResolved is not True)",
+				rr.model.Name))
+			if rr.reason == "" {
+				rr.reason = "ModelStorageUnresolved"
 			}
 		}
 	}
