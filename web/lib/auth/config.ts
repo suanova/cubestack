@@ -34,6 +34,9 @@ export function sessionTtlMs(): number {
  * Prefer setting SESSION_SECRET explicitly so sessions survive restarts. When
  * absent we fall back to a per-process random key: every restart invalidates
  * existing sessions, but the portal keeps working in dev/e2e without config.
+ * In production the fallback is rejected outright — two replicas (or a rolling
+ * restart) would otherwise hold different keys and bounce every user to the
+ * login page, so we fail fast instead.
  *
  * Always returns a Uint8Array (jose requires an array/CryptoKey source for
  * HMAC); the env value is UTF-8 encoded.
@@ -41,6 +44,11 @@ export function sessionTtlMs(): number {
 export function sessionSecret(): { key: Uint8Array; ephemeral: boolean } {
   const fromEnv = process.env.SESSION_SECRET;
   if (fromEnv) return { key: new TextEncoder().encode(fromEnv), ephemeral: false };
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      "SESSION_SECRET must be set when NODE_ENV=production (set one stable value on every web process)",
+    );
+  }
   return { key: ephemeralSecret(), ephemeral: true };
 }
 

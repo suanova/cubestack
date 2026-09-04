@@ -45,7 +45,12 @@ function buildRequest(init?: RequestInit, url = "http://localhost", cookie?: str
     headers,
     cookies: { get: valueFor },
     body: bodyStr ?? null,
-    json: async () => (bodyStr ? JSON.parse(bodyStr) : undefined),
+    json: async () => {
+      // Mirror NextRequest.json(): an absent/empty body rejects with a
+      // SyntaxError instead of resolving undefined.
+      if (bodyStr === undefined) throw new SyntaxError("Unexpected end of JSON input");
+      return JSON.parse(bodyStr);
+    },
   } as unknown as NextRequest;
   return req;
 }

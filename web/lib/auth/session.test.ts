@@ -25,7 +25,12 @@ describe("session cookie signing", () => {
 
   it("rejects a tampered token (signature break)", async () => {
     const token = await signSession("admin");
-    const broken = token.slice(0, -1) + (token.endsWith("A") ? "B" : "A");
+    // Corrupt a character inside the signature. The very last base64url char
+    // only carries padding bits for an HS256 (32-byte) signature, so flipping
+    // it (e.g. A<->B) can leave the digest unchanged; mutate one earlier.
+    const at = token.length - 6;
+    const broken = token.slice(0, at) + (token[at] === "A" ? "B" : "A") + token.slice(at + 1);
+    expect(broken).not.toBe(token);
     expect(await verifySession(broken)).toBeNull();
   });
 

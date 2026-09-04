@@ -15,9 +15,18 @@ import { useI18n } from "@/lib/i18n";
 function readNextPath(): string {
   const raw = new URLSearchParams(window.location.search).get("next");
   if (!raw) return "/";
-  // Only accept a same-origin absolute path, never a scheme:// or //host.
-  if (!raw.startsWith("/") || raw.startsWith("//")) return "/";
-  return raw;
+  // Resolve against the current origin and keep only same-origin paths. The
+  // backslash check stops encoded cross-origin redirects such as
+  // `next=/%5Cevil.example` (browsers treat `\` as `/` on navigation).
+  if (raw.includes("\\")) return "/";
+  let url: URL;
+  try {
+    url = new URL(raw, window.location.origin);
+  } catch {
+    return "/";
+  }
+  if (url.origin !== window.location.origin) return "/";
+  return url.pathname + url.search + url.hash;
 }
 
 export default function LoginPage() {
@@ -137,7 +146,7 @@ export default function LoginPage() {
           px: "24px",
         }}
       >
-        {/* 品牌母题背景:等距立方体网格,向页面边缘渐显、中心留白(纯装饰) */}
+        {/* Brand motif backdrop: isometric cube grid fading toward the edges, center kept clear (decorative only). */}
         <Box
           component="svg"
           aria-hidden="true"
@@ -265,9 +274,12 @@ export default function LoginPage() {
 }
 
 // Small standalone theme toggle so the login page can keep dark/light switch
-// without pulling in the full shell components.
+// without pulling in the full shell components. The dark flag lives in React
+// state so the icon and label update as soon as the theme flips.
 function ThemeToggleStandalone() {
-  const dark = typeof document !== "undefined" && document.documentElement.dataset.theme === "dark";
+  const [dark, setDark] = useState(
+    () => typeof document !== "undefined" && document.documentElement.dataset.theme === "dark",
+  );
   const label = dark ? "theme.toLight" : "theme.toDark";
   const { t } = useI18n();
   return (
@@ -275,8 +287,9 @@ function ThemeToggleStandalone() {
       aria-label={t(label)}
       title={t("theme.toggleTitle")}
       onClick={() => {
-        const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+        const next = dark ? "light" : "dark";
         document.documentElement.dataset.theme = next;
+        setDark(next === "dark");
         try {
           localStorage.setItem("cubestack-theme", next);
         } catch {

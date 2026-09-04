@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { overviewSummary } from "../test/fixtures/overview";
+import { seedSession } from "./auth";
 
 // Suite A — the deterministic, CI-cheap e2e suite. /api/overview is stubbed at
 // the network level with the shared fixtures, so no cluster or Prometheus is
@@ -14,8 +15,9 @@ async function pinLocale(page: Page, locale: string) {
   }, locale);
 }
 
-test.beforeEach(async ({ page }) => {
+test.beforeEach(async ({ context, page }) => {
   await pinLocale(page, "zh-CN");
+  await seedSession(context);
 });
 
 function stubOverview(page: Page, payload: object) {

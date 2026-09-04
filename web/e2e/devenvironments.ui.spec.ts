@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { devEnvironmentList, devEnvironmentSummary } from "../test/fixtures/devenvironments";
+import { seedSession } from "./auth";
 
 // Deterministic, CI-cheap e2e suite for /dev-environments. /api/devenvironments
 // and /api/devenvironments/options are stubbed at the network level with the
@@ -32,8 +33,9 @@ async function pinLocale(page: Page) {
   });
 }
 
-test.beforeEach(async ({ page }) => {
+test.beforeEach(async ({ context, page }) => {
   await pinLocale(page);
+  await seedSession(context);
 });
 
 test.describe("dev environments landing (mocked data)", () => {

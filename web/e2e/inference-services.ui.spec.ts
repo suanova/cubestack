@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { inferenceServiceList, inferenceServiceSummary } from "../test/fixtures/inferenceservices";
+import { seedSession } from "./auth";
 
 // Deterministic, CI-cheap e2e suite for /inference-services. /api/inferenceservices
 // and /api/inferenceservices/options are stubbed at the network level with the
@@ -47,8 +48,9 @@ async function pinLocale(page: Page) {
   });
 }
 
-test.beforeEach(async ({ page }) => {
+test.beforeEach(async ({ context, page }) => {
   await pinLocale(page);
+  await seedSession(context);
 });
 
 test.describe("inference services landing (mocked data)", () => {

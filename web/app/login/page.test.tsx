@@ -15,6 +15,7 @@ function installLocation(search: string) {
     assign,
     pathname: "/login",
     href: "",
+    origin: "http://localhost",
     host: "localhost",
     protocol: "http:",
   };
@@ -138,6 +139,50 @@ describe("login page", () => {
     await act(async () => {});
 
     expect(assign).toHaveBeenCalledWith("/");
+    act(() => root.unmount());
+  });
+
+  it("falls back to / for a cross-origin next (open-redirect guard)", async () => {
+    // Decoded to /\/evil.example: a backslash is treated as a slash by
+    // navigations, so it must not become //evil.example (a foreign origin).
+    for (const next of ["/%5Cevil.example", "//evil.example", "https://evil.example"]) {
+      const assign = installLocation(`?next=${next}`);
+      stubLogin({ status: 200, body: { user: "admin" } });
+      const { container, root } = renderPage();
+      fillInput(container, "login-username", "admin");
+      fillInput(container, "login-password", "correct");
+      submitForm(container);
+      await act(async () => {});
+      expect(assign).toHaveBeenCalledWith("/");
+      act(() => root.unmount());
+    }
+  });
+
+  it("keeps a plain same-origin path from next", async () => {
+    const assign = installLocation("?next=/dev-environments");
+    stubLogin({ status: 200, body: { user: "admin" } });
+    const { container, root } = renderPage();
+    fillInput(container, "login-username", "admin");
+    fillInput(container, "login-password", "correct");
+    submitForm(container);
+    await act(async () => {});
+    expect(assign).toHaveBeenCalledWith("/dev-environments");
+    act(() => root.unmount());
+  });
+
+  it("updates the theme toggle label after a click", async () => {
+    installLocation("");
+    delete document.documentElement.dataset.theme;
+    const { container, root } = renderPage();
+
+    const toggle = container.querySelector('[data-od-id="theme-toggle"]') as HTMLButtonElement;
+    const before = toggle.getAttribute("aria-label");
+    act(() => toggle.click());
+    const after = toggle.getAttribute("aria-label");
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    expect(after).not.toBe(before);
+    expect(after).toBeTruthy();
+
     act(() => root.unmount());
   });
 })

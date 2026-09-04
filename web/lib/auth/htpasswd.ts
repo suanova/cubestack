@@ -1,4 +1,4 @@
-import { compareSync } from "bcryptjs";
+import { compare } from "bcryptjs";
 
 import { getCoreClient } from "@/lib/kubernetes";
 import { htpasswdSecretKey, htpasswdSecretName, htpasswdSecretNamespace } from "./config";
@@ -94,10 +94,11 @@ export async function verifyCredentials(username: string, password: string): Pro
   const hash = entries.get(user);
   if (!hash) return null;
 
-  // bcryptjs compareSync supports $2a$/$2b$/$2y$ prefixes. A malformed hash
-  // line is treated as a mismatch, never a crash.
+  // bcryptjs compare supports $2a$/$2b$/$2y$ prefixes. A malformed hash line
+  // is treated as a mismatch, never a crash. The async form yields between
+  // work chunks instead of blocking the event loop like compareSync would.
   try {
-    return compareSync(pass, hash) ? user : null;
+    return (await compare(pass, hash)) ? user : null;
   } catch {
     return null;
   }

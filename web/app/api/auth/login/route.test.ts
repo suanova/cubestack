@@ -58,6 +58,12 @@ describe("POST /api/auth/login", () => {
     expect(notString.status).toBe(400);
   });
 
+  it("returns 400 when the request has no JSON body at all", async () => {
+    const res = await POST(plainRequest({ method: "POST" }, "http://localhost/api/auth/login"));
+    expect(res.status).toBe(400);
+    expect(verifyCredentials).not.toHaveBeenCalled();
+  });
+
   it("returns 500 without a cookie when the htpasswd Secret cannot be loaded", async () => {
     verifyCredentials.mockRejectedValue(new Error("secret missing"));
     const res = await POST(loginRequest({ username: "admin", password: "x" }));
