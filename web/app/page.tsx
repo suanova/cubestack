@@ -8,6 +8,7 @@
 // perses datasource proxy); nothing is hardcoded.
 
 import { Box, Button, Typography } from "@mui/material";
+import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { OverviewSummary } from "@/app/api/overview/route";
@@ -32,6 +33,11 @@ interface Kpi {
   /** Optional foot line; hidden when null (e.g. no trend data for the GPU card). */
   footKey: MessageKey | null;
   footParams: Record<string, string> | null;
+  /**
+   * Optional href the card navigates to when clicked, pointing at the /dashboards
+   * landing with the corresponding dashboard preselected via ?dashboard=.
+   */
+  href?: string;
 }
 
 /**
@@ -74,23 +80,8 @@ function Foot({
 }
 
 function KpiCard({ kpi }: { kpi: Kpi }) {
-  return (
-    <Box
-      data-od-id={kpi.dataOdId}
-      sx={{
-        p: "16px 18px",
-        border: 1,
-        borderColor: "divider",
-        borderRadius: "var(--radius)",
-        bgcolor: "background.paper",
-        transition: "transform .18s ease, box-shadow .18s ease, border-color .18s ease",
-        "&:hover": {
-          transform: "translateY(-2px)",
-          borderColor: "var(--accent-soft)",
-          boxShadow: "0 12px 28px color-mix(in oklch, var(--fg) 12%, transparent)",
-        },
-      }}
-    >
+  const content = (
+    <>
       <Typography
         sx={{
           fontSize: 12.5,
@@ -130,6 +121,36 @@ function KpiCard({ kpi }: { kpi: Kpi }) {
           <Foot templateKey={kpi.footKey} params={kpi.footParams} />
         </Typography>
       ) : null}
+    </>
+  );
+  const cardSx = {
+    p: "16px 18px",
+    border: 1,
+    borderColor: "divider",
+    borderRadius: "var(--radius)",
+    bgcolor: "background.paper",
+    transition: "transform .18s ease, box-shadow .18s ease, border-color .18s ease",
+    "&:hover": {
+      transform: "translateY(-2px)",
+      borderColor: "var(--accent-soft)",
+      boxShadow: "0 12px 28px color-mix(in oklch, var(--fg) 12%, transparent)",
+    },
+  };
+  if (kpi.href) {
+    return (
+      <Box
+        component={Link}
+        href={kpi.href}
+        data-od-id={kpi.dataOdId}
+        sx={{ ...cardSx, textDecoration: "none" }}
+      >
+        {content}
+      </Box>
+    );
+  }
+  return (
+    <Box data-od-id={kpi.dataOdId} sx={cardSx}>
+      {content}
     </Box>
   );
 }
@@ -465,6 +486,9 @@ export default function OverviewPage() {
             ready: String(data.nodes.ready),
             notReady: String(data.nodes.total - data.nodes.ready),
           },
+          // Nodes drill into the /dashboards landing with Resource Overview
+          // preselected: the full per-node CPU/GPU/Memory/RDMA usage rows.
+          href: "/dashboards?dashboard=resource-overview-dashboard",
         },
         {
           dataOdId: "kpi-gpu",
@@ -476,6 +500,10 @@ export default function OverviewPage() {
           footParams: data.trend
             ? { util: `${trendLast(data.trend.util)}%`, mem: `${trendLast(data.trend.mem)}%` }
             : null,
+          // The GPU card lands on the same Resource Overview but GPU-scoped
+          // (?scope=gpu): the node CPU/Memory/RDMA rows are dropped on arrival,
+          // leaving the per-GPU utilization/temperature/power panels.
+          href: "/dashboards?dashboard=resource-overview-dashboard&scope=gpu",
         },
         {
           dataOdId: "kpi-inference",
@@ -488,6 +516,7 @@ export default function OverviewPage() {
             ready: String(data.inference.ready),
             scaling: String(data.inference.scaling),
           },
+          href: "/dashboards?dashboard=inference-service-dashboard",
         },
         {
           dataOdId: "kpi-devenv",
@@ -500,6 +529,10 @@ export default function OverviewPage() {
             running: String(data.devenv.running),
             stopped: String(data.devenv.stopped),
           },
+          // Dev environments land on the /dashboards landing with the Dev
+          // Environment dashboard preselected (cluster-wide per-node GPU, CPU,
+          // memory, network and storage usage).
+          href: "/dashboards?dashboard=dev-environment-dashboard",
         },
       ]
     : [];

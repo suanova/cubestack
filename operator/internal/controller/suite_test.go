@@ -32,9 +32,10 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	aiv1alpha1 "github.com/suanova/cubestack/api/v1alpha1"
-	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 )
 
@@ -83,7 +84,13 @@ var _ = BeforeSuite(func() {
 	k8sClient, err = client.New(cfg, client.Options{Scheme: testScheme})
 	Expect(err).NotTo(HaveOccurred())
 
-	testMgr, err = ctrl.NewManager(cfg, ctrl.Options{Scheme: testScheme})
+	testMgr, err = ctrl.NewManager(cfg, ctrl.Options{
+		Scheme: testScheme,
+		// Disable the metrics server: its default bind address (:8080) is
+		// often occupied on dev machines, and a bind failure aborts manager
+		// startup before any controller runs.
+		Metrics: metricsserver.Options{BindAddress: "0"},
+	})
 	Expect(err).NotTo(HaveOccurred())
 
 	err = (&ModelVersionReconciler{Client: testMgr.GetClient(), Scheme: testMgr.GetScheme()}).SetupWithManager(testMgr)
@@ -93,6 +100,19 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 
 	err = (&InferenceServiceReconciler{Client: testMgr.GetClient(), Scheme: testMgr.GetScheme()}).SetupWithManager(testMgr)
+	Expect(err).NotTo(HaveOccurred())
+
+	err = (&DevEnvironmentReconciler{
+		Client: testMgr.GetClient(),
+		Scheme: testMgr.GetScheme(),
+		Config: DevEnvironmentControllerConfig{
+			GatewayName:       "test-gw",
+			GatewayNamespace:  testNamespace,
+			HTTPPort:          80,
+			SSHPortRangeStart: 20000,
+			SSHPortRangeEnd:   20100,
+		},
+	}).SetupWithManager(testMgr)
 	Expect(err).NotTo(HaveOccurred())
 
 	mgrDone = make(chan struct{})

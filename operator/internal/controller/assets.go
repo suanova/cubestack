@@ -50,6 +50,33 @@ const (
 
 	// modelVersionLabelKey is used on static PVs for PVC selector binding (design §3.1).
 	modelVersionLabelKey = "ai.cubestack.io/model-version"
+
+	// Labels, finalizer, and SSH secret data keys of the resources created for
+	// a DevEnvironment (design §4.3–4.4, §6.2–6.3).
+	devEnvironmentLabelKey = "ai.cubestack.io/dev-environment"
+	devEnvManagedByValue   = "devenv-controller"
+	devEnvFinalizer        = "ai.cubestack.io/dev-env-finalizer"
+
+	// SSH secret data keys: the managed secret holds the ed25519 host keypair
+	// plus the authorized_keys content assembled from spec.ssh.keysSecret (data
+	// key "keys" by default, per the design's sample CR).
+	sshHostKeyKey         = "ssh_host_ed25519_key"
+	sshHostPubKeyKey      = "ssh_host_ed25519_key.pub"
+	sshAuthorizedKeysKey  = "authorized_keys"
+	sshUserKeysDefaultKey = "keys"
+
+	// devEnvSSHKeysDelegatedLabel marks a Secret that explicitly opts in to being
+	// used as an environment's SSH authorized_keys source. Only a Secret carrying
+	// this label may be referenced by spec.ssh.keysSecret: reading an undelegated
+	// Secret would let an environment creator exfiltrate any same-namespace Secret
+	// through the managed SSH secret that the workload mounts.
+	devEnvSSHKeysDelegatedLabel = "ai.cubestack.io/ssh-keys-delegated"
+	devEnvSSHKeysDelegatedValue = "true"
+
+	// workspaceClaimName is the StatefulSet volumeClaimTemplate name; the
+	// controller creates the PVC <env>-workspace-0 from it (K8s PVC naming:
+	// <sts>-<claim>-<ordinal>).
+	workspaceClaimName = "workspace"
 )
 
 // modelKeyMain is the model key of the main model; model volumes are named

@@ -2,12 +2,15 @@
 
 Two suites cover the overview landing at different layers:
 
-## Suite A — `e2e/overview.ui.spec.ts` (CI-cheap, deterministic)
+## Suite A — `e2e/overview.ui.spec.ts` + `e2e/inference-services.ui.spec.ts` (CI-cheap, deterministic)
 
 `/api/overview` is stubbed at the network level with the shared fixtures in
 `test/fixtures/overview.ts`, so **no KinD cluster or Prometheus is needed**.
-Covers the whole UI state space: KPI row, subtitle, trend legend, allocation
-donut, empty/error states + retry, the 30s poll, and the locale switch.
+Covers the whole overview UI state space: KPI row, subtitle, trend legend,
+allocation donut, empty/error states + retry, the 30s poll, and the locale
+switch. The inference-services suite (`inference-services.ui.spec.ts`, backed
+by `test/fixtures/inferenceservices.ts`) covers the service table, the
+Ready/未就绪 filter, the detail panel, and the deploy-wizard create flow.
 
 ```sh
 npm run test:e2e            # playwright test (playwright.config.ts)

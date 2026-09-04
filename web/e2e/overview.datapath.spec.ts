@@ -10,6 +10,14 @@ import { expect, test } from "@playwright/test";
 // starts it via e2e/deploy/perses/local/run-preview.sh).
 
 test("real route renders cluster KPIs and a Prometheus trend", async ({ page }) => {
+  // The live /api/overview resolves the node/CR reads plus four Prometheus
+  // proxy round-trips, and the first-hit Next compile for the whole portal
+  // happens on this route, so the overview data can take a few seconds to
+  // appear. Give the real-data assertions a generous wait instead of racing a
+  // 5s default timeout (which flakes on cold start when unrelated routes grow
+  // the bundle).
+  test.setTimeout(60_000);
+
   await page.addInitScript(() => {
     localStorage.setItem("cubestack-locale", "zh-CN");
     localStorage.setItem("cubestack-theme", "light");
@@ -17,7 +25,7 @@ test("real route renders cluster KPIs and a Prometheus trend", async ({ page }) 
   await page.goto("/");
 
   // Subtitle reflects the real cluster version + node count.
-  await expect(page.locator('[data-od-id="page-head"]')).toContainText(/Kubernetes v\d+\.\d+ · \d+ 节点/);
+  await expect(page.locator('[data-od-id="page-head"]')).toContainText(/Kubernetes v\d+\.\d+ · \d+ 节点/, { timeout: 20_000 });
 
   // Node KPI: a positive total with a Ready/NotReady breakdown.
   const nodes = page.locator('[data-od-id="kpi-nodes"]');

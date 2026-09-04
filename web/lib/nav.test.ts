@@ -12,15 +12,19 @@ describe("isActive", () => {
   it("marks /dashboards active on the landing and every dashboard page", () => {
     expect(isActive("/dashboards", "/dashboards")).toBe(true);
     expect(isActive("/dashboards", "/dashboards/metax-gpu")).toBe(true);
-    expect(isActive("/dashboards", "/dashboards/sglang-dashboard")).toBe(true);
+    expect(isActive("/dashboards", "/dashboards/inference-service-dashboard")).toBe(true);
     expect(
       isActive("/dashboards", "/dashboards/kubernetes-node-resources-overview"),
     ).toBe(true);
     expect(isActive("/dashboards", "/")).toBe(false);
   });
 
-  it("never marks non-route modules active", () => {
-    expect(isActive("/inference-services", "/inference-services")).toBe(false);
+  it("marks /inference-services active, but never other placeholder modules", () => {
+    expect(isActive("/inference-services", "/inference-services")).toBe(true);
+    expect(isActive("/inference-services", "/inference-services/svc-a")).toBe(true);
+    expect(isActive("/dev-environments", "/dev-environments")).toBe(true);
+    expect(isActive("/dev-environments", "/dashboards")).toBe(false);
     expect(isActive("/devenv", "/dashboards")).toBe(false);
+    expect(isActive("/playground", "/inference-services")).toBe(false);
   });
 });

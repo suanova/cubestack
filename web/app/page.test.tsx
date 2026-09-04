@@ -7,7 +7,15 @@ import OverviewPage from "./page";
 import { overviewSummary as summary } from "@/test/fixtures/overview";
 
 // The test files avoid JSX because tsconfig sets jsx: "preserve" (for Next),
-// which vitest's import-analysis can't transform.
+// which vitest's import-analysis can't transform. Render next/link as a plain
+// anchor so the page renders without router context (the clickable KPI cards
+// are built with <Box component={Link} />).
+vi.mock("next/link", () => ({
+  // Pass all props through so data-od-id stays on the anchor (the clickable
+  // KPI cards carry their test hook via <Box component={Link} data-od-id />).
+  default: (props: Record<string, unknown>) => createElement("a", props),
+}));
+
 vi.mock("@/lib/perses/theme", () => ({
   platformPalette: {
     light: { accent: "#1677ff", bg: "#ffffff", surface: "#f7f8fa", fg: "#111111", muted: "#6b7280", border: "#d9dee7" },
@@ -72,23 +80,43 @@ describe("overview landing page", () => {
 
     expect(container.textContent).toContain("Kubernetes v1.29 · 16 节点");
 
-    // 节点总数 is the first card (replaces the prototype's 活跃告警).
+    // 节点总数 is the first card (replaces the prototype's 活跃告警). It links
+    // to the /dashboards landing with Resource Overview preselected: the full
+    // per-node CPU/GPU/Memory/RDMA usage rows.
     expect(cardText(container, "kpi-nodes")).toContain("节点总数");
     expect(cardText(container, "kpi-nodes")).toContain("16");
     expect(cardText(container, "kpi-nodes")).toContain("Ready 15 · NotReady 1");
+    expect(container.querySelector('[data-od-id="kpi-nodes"]')?.getAttribute("href")).toBe(
+      "/dashboards?dashboard=resource-overview-dashboard",
+    );
 
     expect(cardText(container, "kpi-gpu")).toContain("GPU 卡总数");
     expect(cardText(container, "kpi-gpu")).toContain("128");
     expect(cardText(container, "kpi-gpu")).toContain("2 品牌");
     expect(cardText(container, "kpi-gpu")).toContain("当前利用率 62% · 显存 58%");
+    // The GPU card lands GPU-scoped on Resource Overview (?scope=gpu): the node
+    // CPU/Memory/RDMA rows are dropped on arrival, leaving per-GPU panels.
+    expect(container.querySelector('[data-od-id="kpi-gpu"]')?.getAttribute("href")).toBe(
+      "/dashboards?dashboard=resource-overview-dashboard&scope=gpu",
+    );
 
     expect(cardText(container, "kpi-inference")).toContain("推理服务");
     expect(cardText(container, "kpi-inference")).toContain("12");
     expect(cardText(container, "kpi-inference")).toContain("就绪 11 · 扩缩容中 1");
+    // The inference card links to the /dashboards landing with Inference Service
+    // preselected.
+    expect(container.querySelector('[data-od-id="kpi-inference"]')?.getAttribute("href")).toBe(
+      "/dashboards?dashboard=inference-service-dashboard",
+    );
 
     expect(cardText(container, "kpi-devenv")).toContain("开发环境");
     expect(cardText(container, "kpi-devenv")).toContain("8");
     expect(cardText(container, "kpi-devenv")).toContain("运行中 5 · 已停止 3");
+    // The dev-env card links to the /dashboards landing with the Dev Environment
+    // dashboard preselected (cluster-wide GPU/CPU/memory/network/storage usage).
+    expect(container.querySelector('[data-od-id="kpi-devenv"]')?.getAttribute("href")).toBe(
+      "/dashboards?dashboard=dev-environment-dashboard",
+    );
 
     act(() => root.unmount());
   });
