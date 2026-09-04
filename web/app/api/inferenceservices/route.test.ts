@@ -1,5 +1,7 @@
-import { NextRequest } from "next/server";
+// @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { authedGet, authedRequest } from "@/test/auth";
 
 const { listNamespace, listClusterCustomObject, patchNamespacedCustomObject, createNamespacedCustomObject, getNamespacedCustomObject } = vi.hoisted(() => ({
   listNamespace: vi.fn(),
@@ -120,6 +122,11 @@ async function importRoute() {
   return import("./route");
 }
 
+/** A POST request with a signed session cookie. */
+async function buildPost(body: unknown) {
+  return authedRequest({ method: "POST", body: JSON.stringify(body) }, "http://localhost/api/inferenceservices");
+}
+
 describe("inference services route", () => {
   beforeEach(() => {
     stubCluster();
@@ -137,7 +144,7 @@ describe("inference services route", () => {
 
   it("projects each service from real CR data, resolving the profile", async () => {
     const { GET } = await importRoute();
-    const res = await GET();
+    const res = await GET(await authedGet(), undefined);
     expect(res.status).toBe(200);
     const body = await res.json();
 
@@ -176,7 +183,7 @@ describe("inference services route", () => {
 
   it("degrades metrics to null when Prometheus has no data", async () => {
     const { GET } = await importRoute();
-    const res = await GET();
+    const res = await GET(await authedGet(), undefined);
     const body = await res.json();
     // Every metric family returns empty -> metrics null (page shows empty state).
     for (const item of body.items) {
@@ -208,7 +215,7 @@ describe("inference services route", () => {
     );
 
     const { GET } = await importRoute();
-    const res = await GET();
+    const res = await GET(await authedGet(), undefined);
     expect(res.status).toBe(200);
 
     // Each service's queries anchor on its exact name (or -<role> suffix);
@@ -220,16 +227,18 @@ describe("inference services route", () => {
   it("patches the overrides via a merge patch on PATCH", async () => {
     patchNamespacedCustomObject.mockResolvedValue({});
     const { PATCH } = await importRoute();
-    const req = new NextRequest("http://localhost/api/inferenceservices", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        namespace: "project-a",
-        name: "dsv4-flash-pd",
-        overrides: { decodeReplicas: 4, prefillReplicas: 2, groupSize: 2 },
-      }),
-    });
-    const res = await PATCH(req);
+    const req = await authedRequest(
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          namespace: "project-a",
+          name: "dsv4-flash-pd",
+          overrides: { decodeReplicas: 4, prefillReplicas: 2, groupSize: 2 },
+        }),
+      },
+      "http://localhost/api/inferenceservices",
+    );
+    const res = await PATCH(req, undefined);
     expect(res.status).toBe(200);
     expect(patchNamespacedCustomObject).toHaveBeenCalledWith({
       group: "ai.cubestack.io",
@@ -248,96 +257,108 @@ describe("inference services route", () => {
 
   it("rejects a PATCH with a non-primitive override value", async () => {
     const { PATCH } = await importRoute();
-    const req = new NextRequest("http://localhost/api/inferenceservices", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        namespace: "project-a",
-        name: "dsv4-flash-pd",
-        overrides: { decodeReplicas: { bogus: true } },
-      }),
-    });
-    const res = await PATCH(req);
+    const req = await authedRequest(
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          namespace: "project-a",
+          name: "dsv4-flash-pd",
+          overrides: { decodeReplicas: { bogus: true } },
+        }),
+      },
+      "http://localhost/api/inferenceservices",
+    );
+    const res = await PATCH(req, undefined);
     expect(res.status).toBe(400);
     expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
   it("rejects a PATCH with an override above the profile's max", async () => {
     const { PATCH } = await importRoute();
-    const req = new NextRequest("http://localhost/api/inferenceservices", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        namespace: "project-a",
-        name: "dsv4-flash-pd",
-        overrides: { decodeReplicas: 99 }, // profile max is 16
-      }),
-    });
-    const res = await PATCH(req);
+    const req = await authedRequest(
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          namespace: "project-a",
+          name: "dsv4-flash-pd",
+          overrides: { decodeReplicas: 99 }, // profile max is 16
+        }),
+      },
+      "http://localhost/api/inferenceservices",
+    );
+    const res = await PATCH(req, undefined);
     expect(res.status).toBe(400);
     expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
   it("rejects a PATCH with an override value outside the declared enum", async () => {
     const { PATCH } = await importRoute();
-    const req = new NextRequest("http://localhost/api/inferenceservices", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        namespace: "project-a",
-        name: "dsv4-flash-pd",
-        overrides: { groupSize: 8 }, // enum is [1,2,4]
-      }),
-    });
-    const res = await PATCH(req);
+    const req = await authedRequest(
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          namespace: "project-a",
+          name: "dsv4-flash-pd",
+          overrides: { groupSize: 8 }, // enum is [1,2,4]
+        }),
+      },
+      "http://localhost/api/inferenceservices",
+    );
+    const res = await PATCH(req, undefined);
     expect(res.status).toBe(400);
     expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
   it("rejects a PATCH with a decimal value for an integer override", async () => {
     const { PATCH } = await importRoute();
-    const req = new NextRequest("http://localhost/api/inferenceservices", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        namespace: "project-a",
-        name: "dsv4-flash-pd",
-        overrides: { decodeReplicas: 1.5 },
-      }),
-    });
-    const res = await PATCH(req);
+    const req = await authedRequest(
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          namespace: "project-a",
+          name: "dsv4-flash-pd",
+          overrides: { decodeReplicas: 1.5 },
+        }),
+      },
+      "http://localhost/api/inferenceservices",
+    );
+    const res = await PATCH(req, undefined);
     expect(res.status).toBe(400);
     expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
   it("rejects a PATCH with an override key the profile does not declare", async () => {
     const { PATCH } = await importRoute();
-    const req = new NextRequest("http://localhost/api/inferenceservices", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        namespace: "project-a",
-        name: "dsv4-flash-pd",
-        overrides: { bogus: 1 },
-      }),
-    });
-    const res = await PATCH(req);
+    const req = await authedRequest(
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          namespace: "project-a",
+          name: "dsv4-flash-pd",
+          overrides: { bogus: 1 },
+        }),
+      },
+      "http://localhost/api/inferenceservices",
+    );
+    const res = await PATCH(req, undefined);
     expect(res.status).toBe(400);
     expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
   it("returns 404 when the target service does not exist", async () => {
     const { PATCH } = await importRoute();
-    const req = new NextRequest("http://localhost/api/inferenceservices", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        namespace: "project-a",
-        name: "does-not-exist",
-        overrides: { decodeReplicas: 2 },
-      }),
-    });
-    const res = await PATCH(req);
+    const req = await authedRequest(
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          namespace: "project-a",
+          name: "does-not-exist",
+          overrides: { decodeReplicas: 2 },
+        }),
+      },
+      "http://localhost/api/inferenceservices",
+    );
+    const res = await PATCH(req, undefined);
     expect(res.status).toBe(404);
     expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
   });
@@ -345,18 +366,11 @@ describe("inference services route", () => {
   it("returns a client-safe 500 when the cluster read fails", async () => {
     listClusterCustomObject.mockRejectedValue(new Error("boom"));
     const { GET } = await importRoute();
-    const res = await GET();
+    const res = await GET(await authedGet(), undefined);
     expect(res.status).toBe(500);
     expect(await res.json()).toEqual({ error: "Failed to load inference services" });
   });
 });
-function buildPost(body: unknown): NextRequest {
-  return new NextRequest("http://localhost/api/inferenceservices", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-}
 
 describe("inference services create (POST)", () => {
   beforeEach(() => {
@@ -374,13 +388,14 @@ describe("inference services create (POST)", () => {
   it("creates a service with profile, model and overrides", async () => {
     const { POST } = await importRoute();
     const res = await POST(
-      buildPost({
+      await buildPost({
         namespace: "project-a",
         name: "new-serve",
         profileRef: "metax-sglang-dsv4-pd",
         modelRef: "deepseek-v4-flash-w8a8-v1",
         overrides: { decodeReplicas: 4, prefillReplicas: 2, groupSize: 2 },
       }),
+      undefined,
     );
     expect(res.status).toBe(201);
     expect(await res.json()).toEqual({ created: true, name: "new-serve" });
@@ -406,7 +421,8 @@ describe("inference services create (POST)", () => {
   it("rejects an invalid (non-DNS) name", async () => {
     const { POST } = await importRoute();
     const res = await POST(
-      buildPost({ namespace: "project-a", name: "Bad_Name", profileRef: "p", modelRef: "m" }),
+      await buildPost({ namespace: "project-a", name: "Bad_Name", profileRef: "p", modelRef: "m" }),
+      undefined,
     );
     expect(res.status).toBe(400);
     expect(createNamespacedCustomObject).not.toHaveBeenCalled();
@@ -415,12 +431,13 @@ describe("inference services create (POST)", () => {
   it("rejects a model incompatible with the profile", async () => {
     const { POST } = await importRoute();
     const res = await POST(
-      buildPost({
+      await buildPost({
         namespace: "project-a",
         name: "ok-name",
         profileRef: "metax-sglang-dsv4-pd",
         modelRef: "some-other-v5", // not in the stub modelversions -> not found
       }),
+      undefined,
     );
     // modelRef doesn't exist at all -> 400 "model ... 不存在"
     expect(res.status).toBe(400);
@@ -430,13 +447,14 @@ describe("inference services create (POST)", () => {
   it("rejects an override that exceeds its declared max", async () => {
     const { POST } = await importRoute();
     const res = await POST(
-      buildPost({
+      await buildPost({
         namespace: "project-a",
         name: "ok-name",
         profileRef: "metax-sglang-dsv4-pd",
         modelRef: "deepseek-v4-flash-w8a8-v1",
         overrides: { decodeReplicas: 99 },
       }),
+      undefined,
     );
     expect(res.status).toBe(400);
     expect(createNamespacedCustomObject).not.toHaveBeenCalled();
@@ -445,13 +463,14 @@ describe("inference services create (POST)", () => {
   it("rejects a decimal value for an integer override", async () => {
     const { POST } = await importRoute();
     const res = await POST(
-      buildPost({
+      await buildPost({
         namespace: "project-a",
         name: "ok-name",
         profileRef: "metax-sglang-dsv4-pd",
         modelRef: "deepseek-v4-flash-w8a8-v1",
         overrides: { decodeReplicas: 1.5 },
       }),
+      undefined,
     );
     expect(res.status).toBe(400);
     expect(createNamespacedCustomObject).not.toHaveBeenCalled();
@@ -460,12 +479,13 @@ describe("inference services create (POST)", () => {
   it("rejects a duplicate service name in the namespace", async () => {
     const { POST } = await importRoute();
     const res = await POST(
-      buildPost({
+      await buildPost({
         namespace: "project-a",
         name: "dsv4-flash-pd", // already exists in the fixture
         profileRef: "metax-sglang-dsv4-pd",
         modelRef: "deepseek-v4-flash-w8a8-v1",
       }),
+      undefined,
     );
     expect(res.status).toBe(400);
     expect(createNamespacedCustomObject).not.toHaveBeenCalled();
@@ -474,13 +494,14 @@ describe("inference services create (POST)", () => {
   it("rejects a publish route without a valid modelName", async () => {
     const { POST } = await importRoute();
     const res = await POST(
-      buildPost({
+      await buildPost({
         namespace: "project-a",
         name: "ok-name",
         profileRef: "metax-sglang-dsv4-pd",
         modelRef: "deepseek-v4-flash-w8a8-v1",
         route: { publish: true, modelName: "" },
       }),
+      undefined,
     );
     expect(res.status).toBe(400);
     expect(createNamespacedCustomObject).not.toHaveBeenCalled();
@@ -490,12 +511,13 @@ describe("inference services create (POST)", () => {
     createNamespacedCustomObject.mockRejectedValue(new Error("boom"));
     const { POST } = await importRoute();
     const res = await POST(
-      buildPost({
+      await buildPost({
         namespace: "project-a",
         name: "new-serve",
         profileRef: "metax-sglang-dsv4-pd",
         modelRef: "deepseek-v4-flash-w8a8-v1",
       }),
+      undefined,
     );
     expect(res.status).toBe(500);
     expect(await res.json()).toEqual({ error: "Failed to create inference service" });

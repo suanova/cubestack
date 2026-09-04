@@ -1,4 +1,5 @@
 import { getCoreClient } from "@/lib/kubernetes";
+import { withAuth } from "@/lib/auth/guard";
 
 // @kubernetes/client-node needs Node APIs (TLS, fs), not the Edge runtime.
 export const runtime = "nodejs";
@@ -14,7 +15,7 @@ export const dynamic = "force-dynamic";
  * Lists all namespaces in the cluster and returns a lightweight projection
  * of each one.
  */
-export async function GET() {
+export const GET = withAuth(async () => {
   try {
     // Built lazily inside the try so a kubeconfig-load failure surfaces as a
     // 500 JSON response instead of an unhandled throw.
@@ -33,4 +34,4 @@ export async function GET() {
     console.error("Failed to list namespaces:", err);
     return Response.json({ error: "Failed to list namespaces" }, { status: 500 });
   }
-}
+});

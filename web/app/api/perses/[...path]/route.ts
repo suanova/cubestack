@@ -1,3 +1,5 @@
+import { withAuth } from "@/lib/auth/guard";
+
 import { NextRequest } from "next/server";
 
 // Proxying uses Node's fetch (streams), not the Edge runtime.
@@ -69,12 +71,12 @@ async function proxy(request: NextRequest, path: string[]) {
   }
 }
 
-export async function GET(request: NextRequest, ctx: { params: Promise<{ path: string[] }> }) {
+export const GET = withAuth<{ params: Promise<{ path: string[] }> }>(async (request, _session, ctx) => {
   const { path } = await ctx.params;
   return proxy(request, path);
-}
+});
 
-export async function POST(request: NextRequest, ctx: { params: Promise<{ path: string[] }> }) {
+export const POST = withAuth<{ params: Promise<{ path: string[] }> }>(async (request, _session, ctx) => {
   const { path } = await ctx.params;
   return proxy(request, path);
-}
+});

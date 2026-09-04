@@ -1,4 +1,7 @@
+// @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { authedGet } from "@/test/auth";
 
 const { listNamespace, listClusterCustomObject } = vi.hoisted(() => ({
   listNamespace: vi.fn(),
@@ -59,7 +62,7 @@ describe("inference services create options route", () => {
 
   it("returns namespaces, resolved profiles (with override decls) and model versions", async () => {
     const { GET } = await import("./route");
-    const res = await GET();
+    const res = await GET(await authedGet(), undefined);
     expect(res.status).toBe(200);
     const body = await res.json();
 
@@ -96,7 +99,7 @@ describe("inference services create options route", () => {
   it("returns 500 when the cluster read fails", async () => {
     listClusterCustomObject.mockRejectedValue(new Error("boom"));
     const { GET } = await import("./route");
-    const res = await GET();
+    const res = await GET(await authedGet(), undefined);
     expect(res.status).toBe(500);
     expect(await res.json()).toEqual({ error: "Failed to load create options" });
   });

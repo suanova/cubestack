@@ -32,6 +32,11 @@
   color-scheme: dark;
 }
 
+/* Login page's isometric cube-lattice backdrop: soften in dark mode. */
+[data-theme="dark"] .login-lattice {
+  opacity: 0.55;
+}
+
 @theme inline {
   --color-background: var(--bg);
   --color-foreground: var(--fg);

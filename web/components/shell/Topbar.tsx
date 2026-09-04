@@ -6,8 +6,9 @@
 // color-mix() of --bg as the prototype, so it tracks the theme without a
 // re-render hook.
 
-import { Box } from "@mui/material";
-import { usePathname } from "next/navigation";
+import { Box, Button, Tooltip } from "@mui/material";
+import { usePathname, useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
 
 import { LanguageSwitcher } from "@/components/shell/LanguageSwitcher";
 import { ThemeToggle } from "@/components/perses/ThemeToggle";
@@ -27,8 +28,19 @@ function crumbKey(pathname: string): MessageKey | null {
 
 export function Topbar() {
   const pathname = usePathname();
+  const router = useRouter();
   const { t } = useI18n();
   const section = crumbKey(pathname);
+
+  // The current user (from /api/auth/me) so the shell can show who is signed
+  // in and offer to sign out. A 401 (no session) just hides the badge.
+  const [user, setUser] = useState<string>("");
+  useEffect(() => {
+    fetch("/api/auth/me")
+      .then((res) => (res.ok ? res.json() : Promise.reject()))
+      .then((body: { user?: string }) => setUser(body.user ?? ""))
+      .catch(() => setUser(""));
+  }, []);
 
   return (
     <Box
@@ -65,22 +77,52 @@ export function Topbar() {
         <Box sx={{ display: "flex", alignItems: "center", gap: "10px" }}>
           <ThemeToggle />
           <LanguageSwitcher />
-          <Box
-            component="span"
-            sx={{
-              width: 28,
-              height: 28,
-              borderRadius: "50%",
-              bgcolor: "text.primary",
-              color: "background.default",
-              display: "grid",
-              placeItems: "center",
-              fontSize: 12,
-              fontWeight: 600,
-            }}
-          >
-            张
-          </Box>
+          {user ? (
+            <>
+              <Tooltip title={user} arrow>
+                <Box
+                  component="span"
+                  data-od-id="current-user"
+                  sx={{
+                    width: 28,
+                    height: 28,
+                    borderRadius: "50%",
+                    bgcolor: "text.primary",
+                    color: "background.default",
+                    display: "grid",
+                    placeItems: "center",
+                    fontSize: 12,
+                    fontWeight: 600,
+                    cursor: "default",
+                    userSelect: "none",
+                  }}
+                >
+                  {user.charAt(0).toUpperCase()}
+                </Box>
+              </Tooltip>
+              <Button
+                size="small"
+                variant="outlined"
+                data-od-id="logout-button"
+                onClick={async () => {
+                  try {
+                    await fetch("/api/auth/logout", { method: "POST" });
+                  } finally {
+                    router.replace("/login");
+                  }
+                }}
+                sx={{
+                  textTransform: "none",
+                  fontSize: 12.5,
+                  color: "text.secondary",
+                  borderColor: "divider",
+                  "&:hover": { borderColor: "var(--fg)" },
+                }}
+              >
+                {t("auth.logout")}
+              </Button>
+            </>
+          ) : null}
         </Box>
       </Box>
     </Box>

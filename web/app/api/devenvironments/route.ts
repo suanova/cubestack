@@ -1,6 +1,5 @@
-import type { NextRequest } from "next/server";
-
 import { getCoreClient, getCustomObjectsClient } from "@/lib/kubernetes";
+import { withAuth } from "@/lib/auth/guard";
 
 // @kubernetes/client-node needs Node APIs (TLS, fs), not the Edge runtime.
 export const runtime = "nodejs";
@@ -131,7 +130,7 @@ function project(env: DevEnv): DevEnvironmentSummary {
  *
  * Lists every DevEnvironment in the cluster (any namespace).
  */
-export async function GET() {
+export const GET = withAuth(async () => {
   try {
     const co = getCustomObjectsClient();
     const res = await co.listClusterCustomObject({
@@ -147,7 +146,7 @@ export async function GET() {
     console.error("Failed to list dev environments:", err);
     return Response.json({ error: "Failed to load dev environments" }, { status: 500 });
   }
-}
+});
 
 // ── create (POST) ────────────────────────────────────────────────────────────
 
@@ -175,7 +174,7 @@ interface CreateBody {
  * webhooks re-validate on reconcile. Requires RBAC to create the CR in the
  * target namespace.
  */
-export async function POST(req: NextRequest) {
+export const POST = withAuth(async (req) => {
   try {
     const body = (await req.json()) as CreateBody;
     const ValidationError = (error: string) => Response.json({ error }, { status: 400 });
@@ -255,7 +254,7 @@ export async function POST(req: NextRequest) {
     console.error("Failed to create dev environment:", err);
     return Response.json({ error: "Failed to create dev environment" }, { status: 500 });
   }
-}
+});
 
 // ── start / stop (PATCH) ────────────────────────────────────────────────────
 
@@ -268,7 +267,7 @@ export async function POST(req: NextRequest) {
  * resource omits it (existing resources created before the field was added to
  * the API), instead of `replace`, which would fail when the target is absent.
  */
-export async function PATCH(req: NextRequest) {
+export const PATCH = withAuth(async (req) => {
   try {
     const body = (await req.json()) as { namespace?: string; name?: string; running?: boolean };
     if (!body.namespace || !body.name || typeof body.running !== "boolean") {
@@ -294,7 +293,7 @@ export async function PATCH(req: NextRequest) {
         : { error: "Failed to update dev environment", status: 500 };
     return Response.json(status, { status: status.status });
   }
-}
+});
 
 // ── delete (DELETE) ──────────────────────────────────────────────────────────
 
@@ -303,7 +302,7 @@ export async function PATCH(req: NextRequest) {
  *
  * Deletes one environment. Body: `{ namespace, name }`.
  */
-export async function DELETE(req: NextRequest) {
+export const DELETE = withAuth(async (req) => {
   try {
     const body = (await req.json()) as { namespace?: string; name?: string };
     if (!body.namespace || !body.name) {
@@ -326,4 +325,4 @@ export async function DELETE(req: NextRequest) {
         : { error: "Failed to delete dev environment", status: 500 };
     return Response.json(status, { status: status.status });
   }
-}
+});

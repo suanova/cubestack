@@ -1,6 +1,5 @@
-import type { NextRequest } from "next/server";
-
 import { getCoreClient, getCustomObjectsClient } from "@/lib/kubernetes";
+import { withAuth } from "@/lib/auth/guard";
 
 // @kubernetes/client-node needs Node APIs (TLS, fs), not the Edge runtime.
 export const runtime = "nodejs";
@@ -277,7 +276,7 @@ function project(
  * against its InferenceRuntimeProfile. Metrics are best-effort Prometheus
  * queries and never fail the response.
  */
-export async function GET() {
+export const GET = withAuth(async () => {
   try {
     const co = getCustomObjectsClient();
     const [isvcRes, profileRes] = await Promise.all([
@@ -317,7 +316,7 @@ export async function GET() {
     console.error("Failed to list inference services:", err);
     return Response.json({ error: "Failed to load inference services" }, { status: 500 });
   }
-}
+});
 
 /**
  * PATCH /api/inferenceservices
@@ -328,7 +327,7 @@ export async function GET() {
  * InferenceRuntimeProfile and validated (same contract as POST) before the
  * cluster write. Requires RBAC to get and patch the CR.
  */
-export async function PATCH(req: NextRequest) {
+export const PATCH = withAuth(async (req) => {
   try {
     const body = (await req.json()) as { namespace?: string; name?: string; overrides?: Record<string, unknown> };
     if (!body.namespace || !body.name || !body.overrides) {
@@ -401,7 +400,7 @@ export async function PATCH(req: NextRequest) {
         : { error: "Failed to update inference service", status: 500 };
     return Response.json(status, { status: status.status });
   }
-}
+});
 
 // ── create (POST) ────────────────────────────────────────────────────────────
 
@@ -430,7 +429,7 @@ interface ModelVersionRef {
  *  - the operator controller/verifying-admission re-validates on reconcile.
  * Requires RBAC to create the CR in the target namespace.
  */
-export async function POST(req: NextRequest) {
+export const POST = withAuth(async (req) => {
   try {
     const body = (await req.json()) as CreateBody;
     const ValidationError = (error: string) => Response.json({ error }, { status: 400 });
@@ -521,7 +520,7 @@ export async function POST(req: NextRequest) {
     console.error("Failed to create inference service:", err);
     return Response.json({ error: "Failed to create inference service" }, { status: 500 });
   }
-}
+});
 
 // ── best-effort per-service metrics from Prometheus ─────────────────────
 

@@ -1,4 +1,7 @@
+// @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { authedGet } from "@/test/auth";
 
 const { listNode, listClusterCustomObject } = vi.hoisted(() => ({
   listNode: vi.fn(),
@@ -139,7 +142,7 @@ describe("overview route", () => {
   it("returns the full live summary from nodes and the operator CRs", async () => {
     stubPrometheus(trendResult(Math.floor(Date.now() / 1000)));
     const { GET } = await import("./route");
-    const res = await GET();
+    const res = await GET(await authedGet(), undefined);
 
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -167,7 +170,7 @@ describe("overview route", () => {
   it("degrades the trend to null when Prometheus is unreachable, keeping the CR data", async () => {
     stubPrometheus(null);
     const { GET } = await import("./route");
-    const res = await GET();
+    const res = await GET(await authedGet(), undefined);
 
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -180,7 +183,7 @@ describe("overview route", () => {
     stubPrometheus(trendResult(Math.floor(Date.now() / 1000)));
     listNode.mockRejectedValue(new Error("boom"));
     const { GET } = await import("./route");
-    const res = await GET();
+    const res = await GET(await authedGet(), undefined);
 
     expect(res.status).toBe(500);
     expect(await res.json()).toEqual({ error: "Failed to load overview" });
