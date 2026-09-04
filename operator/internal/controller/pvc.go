@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -95,5 +96,33 @@ func (r *InferenceServiceReconciler) provisionModelPVC(ctx context.Context, isvc
 	}
 	// A same-name PVC that is not controlled by this service must not be
 	// accepted silently: Phase 3 workloads would bind to a foreign volume.
-	return ensureOwned(existing, isvc.UID)
+	if err := ensureOwned(existing, isvc.UID); err != nil {
+		return err
+	}
+	// The owned claim is reused only while its storage identity matches the
+	// resolved ModelVersion. A modelRef switch can otherwise leave the Static
+	// selector or the Dynamic storageClassName of the previous immutable
+	// ModelVersion on the already-bound claim, and new pods would silently
+	// mount the old model data. The designed replacement path — stop the
+	// consumers, delete and recreate the claim, wait for Bound, then apply the
+	// workloads — is the §5.1 target behavior (TODO); until then a mismatch
+	// fails loudly instead of reusing. capacity is deliberately not part of the
+	// identity: an already-bound claim cannot change its request, and under the
+	// Dynamic shared-root premise a same-class switch keeps serving via its
+	// subPath (growth is the expansion TODO, §5.1).
+	if !apiequality.Semantic.DeepEqual(existing.Spec.StorageClassName, pvc.Spec.StorageClassName) ||
+		!apiequality.Semantic.DeepEqual(existing.Spec.Selector, pvc.Spec.Selector) {
+		return &storageIdentityErr{msg: fmt.Sprintf(
+			"PVC %s/%s exists with storageClassName %v and selector %v, but the resolved ModelVersion %s requires storageClassName %q and selector %v; a bound claim's storage identity cannot change in place — revert modelRef or delete the service (the replacement path is the design §5.1 target behavior)",
+			existing.Namespace, existing.Name, existing.Spec.StorageClassName, existing.Spec.Selector,
+			model.Name, sc, pvc.Spec.Selector)}
+	}
+	return nil
 }
+
+// storageIdentityErr marks a provision failure caused by a storage identity
+// mismatch of the already-existing owned model PVC (Provisioned reason
+// StorageIdentityChanged).
+type storageIdentityErr struct{ msg string }
+
+func (e *storageIdentityErr) Error() string { return e.msg }

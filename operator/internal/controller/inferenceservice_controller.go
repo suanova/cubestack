@@ -164,7 +164,12 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			return ctrl.Result{}, err
 		}
 		if err := r.provisionModelPVC(ctx, &isvc, resolved.model); err != nil {
-			setProvisionedCondition(&desired.Status.Conditions, "PVCCreateFailed", err)
+			reason := "PVCCreateFailed"
+			var idErr *storageIdentityErr
+			if errors.As(err, &idErr) {
+				reason = "StorageIdentityChanged"
+			}
+			setProvisionedCondition(&desired.Status.Conditions, reason, err)
 			statusErr := r.updateStatusIfChanged(ctx, &isvc, desired)
 			if statusErr != nil {
 				return ctrl.Result{}, statusErr

@@ -129,6 +129,37 @@ func s3RenderProfile(name string, credsEnv bool) *aiv1alpha1.InferenceRuntimePro
 	return irp
 }
 
+// patchStorageResolved patches StorageResolved=True on the named ModelVersion,
+// the manual-testing phase of the storage-side integration (design §3.1).
+func patchStorageResolved(name string) {
+	Eventually(func() error {
+		mv := &aiv1alpha1.ModelVersion{}
+		if err := k8sClient.Get(ctx, client.ObjectKey{Name: name}, mv); err != nil {
+			return err
+		}
+		meta.SetStatusCondition(&mv.Status.Conditions, metav1.Condition{
+			Type:    aiv1alpha1.ConditionStorageResolved,
+			Status:  metav1.ConditionTrue,
+			Reason:  testStorageResolvedReason,
+			Message: testStorageResolvedMessage,
+		})
+		return k8sClient.Status().Update(ctx, mv)
+	}, "15s", "200ms").Should(Succeed())
+}
+
+// switchModelRef points the service at the named ModelVersion, retrying on
+// status-write conflicts with the concurrent reconciles.
+func switchModelRef(isvcName, modelRef string) {
+	Eventually(func() error {
+		got := &aiv1alpha1.InferenceService{}
+		if err := k8sClient.Get(ctx, client.ObjectKey{Name: isvcName, Namespace: testNamespace}, got); err != nil {
+			return err
+		}
+		got.Spec.ModelRef = modelRef
+		return k8sClient.Update(ctx, got)
+	}, "15s", "200ms").Should(Succeed())
+}
+
 var _ = Describe("InferenceService controller", func() {
 	BeforeEach(func() { ensureSystemNamespace() })
 
@@ -1116,6 +1147,162 @@ var _ = Describe("InferenceService controller", func() {
 			Expect(pvc.Labels[modelLabelKey]).To(Equal("main"))
 			Expect(pvc.Labels[managedByLabelKey]).To(Equal(managedByValue))
 			Expect(pvc.OwnerReferences).To(ContainElement(HaveField("Kind", "InferenceService")))
+		})
+
+		It("fails with StorageIdentityChanged when a modelRef switch changes the Dynamic storage class", func() {
+			name := "isvc-pvc-sc-switch"
+			irp := validRenderProfile(name)
+			Expect(k8sClient.Create(ctx, irp)).To(Succeed())
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: name + "-cm", Namespace: systemNamespace},
+				Immutable:  ptrTo(true),
+				Data:       map[string]string{testConfigMapDataKey: testConfigMapDataValue},
+			}
+			Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+			mvA := validDynamicModelVersion(name+"-mv-a", "standard")
+			Expect(k8sClient.Create(ctx, mvA)).To(Succeed())
+			mvB := validDynamicModelVersion(name+"-mv-b", "other-sc")
+			Expect(k8sClient.Create(ctx, mvB)).To(Succeed())
+			isvc := validInferenceService(name, mvA.Name)
+			isvc.Spec.ProfileRef = irp.Name
+			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
+			defer func() {
+				_ = k8sClient.Delete(ctx, isvc)
+				_ = k8sClient.Delete(ctx, mvB)
+				_ = k8sClient.Delete(ctx, mvA)
+				_ = k8sClient.Delete(ctx, irp)
+			}()
+
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.InferenceService{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: testNamespace}, got)).To(Succeed())
+				g.Expect(meta.IsStatusConditionTrue(got.Status.Conditions, aiv1alpha1.ConditionProvisioned)).To(BeTrue())
+			}, "15s", "200ms").Should(Succeed())
+
+			// Switch to a ModelVersion of a different storage class: the owned
+			// claim's identity no longer matches and must not be silently reused
+			// — new pods would mount the previous model's volume.
+			switchModelRef(name, mvB.Name)
+
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.InferenceService{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: testNamespace}, got)).To(Succeed())
+				cond := meta.FindStatusCondition(got.Status.Conditions, aiv1alpha1.ConditionProvisioned)
+				g.Expect(cond).ToNot(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(cond.Reason).To(Equal("StorageIdentityChanged"))
+				g.Expect(cond.Message).To(ContainSubstring("other-sc"))
+			}, "15s", "200ms").Should(Succeed())
+
+			pvc := &corev1.PersistentVolumeClaim{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-model-main", Namespace: testNamespace}, pvc)).To(Succeed())
+			Expect(pvc.Spec.StorageClassName).To(Equal(ptrTo("standard")))
+			Expect(pvc.Spec.Selector).To(BeNil())
+		})
+
+		It("fails with StorageIdentityChanged when a modelRef switch changes the Static storage unit", func() {
+			name := "isvc-pvc-static-switch"
+			irp := validRenderProfile(name)
+			Expect(k8sClient.Create(ctx, irp)).To(Succeed())
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: name + "-cm", Namespace: systemNamespace},
+				Immutable:  ptrTo(true),
+				Data:       map[string]string{testConfigMapDataKey: testConfigMapDataValue},
+			}
+			Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+			mvA := validStaticModelVersion(name + "-mv-a")
+			Expect(k8sClient.Create(ctx, mvA)).To(Succeed())
+			patchStorageResolved(mvA.Name)
+			mvB := validStaticModelVersion(name + "-mv-b")
+			Expect(k8sClient.Create(ctx, mvB)).To(Succeed())
+			patchStorageResolved(mvB.Name)
+			isvc := validInferenceService(name, mvA.Name)
+			isvc.Spec.ProfileRef = irp.Name
+			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
+			defer func() {
+				_ = k8sClient.Delete(ctx, isvc)
+				_ = k8sClient.Delete(ctx, mvB)
+				_ = k8sClient.Delete(ctx, mvA)
+				_ = k8sClient.Delete(ctx, irp)
+			}()
+
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.InferenceService{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: testNamespace}, got)).To(Succeed())
+				g.Expect(meta.IsStatusConditionTrue(got.Status.Conditions, aiv1alpha1.ConditionProvisioned)).To(BeTrue())
+			}, "15s", "200ms").Should(Succeed())
+
+			// Switch to a ModelVersion of a different storage unit: the old
+			// selector still points at the previous ModelVersion's PV, so the
+			// claim must not be reused — it would mount the old model data.
+			switchModelRef(name, mvB.Name)
+
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.InferenceService{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: testNamespace}, got)).To(Succeed())
+				cond := meta.FindStatusCondition(got.Status.Conditions, aiv1alpha1.ConditionProvisioned)
+				g.Expect(cond).ToNot(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(cond.Reason).To(Equal("StorageIdentityChanged"))
+			}, "15s", "200ms").Should(Succeed())
+
+			pvc := &corev1.PersistentVolumeClaim{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-model-main", Namespace: testNamespace}, pvc)).To(Succeed())
+			Expect(pvc.Spec.Selector).ToNot(BeNil())
+			Expect(pvc.Spec.Selector.MatchLabels).To(Equal(map[string]string{modelVersionLabelKey: mvA.Name}))
+		})
+
+		It("keeps the model PVC when a modelRef switch only changes the Dynamic subPath", func() {
+			name := "isvc-pvc-subpath-switch"
+			irp := validRenderProfile(name)
+			Expect(k8sClient.Create(ctx, irp)).To(Succeed())
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: name + "-cm", Namespace: systemNamespace},
+				Immutable:  ptrTo(true),
+				Data:       map[string]string{testConfigMapDataKey: testConfigMapDataValue},
+			}
+			Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+			mvA := validDynamicModelVersion(name+"-mv-a", "standard")
+			Expect(k8sClient.Create(ctx, mvA)).To(Succeed())
+			mvB := validDynamicModelVersion(name+"-mv-b", "standard")
+			mvB.Spec.Storage.Dynamic.SubPath = "models/deepseek-v4-flash/fp8-v2"
+			Expect(k8sClient.Create(ctx, mvB)).To(Succeed())
+			isvc := validInferenceService(name, mvA.Name)
+			isvc.Spec.ProfileRef = irp.Name
+			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
+			defer func() {
+				_ = k8sClient.Delete(ctx, isvc)
+				_ = k8sClient.Delete(ctx, mvB)
+				_ = k8sClient.Delete(ctx, mvA)
+				_ = k8sClient.Delete(ctx, irp)
+			}()
+
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.InferenceService{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: testNamespace}, got)).To(Succeed())
+				g.Expect(meta.IsStatusConditionTrue(got.Status.Conditions, aiv1alpha1.ConditionProvisioned)).To(BeTrue())
+			}, "15s", "200ms").Should(Succeed())
+
+			pvc := &corev1.PersistentVolumeClaim{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-model-main", Namespace: testNamespace}, pvc)).To(Succeed())
+			claimUID := pvc.UID
+
+			// subPath lives in the volumeMount of the pod template, not in the
+			// claim: a same-class switch only needs the template roll, the claim
+			// identity is unchanged and is retained (design §5.1).
+			switchModelRef(name, mvB.Name)
+
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.InferenceService{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: testNamespace}, got)).To(Succeed())
+				cond := meta.FindStatusCondition(got.Status.Conditions, aiv1alpha1.ConditionProvisioned)
+				g.Expect(cond).ToNot(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			}, "15s", "200ms").Should(Succeed())
+
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-model-main", Namespace: testNamespace}, pvc)).To(Succeed())
+			Expect(pvc.UID).To(Equal(claimUID))
+			Expect(pvc.Spec.StorageClassName).To(Equal(ptrTo("standard")))
 		})
 
 		It("creates the model PVC with a selector for Static storage", func() {
