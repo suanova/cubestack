@@ -17,9 +17,11 @@ spec:
     memory: "64Gi"
 
   # Workspace storage
+  # The workspace always uses the platform-predefined StorageClass
+  # (cephfs-ephemeral, ReadWriteMany) so it can follow the pod on drift; it is
+  # not user-selectable.
   storage:
     size: 200Gi
-    storageClassName: standard   # workspace storage class
     pvcRetention: retain         # retain / delete
     mountPath: /workspace        # workspace mount path (default); base images set HOME here
 

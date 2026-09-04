@@ -126,12 +126,6 @@ type StorageSpec struct {
 	// +optional
 	Size string `json:"size,omitempty"`
 
-	// StorageClassName is the workspace storage class. The workspace PVC is
-	// created with an access mode compatible with this class (ReadWriteOnce by
-	// default).
-	// +optional
-	StorageClassName string `json:"storageClassName,omitempty"`
-
 	// PVCRetention is the workspace PVC retention policy, applied only when the
 	// environment is deleted. Stopping the environment does not delete the PVC:
 	// stopping scales the workload to zero but the workspace data survives

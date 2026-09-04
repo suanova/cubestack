@@ -30,9 +30,8 @@ import (
 )
 
 const (
-	testPortName        = "app"
-	testDevImage        = "harbor.local/ai-images/base-cuda:11.8-pytorch2.2"
-	testDevStorageClass = "ceph-rbd"
+	testPortName = "app"
+	testDevImage = "harbor.local/ai-images/base-cuda:11.8-pytorch2.2"
 )
 
 // testAPIVersion derives from SchemeGroupVersion to avoid repeating the group
@@ -70,10 +69,9 @@ func validDevEnvironment(name string) *DevEnvironment {
 				Memory:   "64Gi",
 			},
 			Storage: &StorageSpec{
-				Size:             "200Gi",
-				StorageClassName: testDevStorageClass,
-				PVCRetention:     PVCRetentionRetain,
-				MountPath:        "/home",
+				Size:         "200Gi",
+				PVCRetention: PVCRetentionRetain,
+				MountPath:    "/home",
 			},
 			Volumes: []VolumeMount{
 				{Name: "shared-dataset", PVCName: "dataset-llm-shared", MountPath: "/data", ReadOnly: true},

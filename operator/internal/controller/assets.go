@@ -77,6 +77,12 @@ const (
 	// controller creates the PVC <env>-workspace-0 from it (K8s PVC naming:
 	// <sts>-<claim>-<ordinal>).
 	workspaceClaimName = "workspace"
+
+	// workspaceStorageClassName is the platform-predefined workspace StorageClass.
+	// The workspace claim always uses this class — users cannot override it — and
+	// requests ReadWriteMany so the volume can be mounted on any node and follow
+	// the pod during drift rescheduling (design §7.2).
+	workspaceStorageClassName = "cephfs-ephemeral"
 )
 
 // modelKeyMain is the model key of the main model; model volumes are named

@@ -398,12 +398,6 @@ spec:
                     default: 10Gi
                     description: Size is the workspace PVC capacity.
                     type: string
-                  storageClassName:
-                    description: |-
-                      StorageClassName is the workspace storage class. The workspace PVC is
-                      created with an access mode compatible with this class (ReadWriteOnce by
-                      default).
-                    type: string
                 type: object
               type:
                 default: ssh

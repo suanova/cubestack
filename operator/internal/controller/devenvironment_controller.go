@@ -608,7 +608,9 @@ func (r *DevEnvironmentReconciler) desiredPodSpec(env *aiv1alpha1.DevEnvironment
 }
 
 // desiredVolumeClaimTemplates renders the workspace claim template, creating
-// the PVC <env>-workspace-0 that survives stop/start.
+// the PVC <env>-workspace-0 that survives stop/start. The claim always uses the
+// platform-predefined workspaceStorageClassName and requests ReadWriteMany so
+// the volume can be mounted on any node and follow the pod across node faults.
 func (r *DevEnvironmentReconciler) desiredVolumeClaimTemplates(env *aiv1alpha1.DevEnvironment) []corev1.PersistentVolumeClaim {
 	if env.Spec.Storage == nil {
 		return nil
@@ -619,14 +621,12 @@ func (r *DevEnvironmentReconciler) desiredVolumeClaimTemplates(env *aiv1alpha1.D
 			Labels: r.envLabels(env.Name),
 		},
 		Spec: corev1.PersistentVolumeClaimSpec{
-			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+			StorageClassName: ptr(workspaceStorageClassName),
 			Resources: corev1.VolumeResourceRequirements{
 				Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse(env.Spec.Storage.Size)},
 			},
 		},
-	}
-	if env.Spec.Storage.StorageClassName != "" {
-		pvc.Spec.StorageClassName = ptr(env.Spec.Storage.StorageClassName)
 	}
 	return []corev1.PersistentVolumeClaim{pvc}
 }
@@ -763,6 +763,13 @@ func (r *DevEnvironmentReconciler) applyStatefulSet(ctx context.Context, env *ai
 		existing.Spec.Replicas != nil && *existing.Spec.Replicas == *sts.Spec.Replicas {
 		return nil
 	}
+	// spec.volumeClaimTemplates is immutable once the StatefulSet exists, so an
+	// update must keep the templates already stored on the object. A StatefulSet
+	// that predates the pinned cephfs-ephemeral/ReadWriteMany workspace claim
+	// keeps its originally-provisioned claim and stays updatable instead of
+	// wedging on an immutability error on the first drift; only newly created
+	// environments get the platform-fixed claim template.
+	sts.Spec.VolumeClaimTemplates = existing.Spec.VolumeClaimTemplates
 	sts.ResourceVersion = existing.ResourceVersion
 	return r.Update(ctx, sts)
 }
