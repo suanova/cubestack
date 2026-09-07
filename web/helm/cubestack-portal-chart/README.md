@@ -14,19 +14,22 @@ Paths below are relative to the repository root.
 ### Using default values
 
 ```bash
-helm install my-portal ./web/helm/cubestack-portal-chart
+helm install my-portal ./web/helm/cubestack-portal-chart \
+  --namespace cubestack-system --create-namespace
 ```
 
 ### Using custom values
 
 ```bash
-helm install my-portal -f values.custom.yaml ./web/helm/cubestack-portal-chart
+helm install my-portal -f values.custom.yaml ./web/helm/cubestack-portal-chart \
+  --namespace cubestack-system --create-namespace
 ```
 
 ### Using OCI registry
 
 ```bash
-helm install my-portal oci://<registry>/cubestack-portal-chart --version <version>
+helm install my-portal oci://<registry>/cubestack-portal-chart \
+  --namespace cubestack-system --create-namespace --version <version>
 ```
 
 ## Configuration
@@ -71,12 +74,14 @@ No credentials are bundled with the chart. Provide your own htpasswd content
 (one `user:bcrypt-hash` line per entry) at install time with `--set-file`:
 
 ```bash
-# Generate a bcrypt hash for a user
-htpasswd -nbB <username> <password>
+# Generate a bcrypt hash for a user (prompts for the password, so it never
+# appears in shell history or process listings)
+htpasswd -nB <username> > /tmp/portal-htpasswd
 
 # Install with the htpasswd file
 helm install my-portal ./web/helm/cubestack-portal-chart \
-  --set-file secrets.htpasswd.content=/path/to/htpasswd
+  --namespace cubestack-system --create-namespace \
+  --set-file secrets.htpasswd.content=/tmp/portal-htpasswd
 ```
 
 The chart creates a Secret named `cubestack-htpasswd` in the target namespace,
@@ -122,7 +127,7 @@ same-named releases in different namespaces do not collide.
 ## Uninstallation
 
 ```bash
-helm uninstall my-portal
+helm uninstall my-portal --namespace cubestack-system
 ```
 
 ## Customization
@@ -154,9 +159,8 @@ resources:
 
 env:
   NODE_ENV: production
-  PORT: "3000"
 ```
 
 The Portal is always exposed through a `ClusterIP` Service on port `80`
 (targeting the container's `3000`) with an auto-generated ServiceAccount;
-neither is configurable.
+neither is configurable, and the container port is pinned to `3000` (`PORT`).

@@ -40,16 +40,17 @@ Create the name of the service account
 {{/*
 Create cluster-scoped, namespace-unique names for the ClusterRole.
 Cluster-scoped resources cannot be namespaced, so releases with the same
-name in different namespaces would collide without the namespace suffix.
-The suffix is appended before the 63-char DNS limit is applied so the
-namespace portion is preserved.
+name in different namespaces would collide. The fullname is capped so a
+bounded hash of the namespace always survives the 63-char DNS limit.
 */}}
 {{- define "cubestack-portal-chart.clusterRoleName" -}}
-{{- printf "%s-%s-cluster-role" (include "cubestack-portal-chart.fullname" .) .Values.namespace | trunc 63 | trimSuffix "-" -}}
+{{- $nsHash := .Values.namespace | sha256sum | trunc 8 -}}
+{{- printf "%s-%s-cluster-role" (include "cubestack-portal-chart.fullname" . | trunc 40 | trimSuffix "-") $nsHash | trunc 63 | trimSuffix "-" -}}
 {{- end }}
 
 {{- define "cubestack-portal-chart.clusterRoleBindingName" -}}
-{{- printf "%s-%s-cluster-role-binding" (include "cubestack-portal-chart.fullname" .) .Values.namespace | trunc 63 | trimSuffix "-" -}}
+{{- $nsHash := .Values.namespace | sha256sum | trunc 8 -}}
+{{- printf "%s-%s-cluster-role-binding" (include "cubestack-portal-chart.fullname" . | trunc 33 | trimSuffix "-") $nsHash | trunc 63 | trimSuffix "-" -}}
 {{- end }}
 
 {{/*

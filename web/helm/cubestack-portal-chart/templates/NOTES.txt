@@ -5,8 +5,8 @@
   {{- range $host := .Values.ingress.hosts }}
     {{- range .paths }}
   http{{ if $.Values.ingress.tls }}s{{ end }}://{{ $host.host }}{{ .path }}
-    {{- end }}
-  {{- end }}
+    {{ end }}
+  {{ end }}
 {{- else }}
   export SERVICE_IP=$(kubectl get --namespace {{ $namespace }} svc {{ $fullName }} -o jsonpath='{.spec.clusterIP}')
   echo "http://$SERVICE_IP:80"

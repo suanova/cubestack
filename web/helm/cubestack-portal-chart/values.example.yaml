@@ -27,10 +27,10 @@ ingress:
       hosts:
         - ui.example.com
 
-# Environment variables
+# Environment variables (the container port is pinned to 3000 via PORT;
+# setting env.PORT here is ignored and should be omitted)
 env:
   NODE_ENV: production
-  PORT: "3000"
 
 # Resource limits and requests
 resources:
@@ -92,7 +92,9 @@ secrets:
     content: ""
 
 # Pod disruption budget for HA. Set exactly one of minAvailable / maxUnavailable.
+# Disabled here because the example runs a single replica: minAvailable: 1 would
+# allow zero voluntary disruptions and block node drains/upgrades.
 podDisruptionBudget:
-  enabled: true
+  enabled: false
   minAvailable: 1
   maxUnavailable: null
