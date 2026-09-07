@@ -1,0 +1,95 @@
+# Default values for cubestack-portal-chart.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# Image settings
+image:
+  registry: harbor.isuanova.com
+  repository: suanova/cubestack-ui
+  # Use latest or a specific tag for OCI mode
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+# Number of replicas
+replicaCount: 1
+
+# Service configuration
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 3000
+
+# Ingress configuration
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: ui.cubestack.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# Environment variables
+env: {}
+
+# Resource limits and requests
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 256Mi
+
+# Node selector for scheduling
+nodeSelector: {}
+
+# Tolerations for scheduling
+tolerations: []
+
+# Affinity rules for scheduling
+affinity: {}
+
+# Pod annotations
+podAnnotations: {}
+
+# Pod security context
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+# Container security context
+securityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - "ALL"
+
+# Namespace to install into
+namespace: cubestack-system
+
+# ServiceAccount configuration
+serviceAccount:
+  name: ""
+  annotations: {}
+
+# Secrets for sensitive data
+secrets:
+  # Session secret for UI
+  sessionSecret:
+    create: true
+    # Set to existing secret name if using external secret
+    existingSecret: ""
+    existingSecretKey: "session-secret"
+    # Generate random secret if create is true
+    length: 32
+
+# Pod disruption budget for HA
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+  maxUnavailable: 1

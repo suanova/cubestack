@@ -1,0 +1,50 @@
+# Git
+.git
+.gitignore
+
+# IDE
+.idea
+.vscode
+
+# Node modules
+node_modules
+
+# Build artifacts
+.next
+build
+
+# Test files
+*.test.ts
+*.test.tsx
+*.spec.ts
+*.spec.tsx
+test
+tests
+e2e
+
+# Logs
+*.log
+logs
+
+# CI/CD
+.github
+.gitlab-ci.yml
+.travis.yml
+
+# Documentation (except README.md in chart root)
+docs
+*.md
+
+# Docker
+Dockerfile
+.dockerignore
+
+# Helm
+*.tgz
+
+# Misc
+.env
+.env.*
+*.env
+.DS_Store
+Thumbs.db

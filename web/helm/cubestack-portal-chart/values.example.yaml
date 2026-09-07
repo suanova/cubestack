@@ -1,0 +1,100 @@
+# Example values for Cubestack Portal Chart Helm Chart
+
+# Image settings
+image:
+  registry: harbor.isuanova.com
+  repository: suanova/cubestack-ui
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+# Number of replicas
+replicaCount: 1
+
+# Service configuration
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 3000
+
+# Ingress configuration
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: ui.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: ui-tls
+      hosts:
+        - ui.example.com
+
+# Environment variables
+env:
+  NODE_ENV: production
+  PORT: "3000"
+
+# Resource limits and requests
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+# Node selector for scheduling
+nodeSelector:
+  kubernetes.io/os: linux
+
+# Tolerations for scheduling
+tolerations: []
+
+# Affinity rules for scheduling
+affinity: {}
+
+# Pod annotations
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "3000"
+  prometheus.io/path: "/metrics"
+
+# Pod security context
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+# Container security context
+securityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - "ALL"
+
+# Namespace to install into
+namespace: cubestack-system
+
+# ServiceAccount configuration
+serviceAccount:
+  name: ""
+  annotations: {}
+
+# Secrets for sensitive data
+secrets:
+  sessionSecret:
+    create: true
+    existingSecret: ""
+    existingSecretKey: "session-secret"
+    length: 32
+
+# Pod disruption budget for HA
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+  maxUnavailable: 1
