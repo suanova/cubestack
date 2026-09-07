@@ -26,6 +26,9 @@ COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/public ./public
 # Run the standalone server as the non-root `node` user built into node:alpine.
-USER node
+# Use the numeric UID (1000): Kubernetes' runAsNonRoot validation cannot resolve
+# a symbolic USER name (e.g. `node`) at container-create time and would reject
+# the pod even though the user is non-root.
+USER 1000
 EXPOSE 3000
 CMD ["node", "server.js"]

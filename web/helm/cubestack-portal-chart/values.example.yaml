@@ -59,7 +59,11 @@ podAnnotations:
 
 # Pod security context
 podSecurityContext:
+  # The portal image runs as the `node` user (UID 1000). K8s cannot verify a
+  # non-numeric user against runAsNonRoot, so pin the numeric UID explicitly.
   runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
   seccompProfile:
     type: RuntimeDefault
 
