@@ -1,24 +1,13 @@
 {{- $fullName := include "cubestack-portal-chart.fullname" . -}}
 {{- $namespace := .Values.namespace -}}
-{{- $servicePort := .Values.service.port -}}
-{{- $serviceType := .Values.service.type -}}
 1. Get the application URL by running these commands:
 {{- if .Values.ingress.enabled }}
-{{- range $host := .Values.ingress.hosts }}
-  {{- range .paths }}
+  {{- range $host := .Values.ingress.hosts }}
+    {{- range .paths }}
   http{{ if $.Values.ingress.tls }}s{{ end }}://{{ $host.host }}{{ .path }}
+    {{- end }}
   {{- end }}
-{{- end }}
-{{- else if eq $serviceType "NodePort" }}
-  export NODE_PORT=$(kubectl get --namespace {{ $namespace }} -o jsonpath="{.spec.ports[0].nodePort}" services {{ $fullName }})
-  export NODE_IP=$(kubectl get nodes --namespace {{ $namespace }} -o jsonpath="{.items[0].status.addresses[0].address}")
-  echo http://$NODE_IP:$NODE_PORT
-{{- else if eq $serviceType "LoadBalancer" }}
-  NOTE: It may take a few minutes for the LoadBalancer IP to be available.
-        You can watch the status of by running 'kubectl get --namespace {{ $namespace }} svc -w {{ $fullName }}'
-  export SERVICE_IP=$(kubectl get svc --namespace {{ $namespace }} {{ $fullName }} --template "{{"{{ range (index .status.loadBalancer.ingress 0) }}{{.}}{{ end }}"}}")
-  echo http://$SERVICE_IP:{{ $servicePort }}
-{{- else if eq $serviceType "ClusterIP" }}
+{{- else }}
   export SERVICE_IP=$(kubectl get --namespace {{ $namespace }} svc {{ $fullName }} -o jsonpath='{.spec.clusterIP}')
-  echo "http://$SERVICE_IP:{{ $servicePort }}"
+  echo "http://$SERVICE_IP:80"
 {{- end }}

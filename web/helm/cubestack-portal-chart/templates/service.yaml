@@ -9,10 +9,10 @@ metadata:
     app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
     helm.sh/chart: {{ include "cubestack-portal-chart.chart" . }}
 spec:
-  type: {{ .Values.service.type }}
+  type: ClusterIP
   ports:
-  - port: {{ .Values.service.port }}
-    targetPort: {{ .Values.service.targetPort }}
+  - port: 80
+    targetPort: 3000
     protocol: TCP
     name: http
   selector:

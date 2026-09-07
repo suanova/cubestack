@@ -13,12 +13,6 @@ image:
 # Number of replicas
 replicaCount: 1
 
-# Service configuration
-service:
-  type: ClusterIP
-  port: 80
-  targetPort: 3000
-
 # Ingress configuration
 ingress:
   enabled: false
@@ -72,11 +66,6 @@ securityContext:
 # Namespace to install into
 namespace: cubestack-system
 
-# ServiceAccount configuration
-serviceAccount:
-  name: ""
-  annotations: {}
-
 # Secrets for sensitive data
 secrets:
   # Session secret for UI
@@ -87,9 +76,19 @@ secrets:
     existingSecretKey: "session-secret"
     # Generate random secret if create is true
     length: 32
+  # Portal login credentials (htpasswd file content: one `user:bcrypt-hash`
+  # line per entry). No credentials are bundled with the chart — provide your
+  # own at install time, e.g.:
+  #   --set-file secrets.htpasswd.content=/path/to/htpasswd
+  # The chart creates a Secret named "cubestack-htpasswd", which is the
+  # portal's built-in default, so no further configuration is needed.
+  # Without content, no htpasswd Secret is created and portal login reports
+  # "auth not configured".
+  htpasswd:
+    content: ""
 
-# Pod disruption budget for HA
+# Pod disruption budget for HA. Set exactly one of minAvailable / maxUnavailable.
 podDisruptionBudget:
   enabled: false
   minAvailable: 1
-  maxUnavailable: 1
+  maxUnavailable: null

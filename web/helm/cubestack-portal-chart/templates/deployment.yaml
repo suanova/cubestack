@@ -47,11 +47,11 @@ spec:
         image: {{ .Values.image.registry }}/{{ .Values.image.repository }}:{{ .Values.image.tag }}
         imagePullPolicy: {{ .Values.image.pullPolicy }}
         ports:
-        - containerPort: {{ .Values.service.targetPort }}
+        - containerPort: 3000
           name: http
           protocol: TCP
         env:
-        {{- include "cubestack-portal-chart.env" . | nindent 10 }}
+        {{- include "cubestack-portal-chart.env" . | nindent 8 }}
         - name: SESSION_SECRET
           valueFrom:
             secretKeyRef:
@@ -65,13 +65,13 @@ spec:
         livenessProbe:
           httpGet:
             path: /
-            port: {{ .Values.service.targetPort }}
+            port: 3000
           initialDelaySeconds: 30
           periodSeconds: 10
         readinessProbe:
           httpGet:
             path: /
-            port: {{ .Values.service.targetPort }}
+            port: 3000
           initialDelaySeconds: 5
           periodSeconds: 5
         resources:

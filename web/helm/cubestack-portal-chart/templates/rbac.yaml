@@ -20,10 +20,13 @@ rules:
     resources: ["inferenceservices", "devenvironments", "inferenceruntimeprofiles", "modelversions"]
     verbs: ["get", "list", "watch"]
 ---
+# Cluster-scoped: `namespaces` cannot be read through a namespaced Role, and
+# the name carries the release namespace so same-named releases in different
+# namespaces do not collide on cluster-scoped resources.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "cubestack-portal-chart.fullname" . }}-cluster-role
+  name: {{ include "cubestack-portal-chart.clusterRoleName" . }}
   labels:
     app.kubernetes.io/name: {{ include "cubestack-portal-chart.name" . }}
     app.kubernetes.io/instance: {{ .Release.Name }}
@@ -57,7 +60,7 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "cubestack-portal-chart.fullname" . }}-cluster-role-binding
+  name: {{ include "cubestack-portal-chart.clusterRoleBindingName" . }}
   labels:
     app.kubernetes.io/name: {{ include "cubestack-portal-chart.name" . }}
     app.kubernetes.io/instance: {{ .Release.Name }}
@@ -66,7 +69,7 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ include "cubestack-portal-chart.fullname" . }}-cluster-role
+  name: {{ include "cubestack-portal-chart.clusterRoleName" . }}
 subjects:
   - kind: ServiceAccount
     name: {{ include "cubestack-portal-chart.serviceAccountName" . }}

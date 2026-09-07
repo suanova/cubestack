@@ -1,4 +1,4 @@
-# CubeStack Portal Chart Helm Chart
+# CubeStack Portal Helm Chart
 
 This Helm chart deploys the CubeStack Portal (UI) application to a Kubernetes cluster.
 
@@ -9,16 +9,18 @@ This Helm chart deploys the CubeStack Portal (UI) application to a Kubernetes cl
 
 ## Installation
 
+Paths below are relative to the repository root.
+
 ### Using default values
 
 ```bash
-helm install my-portal ./helm/cubestack-portal-chart
+helm install my-portal ./web/helm/cubestack-portal-chart
 ```
 
 ### Using custom values
 
 ```bash
-helm install my-portal -f values.custom.yaml ./helm/cubestack-portal-chart
+helm install my-portal -f values.custom.yaml ./web/helm/cubestack-portal-chart
 ```
 
 ### Using OCI registry
@@ -36,11 +38,8 @@ The following table lists the configurable parameters of the Portal chart and th
 | `image.registry` | UI image registry | `harbor.isuanova.com` |
 | `image.repository` | UI image repository | `suanova/cubestack-ui` |
 | `image.tag` | UI image tag | `latest` |
-| `image.pullPolicy` | Image pull policy | `IfNotPresent` |
+| `image.pullPolicy` | Image pull policy | `Always` |
 | `replicaCount` | Number of replicas | `1` |
-| `service.type` | Kubernetes Service type | `ClusterIP` |
-| `service.port` | Service port | `80` |
-| `service.targetPort` | Target port | `3000` |
 | `ingress.enabled` | Enable ingress | `false` |
 | `ingress.className` | Ingress class name | `""` |
 | `ingress.annotations` | Ingress annotations | `{}` |
@@ -51,8 +50,6 @@ The following table lists the configurable parameters of the Portal chart and th
 | `resources.requests.cpu` | CPU request | `100m` |
 | `resources.requests.memory` | Memory request | `256Mi` |
 | `namespace` | Target namespace | `cubestack-system` |
-| `serviceAccount.name` | ServiceAccount name | `""` (auto-generated) |
-| `serviceAccount.annotations` | ServiceAccount annotations | `{}` |
 
 ### Environment Variables
 
@@ -68,22 +65,26 @@ env:
 
 The portal requires authentication configuration for login:
 
-### htpasswd (Hardcoded)
+### htpasswd (operator-provided)
 
-The `templates/portal/htpasswd.yaml` file contains demo credentials `admin / admin`. Replace the base64-encoded htpasswd content with your own bcrypt hashes before production use:
+No credentials are bundled with the chart. Provide your own htpasswd content
+(one `user:bcrypt-hash` line per entry) at install time with `--set-file`:
 
 ```bash
-# Generate a new bcrypt hash
+# Generate a bcrypt hash for a user
 htpasswd -nbB <username> <password>
 
-# Encode to base64 (Linux)
-echo -n "<user:hash>" | base64
-
-# Encode to base64 (macOS)
-echo -n "<user:hash>" | base64 | tr -d '\n'
+# Install with the htpasswd file
+helm install my-portal ./web/helm/cubestack-portal-chart \
+  --set-file secrets.htpasswd.content=/path/to/htpasswd
 ```
 
-Then update `templates/portal/htpasswd.yaml` with the new encoded value.
+The chart creates a Secret named `cubestack-htpasswd` in the target namespace,
+which matches the portal's built-in lookup default — no environment variables
+or additional configuration are required for login.
+
+Without the htpasswd content, no Secret is created and the portal reports
+"auth not configured" when login is attempted.
 
 ### Session Secret
 
@@ -110,10 +111,13 @@ kubectl -n cubestack-system create secret generic my-session-secret \
 
 ## RBAC
 
-The chart automatically creates a Role and RoleBinding with the following permissions:
-- Read `cubestack-htpasswd` secret
-- List namespaces
-- Get/List/Watch operator CRDs: `inferenceservices`, `devenvironments`, `inferenceruntimeprofiles`, `modelversions`
+The chart automatically creates namespaced and cluster-scoped RBAC:
+
+- `Role` + `RoleBinding`: read the htpasswd Secret (`cubestack-htpasswd` by default), get/list/watch operator CRDs (`inferenceservices`, `devenvironments`, `inferenceruntimeprofiles`, `modelversions`)
+- `ClusterRole` + `ClusterRoleBinding`: list namespaces (cluster-scoped resource)
+
+Cluster-scoped object names include the release namespace as a suffix so
+same-named releases in different namespaces do not collide.
 
 ## Uninstallation
 
@@ -127,9 +131,6 @@ You can customize the deployment by creating a `values.custom.yaml` file and pas
 
 ```yaml
 replicaCount: 3
-
-service:
-  type: LoadBalancer
 
 ingress:
   enabled: true
@@ -155,3 +156,7 @@ env:
   NODE_ENV: production
   PORT: "3000"
 ```
+
+The Portal is always exposed through a `ClusterIP` Service on port `80`
+(targeting the container's `3000`) with an auto-generated ServiceAccount;
+neither is configurable.

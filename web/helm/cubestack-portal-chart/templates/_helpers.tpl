@@ -34,7 +34,22 @@ Create chart name and version as used by the chart label.
 Create the name of the service account
 */}}
 {{- define "cubestack-portal-chart.serviceAccountName" -}}
-{{- default (include "cubestack-portal-chart.fullname" .) .Values.serviceAccount.name }}
+{{- include "cubestack-portal-chart.fullname" . -}}
+{{- end }}
+
+{{/*
+Create cluster-scoped, namespace-unique names for the ClusterRole.
+Cluster-scoped resources cannot be namespaced, so releases with the same
+name in different namespaces would collide without the namespace suffix.
+The suffix is appended before the 63-char DNS limit is applied so the
+namespace portion is preserved.
+*/}}
+{{- define "cubestack-portal-chart.clusterRoleName" -}}
+{{- printf "%s-%s-cluster-role" (include "cubestack-portal-chart.fullname" .) .Values.namespace | trunc 63 | trimSuffix "-" -}}
+{{- end }}
+
+{{- define "cubestack-portal-chart.clusterRoleBindingName" -}}
+{{- printf "%s-%s-cluster-role-binding" (include "cubestack-portal-chart.fullname" .) .Values.namespace | trunc 63 | trimSuffix "-" -}}
 {{- end }}
 
 {{/*

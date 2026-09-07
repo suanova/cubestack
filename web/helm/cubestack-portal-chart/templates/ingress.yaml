@@ -39,7 +39,7 @@ spec:
               service:
                 name: {{ include "cubestack-portal-chart.serviceName" $ }}
                 port:
-                  number: {{ $.Values.service.port }}
+                  number: 80
           {{- end }}
     {{- end }}
 {{- end }}

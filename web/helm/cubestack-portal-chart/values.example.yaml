@@ -1,4 +1,4 @@
-# Example values for Cubestack Portal Chart Helm Chart
+# Example values for the CubeStack Portal Helm Chart
 
 # Image settings
 image:
@@ -9,12 +9,6 @@ image:
 
 # Number of replicas
 replicaCount: 1
-
-# Service configuration
-service:
-  type: ClusterIP
-  port: 80
-  targetPort: 3000
 
 # Ingress configuration
 ingress:
@@ -80,11 +74,6 @@ securityContext:
 # Namespace to install into
 namespace: cubestack-system
 
-# ServiceAccount configuration
-serviceAccount:
-  name: ""
-  annotations: {}
-
 # Secrets for sensitive data
 secrets:
   sessionSecret:
@@ -92,9 +81,14 @@ secrets:
     existingSecret: ""
     existingSecretKey: "session-secret"
     length: 32
+  # Portal login credentials. Provide your own htpasswd content at install
+  # time (--set-file secrets.htpasswd.content=/path/to/htpasswd). The chart
+  # creates Secret "cubestack-htpasswd", the portal's built-in default.
+  htpasswd:
+    content: ""
 
-# Pod disruption budget for HA
+# Pod disruption budget for HA. Set exactly one of minAvailable / maxUnavailable.
 podDisruptionBudget:
   enabled: true
   minAvailable: 1
-  maxUnavailable: 1
+  maxUnavailable: null

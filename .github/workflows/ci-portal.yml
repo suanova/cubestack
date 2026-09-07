@@ -39,6 +39,7 @@ jobs:
               - '.github/**'
             e2e:
               - 'web/e2e/**'
+              - 'web/helm/**'
               - 'web/playwright*.config.ts'
               - 'web/package*.json'
               - 'web/test/fixtures/**'
@@ -192,12 +193,13 @@ jobs:
           kind load docker-image harbor.isuanova.com/suanova/cubestack-ui:test --name cubestack
       - name: Install portal via Helm
         run: |
+          kubectl create namespace cubestack-system
           helm install portal-test web/helm/cubestack-portal-chart \
             --namespace cubestack-system \
             --set image.registry=harbor.isuanova.com \
             --set image.repository=suanova/cubestack-ui \
             --set image.tag=test \
-            --set image.pullPolicy=IfNotPresent \
+            --set image.pullPolicy=Always \
             --set ingress.enabled=false \
             --wait \
             --timeout 120s
