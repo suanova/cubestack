@@ -199,7 +199,7 @@ jobs:
             --set image.registry=harbor.isuanova.com \
             --set image.repository=suanova/cubestack-ui \
             --set image.tag=test \
-            --set image.pullPolicy=Always \
+            --set image.pullPolicy=IfNotPresent \
             --set ingress.enabled=false \
             --wait \
             --timeout 120s
