@@ -27,7 +27,7 @@ spec:
         helm.sh/chart: {{ include "cubestack-portal-chart.chart" . }}
     spec:
       serviceAccountName: {{ include "cubestack-portal-chart.serviceAccountName" . }}
-      automountServiceAccountToken: false
+      automountServiceAccountToken: true
       {{- if .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml .Values.nodeSelector | nindent 8 }}
@@ -52,6 +52,16 @@ spec:
           protocol: TCP
         env:
         {{- include "cubestack-portal-chart.env" . | nindent 10 }}
+        - name: SESSION_SECRET
+          valueFrom:
+            secretKeyRef:
+              {{- if .Values.secrets.sessionSecret.existingSecret }}
+              name: {{ .Values.secrets.sessionSecret.existingSecret }}
+              key: {{ .Values.secrets.sessionSecret.existingSecretKey }}
+              {{- else }}
+              name: {{ include "cubestack-portal-chart.fullname" . }}-session-secret
+              key: session-secret
+              {{- end }}
         livenessProbe:
           httpGet:
             path: /

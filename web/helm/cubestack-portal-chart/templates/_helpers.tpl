@@ -63,6 +63,9 @@ Create environment variables for UI container
 */}}
 {{- define "cubestack-portal-chart.env" -}}
 {{- if .Values.env }}
-{{- toYaml .Values.env }}
+{{- range $key, $value := .Values.env }}
+- name: {{ $key }}
+  value: {{ $value | quote }}
+{{- end }}
 {{- end }}
 {{- end }}

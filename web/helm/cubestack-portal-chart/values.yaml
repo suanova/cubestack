@@ -8,7 +8,7 @@ image:
   repository: suanova/cubestack-ui
   # Use latest or a specific tag for OCI mode
   tag: "latest"
-  pullPolicy: IfNotPresent
+  pullPolicy: Always
 
 # Number of replicas
 replicaCount: 1

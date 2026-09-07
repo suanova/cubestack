@@ -19,6 +19,6 @@
   export SERVICE_IP=$(kubectl get svc --namespace {{ $namespace }} {{ $fullName }} --template "{{"{{ range (index .status.loadBalancer.ingress 0) }}{{.}}{{ end }}"}}")
   echo http://$SERVICE_IP:{{ $servicePort }}
 {{- else if eq $serviceType "ClusterIP" }}
-  kubectl get --namespace {{ $namespace }} svc {{ $fullName }} -o jsonpath='{.spec.clusterIP}'
+  export SERVICE_IP=$(kubectl get --namespace {{ $namespace }} svc {{ $fullName }} -o jsonpath='{.spec.clusterIP}')
   echo "http://$SERVICE_IP:{{ $servicePort }}"
 {{- end }}
