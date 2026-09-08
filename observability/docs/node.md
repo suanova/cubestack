@@ -131,8 +131,8 @@ sum by (node) (
     rate(node_disk_read_bytes_total{job="node-exporter"}[5m]),
     "internal_ip", "$1", "instance", "([^:]+):.*"
   )
-  * on (internal_ip) group_left(node) kube_node_info
-){node="$node"}
+  * on (internal_ip) group_left(node) kube_node_info{node="$node"}
+)
 ```
 - Unit：B/s
 
@@ -143,8 +143,8 @@ sum by (node) (
     rate(node_disk_written_bytes_total{job="node-exporter"}[5m]),
     "internal_ip", "$1", "instance", "([^:]+):.*"
   )
-  * on (internal_ip) group_left(node) kube_node_info
-){node="$node"}
+  * on (internal_ip) group_left(node) kube_node_info{node="$node"}
+)
 ```
 
 ---
