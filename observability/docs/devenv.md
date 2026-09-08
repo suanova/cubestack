@@ -2,7 +2,7 @@
 
 变量：
 - `$namespace`（来自 `label_values(cubestack_devenv_cpu_usage_cores:sum, namespace)`）
-- `$devenv`（来自 `label_values(kube_statefulset_replicas{label_app_kubernetes_io_part_of="cubestack-devenv", namespace="$namespace"}, statefulset)`）
+- `$devenv`（来自 `label_values(kube_statefulset_replicas{label_ai_cubestack_io_dev_environment!="", namespace="$namespace"}, statefulset)`）
 
 > **注意 label 区分：**
 > - State/Running Time 来自 KSM StatefulSet metric，使用 `statefulset` label，对应 `statefulset="$devenv"`
@@ -16,10 +16,10 @@
 ### State（从 KSM StatefulSet 推断）
 ```
 # Running
-kube_statefulset_status_replicas_ready{label_app_kubernetes_io_part_of="cubestack-devenv", namespace="$namespace", statefulset="$devenv"} > 0
+kube_statefulset_status_replicas_ready{label_ai_cubestack_io_dev_environment!="", namespace="$namespace", statefulset="$devenv"} > 0
 
 # Stopped（用户主动 scale down）
-kube_statefulset_spec_replicas{label_app_kubernetes_io_part_of="cubestack-devenv", namespace="$namespace", statefulset="$devenv"} == 0
+kube_statefulset_spec_replicas{label_ai_cubestack_io_dev_environment!="", namespace="$namespace", statefulset="$devenv"} == 0
 
 ```
 - UI 根据以上条件判断并展示对应状态标签
@@ -29,9 +29,9 @@ kube_statefulset_spec_replicas{label_app_kubernetes_io_part_of="cubestack-devenv
 time() - min by (namespace, devenv) (
   label_replace(
     kube_pod_start_time
-    * on(namespace, pod) group_left(label_cubestack_io_devenv)
-    kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv", namespace="$namespace"},
-    "devenv", "$1", "label_cubestack_io_devenv", "(.*)"
+    * on(namespace, pod) group_left(label_ai_cubestack_io_dev_environment)
+    kube_pod_labels{label_ai_cubestack_io_dev_environment!="", namespace="$namespace"},
+    "devenv", "$1", "label_ai_cubestack_io_dev_environment", "(.*)"
   )
 ){devenv="$devenv"}
 ```
@@ -70,9 +70,9 @@ cubestack_devenv_pvc_bound:min{namespace="$namespace", devenv="$devenv"}
 #### State
 ```
 # Running
-kube_statefulset_status_replicas_ready{label_app_kubernetes_io_part_of="cubestack-devenv", namespace="$namespace", statefulset="$devenv"} > 0
+kube_statefulset_status_replicas_ready{label_ai_cubestack_io_dev_environment!="", namespace="$namespace", statefulset="$devenv"} > 0
 # Stopped
-kube_statefulset_spec_replicas{label_app_kubernetes_io_part_of="cubestack-devenv", namespace="$namespace", statefulset="$devenv"} == 0
+kube_statefulset_spec_replicas{label_ai_cubestack_io_dev_environment!="", namespace="$namespace", statefulset="$devenv"} == 0
 ```
 
 #### Running Time
@@ -80,9 +80,9 @@ kube_statefulset_spec_replicas{label_app_kubernetes_io_part_of="cubestack-devenv
 time() - min by (namespace, devenv) (
   label_replace(
     kube_pod_start_time
-    * on(namespace, pod) group_left(label_cubestack_io_devenv)
-    kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv", namespace="$namespace"},
-    "devenv", "$1", "label_cubestack_io_devenv", "(.*)"
+    * on(namespace, pod) group_left(label_ai_cubestack_io_dev_environment)
+    kube_pod_labels{label_ai_cubestack_io_dev_environment!="", namespace="$namespace"},
+    "devenv", "$1", "label_ai_cubestack_io_dev_environment", "(.*)"
   )
 ){devenv="$devenv"}
 ```

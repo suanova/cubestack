@@ -17,9 +17,9 @@ spec:
             sum by (namespace, devenv) (
               label_replace(
                 kube_pod_container_resource_requests{resource=~"nvidia.com/gpu|metax-tech.com/gpu"}
-                * on(namespace, pod) group_left(label_cubestack_io_devenv)
-                kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv"},
-                "devenv", "$1", "label_cubestack_io_devenv", "(.*)"
+                * on(namespace, pod) group_left(label_ai_cubestack_io_dev_environment)
+                kube_pod_labels{label_ai_cubestack_io_dev_environment!=""},
+                "devenv", "$1", "label_ai_cubestack_io_dev_environment", "(.*)"
               )
             )
 
@@ -29,9 +29,9 @@ spec:
             sum by (namespace, devenv) (
               label_replace(
                 rate(container_cpu_usage_seconds_total{container!=""}[5m])
-                * on(namespace, pod) group_left(label_cubestack_io_devenv)
-                kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv"},
-                "devenv", "$1", "label_cubestack_io_devenv", "(.*)"
+                * on(namespace, pod) group_left(label_ai_cubestack_io_dev_environment)
+                kube_pod_labels{label_ai_cubestack_io_dev_environment!=""},
+                "devenv", "$1", "label_ai_cubestack_io_dev_environment", "(.*)"
               )
             )
 
@@ -41,9 +41,9 @@ spec:
             sum by (namespace, devenv) (
               label_replace(
                 kube_pod_container_resource_requests{resource="cpu"}
-                * on(namespace, pod) group_left(label_cubestack_io_devenv)
-                kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv"},
-                "devenv", "$1", "label_cubestack_io_devenv", "(.*)"
+                * on(namespace, pod) group_left(label_ai_cubestack_io_dev_environment)
+                kube_pod_labels{label_ai_cubestack_io_dev_environment!=""},
+                "devenv", "$1", "label_ai_cubestack_io_dev_environment", "(.*)"
               )
             )
 
@@ -53,9 +53,9 @@ spec:
             sum by (namespace, devenv) (
               label_replace(
                 container_memory_working_set_bytes{container!=""}
-                * on(namespace, pod) group_left(label_cubestack_io_devenv)
-                kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv"},
-                "devenv", "$1", "label_cubestack_io_devenv", "(.*)"
+                * on(namespace, pod) group_left(label_ai_cubestack_io_dev_environment)
+                kube_pod_labels{label_ai_cubestack_io_dev_environment!=""},
+                "devenv", "$1", "label_ai_cubestack_io_dev_environment", "(.*)"
               )
             )
 
@@ -65,9 +65,9 @@ spec:
             sum by (namespace, devenv) (
               label_replace(
                 kube_pod_container_resource_requests{resource="memory"}
-                * on(namespace, pod) group_left(label_cubestack_io_devenv)
-                kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv"},
-                "devenv", "$1", "label_cubestack_io_devenv", "(.*)"
+                * on(namespace, pod) group_left(label_ai_cubestack_io_dev_environment)
+                kube_pod_labels{label_ai_cubestack_io_dev_environment!=""},
+                "devenv", "$1", "label_ai_cubestack_io_dev_environment", "(.*)"
               )
             )
 
@@ -77,9 +77,9 @@ spec:
             min by (namespace, devenv) (
               label_replace(
                 kube_pod_status_ready
-                * on(namespace, pod) group_left(label_cubestack_io_devenv)
-                kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv"},
-                "devenv", "$1", "label_cubestack_io_devenv", "(.*)"
+                * on(namespace, pod) group_left(label_ai_cubestack_io_dev_environment)
+                kube_pod_labels{label_ai_cubestack_io_dev_environment!=""},
+                "devenv", "$1", "label_ai_cubestack_io_dev_environment", "(.*)"
               )
             )
 
@@ -89,9 +89,9 @@ spec:
             min by (namespace, devenv) (
               label_replace(
                 kube_pod_container_status_ready
-                * on(namespace, pod) group_left(label_cubestack_io_devenv)
-                kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv"},
-                "devenv", "$1", "label_cubestack_io_devenv", "(.*)"
+                * on(namespace, pod) group_left(label_ai_cubestack_io_dev_environment)
+                kube_pod_labels{label_ai_cubestack_io_dev_environment!=""},
+                "devenv", "$1", "label_ai_cubestack_io_dev_environment", "(.*)"
               )
             )
 
@@ -101,9 +101,9 @@ spec:
             sum by (namespace, devenv) (
               label_replace(
                 kube_pod_container_status_restarts_total
-                * on(namespace, pod) group_left(label_cubestack_io_devenv)
-                kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv"},
-                "devenv", "$1", "label_cubestack_io_devenv", "(.*)"
+                * on(namespace, pod) group_left(label_ai_cubestack_io_dev_environment)
+                kube_pod_labels{label_ai_cubestack_io_dev_environment!=""},
+                "devenv", "$1", "label_ai_cubestack_io_dev_environment", "(.*)"
               )
             )
 
@@ -113,9 +113,9 @@ spec:
             sum by (namespace, devenv) (
               label_replace(
                 rate(container_network_receive_bytes_total{pod!=""}[5m])
-                * on(namespace, pod) group_left(label_cubestack_io_devenv)
-                kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv"},
-                "devenv", "$1", "label_cubestack_io_devenv", "(.*)"
+                * on(namespace, pod) group_left(label_ai_cubestack_io_dev_environment)
+                kube_pod_labels{label_ai_cubestack_io_dev_environment!=""},
+                "devenv", "$1", "label_ai_cubestack_io_dev_environment", "(.*)"
               )
             )
 
@@ -125,9 +125,9 @@ spec:
             sum by (namespace, devenv) (
               label_replace(
                 rate(container_network_transmit_bytes_total{pod!=""}[5m])
-                * on(namespace, pod) group_left(label_cubestack_io_devenv)
-                kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv"},
-                "devenv", "$1", "label_cubestack_io_devenv", "(.*)"
+                * on(namespace, pod) group_left(label_ai_cubestack_io_dev_environment)
+                kube_pod_labels{label_ai_cubestack_io_dev_environment!=""},
+                "devenv", "$1", "label_ai_cubestack_io_dev_environment", "(.*)"
               )
             )
 
@@ -137,9 +137,9 @@ spec:
             sum by (namespace, devenv) (
               label_replace(
                 rate(container_fs_reads_bytes_total{container!=""}[5m])
-                * on(namespace, pod) group_left(label_cubestack_io_devenv)
-                kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv"},
-                "devenv", "$1", "label_cubestack_io_devenv", "(.*)"
+                * on(namespace, pod) group_left(label_ai_cubestack_io_dev_environment)
+                kube_pod_labels{label_ai_cubestack_io_dev_environment!=""},
+                "devenv", "$1", "label_ai_cubestack_io_dev_environment", "(.*)"
               )
             )
 
@@ -149,9 +149,9 @@ spec:
             sum by (namespace, devenv) (
               label_replace(
                 rate(container_fs_writes_bytes_total{container!=""}[5m])
-                * on(namespace, pod) group_left(label_cubestack_io_devenv)
-                kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv"},
-                "devenv", "$1", "label_cubestack_io_devenv", "(.*)"
+                * on(namespace, pod) group_left(label_ai_cubestack_io_dev_environment)
+                kube_pod_labels{label_ai_cubestack_io_dev_environment!=""},
+                "devenv", "$1", "label_ai_cubestack_io_dev_environment", "(.*)"
               )
             )
 
@@ -169,8 +169,8 @@ spec:
                 kube_pod_spec_volumes_persistentvolumeclaims_info,
                 "dummy", "", "", ""
               )
-              * on(namespace, pod) group_left(label_cubestack_io_devenv)
-              kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv"}
+              * on(namespace, pod) group_left(label_ai_cubestack_io_dev_environment)
+              kube_pod_labels{label_ai_cubestack_io_dev_environment!=""}
             )
 
         # Per-DevEnvironment PVC requested capacity
@@ -186,6 +186,6 @@ spec:
                 kube_pod_spec_volumes_persistentvolumeclaims_info,
                 "dummy", "", "", ""
               )
-              * on(namespace, pod) group_left(label_cubestack_io_devenv)
-              kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv"}
+              * on(namespace, pod) group_left(label_ai_cubestack_io_dev_environment)
+              kube_pod_labels{label_ai_cubestack_io_dev_environment!=""}
             )

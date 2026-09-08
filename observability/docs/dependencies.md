@@ -59,8 +59,8 @@ DevEnvironment 的所有可观测性指标均从 KSM / cAdvisor 取得，Control
 
 | 指标语义 | 来源 | expr |
 |---|---|---|
-| Total | KSM StatefulSet | `count(kube_statefulset_replicas{label_app_kubernetes_io_part_of="cubestack-devenv"})` |
-| Running | KSM StatefulSet | `count(kube_statefulset_status_replicas_ready{label_app_kubernetes_io_part_of="cubestack-devenv"} > 0)` |
+| Total | KSM StatefulSet | `count(kube_statefulset_replicas{label_ai_cubestack_io_dev_environment!=""})` |
+| Running | KSM StatefulSet | `count(kube_statefulset_status_replicas_ready{label_ai_cubestack_io_dev_environment!=""} > 0)` |
 | Stopped | KSM StatefulSet | `kube_statefulset_spec_replicas{...} == 0` |
 | Running Time | KSM Pod | `time() - min by(namespace,devenv)(kube_pod_start_time join kube_pod_labels)` |
 
@@ -70,11 +70,12 @@ DevEnvironment 创建 StatefulSet 时，**StatefulSet `.metadata.labels`** 和 *
 
 ```yaml
 labels:
-  app.kubernetes.io/part-of: cubestack-devenv       # 固定值，StatefulSet 和 pod 都需要
-  cubestack.io/devenv: <CR name>                     # DevEnvironment CR 的 .metadata.name，pod 必须有
+  ai.cubestack.io/dev-environment: <CR name>   # DevEnvironment CR 的 .metadata.name，StatefulSet 和 pod 都需要
+  ai.cubestack.io/managed-by: devenv-controller
 ```
 
-**为什么 StatefulSet 本身也需要 `app.kubernetes.io/part-of`：**  
+这是 DevEnvironment controller 的 `envLabels()` 已经在打的两个 label（无需 controller 改动），同时打在 StatefulSet metadata 和 pod template 上，因此不需要额外的 `part-of`-style 判别 label：pod 是否属于某个 DevEnvironment，看 `label_ai_cubestack_io_dev_environment` 是否非空即可。
+
 KSM 的 `kube_statefulset_replicas` 通过 StatefulSet `.metadata.labels` 透传 label，用于 Overview 页面的 Total/Running 计数（见 3.1）。Pod template 上的 label 仅透传到 `kube_pod_labels`，不会出现在 `kube_statefulset_*` 指标上。
 
 ---
@@ -90,11 +91,11 @@ KSM 默认**不透传**自定义 pod/statefulset labels。必须通过以下配�
 ```yaml
 # kube-state-metrics values（Helm）
 extraArgs:
-  - --metric-labels-allowlist=pods=[app.kubernetes.io/part-of,cubestack.io/inference-service,cubestack.io/role,cubestack.io/devenv],statefulsets=[app.kubernetes.io/part-of]
+  - --metric-labels-allowlist=pods=[app.kubernetes.io/part-of,cubestack.io/inference-service,cubestack.io/role,ai.cubestack.io/dev-environment],statefulsets=[ai.cubestack.io/dev-environment]
 ```
 
 - `pods=[...]`：使 `kube_pod_labels` 透传 pod label，供 Recording Rule join
-- `statefulsets=[app.kubernetes.io/part-of]`：使 `kube_statefulset_replicas` 等指标透传 StatefulSet label，供 Overview 页面统计 DevEnvironment Total/Running
+- `statefulsets=[ai.cubestack.io/dev-environment]`：使 `kube_statefulset_replicas` 等指标透传 StatefulSet label，供 Overview 页面统计 DevEnvironment Total/Running
 
 不开启此配置，Recording Rule 中所有 `kube_pod_labels` join 均无法工作，Overview DevEnvironment 计数也无法正确过滤。
 

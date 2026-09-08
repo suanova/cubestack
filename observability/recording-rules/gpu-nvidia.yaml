@@ -87,8 +87,8 @@ spec:
                 ),
                 "pod", "$1", "exported_pod", "(.*)"
               )
-              * on(namespace, pod) group_left(label_cubestack_io_devenv)
-              kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv"}
+              * on(namespace, pod) group_left(label_ai_cubestack_io_dev_environment)
+              kube_pod_labels{label_ai_cubestack_io_dev_environment!=""}
             )
 
         # GPU VRAM utilization per InferenceService or DevEnvironment (NVIDIA)
@@ -114,6 +114,6 @@ spec:
                 ),
                 "pod", "$1", "exported_pod", "(.*)"
               )
-              * on(namespace, pod) group_left(label_cubestack_io_devenv)
-              kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-devenv"}
+              * on(namespace, pod) group_left(label_ai_cubestack_io_dev_environment)
+              kube_pod_labels{label_ai_cubestack_io_dev_environment!=""}
             )

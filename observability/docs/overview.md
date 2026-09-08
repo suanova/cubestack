@@ -37,10 +37,10 @@ count(cubestack_inference_service_info) or vector(0)
 
 ### DevEnvironment Total / Running
 ```
-count(kube_statefulset_replicas{label_app_kubernetes_io_part_of="cubestack-devenv"})
-count(kube_statefulset_status_replicas_ready{label_app_kubernetes_io_part_of="cubestack-devenv"} > 0)
+count(kube_statefulset_replicas{label_ai_cubestack_io_dev_environment!=""})
+count(kube_statefulset_status_replicas_ready{label_ai_cubestack_io_dev_environment!=""} > 0)
 ```
-- 依赖 KSM `statefulsets=[app.kubernetes.io/part-of]` allowlist 配置（见 docs/dependencies.md 3.1）
+- 依赖 KSM `statefulsets=[ai.cubestack.io/dev-environment]` allowlist 配置（见 docs/dependencies.md 3.1）
 - Total = StatefulSet 数量；Running = 至少有 1 个 ready replica 的 StatefulSet 数量
 
 ### Ceph Health

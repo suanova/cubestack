@@ -15,12 +15,12 @@
 ```yaml
 kube-state-metrics:
   extraArgs:
-    - --metric-labels-allowlist=pods=[app.kubernetes.io/part-of,cubestack.io/inference-service,cubestack.io/role,cubestack.io/devenv],statefulsets=[app.kubernetes.io/part-of]
+    - --metric-labels-allowlist=pods=[app.kubernetes.io/part-of,cubestack.io/inference-service,cubestack.io/role,ai.cubestack.io/dev-environment],statefulsets=[ai.cubestack.io/dev-environment]
 ```
 
 **为什么需要：**
 - `pods=[...]`：使 `kube_pod_labels` 透传 pod 自定义 label，recording rule 用 `* on(namespace,pod) group_left(...)` 将 SGLang/GPU/cAdvisor 指标关联回 InferenceService 和 DevEnvironment
-- `statefulsets=[app.kubernetes.io/part-of]`：使 `kube_statefulset_replicas` 透传 StatefulSet label，Overview 页面用于统计 DevEnvironment Total/Running 数量
+- `statefulsets=[ai.cubestack.io/dev-environment]`：使 `kube_statefulset_replicas` 透传 StatefulSet label，Overview 页面用于统计 DevEnvironment Total/Running 数量
 
 ### 1.2 Prometheus 能发现 CubeStack 的 ServiceMonitor 和 PrometheusRule
 
