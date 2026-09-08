@@ -1,0 +1,81 @@
+name: CI Portal Chart
+
+# Push-only so the chart publish job never appears in pull request checks —
+# same as the portal image and operator chart workflows. PR validation of the
+# chart itself (lint + KinD install) lives in ci-portal.yml; this workflow
+# publishes the packaged chart as an OCI artifact when a merge to main touches
+# chart content or this workflow file.
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: ci-portal-chart-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    permissions:
+      contents: read
+      pull-requests: read
+    runs-on: ubuntu-latest
+    outputs:
+      chart: ${{ steps.filter.outputs.chart }}
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Full history so paths-filter can diff against the base ref without fetching
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Detect changed paths
+        uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3
+        id: filter
+        with:
+          filters: |
+            chart:
+              - 'web/helm/**'
+              - '.github/workflows/ci-portal-chart.yml'
+
+  build-push-chart:
+    # Publish the chart as an OCI artifact only when a merge lands on main
+    # with chart-content-relevant changes.
+    needs: changes
+    if: needs.changes.outputs.chart == 'true'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      # helm is preinstalled on ubuntu-24.04 runners — no install step needed.
+      - name: Log in to Harbor (helm registry)
+        env:
+          # Pass credentials through the environment, never inline: Harbor
+          # robot account names contain a literal '$' (robot$<name>) and
+          # passwords may contain any shell metacharacter. Env values bypass
+          # shell parsing; only the variable reference is expanded below.
+          HARBOR_USERNAME: ${{ vars.CI_BOT_NAME }}
+          HARBOR_PASSWORD: ${{ secrets.CI_BOT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          helm registry login harbor.isuanova.com \
+            -u "$HARBOR_USERNAME" -p "$HARBOR_PASSWORD"
+      - name: Package and push the chart to Harbor
+        working-directory: web/helm/cubestack-portal-chart
+        run: |
+          set -euo pipefail
+          # Package next to the chart dir and push as an OCI artifact. The OCI
+          # repository is the chart name (cubestack-portal-chart); Harbor
+          # serves chart-OCI and image artifacts under the same project, and
+          # this name does not collide with the cubestack-ui image repo.
+          helm package .
+          # The OCI version tag is the Chart.yaml version — derive the tgz
+          # name from it so a version bump needs no workflow edit.
+          CHART_VERSION="$(helm show chart . | awk '/^version:/{print $2}')"
+          helm push "cubestack-portal-chart-${CHART_VERSION}.tgz" \
+            oci://harbor.isuanova.com/suanova
