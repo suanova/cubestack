@@ -54,8 +54,6 @@ The following table lists the configurable parameters of the Portal chart and th
 | `resources.requests.memory` | Memory request | `256Mi` |
 | `namespace` | Target namespace | `cubestack-system` |
 | `secrets.htpasswd.content` | Pre-hashed htpasswd content | `""` |
-| `secrets.htpasswd.username` | Plaintext username (chart bcrypts the password) | `""` |
-| `secrets.htpasswd.password` | Plaintext password (chart bcrypts it) | `""` |
 
 ### Environment Variables
 
@@ -73,8 +71,8 @@ The portal requires authentication configuration for login:
 
 ### htpasswd (operator-provided)
 
-No credentials are bundled with the chart. Provide credentials at install time
-in one of two ways.
+No credentials are bundled with the chart. Provide pre-hashed credentials at
+install time, or manage the authentication Secret outside Helm.
 
 #### Pre-hashed htpasswd content
 
@@ -91,24 +89,15 @@ helm install cubestack-portal ./web/helm/cubestack-portal-chart \
   --set-file secrets.htpasswd.content=/tmp/portal-htpasswd
 ```
 
-#### Plaintext username and password
-
-Let the chart bcrypt the password at render time. This is convenient for demos
-but avoids placing a raw hash in shell history:
-
-```bash
-helm install cubestack-portal ./web/helm/cubestack-portal-chart \
-  --namespace cubestack-system --create-namespace \
-  --set secrets.htpasswd.username=admin \
-  --set secrets.htpasswd.password=admin
-```
-
 The chart creates a Secret named `cubestack-htpasswd` in the target namespace,
 which matches the portal's built-in lookup default — no environment variables
 or additional configuration are required for login.
 
-Without credentials, no Secret is created and the portal reports
-"auth not configured" when login is attempted.
+To manage credentials outside Helm, create a Secret named
+`cubestack-htpasswd` with the pre-hashed file stored under the `htpasswd` data
+key and leave `secrets.htpasswd.content` empty. The chart will not create or
+modify that Secret. Without either source, the portal reports "auth not
+configured" when login is attempted.
 
 ### Session Secret
 
