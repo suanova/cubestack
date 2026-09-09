@@ -19,6 +19,7 @@ RUN npm run build
 # Minimal runtime image.
 FROM base AS runner
 ENV NODE_ENV=production
+ENV HOSTNAME=0.0.0.0
 ENV PORT=3000
 # Standalone output bundles the traced server and node_modules; public and
 # static must be copied alongside it (see output.md in the Next.js docs).
