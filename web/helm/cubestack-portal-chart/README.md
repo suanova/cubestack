@@ -53,6 +53,9 @@ The following table lists the configurable parameters of the Portal chart and th
 | `resources.requests.cpu` | CPU request | `100m` |
 | `resources.requests.memory` | Memory request | `256Mi` |
 | `namespace` | Target namespace | `cubestack-system` |
+| `secrets.htpasswd.content` | Pre-hashed htpasswd content | `""` |
+| `secrets.htpasswd.username` | Plaintext username (chart bcrypts the password) | `""` |
+| `secrets.htpasswd.password` | Plaintext password (chart bcrypts it) | `""` |
 
 ### Environment Variables
 
@@ -70,8 +73,12 @@ The portal requires authentication configuration for login:
 
 ### htpasswd (operator-provided)
 
-No credentials are bundled with the chart. Provide your own htpasswd content
-(one `user:bcrypt-hash` line per entry) at install time with `--set-file`:
+No credentials are bundled with the chart. Provide credentials at install time
+in one of two ways.
+
+#### Pre-hashed htpasswd content
+
+Provide an htpasswd file (one `user:bcrypt-hash` line per entry) with `--set-file`:
 
 ```bash
 # Generate a bcrypt hash for a user (prompts for the password, so it never
@@ -84,11 +91,23 @@ helm install my-portal ./web/helm/cubestack-portal-chart \
   --set-file secrets.htpasswd.content=/tmp/portal-htpasswd
 ```
 
+#### Plaintext username and password
+
+Let the chart bcrypt the password at render time. This is convenient for demos
+but avoids placing a raw hash in shell history:
+
+```bash
+helm install my-portal ./web/helm/cubestack-portal-chart \
+  --namespace cubestack-system --create-namespace \
+  --set secrets.htpasswd.username=admin \
+  --set secrets.htpasswd.password=admin
+```
+
 The chart creates a Secret named `cubestack-htpasswd` in the target namespace,
 which matches the portal's built-in lookup default — no environment variables
 or additional configuration are required for login.
 
-Without the htpasswd content, no Secret is created and the portal reports
+Without credentials, no Secret is created and the portal reports
 "auth not configured" when login is attempted.
 
 ### Session Secret
