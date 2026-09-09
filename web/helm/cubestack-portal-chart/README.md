@@ -14,21 +14,21 @@ Paths below are relative to the repository root.
 ### Using default values
 
 ```bash
-helm install my-portal ./web/helm/cubestack-portal-chart \
+helm install cubestack-portal ./web/helm/cubestack-portal-chart \
   --namespace cubestack-system --create-namespace
 ```
 
 ### Using custom values
 
 ```bash
-helm install my-portal -f values.custom.yaml ./web/helm/cubestack-portal-chart \
+helm install cubestack-portal -f values.custom.yaml ./web/helm/cubestack-portal-chart \
   --namespace cubestack-system --create-namespace
 ```
 
 ### Using OCI registry
 
 ```bash
-helm install my-portal oci://<registry>/cubestack-portal-chart \
+helm install cubestack-portal oci://<registry>/cubestack-portal-chart \
   --namespace cubestack-system --create-namespace --version <version>
 ```
 
@@ -86,7 +86,7 @@ Provide an htpasswd file (one `user:bcrypt-hash` line per entry) with `--set-fil
 htpasswd -nB <username> > /tmp/portal-htpasswd
 
 # Install with the htpasswd file
-helm install my-portal ./web/helm/cubestack-portal-chart \
+helm install cubestack-portal ./web/helm/cubestack-portal-chart \
   --namespace cubestack-system --create-namespace \
   --set-file secrets.htpasswd.content=/tmp/portal-htpasswd
 ```
@@ -97,7 +97,7 @@ Let the chart bcrypt the password at render time. This is convenient for demos
 but avoids placing a raw hash in shell history:
 
 ```bash
-helm install my-portal ./web/helm/cubestack-portal-chart \
+helm install cubestack-portal ./web/helm/cubestack-portal-chart \
   --namespace cubestack-system --create-namespace \
   --set secrets.htpasswd.username=admin \
   --set secrets.htpasswd.password=admin
@@ -146,7 +146,7 @@ same-named releases in different namespaces do not collide.
 ## Uninstallation
 
 ```bash
-helm uninstall my-portal --namespace cubestack-system
+helm uninstall cubestack-portal --namespace cubestack-system
 ```
 
 ## Customization
