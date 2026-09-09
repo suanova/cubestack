@@ -55,6 +55,9 @@ spec:
         # Pin the app's listening port regardless of any user-provided env.PORT.
         - name: PORT
           value: "3000"
+        # Bind the standalone Next.js server to all interfaces.
+        - name: HOSTNAME
+          value: "0.0.0.0"
         # Point the portal at the namespace where the chart creates the
         # cubestack-htpasswd Secret (the app's built-in default is
         # cubestack-system, which may differ from .Values.namespace).
