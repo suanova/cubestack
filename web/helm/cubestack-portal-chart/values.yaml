@@ -2,10 +2,9 @@
 # This is a YAML-formatted file.
 # Declare variables to be passed into your templates.
 
-# Override the base name used for Kubernetes resources.
-# The chart name is cubestack-portal-chart; without this, installing as
-# release "cubestack-portal" produces names like
-# "cubestack-portal-cubestack-portal-chart-...".
+# Override the base name used for Kubernetes labels (app.kubernetes.io/name).
+# The chart name is cubestack-portal-chart; this keeps labels as
+# "cubestack-portal" instead.
 nameOverride: cubestack-portal
 
 # Image settings
