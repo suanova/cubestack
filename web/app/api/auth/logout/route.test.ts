@@ -20,6 +20,16 @@ describe("POST /api/auth/logout", () => {
     const setCookie = res.headers.get("set-cookie") ?? "";
     expect(setCookie).toMatch(/cubestack-session=;/);
     expect(setCookie).toMatch(/Max-Age=0/);
+    // Over http the clear cookie must mirror the (non-secure) session cookie.
+    expect(setCookie).not.toMatch(/Secure/);
+  });
+
+  it("clears a Secure session cookie when served behind TLS", async () => {
+    const res = await POST(
+      logoutPost({ headers: { origin: "http://localhost", "x-forwarded-proto": "https" } }),
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("set-cookie") ?? "").toMatch(/Secure/);
   });
 
   it("allows non-browser clients that send no Origin/Referer", async () => {

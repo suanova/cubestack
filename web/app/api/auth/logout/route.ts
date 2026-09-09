@@ -1,6 +1,6 @@
 import type { NextRequest } from "next/server";
 
-import { clearSessionCookieHeader } from "@/lib/auth/session";
+import { clearSessionCookieHeader, secureCookieForRequest } from "@/lib/auth/session";
 
 // POST /api/auth/logout
 // Clears the session cookie and returns success, regardless of whether a valid
@@ -14,7 +14,7 @@ export async function POST(req: NextRequest) {
   }
   return Response.json(
     { ok: true },
-    { headers: { "Set-Cookie": clearSessionCookieHeader() } },
+    { headers: { "Set-Cookie": clearSessionCookieHeader(secureCookieForRequest(req)) } },
   );
 }
 

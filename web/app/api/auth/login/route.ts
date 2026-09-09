@@ -2,7 +2,7 @@ import type { NextRequest } from "next/server";
 
 import { verifyCredentials } from "@/lib/auth/htpasswd";
 import { sessionTtlMs } from "@/lib/auth/config";
-import { sessionCookieHeader, signSession } from "@/lib/auth/session";
+import { secureCookieForRequest, sessionCookieHeader, signSession } from "@/lib/auth/session";
 
 // POST /api/auth/login
 // Verifies a username/password pair against the htpasswd Secret and, on
@@ -38,7 +38,7 @@ export async function POST(req: NextRequest) {
     { user },
     {
       headers: {
-        "Set-Cookie": sessionCookieHeader(token, Math.floor(sessionTtlMs() / 1000)),
+        "Set-Cookie": sessionCookieHeader(token, Math.floor(sessionTtlMs() / 1000), secureCookieForRequest(req)),
       },
     },
   );
