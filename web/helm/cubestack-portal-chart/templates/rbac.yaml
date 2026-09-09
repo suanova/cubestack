@@ -33,10 +33,23 @@ metadata:
     app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
     helm.sh/chart: {{ include "cubestack-portal-chart.chart" . }}
 rules:
-  # Read namespaces for UI APIs (cluster-scoped resource)
+  # Read namespaces and nodes for UI APIs (cluster-scoped core resources)
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["list"]
+  # Read the operator's CRs. The UI aggregates them cluster-wide
+  # (listClusterCustomObject) and the CRDs are a mix of namespaced and
+  # cluster scope, so only a ClusterRole covers the cross-namespace reads.
+  - apiGroups: ["ai.cubestack.io"]
+    resources: ["inferenceservices", "devenvironments"]
+    verbs: ["create", "update", "delete", "get", "list", "watch"]
+  - apiGroups: ["ai.cubestack.io"]
+    resources: ["inferenceruntimeprofiles", "modelversions"]
+    verbs: ["get", "list", "watch"]
+
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
