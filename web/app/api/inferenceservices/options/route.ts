@@ -27,6 +27,8 @@ export interface CreateOptionsResponse {
     models: string[];
     architectures: string[];
     quantizations: string[];
+    /** Profile label inference.ai.cubestack.io/serving-mode: "pd-separation" | "standard" (or null when unlabeled). */
+    servingMode: string | null;
     gpuPerPod: number | null;
     overrides: Array<{
       name: string;
@@ -67,9 +69,13 @@ interface ProfileSpec {
   roles?: ProfileRole[];
 }
 interface Profile {
-  metadata?: { name?: string };
+  metadata?: { name?: string; labels?: Record<string, string> };
   spec?: ProfileSpec;
 }
+
+// Label declaring the profile's serving topology (see the deploy wizard):
+// "pd-separation" (separate prefill/decode roles) or "standard" (single role).
+const SERVING_MODE_LABEL = "inference.ai.cubestack.io/serving-mode";
 interface ModelVersion {
   metadata?: { name?: string };
   spec?: {
@@ -118,6 +124,7 @@ export const GET = withAuth(async () => {
           models: spec.accelerator?.models ?? [],
           architectures: spec.modelRequirements?.architectures ?? [],
           quantizations: spec.modelRequirements?.quantization ?? [],
+          servingMode: p.metadata?.labels?.[SERVING_MODE_LABEL] ?? null,
           gpuPerPod: gpuPerPod || 0,
           overrides: (spec.overrides ?? []).map((o) => ({
             name: o.name ?? "",

@@ -46,11 +46,18 @@ export interface InferenceServiceSummary {
   gpuPerPod: number | null;
   modelName: string | null;
   modelVersion: string | null;
-  // override knobs surfaced in the scale panel
+  // override knobs declared by the profile, with the effective value (the
+  // service's spec.overrides value, falling back to the profile default);
+  // drives the replicas column and the scale panel
   overrideNums: Record<string, number>;
-  decode: { current: number; min: number; max: number };
-  prefill: { current: number; min: number; max: number };
-  groupSize: { current: number; enum: number[] | null };
+  overrides: Array<{
+    name: string;
+    type: "integer" | "string" | "boolean";
+    min: number | null;
+    max: number | null;
+    enum: Array<number | string> | null;
+    current: number | string | boolean | null;
+  }>;
   // observed state (null until the controller reports it)
   ready: boolean | null;
   progressing: boolean;
@@ -115,7 +122,7 @@ interface ProfileOverride {
   min?: number;
   max?: number;
   enum?: Array<number | string>;
-  default?: number | string;
+  default?: number | string | boolean;
 }
 interface ProfileRole {
   name?: string;
@@ -153,10 +160,6 @@ function num(v: unknown): number | null {
 function condTrue(conds: Condition[] | undefined, type: string): boolean | null {
   const c = conds?.find((x) => x.type === type);
   return c ? c.status === "True" : null;
-}
-
-function profileOverride(profile: Profile | undefined, name: string): ProfileOverride {
-  return profile?.spec?.overrides?.find((o) => o.name === name) ?? {};
 }
 
 /**
@@ -200,19 +203,34 @@ function project(
   const status = isvc.status ?? {};
   const gpuRole = findGpuRole(profile);
 
-  const decode = profileOverride(profile, "decodeReplicas");
-  const prefill = profileOverride(profile, "prefillReplicas");
-  const group = profileOverride(profile, "groupSize");
   const overrideNums: Record<string, number> = {};
   for (const [k, v] of Object.entries(spec.overrides ?? {})) {
     const n = num(v);
     if (n !== null) overrideNums[k] = n;
   }
 
-  const numOverride = (name: string, fallback: number | null): number => {
-    const v = overrideNums[name] ?? num(profileOverride(profile, name).default);
-    return v ?? fallback ?? 0;
-  };
+  // Effective value of every knob the profile declares: the service's user
+  // value wins, else the profile default, else null. Drives the page's
+  // replicas column and scale panel, so no knob name is hardcoded.
+  const isPrim = (v: unknown): v is number | string | boolean =>
+    typeof v === "number" || typeof v === "string" || typeof v === "boolean";
+  const specOverrides = spec.overrides ?? {};
+  const overrides = (profile?.spec?.overrides ?? []).map((o) => {
+    const name = o.name ?? "";
+    const raw = specOverrides[name];
+    const current = isPrim(raw) ? raw : (isPrim(o.default) ? o.default : null);
+    return {
+      name,
+      type: (o.type === "string" || o.type === "boolean" ? o.type : "integer") as
+        | "integer"
+        | "string"
+        | "boolean",
+      min: num(o.min),
+      max: num(o.max),
+      enum: o.enum ?? null,
+      current,
+    };
+  });
 
   const roles: InferenceServiceSummary["roles"] = (status.roles ?? []).map((r) => ({
     name: r.name ?? "?",
@@ -239,20 +257,7 @@ function project(
     modelName: status.model?.name ?? null,
     modelVersion: status.model?.version ?? null,
     overrideNums,
-    decode: {
-      current: numOverride("decodeReplicas", 1),
-      min: num(decode.min) ?? 1,
-      max: num(decode.max) ?? 1,
-    },
-    prefill: {
-      current: numOverride("prefillReplicas", 1),
-      min: num(prefill.min) ?? 1,
-      max: num(prefill.max) ?? 1,
-    },
-    groupSize: {
-      current: numOverride("groupSize", 1),
-      enum: group.enum?.map(Number).filter((n) => !Number.isNaN(n)) ?? null,
-    },
+    overrides,
     ready: condTrue(status.conditions, "Ready"),
     progressing: condTrue(status.conditions, "Progressing") === true,
     conditions: (status.conditions ?? []).map((c) => ({
