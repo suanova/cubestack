@@ -183,6 +183,123 @@ describe("inference services page", () => {
     act(() => root.unmount());
   });
 
+  it("renders a declared string enum as a select, not a free-text input", async () => {
+    // A string override with a declared enum is a closed set: it must render the
+    // enum as a select (previously the string branch won and it was text).
+    const list = [
+      inferenceServiceSummary({
+        name: "str-enum",
+        namespace: "project-a",
+        overrides: [
+          { name: "quantization", type: "string", min: null, max: null, enum: ["w8a8", "fp16"], current: null },
+        ],
+      }),
+    ];
+    stubData(list);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    // The select shows the first declared entry (an enum select needs a value
+    // inside the set) and renders it as text; a free-text input would show none.
+    const trigger = container.querySelector('[role="combobox"]');
+    expect(trigger).not.toBeNull();
+    expect((trigger?.textContent ?? "").replace(/\u200b/g, "").trim()).toBe("w8a8");
+
+    // Both declared options are offered by the select.
+    await act(async () => {
+      (trigger as HTMLElement).dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
+    });
+    const options = Array.from(document.querySelectorAll('[role="option"]')).map((el) => el.textContent);
+    expect(options).toEqual(["w8a8", "fp16"]);
+
+    act(() => root.unmount());
+  });
+
+  it("keeps Apply disabled while a string enum holds a value outside the enum", async () => {
+    // The service's stored value is no longer in the declared enum: the numeric
+    // edit alone must not enable Apply, i.e. string enums are validated too.
+    const list = [
+      inferenceServiceSummary({
+        name: "stale-enum",
+        namespace: "project-a",
+        overrides: [
+          { name: "quantization", type: "string", min: null, max: null, enum: ["w8a8", "fp16"], current: "int4" },
+          { name: "maxModelLen", type: "integer", min: 1, max: 100, enum: null, current: 10 },
+        ],
+      }),
+    ];
+    stubData(list);
+    // The out-of-enum stored value makes MUI warn; that is the state under test.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    const numInput = container.querySelector('input[type="number"]') as HTMLInputElement;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
+      setter.call(numInput, "20");
+      numInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    const applyBtn = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "应用");
+    expect((applyBtn as HTMLButtonElement).disabled).toBe(true);
+
+    warnSpy.mockRestore();
+    act(() => root.unmount());
+  });
+
+  it("still treats edits as changed when values contain the snapshot delimiters", async () => {
+    // The edited-vs-service comparison used to join "name=value;" pairs, so a
+    // value containing ";" or "=" could make two different states collide:
+    // a="p;b=q", b="r" joins to the same string as a="p", b="q;b=r".
+    const list = [
+      inferenceServiceSummary({
+        name: "delims",
+        namespace: "project-a",
+        overrides: [
+          { name: "a", type: "string", min: null, max: null, enum: null, current: "p;b=q" },
+          { name: "b", type: "string", min: null, max: null, enum: null, current: "r" },
+        ],
+      }),
+    ];
+    const patches: Array<Record<string, unknown> | undefined> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method === "PATCH") {
+          patches.push(JSON.parse(String(init.body)));
+          return { ok: true, status: 200, json: async () => ({ ok: true }) };
+        }
+        return { ok: true, status: 200, json: async () => ({ items: list }) };
+      }),
+    );
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    const inputs = container.querySelectorAll("input");
+    expect(inputs).toHaveLength(2);
+    const setValue = async (el: HTMLInputElement, v: string) => {
+      await act(async () => {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
+        setter.call(el, v);
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    };
+    await setValue(inputs[0] as HTMLInputElement, "p");
+    await setValue(inputs[1] as HTMLInputElement, "q;b=r");
+
+    // Both knobs differ from the service, so Apply must be enabled.
+    const applyBtn = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "应用");
+    expect((applyBtn as HTMLButtonElement).disabled).toBe(false);
+    await act(async () => {
+      (applyBtn as HTMLElement).click();
+    });
+    await act(async () => {});
+    expect(patches[0]?.overrides).toEqual({ a: "p", b: "q;b=r" });
+
+    act(() => root.unmount());
+  });
+
   it("filters the table by status", async () => {
     stubData(inferenceServiceList());
     const { container, root } = renderPage();

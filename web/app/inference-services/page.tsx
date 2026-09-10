@@ -645,6 +645,19 @@ function ScaleInput({
   if (o.type === "boolean") {
     return <Switch checked={value === true} onChange={(e) => onChange(e.target.checked)} size="small" />;
   }
+  // A declared enum is a closed set whatever its type, so it renders as a
+  // select — checked before the string/integer branches.
+  if (o.enum !== null && o.enum.length > 0) {
+    return (
+      <Select value={value} size="small" onChange={(e) => onChange(e.target.value as number | string)} sx={{ width: "100%", fontSize: 13, fontFamily: "var(--font-mono)" }}>
+        {o.enum.map((n) => (
+          <MenuItem key={String(n)} value={n}>
+            {String(n)}
+          </MenuItem>
+        ))}
+      </Select>
+    );
+  }
   if (o.type === "string") {
     return (
       <input
@@ -664,25 +677,19 @@ function ScaleInput({
       />
     );
   }
-  if (o.enum !== null && o.enum.length > 0) {
-    return (
-      <Select value={value} size="small" onChange={(e) => onChange(e.target.value as number | string)} sx={{ width: "100%", fontSize: 13, fontFamily: "var(--font-mono)" }}>
-        {o.enum.map((n) => (
-          <MenuItem key={String(n)} value={n}>
-            {String(n)}
-          </MenuItem>
-        ))}
-      </Select>
-    );
-  }
   return <NumberInput value={typeof value === "number" ? value : o.min ?? 1} min={o.min ?? undefined} max={o.max ?? undefined} onChange={onChange} />;
 }
 
-// Type/range validity of a scale value against the profile declaration.
+// Type/range/enum validity of a scale value against the profile declaration.
+// A declared enum is closed for string overrides too, otherwise a string enum
+// would accept any non-empty text and only be rejected by the API.
 function scaleValueValid(o: InferenceServiceSummary["overrides"][number], v: number | string | boolean | undefined): boolean {
   if (v === undefined || v === null) return false;
   if (o.type === "boolean") return typeof v === "boolean";
-  if (o.type === "string") return typeof v === "string" && v.trim() !== "";
+  if (o.type === "string") {
+    if (typeof v !== "string" || v.trim() === "") return false;
+    return o.enum === null || o.enum.some((e) => e === v);
+  }
   if (typeof v !== "number" || !Number.isInteger(v)) return false;
   if (o.enum !== null && !o.enum.some((e) => e === v)) return false;
   if (o.min !== null && v < o.min) return false;
@@ -691,9 +698,11 @@ function scaleValueValid(o: InferenceServiceSummary["overrides"][number], v: num
 }
 
 // Starting value for a scale input: the effective value, falling back to a
+// declared enum entry (an enum select needs a value inside the set), then to a
 // per-type default (mirrors the wizard's overrideValue).
 function scaleInitial(o: InferenceServiceSummary["overrides"][number]): number | string | boolean {
   if (o.current !== null) return o.current;
+  if (o.enum !== null && o.enum.length > 0) return o.enum[0];
   if (o.type === "boolean") return true;
   if (o.type === "string") return "";
   return o.min ?? 1;
@@ -725,18 +734,25 @@ function ScaleCard({
   // on the `s` object reference (whose identity changes on every poll refresh)
   // — so a 30s poll refresh (same values) must not clobber in-progress edits.
   // exhaustive-deps is suppressed because the correct deps are the primitives,
-  // not the enclosing `s` object. The key uses scaleInitial (not raw current)
-  // so an unset knob (no user value, no profile default) reads "unchanged" at
-  // its displayed fallback instead of enabling Apply.
-  const currentValueKey = s.overrides.map((o) => `${o.name}=${String(scaleInitial(o))}`).join(";");
+  // not the enclosing `s` object. The snapshot serializes [name, value] tuples:
+  // a "name=value;" join would collide for values containing ";" or "=" and
+  // wrongly read edits as unchanged. It uses scaleInitial (not raw current) so
+  // an unset knob reads "unchanged" at its displayed fallback.
+  const currentValueKey = JSON.stringify(s.overrides.map((o) => [o.name, scaleInitial(o)]));
   /* eslint-disable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps */
   useEffect(() => {
     setValues(Object.fromEntries(s.overrides.map((o) => [o.name, scaleInitial(o)])));
   }, [s.namespace, s.name, currentValueKey]);
   /* eslint-enable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps */
 
-  const invalid = s.overrides.some((o) => !scaleValueValid(o, values[o.name]));
-  const unchanged = s.overrides.map((o) => `${o.name}=${String(values[o.name] ?? "")}`).join(";") === currentValueKey;
+  // Effective value per declared knob: the local edit when present, else the
+  // service's value or declared default (values can lag one render behind a
+  // poll that changed the declared override set).
+  const effective: Record<string, number | string | boolean> = Object.fromEntries(
+    s.overrides.map((o) => [o.name, values[o.name] ?? scaleInitial(o)]),
+  );
+  const invalid = s.overrides.some((o) => !scaleValueValid(o, effective[o.name]));
+  const unchanged = JSON.stringify(s.overrides.map((o) => [o.name, effective[o.name]])) === currentValueKey;
 
   return (
     <Card title={t("inf.scale.title")} meta={t("inf.scale.hint")}>
@@ -745,11 +761,8 @@ function ScaleCard({
       ) : (
         <Box sx={{ px: "18px", py: "12px", display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(170px, 1fr))", gap: "12px", alignItems: "end" }}>
           {s.overrides.map((o) => (
-            <Field key={o.name} label={o.name} error={!scaleValueValid(o, values[o.name])}>
-              {/* ?? fallback: a poll can change the declared override set (profile
-                  edited mid-session), and values is rebuilt one effect later; the
-                  fallback keeps the input controlled in that one render. */}
-              <ScaleInput o={o} value={values[o.name] ?? scaleInitial(o)} onChange={(v) => setValues((prev) => ({ ...prev, [o.name]: v }))} />
+            <Field key={o.name} label={o.name} error={!scaleValueValid(o, effective[o.name])}>
+              <ScaleInput o={o} value={effective[o.name]} onChange={(v) => setValues((prev) => ({ ...prev, [o.name]: v }))} />
             </Field>
           ))}
         </Box>
@@ -761,7 +774,7 @@ function ScaleCard({
         <Box sx={{ px: "18px", pb: "8px", fontSize: 11.5, color: "text.secondary" }}>{msg}</Box>
       ) : null}
       <Box sx={{ px: "18px", pb: "14px" }}>
-        <Button variant="contained" disabled={busy || invalid || unchanged || s.overrides.length === 0} onClick={() => onApply(values)} sx={{ textTransform: "none", fontSize: 12.5 }}>
+        <Button variant="contained" disabled={busy || invalid || unchanged || s.overrides.length === 0} onClick={() => onApply(effective)} sx={{ textTransform: "none", fontSize: 12.5 }}>
           {busy ? t("inf.scale.applying") : t("inf.scale.apply")}
         </Button>
       </Box>
@@ -958,6 +971,9 @@ function DeployWizard({
     const held = draft.overrides[o.name];
     if (held !== undefined) return held;
     if (o.default !== null && o.default !== undefined) return o.default;
+    // An enum select needs a value inside the declared set, otherwise MUI
+    // reports an out-of-range value ("") on first render.
+    if (o.enum !== null && o.enum.length > 0) return o.enum[0];
     if (o.type === "boolean") return true;
     if (o.type === "integer") return o.min ?? 1;
     return "";
