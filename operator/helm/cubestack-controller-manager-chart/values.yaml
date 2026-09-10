@@ -1,5 +1,5 @@
 image:
-  repository: harbor.isuanova.com/suanova/cubestack-operator
+  repository: harbor.isuanova.com/suanova/cubestack-controller-manager
   tag: latest
 
 # Platform Gateway the operator publishes InferenceService routes to

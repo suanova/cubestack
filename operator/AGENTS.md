@@ -72,7 +72,7 @@ The chart's `templates/` and `vap.yaml` are generated from the `config/` sources
 ```bash
 make manifests  # Regenerate CRDs/RBAC from markers
 make generate   # Regenerate DeepCopy methods
-make helm-resources-update  # Regenerate helm/cubestack-operator-chart from config/ (commit with the change)
+make helm-resources-update  # Regenerate helm/cubestack-controller-manager-chart from config/ (commit with the change)
 ```
 
 **After editing `*.go` files:**
@@ -280,7 +280,7 @@ kubectl apply -f https://raw.githubusercontent.com/<org>/<repo>/<tag>/dist/insta
 
 ### Option 2: Helm Chart
 
-The operator ships as a Helm chart at `helm/cubestack-operator-chart/`. The chart's
+The operator ships as a Helm chart at `helm/cubestack-controller-manager-chart/`. The chart's
 `templates/` and `vap.yaml` are generated from `config/` by
 `hack/update-helm-resources.sh` (see Critical Rules above); the ai CRDs in
 `crds/` are synced from `config/crd/bases` at use time by `make helm-crds-sync`
@@ -290,7 +290,7 @@ files.
 ```bash
 make helm-resources-update  # Regenerate chart templates/vap.yaml from config/ after config changes
 make helm-crds-sync          # Copy the ai CRDs from config/crd/bases into the chart (crds/ is not committed)
-helm install cubestack ./helm/cubestack-operator-chart --namespace cubestack-system --create-namespace
+helm install cubestack ./helm/cubestack-controller-manager-chart --namespace cubestack-system --create-namespace
 helm uninstall cubestack --namespace cubestack-system   # removes the operator, keeps the CRDs
 ```
 

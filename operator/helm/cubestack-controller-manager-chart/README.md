@@ -1,4 +1,4 @@
-# cubestack-operator-chart
+# cubestack-controller-manager-chart
 
 The CubeStack operator chart: installs the `ai.cubestack.io` CRDs
 (ModelVersion, InferenceRuntimeProfile, InferenceService, DevEnvironment),
@@ -47,7 +47,7 @@ prereq of `helm-package` and `helm-e2e-install`, so packaged charts and the
 `helm-e2e-*` flow already contain the CRDs).
 
 ```bash
-helm install cubestack ./helm/cubestack-operator-chart -n cubestack-system --create-namespace
+helm install cubestack ./helm/cubestack-controller-manager-chart -n cubestack-system --create-namespace
 ```
 
 ### Install from the OCI registry
@@ -58,17 +58,17 @@ LeaderWorkerSet controller must already be installed (the chart installs the
 `ai.cubestack.io` CRDs only):
 
 ```bash
-helm install cubestack oci://harbor.isuanova.com/suanova/cubestack-operator-chart \
+helm install cubestack oci://harbor.isuanova.com/suanova/cubestack-controller-manager-chart \
   --version 0.1.0 -n cubestack-system --create-namespace
 ```
 
 ### Image overrides
 
-The default image is `harbor.isuanova.com/suanova/cubestack-operator:latest`
+The default image is `harbor.isuanova.com/suanova/cubestack-controller-manager:latest`
 (the team's registry). Override repository and tag with `--set`:
 
 ```bash
-helm install cubestack ./helm/cubestack-operator-chart -n cubestack-system \
+helm install cubestack ./helm/cubestack-controller-manager-chart -n cubestack-system \
   --create-namespace \
   --set image.repository=myregistry.example.com/cubestack \
   --set image.tag=v1.2.3
@@ -99,7 +99,7 @@ The `name`/`namespace` defaults follow the platform convention (the same
 so a standard install only needs the domain:
 
 ```bash
-helm install cubestack ./helm/cubestack-operator-chart -n cubestack-system \
+helm install cubestack ./helm/cubestack-controller-manager-chart -n cubestack-system \
   --create-namespace --set gateway.domain=example.com
 ```
 
@@ -149,7 +149,7 @@ paths change. To publish manually, from `operator/`:
 ```bash
 make helm-package   # regenerates chart resources from config/, then packages
 helm registry login harbor.isuanova.com -u <CI_BOT_NAME> -p <CI_BOT_PASSWORD>
-helm push helm/cubestack-operator-chart/cubestack-operator-chart-0.1.0.tgz oci://harbor.isuanova.com/suanova
+helm push helm/cubestack-controller-manager-chart/cubestack-controller-manager-chart-0.1.0.tgz oci://harbor.isuanova.com/suanova
 ```
 
 The OCI version tag comes from the Chart.yaml `version` — CI derives the

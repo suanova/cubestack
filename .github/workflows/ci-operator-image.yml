@@ -61,7 +61,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           set -euo pipefail
-          IMAGE=harbor.isuanova.com/suanova/cubestack-operator
+          IMAGE=harbor.isuanova.com/suanova/cubestack-controller-manager
           SHA_TAG="${GITHUB_SHA}"
 
           # Push the immutable, commit-addressed tag. Safe for any commit that

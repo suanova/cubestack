@@ -66,7 +66,7 @@ jobs:
       # HEAD first (helm-resources-update dependency) so the pushed artifact
       # always matches the committed sources — the generator fails loudly on
       # errors — and drops any stale tgz before packaging. The tgz lands next
-      # to the chart (helm/cubestack-operator-chart/cubestack-operator-chart-<version>.tgz).
+      # to the chart (helm/cubestack-controller-manager-chart/cubestack-controller-manager-chart-<version>.tgz).
       - name: Package the chart
         working-directory: operator
         run: make helm-package
@@ -85,16 +85,16 @@ jobs:
           helm registry login harbor.isuanova.com \
             -u "$HARBOR_USERNAME" -p "$HARBOR_PASSWORD"
       # Push the packaged chart as an OCI artifact. The OCI repository name is
-      # deliberately the chart name (cubestack-operator-chart): Harbor serves
-      # chart-OCI and image artifacts under the same repo name within a
-      # project, so the chart repo is suffixed -chart to avoid colliding with
-      # the container image repository cubestack-operator in project suanova.
+      # deliberately the chart name (cubestack-controller-manager-chart), kept distinct
+      # from the container image repository cubestack-controller-manager in
+      # project suanova — Harbor serves chart-OCI and image artifacts under
+      # the same repo name within a project.
       - name: Push chart to Harbor
         working-directory: operator
         run: |
           set -euo pipefail
           # The OCI version tag is the Chart.yaml version — derive the tgz
           # name from it so a version bump needs no workflow edit.
-          CHART_VERSION="$(helm show chart helm/cubestack-operator-chart | awk '/^version:/{print $2}')"
-          helm push "helm/cubestack-operator-chart/cubestack-operator-chart-${CHART_VERSION}.tgz" \
+          CHART_VERSION="$(helm show chart helm/cubestack-controller-manager-chart | awk '/^version:/{print $2}')"
+          helm push "helm/cubestack-controller-manager-chart/cubestack-controller-manager-chart-${CHART_VERSION}.tgz" \
             oci://harbor.isuanova.com/suanova

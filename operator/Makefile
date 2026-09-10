@@ -1,5 +1,5 @@
 # Image URL to use all building/pushing image targets
-IMG ?= harbor.isuanova.com/suanova/cubestack-operator:latest
+IMG ?= harbor.isuanova.com/suanova/cubestack-controller-manager:latest
 # YEAR defines the year value used for substituting the YEAR placeholder in the boilerplate header.
 YEAR ?= $(shell date +%Y)
 
@@ -103,7 +103,7 @@ KIND_CLUSTER_HELM ?= cubestack-helm-e2e
 HELM_E2E_KUBECTL = $(KUBECTL) --context kind-$(KIND_CLUSTER_HELM)
 HELM_E2E_HELM = $(HELM) --kube-context kind-$(KIND_CLUSTER_HELM)
 HELM_NAMESPACE ?= cubestack-system
-HELM_CHART_DIR ?= helm/cubestack-operator-chart
+HELM_CHART_DIR ?= helm/cubestack-controller-manager-chart
 ECHO_IMG ?= example.com/cubestack-e2e-echo:v0.0.1
 HELM_RELEASE ?= cubestack
 # Manager image for the helm e2e flow. Defaults to the same registry image as
@@ -112,7 +112,7 @@ HELM_RELEASE ?= cubestack
 # registry even for the :latest tag. Derives from IMG when the caller sets
 # IMG explicitly (command line or environment).
 ifeq ($(origin IMG),file)
-HELM_E2E_IMG ?= harbor.isuanova.com/suanova/cubestack-operator:latest
+HELM_E2E_IMG ?= harbor.isuanova.com/suanova/cubestack-controller-manager:latest
 else
 HELM_E2E_IMG ?= $(IMG)
 endif
