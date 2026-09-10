@@ -53,7 +53,7 @@ The following table lists the configurable parameters of the Portal chart and th
 | `resources.requests.cpu` | CPU request | `100m` |
 | `resources.requests.memory` | Memory request | `256Mi` |
 | `namespace` | Target namespace | `cubestack-system` |
-| `secrets.htpasswd.content` | Pre-hashed htpasswd content | `""` |
+| `secrets.htpasswd.content` | Pre-hashed htpasswd content (raw `user:bcrypt-hash` line, not base64) | `""` |
 
 ### Environment Variables
 
@@ -89,6 +89,19 @@ helm install cubestack-portal ./web/helm/cubestack-portal-chart \
   --set-file secrets.htpasswd.content=/tmp/portal-htpasswd
 ```
 
+For a single entry, pass the line inline with `--set` instead. The value is the
+raw `user:bcrypt-hash` text — the chart base64-encodes it when writing the
+Secret, so do not pass an already-base64-encoded string:
+
+```bash
+helm install cubestack-portal ./web/helm/cubestack-portal-chart \
+  --namespace cubestack-system --create-namespace \
+  --set 'secrets.htpasswd.content=admin:$2a$10$9/nTwyvmfwMdwc.OSsoZFe9gTfGfoCVdKIcSwcQWb6Qll7TmygG26'
+```
+
+Single-quote the value: a bcrypt hash contains `$`, which an unquoted or
+double-quoted shell would otherwise expand as a variable.
+
 The chart creates a Secret named `cubestack-htpasswd` in the target namespace,
 which matches the portal's built-in lookup default — no environment variables
 or additional configuration are required for login.
@@ -98,6 +111,20 @@ To manage credentials outside Helm, create a Secret named
 key and leave `secrets.htpasswd.content` empty. The chart will not create or
 modify that Secret. Without either source, the portal reports "auth not
 configured" when login is attempted.
+
+### Authorization model
+
+Authentication is the only access control the portal implements. Every htpasswd
+entry is a fully privileged portal user: a valid session can read cluster-wide
+and create/update/delete inference services and dev environments in any existing
+namespace the UI offers (profiles and model versions are read-only). Sessions
+carry only the username (no roles, no namespace scoping), so there is no way to
+grant a user write access to a subset of namespaces.
+
+Treat the htpasswd credentials as platform-admin credentials and protect the
+`cubestack-htpasswd` Secret accordingly. If you need per-namespace
+authorization, it is not provided by this chart — do not deploy the portal
+where untrusted users can reach it.
 
 ### Session Secret
 
@@ -126,8 +153,8 @@ kubectl -n cubestack-system create secret generic my-session-secret \
 
 The chart automatically creates namespaced and cluster-scoped RBAC:
 
-- `Role` + `RoleBinding`: read the htpasswd Secret (`cubestack-htpasswd` by default), get/list/watch operator CRDs (`inferenceservices`, `devenvironments`, `inferenceruntimeprofiles`, `modelversions`)
-- `ClusterRole` + `ClusterRoleBinding`: list namespaces (cluster-scoped resource)
+- `Role` + `RoleBinding`: read the htpasswd Secret (`cubestack-htpasswd` by default), get/list/watch the operator CRs (`inferenceservices`, `devenvironments`, `inferenceruntimeprofiles`, `modelversions`)
+- `ClusterRole` + `ClusterRoleBinding`: list namespaces and nodes, and get/list/watch/create/update/delete the operator CRs cluster-wide (the UI aggregates them across namespaces)
 
 Cluster-scoped object names include the release namespace as a suffix so
 same-named releases in different namespaces do not collide.

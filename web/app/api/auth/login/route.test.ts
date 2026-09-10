@@ -87,6 +87,24 @@ describe("POST /api/auth/login", () => {
     expect(res.headers.get("set-cookie") ?? "").toMatch(/Secure/);
   });
 
+  it("honours an explicit SESSION_COOKIE_SECURE=false override", async () => {
+    process.env.SESSION_COOKIE_SECURE = "false";
+    verifyCredentials.mockResolvedValue("admin");
+    // Forwarded-https origin would normally set Secure; the override wins.
+    const res = await POST(
+      plainRequest(
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-forwarded-proto": "https" },
+          body: JSON.stringify({ username: "admin", password: "correct" }),
+        },
+        "http://localhost/api/auth/login",
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("set-cookie") ?? "").not.toMatch(/Secure/);
+  });
+
   it("returns 401 for invalid credentials without setting a cookie", async () => {
     verifyCredentials.mockResolvedValue(null);
     const res = await POST(loginRequest({ username: "admin", password: "wrong" }));

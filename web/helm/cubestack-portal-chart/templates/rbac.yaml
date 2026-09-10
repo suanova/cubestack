@@ -40,9 +40,15 @@ rules:
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["list"]
-  # Read the operator's CRs. The UI aggregates them cluster-wide
-  # (listClusterCustomObject) and the CRDs are a mix of namespaced and
-  # cluster scope, so only a ClusterRole covers the cross-namespace reads.
+  # Read and write the operator's CRs. Reads are cluster-wide because the UI
+  # aggregates them (listClusterCustomObject) and the CRDs are a mix of
+  # namespaced and cluster scope. Writes (create/update/delete) are cluster-wide
+  # because the UI creates an environment/service in whichever namespace the
+  # user picks, and the portal has no per-user role or namespace scoping —
+  # sessions carry only the username (see the chart README, "Authorization
+  # model"), so every valid session is effectively a platform admin. Guard the
+  # htpasswd credentials as admin credentials. profiles and modelversions stay
+  # read-only: the UI never writes them.
   - apiGroups: ["ai.cubestack.io"]
     resources: ["inferenceservices", "devenvironments"]
     verbs: ["create", "update", "delete", "get", "list", "watch"]

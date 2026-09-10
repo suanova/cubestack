@@ -8,6 +8,15 @@ import { clearSessionCookieHeader, secureCookieForRequest } from "@/lib/auth/ses
 // a cross-site page could otherwise trigger with a form POST, so same-origin
 // callers are enforced: a browser always attaches Origin (and usually Referer)
 // to a POST, and a foreign origin is rejected.
+//
+// The cleared cookie mirrors the session cookie's Secure flag, derived from the
+// same scheme check used at login (see secureCookieForRequest). This assumes
+// login and logout are reached over the same scheme: a browser refuses to let
+// an insecure response overwrite a Secure cookie, so an https-issued session
+// logged out over http returns 200 while the session survives. Serve both on
+// one canonical scheme (terminate http -> https at the ingress), and pin
+// SESSION_COOKIE_SECURE when a TLS terminator does not forward
+// X-Forwarded-Proto.
 export async function POST(req: NextRequest) {
   if (!isSameOrigin(req)) {
     return Response.json({ error: "Forbidden" }, { status: 403 });
