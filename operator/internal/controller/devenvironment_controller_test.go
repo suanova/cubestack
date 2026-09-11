@@ -42,6 +42,7 @@ import (
 const (
 	testDevImage          = "harbor.local/ai-images/base-cuda:11.8-pytorch2.2"
 	testMismatchImage     = "harbor.local/ai-images/base-maca:1.0"
+	testCPUImage          = "harbor.local/ai-images/ssh-ubuntu22.04:latest"
 	testGPUResource       = "nvidia.com/gpu"
 	testDevEnvGatewayName = "test-gw"
 	testGatewayIP         = "1.2.3.4"
@@ -66,7 +67,7 @@ func validDevEnvironment(name string) *aiv1alpha1.DevEnvironment {
 			Running: true,
 			Resources: aiv1alpha1.ResourcesSpec{
 				GPUType:  aiv1alpha1.GPUTypeNVIDIA,
-				GPUCount: 1,
+				GPUCount: ptrTo(int32(1)),
 				CPU:      "16",
 				Memory:   "64Gi",
 			},
@@ -394,7 +395,7 @@ var _ = Describe("DevEnvironment pod spec rendering", func() {
 	Describe("desiredResources", func() {
 		It("requests and limits the nvidia gpu by gpuCount", func() {
 			env := &aiv1alpha1.DevEnvironment{Spec: aiv1alpha1.DevEnvironmentSpec{Resources: aiv1alpha1.ResourcesSpec{
-				GPUType: aiv1alpha1.GPUTypeNVIDIA, GPUCount: 2,
+				GPUType: aiv1alpha1.GPUTypeNVIDIA, GPUCount: ptrTo(int32(2)),
 			}}}
 			got := desiredResources(env)
 			key := corev1.ResourceName(testGPUResource)
@@ -408,7 +409,7 @@ var _ = Describe("DevEnvironment pod spec rendering", func() {
 
 		It("maps a metax gpuType to the metax-tech.com/gpu resource", func() {
 			env := &aiv1alpha1.DevEnvironment{Spec: aiv1alpha1.DevEnvironmentSpec{Resources: aiv1alpha1.ResourcesSpec{
-				GPUType: aiv1alpha1.GPUTypeMetaX, GPUCount: 1,
+				GPUType: aiv1alpha1.GPUTypeMetaX, GPUCount: ptrTo(int32(1)),
 			}}}
 			got := desiredResources(env)
 			key := corev1.ResourceName("metax-tech.com/gpu")
@@ -419,13 +420,72 @@ var _ = Describe("DevEnvironment pod spec rendering", func() {
 
 		It("maps optional cpu and memory to limits only", func() {
 			env := &aiv1alpha1.DevEnvironment{Spec: aiv1alpha1.DevEnvironmentSpec{Resources: aiv1alpha1.ResourcesSpec{
-				GPUType: aiv1alpha1.GPUTypeNVIDIA, GPUCount: 1, CPU: "16", Memory: "32Gi",
+				GPUType: aiv1alpha1.GPUTypeNVIDIA, GPUCount: ptrTo(int32(1)), CPU: "16", Memory: "32Gi",
 			}}}
 			got := desiredResources(env)
 			Expect(got.Limits.Cpu().Cmp(resource.MustParse("16"))).To(Equal(0))
 			Expect(got.Limits.Memory().Cmp(resource.MustParse("32Gi"))).To(Equal(0))
 			Expect(got.Requests).NotTo(HaveKey(corev1.ResourceCPU))
 			Expect(got.Requests).NotTo(HaveKey(corev1.ResourceMemory))
+		})
+
+		It("omits the gpu entirely when gpuCount is 0", func() {
+			env := &aiv1alpha1.DevEnvironment{Spec: aiv1alpha1.DevEnvironmentSpec{Resources: aiv1alpha1.ResourcesSpec{
+				GPUType: aiv1alpha1.GPUTypeMetaX, GPUCount: ptrTo(int32(0)), CPU: "4", Memory: "8Gi",
+			}}}
+			got := desiredResources(env)
+			// Neither vendor: a zero request would still pin the pod to a node
+			// advertising that resource.
+			Expect(got.Requests).NotTo(HaveKey(corev1.ResourceName(testGPUResource)))
+			Expect(got.Requests).NotTo(HaveKey(corev1.ResourceName("metax-tech.com/gpu")))
+			Expect(got.Limits).NotTo(HaveKey(corev1.ResourceName(testGPUResource)))
+			Expect(got.Limits).NotTo(HaveKey(corev1.ResourceName("metax-tech.com/gpu")))
+			Expect(got.Limits.Cpu().Cmp(resource.MustParse("4"))).To(Equal(0))
+			Expect(got.Limits.Memory().Cmp(resource.MustParse("8Gi"))).To(Equal(0))
+		})
+
+		It("treats an unset gpuCount as the schema default of 1", func() {
+			env := &aiv1alpha1.DevEnvironment{Spec: aiv1alpha1.DevEnvironmentSpec{Resources: aiv1alpha1.ResourcesSpec{
+				GPUType: aiv1alpha1.GPUTypeNVIDIA,
+			}}}
+			got := desiredResources(env)
+			key := corev1.ResourceName(testGPUResource)
+			Expect(got.Requests).To(HaveKey(key))
+			req := got.Requests[key]
+			lim := got.Limits[key]
+			Expect(req.Value()).To(Equal(int64(1)))
+			Expect(lim.Value()).To(Equal(int64(1)))
+		})
+	})
+
+	Describe("brandMismatchReason", func() {
+		DescribeTable("gates the image brand against the requested accelerator",
+			func(image string, gpuType aiv1alpha1.GPUType, gpuCount *int32, wantMatch bool) {
+				env := &aiv1alpha1.DevEnvironment{Spec: aiv1alpha1.DevEnvironmentSpec{
+					Image:     image,
+					Resources: aiv1alpha1.ResourcesSpec{GPUType: gpuType, GPUCount: gpuCount},
+				}}
+				reason := brandMismatchReason(env)
+				if wantMatch {
+					Expect(reason).To(BeEmpty())
+				} else {
+					Expect(reason).NotTo(BeEmpty())
+				}
+			},
+			Entry("nvidia with a base-cuda image matches", testDevImage, aiv1alpha1.GPUTypeNVIDIA, ptrTo(int32(1)), true),
+			Entry("nvidia with a base-maca image mismatches", testMismatchImage, aiv1alpha1.GPUTypeNVIDIA, ptrTo(int32(1)), false),
+			Entry("metax with a base-cuda image mismatches", testDevImage, aiv1alpha1.GPUTypeMetaX, ptrTo(int32(1)), false),
+			// No accelerator ⇒ nothing to match, whatever the image or gpuType.
+			Entry("gpuCount 0 exempts a non-brand image", testCPUImage, aiv1alpha1.GPUTypeNVIDIA, ptrTo(int32(0)), true),
+			Entry("gpuCount 0 exempts a mismatched image", testMismatchImage, aiv1alpha1.GPUTypeNVIDIA, ptrTo(int32(0)), true),
+		)
+
+		It("names the CPU-only escape in the mismatch message", func() {
+			env := &aiv1alpha1.DevEnvironment{Spec: aiv1alpha1.DevEnvironmentSpec{
+				Image:     testMismatchImage,
+				Resources: aiv1alpha1.ResourcesSpec{GPUType: aiv1alpha1.GPUTypeNVIDIA, GPUCount: ptrTo(int32(1))},
+			}}
+			Expect(brandMismatchReason(env)).To(ContainSubstring("gpuCount: 0"))
 		})
 	})
 
@@ -757,6 +817,36 @@ var _ = Describe("DevEnvironment controller", func() {
 
 			sts := &appsv1.StatefulSet{}
 			Expect(k8sClient.Get(ctx, envKey(env.Name), sts)).To(Succeed())
+		})
+
+		It("provisions a CPU-only environment from a non-brand image", func() {
+			env := validDevEnvironment("de-cpu-only")
+			// A CPU image the brand gate would reject if a GPU were requested,
+			// and a gpuType that does not match it either.
+			env.Spec.Resources.GPUCount = ptrTo(int32(0))
+			env.Spec.Image = testCPUImage
+			Expect(k8sClient.Create(ctx, env)).To(Succeed())
+			defer deleteEnv(env.Name)
+
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.DevEnvironment{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), got)).To(Succeed())
+				cond := meta.FindStatusCondition(got.Status.Conditions, aiv1alpha1.ConditionBrandMatchValid)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+				g.Expect(cond.Reason).To(Equal(reasonNotApplicable))
+				g.Expect(got.Status.Phase).NotTo(BeNil())
+				g.Expect(got.Status.Phase.Name).NotTo(Equal(aiv1alpha1.PhaseFailed))
+			}, "15s", "200ms").Should(Succeed())
+
+			sts := &appsv1.StatefulSet{}
+			Expect(k8sClient.Get(ctx, envKey(env.Name), sts)).To(Succeed())
+			c := sts.Spec.Template.Spec.Containers[0]
+			// No vendor key in either map: a zero request would still pin the
+			// pod to a node advertising that resource.
+			Expect(c.Resources.Requests).NotTo(HaveKey(corev1.ResourceName(testGPUResource)))
+			Expect(c.Resources.Limits).NotTo(HaveKey(corev1.ResourceName(testGPUResource)))
+			Expect(c.Resources.Limits).NotTo(HaveKey(corev1.ResourceName("metax-tech.com/gpu")))
 		})
 
 		It("withdraws compute and routes when a running environment becomes mismatched", func() {

@@ -66,7 +66,7 @@ func validDevEnvironment(name string) *DevEnvironment {
 			Running: true,
 			Resources: ResourcesSpec{
 				GPUType:  GPUTypeNVIDIA,
-				GPUCount: 1,
+				GPUCount: ptrTo(int32(1)),
 				CPU:      "16",
 				Memory:   "64Gi",
 			},
@@ -125,7 +125,7 @@ var _ = Describe("DevEnvironment", func() {
 			Expect(got.Spec.Type).To(Equal(DevEnvironmentTypeSSH))
 			Expect(got.Spec.Running).To(BeFalse())
 			Expect(got.Spec.Resources.GPUType).To(Equal(GPUTypeNVIDIA))
-			Expect(got.Spec.Resources.GPUCount).To(Equal(int32(1)))
+			Expect(got.Spec.Resources.GPUCount).To(Equal(ptrTo(int32(1))))
 			Expect(got.Spec.Storage.Size).To(Equal("10Gi"))
 			Expect(got.Spec.Storage.PVCRetention).To(Equal(PVCRetentionRetain))
 			// No schema default: an unset mountPath stays empty so the controller
@@ -287,9 +287,8 @@ var _ = Describe("DevEnvironment", func() {
 				"spec.resources"),
 		)
 
-		// gpuCount is an omitempty int32, so a zero value is dropped by the typed
-		// client and the schema default 1 applies instead. These cases are created
-		// as raw objects to send an explicit out-of-range value.
+		// These cases are created as raw objects so they can send values the typed
+		// client would not produce.
 		DescribeTable("rejects objects with invalid raw values",
 			func(name string, mutate func(map[string]any), wantMessage string) {
 				spec := map[string]any{
@@ -310,8 +309,33 @@ var _ = Describe("DevEnvironment", func() {
 			},
 			Entry("gpuCount below minimum",
 				"de-invalid-gpucount-raw",
-				func(s map[string]any) { s["resources"].(map[string]any)["gpuCount"] = 0 },
+				func(s map[string]any) { s["resources"].(map[string]any)["gpuCount"] = -1 },
 				"spec.resources.gpuCount"),
 		)
+
+		// gpuCount 0 means "no accelerator" and must survive a write. As a plain
+		// int32 with omitempty the zero would be dropped on the way out and the
+		// schema default of 1 restored — silently turning a CPU-only environment
+		// back into a GPU one on the controller's first Update.
+		It("keeps an explicit gpuCount of 0 across a write", func() {
+			de := validDevEnvironment("de-cpu-only")
+			de.Spec.Resources.GPUCount = ptrTo(int32(0))
+
+			Expect(k8sClient.Create(ctx, de)).To(Succeed())
+			Expect(de.Spec.Resources.GPUCount).NotTo(BeNil())
+			Expect(*de.Spec.Resources.GPUCount).To(Equal(int32(0)))
+
+			// A write that does not touch resources — the shape the controller's
+			// finalizer Update takes.
+			de.Labels = map[string]string{"probe": "true"}
+			Expect(k8sClient.Update(ctx, de)).To(Succeed())
+
+			got := &DevEnvironment{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: de.Name, Namespace: de.Namespace}, got)).To(Succeed())
+			Expect(got.Spec.Resources.GPUCount).NotTo(BeNil())
+			Expect(*got.Spec.Resources.GPUCount).To(Equal(int32(0)))
+
+			Expect(k8sClient.Delete(ctx, de)).To(Succeed())
+		})
 	})
 })

@@ -105,11 +105,13 @@ type ResourcesSpec struct {
 	// +optional
 	GPUType GPUType `json:"gpuType,omitempty"`
 
-	// GPUCount is the number of GPU cards.
+	// GPUCount is the number of GPU cards. 0 requests no accelerator: the pod
+	// carries no vendor GPU resource and the image brand is not checked. Omit
+	// it for the default of 1.
 	// +kubebuilder:default=1
-	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Minimum=0
 	// +optional
-	GPUCount int32 `json:"gpuCount,omitempty"`
+	GPUCount *int32 `json:"gpuCount,omitempty"`
 
 	// CPU is the CPU limit in cores.
 	// +optional

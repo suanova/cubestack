@@ -12,6 +12,11 @@ spec:
   # Compute / resources
   resources:
     gpuType: nvidia
+    # gpuCount is the number of GPU cards. Omit it for the default of 1 — an
+    # omitted count always means one GPU. Set it to 0 for a CPU-only
+    # environment: the pod then carries no GPU resource at all, and the image
+    # brand is not checked, which is how the CPU images (ssh-ubuntu22.04,
+    # jupyter-minimal) are used.
     gpuCount: 1
     cpu: "16"
     memory: "64Gi"

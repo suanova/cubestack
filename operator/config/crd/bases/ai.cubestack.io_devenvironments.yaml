@@ -112,9 +112,12 @@ spec:
                     type: string
                   gpuCount:
                     default: 1
-                    description: GPUCount is the number of GPU cards.
+                    description: |-
+                      GPUCount is the number of GPU cards. 0 requests no accelerator: the pod
+                      carries no vendor GPU resource and the image brand is not checked. Omit
+                      it for the default of 1.
                     format: int32
-                    minimum: 1
+                    minimum: 0
                     type: integer
                   gpuType:
                     default: nvidia

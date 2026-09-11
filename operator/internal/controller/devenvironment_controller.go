@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// +kubebuilder:rbac:groups=ai.cubestack.io,resources=devenvironments,verbs=get;list;watch;update
+// +kubebuilder:rbac:groups=ai.cubestack.io,resources=devenvironments,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=ai.cubestack.io,resources=devenvironments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=ai.cubestack.io,resources=devenvironments/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
@@ -207,8 +207,13 @@ func (r *DevEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	if !slices.Contains(env.Finalizers, devEnvFinalizer) {
+		// Patch, not Update: Update sends the whole object and carries the
+		// resourceVersion we read, so any write landing in between 409-conflicts
+		// and forces a retry reconcile. A merge patch has no such precondition,
+		// and the finalizer is the only field this call means to change.
+		patch := client.MergeFrom(env.DeepCopy())
 		env.Finalizers = append(env.Finalizers, devEnvFinalizer)
-		if err := r.Update(ctx, &env); err != nil {
+		if err := r.Patch(ctx, &env, patch); err != nil {
 			return ctrl.Result{}, err
 		}
 		if r.Recorder != nil {
@@ -225,6 +230,9 @@ func (r *DevEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// hard failure — nothing is provisioned (design §4.2). An environment that
 	// was running before the image or gpuType changed is withdrawn so the Failed
 	// phase reflects reality: the workload is stopped and the routes removed.
+	// An environment requesting no GPU (gpuCount 0) is exempt: with no
+	// accelerator there is no brand to match, which is what makes a CPU image
+	// usable at all.
 	if reason := brandMismatchReason(&env); reason != "" {
 		if err := r.stopCompute(ctx, &env); err != nil {
 			return ctrl.Result{}, err
@@ -245,7 +253,11 @@ func (r *DevEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		r.emitLifecycleTransition(&env, desired)
 		return ctrl.Result{}, nil
 	}
-	setBrandMatchValidCondition(&desired.Status.Conditions, true, reasonBrandValid, "gpuType matches the image brand")
+	if desiredGPUCount(&env) == 0 {
+		setBrandMatchValidCondition(&desired.Status.Conditions, true, reasonNotApplicable, "no GPU requested; image brand not checked")
+	} else {
+		setBrandMatchValidCondition(&desired.Status.Conditions, true, reasonBrandValid, "gpuType matches the image brand")
+	}
 
 	// 2. SSH secret: a managed host keypair + authorized_keys when SSH is
 	// exposed (design §6.3).
@@ -316,7 +328,14 @@ func (r *DevEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 // the observed one.
 func (r *DevEnvironmentReconciler) updateStatusIfChanged(ctx context.Context, env *aiv1alpha1.DevEnvironment, desired *aiv1alpha1.DevEnvironment) error {
 	if !apiequality.Semantic.DeepEqual(env.Status, desired.Status) {
-		return r.Status().Update(ctx, desired)
+		// Patch, not Update: Update carries the resourceVersion of the object we
+		// read, and that read is served by the informer cache, which lags the API
+		// server — most visibly right after the finalizer patch above requeues
+		// immediately, so the very next reconcile describes a version the server
+		// has already moved past. It then 409-conflicts and forces a retry
+		// reconcile. Status is this controller's own observed state, so it needs
+		// no compare-and-swap; a merge patch drops the precondition.
+		return r.Status().Patch(ctx, desired, client.MergeFrom(env))
 	}
 	return nil
 }
@@ -526,17 +545,22 @@ func gatewayAPICRDsInstalled(mgr ctrl.Manager) bool {
 
 // brandMismatchReason returns a non-empty message when gpuType does not match
 // the image brand: nvidia <-> base-cuda and metax <-> base-maca (design §4.2).
-// Custom images must carry their brand marker in the name (P1 baseline).
+// Custom images must carry their brand marker in the name (P1 baseline). An
+// environment that requests no GPU has no brand to match, so it is exempt —
+// which is what lets a CPU-only environment run a CPU image.
 func brandMismatchReason(env *aiv1alpha1.DevEnvironment) string {
+	if desiredGPUCount(env) == 0 {
+		return ""
+	}
 	image := strings.ToLower(env.Spec.Image)
 	switch env.Spec.Resources.GPUType {
 	case aiv1alpha1.GPUTypeNVIDIA:
 		if !strings.Contains(image, "base-cuda") {
-			return fmt.Sprintf("image %q does not match gpuType nvidia (expected a base-cuda image)", env.Spec.Image)
+			return fmt.Sprintf("image %q does not match gpuType nvidia (expected a base-cuda image); set spec.resources.gpuCount: 0 for a CPU-only environment", env.Spec.Image)
 		}
 	case aiv1alpha1.GPUTypeMetaX:
 		if !strings.Contains(image, "base-maca") {
-			return fmt.Sprintf("image %q does not match gpuType metax (expected a base-maca image)", env.Spec.Image)
+			return fmt.Sprintf("image %q does not match gpuType metax (expected a base-maca image); set spec.resources.gpuCount: 0 for a CPU-only environment", env.Spec.Image)
 		}
 	}
 	return ""
@@ -564,6 +588,16 @@ func mainContainerPort(t aiv1alpha1.DevEnvironmentType) int32 {
 	}
 }
 
+// desiredGPUCount resolves the requested accelerator count. A nil count means
+// the field was never defaulted — a Go-constructed object — which the API
+// server would have set to 1.
+func desiredGPUCount(env *aiv1alpha1.DevEnvironment) int32 {
+	if env.Spec.Resources.GPUCount == nil {
+		return 1
+	}
+	return *env.Spec.Resources.GPUCount
+}
+
 // gpuResource is the GPU extended resource by vendor (design §8.1).
 func gpuResource(t aiv1alpha1.GPUType) corev1.ResourceName {
 	if t == aiv1alpha1.GPUTypeMetaX {
@@ -574,11 +608,18 @@ func gpuResource(t aiv1alpha1.GPUType) corev1.ResourceName {
 
 // desiredResources maps the requested compute to container resources: the GPU
 // is both requested and limited; CPU/memory are limits only (design §3.2.2).
+// A GPUCount of 0 asks for no accelerator, so the vendor resource is left out
+// entirely rather than requested at zero — a zero request would still pin the
+// pod to a node advertising that resource.
 func desiredResources(env *aiv1alpha1.DevEnvironment) corev1.ResourceRequirements {
-	gpuName := gpuResource(env.Spec.Resources.GPUType)
-	gpu := resource.NewQuantity(int64(env.Spec.Resources.GPUCount), resource.DecimalSI)
-	limits := corev1.ResourceList{gpuName: *gpu}
-	requests := corev1.ResourceList{gpuName: *gpu}
+	limits := corev1.ResourceList{}
+	requests := corev1.ResourceList{}
+	if count := desiredGPUCount(env); count > 0 {
+		gpuName := gpuResource(env.Spec.Resources.GPUType)
+		gpu := resource.NewQuantity(int64(count), resource.DecimalSI)
+		limits[gpuName] = *gpu
+		requests[gpuName] = *gpu
+	}
 	if env.Spec.Resources.CPU != "" {
 		limits[corev1.ResourceCPU] = resource.MustParse(env.Spec.Resources.CPU)
 	}
