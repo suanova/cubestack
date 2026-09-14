@@ -646,7 +646,7 @@ export function TasksPane() {
               bgcolor: "background.default",
               border: 1,
               borderColor: "divider",
-              borderRadius: 10,
+              borderRadius: "10px",
               boxShadow: "0 24px 48px rgba(0,0,0,.25)",
             }}
           >
@@ -724,7 +724,7 @@ export function TasksPane() {
                   </Box>
                   <Box sx={{ display: "flex", flexDirection: "column", gap: "6px" }}>
                     <Box component="label" sx={{ fontSize: 12.5, color: "text.secondary", fontWeight: 550 }}>{t("cubepilot.dialog.preview")}</Box>
-                    <Box sx={{ ...monoSx, fontSize: 12, lineHeight: 1.6, whiteSpace: "pre-wrap", maxHeight: 160, overflowY: "auto", border: 1, borderColor: "divider", borderRadius: 6, p: "10px", bgcolor: "var(--surface)" }}>
+                    <Box sx={{ ...monoSx, fontSize: 12, lineHeight: 1.6, whiteSpace: "pre-wrap", maxHeight: 160, overflowY: "auto", border: 1, borderColor: "divider", borderRadius: "6px", p: "10px", bgcolor: "var(--surface)" }}>
                       {previewPrompt || t("cubepilot.dialog.emptyInstruction")}
                     </Box>
                   </Box>
@@ -746,7 +746,7 @@ export function TasksPane() {
                         py: "7px",
                         fontSize: 13,
                         border: 1,
-                        borderRadius: 6,
+                        borderRadius: "6px",
                         cursor: "pointer",
                         bgcolor: trigger === tr ? "var(--accent-soft)" : "transparent",
                         color: trigger === tr ? "var(--accent-strong)" : "text.secondary",
@@ -775,7 +775,7 @@ export function TasksPane() {
                   ) : null}
                 </Box>
               ) : null}
-              <Box sx={{ display: "flex", gap: "9px", alignItems: "flex-start", p: "10px 12px", border: 1, borderColor: "color-mix(in oklch, #e0a13a 40%, var(--border))", borderRadius: 6, bgcolor: "color-mix(in oklch, #e0a13a 8%, transparent)", fontSize: 12.5, lineHeight: 1.6 }}>
+              <Box sx={{ display: "flex", gap: "9px", alignItems: "flex-start", p: "10px 12px", border: 1, borderColor: "color-mix(in oklch, #e0a13a 40%, var(--border))", borderRadius: "6px", bgcolor: "color-mix(in oklch, #e0a13a 8%, transparent)", fontSize: 12.5, lineHeight: 1.6 }}>
                 <Box sx={{ flex: "none", color: "#e0a13a", display: "flex", mt: "1px" }}>{Icons.warn({ size: 14 })}</Box>
                 <Box>{t("cubepilot.dialog.notice")}</Box>
               </Box>
@@ -801,7 +801,7 @@ function StatBox({ label, value, sub, badge }: { label: string; value: ReactNode
         bgcolor: "var(--surface)",
         border: 1,
         borderColor: "divider",
-        borderRadius: 8,
+        borderRadius: "8px",
         p: "14px 16px",
         display: "flex",
         flexDirection: "column",

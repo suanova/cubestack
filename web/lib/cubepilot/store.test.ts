@@ -8,42 +8,27 @@ import {
   agentGreeting,
   agentScenario,
   createSession,
-  createTask,
   deleteLlm,
-  deleteTask,
   getAgentDemo,
   getConfirm,
   getConfig,
   getSession,
-  getTask,
   getStatus,
   listLlms,
   listMessages,
-  listPlaygroundServices,
-  listReports,
   listSessions,
   listSkills,
-  listTasks,
-  listTemplates,
   modelChips,
-  playgroundChat,
-  renderInstruction,
-  runTask,
   saveConfig,
   saveConfirm,
   sendUserMessage,
   setSkillEnabled,
-  toggleTask,
   updateLlm,
 } from "./store";
 
-// A fixed "now" so nextRunAt assertions are deterministic.
-const NOW = Date.UTC(2026, 7, 26, 9, 0, 0); // 2026-08-26T09:00:00Z (Wednesday)
-
 beforeEach(() => {
   vi.useFakeTimers();
-  vi.setSystemTime(NOW);
-  __resetStore(NOW);
+  __resetStore();
 });
 
 afterEach(() => {
@@ -60,24 +45,7 @@ describe("seeded demo state", () => {
     expect(getSession("agent:main-gpu-temp-0826")?.messages).toHaveLength(2);
   });
 
-  it("seeds four tasks with recomputed next run times", () => {
-    const tasks = listTasks();
-    expect(tasks.map((t) => t.name)).toEqual([
-      "每日集群巡检",
-      "GPU 节点健康检查",
-      "推理服务可用性验证",
-      "升级前预检(v1.4.0)",
-    ]);
-    // 0 6 * * * after Wed 2026-08-26 09:00Z → Thu 06:00Z.
-    expect(tasks[0].nextRunAt).toBe("2026-08-27T06:00:00.000Z");
-    // Manual-only tasks have no next run.
-    expect(tasks[3].schedule).toBe("");
-    expect(tasks[3].nextRunAt).toBeUndefined();
-    expect(tasks[3].lastStatus).toBe("failed");
-  });
-
-  it("seeds templates, llms, config, confirm rules and skills", () => {
-    expect(listTemplates().map((t) => t.name)).toEqual(["cluster-inspect", "gpu-health", "inference-verify"]);
+  it("seeds llms, config, confirm rules and skills", () => {
     expect(listLlms().map((m) => m.name)).toEqual(["glm-5.2-chat", "qwen2.5-72b", "deepseek-v4"]);
     expect(getConfig().model).toBe("glm-5.2-chat");
     const confirm = getConfirm();
@@ -118,87 +86,6 @@ describe("sessions", () => {
 
   it("returns a null reply for unknown sessions", () => {
     expect(sendUserMessage("agent:main-nope", "hi").reply).toBeNull();
-  });
-});
-
-describe("tasks", () => {
-  it("creates free-form tasks with a manual-only schedule", () => {
-    const task = createTask("tester", { name: " 磁盘检查 ", prompt: "检查磁盘使用率", schedule: "" });
-    expect(task.name).toBe("磁盘检查");
-    expect(task.prompt).toBe("检查磁盘使用率");
-    expect(task.schedule).toBe("");
-    expect(task.templateRef).toBeUndefined();
-    expect(task.enabled).toBe(true);
-    expect(task.creator).toBe("tester");
-    expect(task.nextRunAt).toBeUndefined();
-    expect(listTasks().at(-1)?.id).toBe(task.id);
-  });
-
-  it("creates template tasks with a computed next run", () => {
-    // 0 7 * * * after 09:00 → tomorrow 07:00.
-    const task = createTask("tester", { name: "生产巡检", prompt: "", schedule: "0 7 * * *", templateRef: "cluster-inspect" });
-    expect(task.templateRef).toBe("cluster-inspect");
-    expect(task.prompt).toBe("");
-    expect(task.nextRunAt).toBe("2026-08-27T07:00:00.000Z");
-  });
-
-  it("renders template instruction placeholders", () => {
-    expect(renderInstruction("对 {{namespace}} 下的 isvc 验证", { namespace: "prod" })).toBe("对 prod 下的 isvc 验证");
-    // Unknown placeholders are left untouched.
-    expect(renderInstruction("{{a}} {{b}}", { a: "x" })).toBe("x {{b}}");
-  });
-
-  it("lists reports newest first", () => {
-    const daily = listTasks()[0]; // 每日集群巡检 (2 seeded runs)
-    const reports = listReports(daily.id);
-    expect(reports).toHaveLength(2);
-    expect(reports[0].trigger).toBe("Cron");
-    expect(new Date(reports[0].startedAt).getTime()).toBeGreaterThan(new Date(reports[1].startedAt).getTime());
-    expect(listReports("nope")).toEqual([]);
-  });
-
-  it("materializes a simulated run after the run duration elapses", () => {
-    const daily = listTasks()[0];
-    const run = runTask(daily.id, "Manual");
-    expect(run?.status).toBe("running");
-    expect(run?.finishedAt).toBe("");
-    expect(listReports(daily.id)[0].status).toBe("running");
-
-    vi.advanceTimersByTime(8_000);
-
-    const rep = listReports(daily.id)[0];
-    expect(rep.status).toBe("success");
-    expect(rep.finishedAt).not.toBe("");
-    expect(rep.p0).toBe(0);
-    expect(rep.p1).toBe(2);
-    expect(rep.p2).toBe(2);
-    expect(rep.content).toContain("P0: 0 · P1: 2 · P2: 2");
-    expect(getTask(daily.id)?.lastStatus).toBe("success");
-  });
-
-  it("uses the free-form report for tasks without a template", () => {
-    const task = createTask("tester", { name: "自由任务", prompt: "检查磁盘", schedule: "" });
-    runTask(task.id, "Manual");
-    vi.advanceTimersByTime(8_000);
-    const rep = listReports(task.id)[0];
-    expect(rep.status).toBe("success");
-    expect(rep.content).toContain("# 任务执行报告(自由任务)");
-    expect(rep.content).toContain("检查磁盘");
-  });
-
-  it("returns undefined for runs on unknown tasks", () => {
-    expect(runTask("nope", "Manual")).toBeUndefined();
-  });
-
-  it("toggles and deletes tasks", () => {
-    const task = createTask("tester", { name: "t", prompt: "p", schedule: "" });
-    expect(toggleTask(task.id)?.enabled).toBe(false);
-    expect(toggleTask(task.id)?.enabled).toBe(true);
-    expect(toggleTask("nope")).toBeUndefined();
-
-    expect(deleteTask(task.id)).toBe(true);
-    expect(listTasks().some((t) => t.id === task.id)).toBe(false);
-    expect(deleteTask(task.id)).toBe(false);
   });
 });
 
@@ -273,28 +160,6 @@ describe("config / status / confirm / skills", () => {
     expect(setSkillEnabled("nope", true)).toEqual(listSkills());
   });
 
-  it("seeds the playground services and the scaling note", () => {
-    const { services, scaling } = listPlaygroundServices();
-    expect(services.map((s) => s.serviceId)).toEqual(["glm-5.2-chat", "deepseek-v4", "llama3-8b-chat"]);
-    expect(services[0].qps).toBe(42);
-    expect(services[0].p95Ms).toBe(412);
-    expect(scaling).toEqual([{ name: "qwen2.5-72b", engine: "GPUStack" }]);
-  });
-
-  it("renders scripted playground replies with the service facts, rotated by turn", () => {
-    const first = playgroundChat("glm-5.2-chat", 0);
-    expect(first).toContain("glm-5.2-chat");
-    expect(first).toContain("2 / 4");
-    // The P95 template picks up the selected service's latency.
-    expect(playgroundChat("deepseek-v4", 1)).toContain("388ms");
-    expect(playgroundChat("llama3-8b-chat", 2)).toContain("1 × A100(NVIDIA)");
-    // Rotation wraps at the template count.
-    expect(playgroundChat("glm-5.2-chat", 3)).toBe(first);
-  });
-
-  it("returns null for unknown playground services", () => {
-    expect(playgroundChat("nope", 0)).toBeNull();
-  });
 });
 
 describe("unified chat: agent demo content", () => {

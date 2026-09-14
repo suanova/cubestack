@@ -43,24 +43,32 @@ function stubApi() {
       if (url.includes("/api/cubepilot/llms")) return json({ llms: [{ name: "glm-5.2-chat", endpoint: "https://llm/v1", keyed: true }] });
       if (url.includes("/api/cubepilot/playground/services"))
         return json({
-          services: [
-            {
-              serviceId: "glm-5.2-chat",
-              name: "glm-5.2-chat",
-              engine: "vLLM",
-              gpu: "2 × A100(NVIDIA)",
-              model: "GLM-5.2 · v1.0.0",
-              replicas: "2 / 4",
-              qps: 42,
-              p95Ms: 412,
-              tps: 1204,
-              persona: "我是 GLM-5.2,由 CubeStack 推理池以 vLLM 引擎托管,当前张量并行 TP=2。",
-            },
-          ],
-          scaling: [{ name: "qwen2.5-72b", engine: "GPUStack" }],
+          models: [{ id: "glm-5.2-chat", ownedBy: "cubestack" }],
+          endpoint: "http://gw.test:8080",
         });
-      if (url.includes("/api/cubepilot/playground/chat"))
-        return json({ reply: { text: "你好,我是演示模型 glm-5.2-chat,当前一切正常。" } });
+      if (url.includes("/api/cubepilot/playground/chat")) {
+        // Real streaming: SSE chunks (the client accumulates the deltas).
+        const FULL = "好的,已收到。这是来自真实 AI Gateway 的流式回复。";
+        let i = 0;
+        const enc = new TextEncoder();
+        const stream = new ReadableStream({
+          start(controller) {
+            const tick = () => {
+              if (i < FULL.length) {
+                const chunk = FULL.slice(i, i + 5);
+                i += 5;
+                controller.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: chunk } }] })}\n\n`));
+                setTimeout(tick, 15);
+              } else {
+                controller.enqueue(enc.encode("data: [DONE]\n\n"));
+                controller.close();
+              }
+            };
+            tick();
+          },
+        });
+        return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+      }
       return json({});
     }),
   );
@@ -140,15 +148,18 @@ describe("cubepilot page", () => {
     const { container, root } = renderPage();
     await act(async () => {});
 
-    // Default object: the first service (the prototype's selectModel(MODELS[0])).
+    // Default object: the first gateway model (the prototype's selectModel(MODELS[0])).
     expect(
       (container.querySelector('[data-od-id="obj-glm-5.2-chat"]') as HTMLElement).getAttribute("aria-pressed"),
     ).toBe("true");
     expect(container.querySelector('[data-od-id="params-card"]')).not.toBeNull();
-    expect(container.querySelector('[data-od-id="metrics-card"]')).not.toBeNull();
+    // No fake metrics card: the rail is params + the real cURL card.
+    expect(container.querySelector('[data-od-id="metrics-card"]')).toBeNull();
     expect(container.querySelector('[data-od-id="api-card"]')).not.toBeNull();
-    expect(container.querySelector('[data-od-id="pg-endpoint"]')?.textContent).toContain("glm-5.2-chat");
-    expect(container.textContent).toContain("我是 GLM-5.2");
+    expect(container.querySelector('[data-od-id="pg-endpoint"]')?.textContent).toContain("/v1/chat/completions");
+    // The object meta line shows the gateway owner.
+    expect(container.textContent).toContain("cubestack");
+    expect(container.textContent).toContain("已切换到 glm-5.2-chat");
 
     // Send a message through the composer (native setter so React's
     // controlled onChange fires).
@@ -163,19 +174,18 @@ describe("cubepilot page", () => {
       send.click();
     });
 
-    // The canned reply streams in character by character. React only
-    // commits the interval updates at act boundaries, so poll with one short
-    // act per tick instead of one long act.
-    const FULL = "你好,我是演示模型 glm-5.2-chat,当前一切正常。";
+    // The real SSE reply streams in; React commits the updates at act
+    // boundaries, so poll with one short act per tick instead of one long act.
+    const FULL = "好的,已收到。这是来自真实 AI Gateway 的流式回复。";
     let done = false;
     for (let i = 0; i < 100 && !done; i++) {
       await act(async () => {
         await new Promise((r) => setTimeout(r, 50));
       });
-      done = (container.textContent ?? "").includes(FULL);
+      const text = container.textContent ?? "";
+      done = text.includes(FULL) && /生成 \d+ 字符/.test(text);
     }
     expect(done).toBe(true);
-    expect(container.textContent).toContain("生成");
     expect(container.querySelector('[data-od-id="pg-streaming"]')).toBeNull();
     act(() => root.unmount());
   }, 10000);

@@ -6,7 +6,6 @@
 // layer, not storage. A real backend replaces these modules without touching
 // the pages (same wire shapes, see lib/cubepilot/types.ts).
 
-import { nextCronRun } from "./cron";
 import { buildReply } from "./reply";
 import type {
   AgentBlock,
@@ -20,18 +19,10 @@ import type {
   ChatToolCall,
   ConfirmView,
   LlmModel,
-  PlaygroundScaling,
-  PlaygroundService,
   QuickChip,
-  Report,
   SessionInfo,
   SkillInfo,
-  Task,
-  TaskTemplate,
 } from "./types";
-
-/** Simulated duration of a task run before its report materializes. */
-const RUN_DURATION_MS = 8_000;
 
 interface Session {
   key: string;
@@ -43,10 +34,6 @@ interface State {
   sessions: Map<string, Session>;
   /** Session order (newest first). */
   sessionOrder: string[];
-  tasks: Map<string, Task>;
-  taskOrder: string[];
-  templates: TaskTemplate[];
-  reports: Map<string, Report[]>;
   llms: LlmModel[];
   config: AgentConfig;
   confirm: {
@@ -72,53 +59,10 @@ const PLATFORM_RULES: AllowlistRule[] = [
   { pattern: "dcgm dmon", label: "DCGM 指标采集", owned: false },
 ];
 
-const TEMPLATES: TaskTemplate[] = [
-  {
-    name: "cluster-inspect",
-    displayName: "集群日常巡检",
-    description: "节点 / Pod / GPU / 存储 / 证书全量健康检查,输出分级报告",
-    instruction:
-      "对集群执行全量巡检:节点 Ready 状态与资源压力、非 Running Pod、GPU 温度与显存阈值、Ceph 存储水位、网关 TLS 证书有效期。将发现按 P0(故障)/P1(重要)/P2(提示)分级,并给出处置建议。",
-    paramsSchema: [
-      { name: "scope", type: "enum", default: "all", enum: ["all", "compute", "inference", "storage"] },
-    ],
-    defaultCron: "0 6 * * *",
-    skills: ["kubectl-platform", "gpu-inspect", "ceph-ops"],
-  },
-  {
-    name: "gpu-health",
-    displayName: "GPU 节点健康检查",
-    description: "DCGM 指标、温度/显存阈值与 XID 错误扫描",
-    instruction:
-      "扫描全部 GPU 节点:DCGM 温度/显存/利用率指标、阈值检查(温度 85°C / 显存 90%)、近 24h XID 错误日志。对超阈值 GPU 定位所在节点与业务 Pod,输出分级结论与处置建议。",
-    paramsSchema: [{ name: "tempThreshold", type: "number", default: "85" }],
-    defaultCron: "0 2 * * *",
-    skills: ["gpu-inspect"],
-  },
-  {
-    name: "inference-verify",
-    displayName: "推理服务可用性验证",
-    description: "对已发布推理服务做端到端探测(P95 延迟 / 错误率)",
-    instruction:
-      "对 {{namespace}} 下全部 Ready 的 InferenceService 执行端到端验证:经 AI Gateway 发起真实推理请求,统计 P95 延迟与错误率,未通过的服务列出副本状态与最近事件。",
-    paramsSchema: [{ name: "namespace", type: "string", default: "default" }],
-    defaultCron: "30 8 * * *",
-    skills: ["inference-deploy"],
-  },
-];
-
 // ── seeding ──────────────────────────────────────────────────────────────
 
-function iso(offsetMs: number, base: number): string {
-  return new Date(base + offsetMs).toISOString();
-}
-
-const H = 3600_000;
-const D = 24 * H;
-
-/** Seed the demo state. `now` is injectable for tests. */
-export function seedState(now = Date.now()): State {
-  const t0 = now;
+/** Seed the demo state. */
+export function seedState(): State {
 
   const sessions: Map<string, Session> = new Map();
   const sessionOrder: string[] = [];
@@ -159,185 +103,7 @@ export function seedState(now = Date.now()): State {
     { role: "assistant", text: "已提交扩容(InferenceService overrides.replicas=2→4)。**等待审批** · 审批人:你 · 生效后我会自动验证 P95 延迟。" },
   ]);
 
-  const tasks: Map<string, Task> = new Map();
-  const taskOrder: string[] = [];
-  const reports: Map<string, Report[]> = new Map();
-  let seq = 0;
-  const nid = (prefix: string) => `${prefix}-${(++seq).toString(36)}`;
-
-  const addTask = (
-    task: Omit<Task, "id">,
-    reportList: Array<Omit<Report, "id" | "taskId" | "taskName">>,
-  ): Task => {
-    const t: Task = { ...task, id: nid("task") };
-    tasks.set(t.id, t);
-    taskOrder.push(t.id);
-    reports.set(
-      t.id,
-      reportList.map((r) => ({ ...r, id: nid("run"), taskId: t.id, taskName: t.name })),
-    );
-    return t;
-  };
-
-  const dailyInspectionReport = (when: number, p1: number, p2: number): Omit<Report, "id" | "taskId" | "taskName"> => ({
-    trigger: "Cron",
-    status: "success",
-    startedAt: iso(when, t0),
-    finishedAt: iso(when + 4 * 60_000, t0),
-    content: [
-      "# 集群日常巡检报告",
-      "",
-      `**范围**: all · **策略**: daily-6am`,
-      "",
-      "## 检查项",
-      "- Kubernetes 控制面: ✅ API Server / etcd / Scheduler / Controller 4/4",
-      "- Node Ready: ✅ 16 节点 Ready,无 CrashLoopBackOff",
-      "- GPU 健康: ⚠️ gpu-nvidia-02 GPU#3 温度 87°C > 85°C(P1)",
-      "- 存储容量: ⚠️ osd-07 使用率 82%(P1)",
-      "- 网络组件: ✅ Cilium / Envoy Gateway / CoreDNS 2/2",
-      "- 推理服务: ✅ 11 就绪 · qwen2.5-72b 扩缩容中(P2)",
-      "- 证书与安全: ✅ 网关 TLS 证书 28 天后到期(P2)",
-      "",
-      "## 结论",
-      `**24 / 26 项通过** · P0: 0 · P1: ${p1} · P2: ${p2} · 异常已同步消息中心`,
-    ].join("\n"),
-    p0: 0,
-    p1,
-    p2,
-  });
-
-  addTask(
-    {
-      name: "每日集群巡检",
-      prompt: "",
-      schedule: "0 6 * * *",
-      templateRef: "cluster-inspect",
-      enabled: true,
-      creator: "platform",
-      createdAt: iso(-14 * D, t0),
-      lastRunAt: iso(-1 * D + 6 * H, t0),
-      lastStatus: "success",
-      nextRunAt: (nextCronRun("0 6 * * *", new Date(t0)) ?? undefined)?.toISOString(),
-    },
-    [dailyInspectionReport(-2 * D + 6 * H, 1, 2), dailyInspectionReport(-1 * D + 6 * H, 2, 2)],
-  );
-
-  addTask(
-    {
-      name: "GPU 节点健康检查",
-      prompt: "",
-      schedule: "0 2 * * *",
-      templateRef: "gpu-health",
-      enabled: true,
-      creator: "platform",
-      createdAt: iso(-14 * D, t0),
-      lastRunAt: iso(-1 * D + 2 * H, t0),
-      lastStatus: "success",
-      nextRunAt: (nextCronRun("0 2 * * *", new Date(t0)) ?? undefined)?.toISOString(),
-    },
-    [
-      {
-        trigger: "Cron",
-        status: "success",
-        startedAt: iso(-1 * D + 2 * H, t0),
-        finishedAt: iso(-1 * D + 2 * H + 42_000, t0),
-        content: [
-          "# GPU 节点健康检查报告",
-          "",
-          "## 扫描范围",
-          "- 3 个 GPU 池 · 128 张卡(NVIDIA ×96 / MetaX ×32)",
-          "",
-          "## 阈值检查(温度 85°C / 显存 90%)",
-          "- ⚠️ gpu-nvidia-02 GPU#3: 温度 87°C(P1)· 关联告警 P2-8841",
-          "- 其余 127 张卡正常(71–78°C)",
-          "",
-          "## XID 错误(近 24h)",
-          "- 无 Xid 48 / 63 / 79 记录",
-          "",
-          "## 结论",
-          "**1 项异常** · P0: 0 · P1: 1 · P2: 0 · 已推送消息中心",
-        ].join("\n"),
-        p0: 0,
-        p1: 1,
-        p2: 0,
-      },
-    ],
-  );
-
-  addTask(
-    {
-      name: "推理服务可用性验证",
-      prompt: "",
-      schedule: "30 8 * * *",
-      templateRef: "inference-verify",
-      enabled: true,
-      creator: "platform",
-      createdAt: iso(-7 * D, t0),
-      lastRunAt: iso(-1 * D + 8 * H + 30 * 60_000, t0),
-      lastStatus: "success",
-      nextRunAt: (nextCronRun("30 8 * * *", new Date(t0)) ?? undefined)?.toISOString(),
-    },
-    [
-      {
-        trigger: "Cron",
-        status: "success",
-        startedAt: iso(-1 * D + 8 * H + 30 * 60_000, t0),
-        finishedAt: iso(-1 * D + 8 * H + 32 * 60_000, t0),
-        content: [
-          "# 推理服务可用性验证报告",
-          "",
-          "## 验证结果(经 AI Gateway 端到端)",
-          "| 服务 | 副本 | P95 | 结果 |",
-          "| --- | --- | --- | --- |",
-          "| glm-5.2-chat | 2/2 | 412ms | ✅ 通过 |",
-          "| deepseek-v4 | 2/2 | 388ms | ✅ 通过 |",
-          "| qwen2.5-72b | 1/2 | — | ⏳ 扩缩容完成后重试 |",
-          "",
-          "## 结论",
-          "**2 / 3 服务通过** · P0: 0 · P1: 0 · P2: 1",
-        ].join("\n"),
-        p0: 0,
-        p1: 0,
-        p2: 1,
-      },
-    ],
-  );
-
-  addTask(
-    {
-      name: "升级前预检(v1.4.0)",
-      prompt: "校验 v1.3.2 → v1.4.0 升级路径、etcd 碎片率与备份、容量水位、CRD 兼容性,输出预检结论",
-      schedule: "",
-      enabled: false,
-      creator: "platform",
-      createdAt: iso(-3 * D, t0),
-      lastRunAt: iso(-2 * D + 22 * H, t0),
-      lastStatus: "failed",
-    },
-    [
-      {
-        trigger: "Manual",
-        status: "failed",
-        startedAt: iso(-2 * D + 22 * H, t0),
-        finishedAt: iso(-2 * D + 22 * H + 82_000, t0),
-        content: [
-          "# 升级前预检报告(v1.3.2 → v1.4.0)",
-          "",
-          "## 预检项",
-          "- 版本升级路径: ✅ 合法",
-          "- etcd 碎片率: ⚠️ 31%(建议 compact + defrag)",
-          "- Ceph 容量: ⚠️ 78%(warning)",
-          "- CRD 兼容性: ✅ ai.cubestack.io/v1alpha1 兼容",
-          "",
-          "## 结论",
-          "**失败**: 预检脚本在 CRD 兼容性扫描阶段超时(> 60s)。12 项通过,2 项 warning。请调整超时或分批扫描后重试。",
-        ].join("\n"),
-        p0: 0,
-        p1: 2,
-        p2: 0,
-      },
-    ],
-  );
+  const seq = 0;
 
   const skills: SkillInfo[] = [
     { name: "kubectl-platform", displayName: "K8s 平台操作", description: "节点 / Pod / Service / 自定义资源的只读查询与受控写操作", enabled: true },
@@ -351,10 +117,6 @@ export function seedState(now = Date.now()): State {
   return {
     sessions,
     sessionOrder,
-    tasks,
-    taskOrder,
-    templates: TEMPLATES,
-    reports,
     llms: [
       { name: "glm-5.2-chat", endpoint: "https://llm.cubestack.local/v1", keyed: true },
       { name: "qwen2.5-72b", endpoint: "https://llm.cubestack.local/v1/qwen", keyed: true },
@@ -381,135 +143,13 @@ export function seedState(now = Date.now()): State {
 
 let state: State = seedState();
 
-/** Test hook: re-seed the singleton with an injectable clock. */
-export function __resetStore(now = Date.now()): void {
-  state = seedState(now);
+/** Test hook: re-seed the singleton. */
+export function __resetStore(): void {
+  state = seedState();
 }
 
 function nextId(prefix: string): string {
   return `${prefix}-${(++state.seq).toString(36)}`;
-}
-
-/** Materialize simulated runs whose duration has elapsed. */
-function materializeRuns(): void {
-  const now = Date.now();
-  for (const list of state.reports.values()) {
-    for (const r of list) {
-      if (r.status !== "running") continue;
-      if (now - new Date(r.startedAt).getTime() >= RUN_DURATION_MS) {
-        finishRun(r);
-      }
-    }
-  }
-}
-
-function finishRun(r: Report): void {
-  r.status = "success";
-  r.finishedAt = new Date().toISOString();
-  const task = state.tasks.get(r.taskId);
-  const template = task?.templateRef ? state.templates.find((t) => t.name === task.templateRef) : undefined;
-  const prompt = template?.instruction ?? task?.prompt ?? "执行任务";
-  const findings = countFindings(reportForTemplate(template?.name, prompt));
-  r.content = findings.md;
-  r.p0 = findings.p0;
-  r.p1 = findings.p1;
-  r.p2 = findings.p2;
-  if (task) {
-    task.lastRunAt = r.startedAt;
-    task.lastStatus = r.status;
-  }
-}
-
-interface Findings {
-  md: string;
-  p0: number;
-  p1: number;
-  p2: number;
-}
-
-/** Extract P0/P1/P2 counts from the "P0: n · P1: n · P2: n" conclusion line. */
-function countFindings(content: string): Findings {
-  const m = /P0:\s*(\d+)\s*·\s*P1:\s*(\d+)\s*·\s*P2:\s*(\d+)/.exec(content);
-  return {
-    md: content,
-    p0: m ? Number(m[1]) : 0,
-    p1: m ? Number(m[2]) : 0,
-    p2: m ? Number(m[3]) : 0,
-  };
-}
-
-/** Canned report content for a just-finished (simulated) run. */
-function reportForTemplate(templateName: string | undefined, prompt: string): string {
-  const stamp = new Date().toISOString();
-  if (templateName === "cluster-inspect") {
-    return [
-      "# 集群日常巡检报告",
-      "",
-      `**运行时间**: ${stamp} · **范围**: all`,
-      "",
-      "## 检查项",
-      "- Kubernetes 控制面: ✅ 4/4",
-      "- Node Ready: ✅ 16 节点 Ready,无 CrashLoopBackOff",
-      "- GPU 健康: ⚠️ gpu-nvidia-02 GPU#3 温度 87°C > 85°C(P1)",
-      "- 存储容量: ⚠️ osd-07 使用率 82%(P1)",
-      "- 网络组件: ✅ 2/2",
-      "- 推理服务: ✅ 11 就绪(P2: qwen2.5-72b 扩缩容中)",
-      "- 证书与安全: ✅ 正常(P2: 证书 28 天后到期)",
-      "",
-      "## 结论",
-      "**24 / 26 项通过** · P0: 0 · P1: 2 · P2: 2 · 异常已同步消息中心",
-    ].join("\n");
-  }
-  if (templateName === "gpu-health") {
-    return [
-      "# GPU 节点健康检查报告",
-      "",
-      `**运行时间**: ${stamp}`,
-      "",
-      "## 阈值检查(温度 85°C / 显存 90%)",
-      "- ⚠️ gpu-nvidia-02 GPU#3: 温度 87°C(P1)",
-      "- 其余 127 张卡正常",
-      "",
-      "## XID 错误(近 24h)",
-      "- 无 Xid 48 / 63 / 79 记录",
-      "",
-      "## 结论",
-      "**1 项异常** · P0: 0 · P1: 1 · P2: 0",
-    ].join("\n");
-  }
-  if (templateName === "inference-verify") {
-    return [
-      "# 推理服务可用性验证报告",
-      "",
-      `**运行时间**: ${stamp}`,
-      "",
-      "## 验证结果(经 AI Gateway 端到端)",
-      "- glm-5.2-chat: ✅ 通过 · P95 412ms",
-      "- deepseek-v4: ✅ 通过 · P95 388ms",
-      "- qwen2.5-72b: ⏳ 扩缩容中,验证推迟(P2)",
-      "",
-      "## 结论",
-      "**2 / 3 服务通过** · P0: 0 · P1: 0 · P2: 1",
-    ].join("\n");
-  }
-  return [
-    "# 任务执行报告(自由任务)",
-    "",
-    `**运行时间**: ${stamp}`,
-    "",
-    "## 指令",
-    "```",
-    prompt,
-    "```",
-    "",
-    "## 执行摘要",
-    "- 已按计划完成资源查询与状态核对",
-    "- ⚠️ osd-07 使用率 82%,建议关注(P1)",
-    "- 其余指标正常",
-    "",
-    "## 结论",
-    "**执行成功** · P0: 0 · P1: 1 · P2: 0",
-  ].join("\n");
 }
 
 // ── sessions ─────────────────────────────────────────────────────────────
@@ -554,113 +194,6 @@ export function sendUserMessage(key: string, text: string): AssistantReplyResult
 export interface AssistantReplyResult {
   key: string;
   reply: { text: string; tools?: ChatToolCall[] } | null;
-}
-
-// ── tasks ────────────────────────────────────────────────────────────────
-
-/** Reports for a task, with expired simulated runs materialized. */
-export function listReports(taskId: string): Report[] {
-  materializeRuns();
-  return [...(state.reports.get(taskId) ?? [])].reverse();
-}
-
-export function listTasks(): Task[] {
-  materializeRuns();
-  return state.taskOrder
-    .map((id) => state.tasks.get(id)!)
-    .map((t) => {
-      // Recompute nextRunAt so it always lies in the future.
-      const next = t.schedule ? nextCronRun(t.schedule, new Date()) : null;
-      return { ...t, nextRunAt: next?.toISOString() };
-    });
-}
-
-export function getTask(id: string): Task | undefined {
-  return state.tasks.get(id);
-}
-
-export interface CreateTaskInput {
-  name: string;
-  prompt: string;
-  schedule: string;
-  templateRef?: string;
-  params?: Record<string, string>;
-}
-
-export function createTask(user: string, input: CreateTaskInput): Task {
-  const template = input.templateRef ? state.templates.find((t) => t.name === input.templateRef) : undefined;
-  const instruction = template
-    ? renderInstruction(template.instruction, input.params ?? {})
-    : input.prompt.trim();
-  const schedule = input.schedule.trim();
-  const task: Task = {
-    id: nextId("task"),
-    name: input.name.trim(),
-    prompt: template ? "" : instruction,
-    schedule,
-    templateRef: template?.name,
-    enabled: true,
-    creator: user,
-    createdAt: new Date().toISOString(),
-  };
-  if (schedule) task.nextRunAt = nextCronRun(schedule, new Date())?.toISOString();
-  state.tasks.set(task.id, task);
-  state.taskOrder.push(task.id);
-  state.reports.set(task.id, []);
-  return task;
-}
-
-/** Interpolate {{param}} placeholders (client preview does the same). */
-export function renderInstruction(instruction: string, params: Record<string, string>): string {
-  let out = instruction;
-  for (const [k, v] of Object.entries(params)) {
-    out = out.split("{{" + k + "}}").join(v);
-  }
-  return out;
-}
-
-export function deleteTask(id: string): boolean {
-  if (!state.tasks.delete(id)) return false;
-  state.taskOrder = state.taskOrder.filter((x) => x !== id);
-  state.reports.delete(id);
-  return true;
-}
-
-export function toggleTask(id: string): Task | undefined {
-  const t = state.tasks.get(id);
-  if (!t) return undefined;
-  t.enabled = !t.enabled;
-  return t;
-}
-
-/** Start a simulated run; the report materializes after RUN_DURATION_MS. */
-export function runTask(id: string, trigger: "Cron" | "Manual"): Report | undefined {
-  const t = state.tasks.get(id);
-  if (!t) return undefined;
-  const startedAt = new Date().toISOString();
-  const report: Report = {
-    id: nextId("run"),
-    taskId: id,
-    taskName: t.name,
-    trigger,
-    status: "running",
-    startedAt,
-    finishedAt: "",
-    content: "",
-    p0: 0,
-    p1: 0,
-    p2: 0,
-  };
-  const list = state.reports.get(id) ?? [];
-  list.push(report);
-  state.reports.set(id, list);
-  t.lastRunAt = startedAt;
-  t.lastStatus = "running";
-  return report;
-}
-
-export function listTemplates(): TaskTemplate[] {
-  return state.templates;
 }
 
 // ── LLMs ─────────────────────────────────────────────────────────────────
@@ -712,13 +245,15 @@ export function saveConfig(patch: { model?: string; systemPrompt?: string }): Ag
 }
 
 export function getStatus(user: string): AgentStatus {
-  const startedAt = new Date(Date.now() - 2 * D - 5 * H).toISOString();
+  // Demo: the agent has been up for 2d 5h.
+  const uptimeSeconds = 2 * 24 * 3600 + 5 * 3600;
+  const startedAt = new Date(Date.now() - uptimeSeconds * 1000).toISOString();
   return {
     exists: state.config.exists,
     id: `agent-${user}`,
     phase: "Ready",
     startedAt,
-    uptimeSeconds: 2 * 24 * 3600 + 5 * 3600,
+    uptimeSeconds,
     gatewayImage: "cubestack/cubepilot-gateway:v1.4.0",
     user,
   };
@@ -765,88 +300,6 @@ export function setSkillEnabled(name: string, enable: boolean): SkillInfo[] {
   else set.delete(name);
   state.enabledSkills = [...set];
   return listSkills();
-}
-
-// ── playground (inference services) ──────────────────────────────────────
-
-/**
- * Demo catalog of running inference services for the unified chat object
- * list, mirroring public/chat.html. Static on purpose: the demo does not
- * mutate service state.
- */
-const PLAYGROUND_SERVICES: PlaygroundService[] = [
-  {
-    serviceId: "glm-5.2-chat",
-    name: "glm-5.2-chat",
-    engine: "vLLM",
-    gpu: "2 × A100(NVIDIA)",
-    model: "GLM-5.2 · v1.0.0",
-    replicas: "2 / 4",
-    qps: 42,
-    p95Ms: 412,
-    tps: 1204,
-    persona: "我是 GLM-5.2,由 CubeStack 推理池以 vLLM 引擎托管,当前张量并行 TP=2。",
-  },
-  {
-    serviceId: "deepseek-v4",
-    name: "deepseek-v4",
-    engine: "SGLang",
-    gpu: "4 × C500(沐曦)",
-    model: "DeepSeek-V4 · v0.9.2",
-    replicas: "4 / 6",
-    qps: 67,
-    p95Ms: 388,
-    tps: 2310,
-    persona: "我是 DeepSeek-V4,运行在沐曦 C500 推理池,由 SGLang 引擎提供服务。",
-  },
-  {
-    serviceId: "llama3-8b-chat",
-    name: "llama3-8b-chat",
-    engine: "vLLM",
-    gpu: "1 × A100(NVIDIA)",
-    model: "Llama-3-8B · v1.2.0",
-    replicas: "1 / 2",
-    qps: 18,
-    p95Ms: 196,
-    tps: 640,
-    persona: "我是 Llama-3-8B 微调版,单卡 A100 部署,适合低并发调试与验证。",
-  },
-];
-
-/** Services still scaling; they join the list once ready. */
-const PLAYGROUND_SCALING: PlaygroundScaling[] = [{ name: "qwen2.5-72b", engine: "GPUStack" }];
-
-/** Scripted model answers, rotated by turn; {placeholders} fill service facts. */
-const PLAYGROUND_REPLIES = [
-  "好的。这个请求已通过 AI Gateway 路由到 {name} 后端。当前副本数 {replicas},KV Cache 使用率 61%,请求队列无积压。如需更高吞吐,可以把 maxReplicas 上调,或在低峰期开启模型预热以减少冷启动。",
-  "收到。在 CubeStack 上,这类任务建议拆成两步:先在开发环境(DevEnvironment)里用小样本验证,再把推理服务的最小副本数固定为 2 保证可用性。{name} 当前 P95 延迟 {latency}ms,处于健康区间。",
-  "这是一个演示回复:{name} 由 {engine} 引擎托管,GPU 规格 {gpu}。平台按 token_throughput 与 queue_size 指标自动扩缩容,扩容稳定窗 60s、缩容稳定窗 300s。",
-];
-
-export function listPlaygroundServices(): {
-  services: PlaygroundService[];
-  scaling: PlaygroundScaling[];
-} {
-  return {
-    services: PLAYGROUND_SERVICES.map((s) => ({ ...s })),
-    scaling: PLAYGROUND_SCALING.map((s) => ({ ...s })),
-  };
-}
-
-/**
- * The deterministic demo "inference": rotates the scripted replies by turn
- * and fills them with the selected service's facts. Null for unknown ids.
- */
-export function playgroundChat(serviceId: string, turn: number): string | null {
-  const svc = PLAYGROUND_SERVICES.find((s) => s.serviceId === serviceId);
-  if (!svc) return null;
-  const idx = ((turn % PLAYGROUND_REPLIES.length) + PLAYGROUND_REPLIES.length) % PLAYGROUND_REPLIES.length;
-  return PLAYGROUND_REPLIES[idx]
-    .replace("{name}", svc.name)
-    .replace("{engine}", svc.engine)
-    .replace("{gpu}", svc.gpu)
-    .replace("{replicas}", svc.replicas)
-    .replace("{latency}", String(svc.p95Ms));
 }
 
 // ── unified chat: agent (CubePilot) demo content ──────────────────────────

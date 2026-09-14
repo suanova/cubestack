@@ -142,31 +142,12 @@ export interface SkillInfo {
   enabled: boolean;
 }
 
-/** A running inference service offered in the unified chat object list. */
-export interface PlaygroundService {
-  /** Stable id, also the model name at the gateway. */
-  serviceId: string;
-  name: string;
-  /** Inference engine: vLLM / SGLang / GPUStack. */
-  engine: string;
-  /** GPU spec, e.g. "2 × A100(NVIDIA)". */
-  gpu: string;
-  /** Model + version line, e.g. "GLM-5.2 · v1.0.0". */
-  model: string;
-  /** "ready / desired" replica count. */
-  replicas: string;
-  qps: number;
-  p95Ms: number;
-  /** Token throughput per second. */
-  tps: number;
-  /** Short self-introduction shown when the service is selected. */
-  persona: string;
-}
-
-/** A service that is still scaling and therefore not (yet) selectable. */
-export interface PlaygroundScaling {
-  name: string;
-  engine: string;
+/** A model served by the AI Gateway (one entry of its GET /v1/models). */
+export interface GatewayModel {
+  /** Model id — sent as `model` in chat completions. */
+  id: string;
+  /** Gateway-reported owner (may be empty). */
+  ownedBy: string;
 }
 
 // ── unified chat: agent (CubePilot) side ─────────────────────────────────

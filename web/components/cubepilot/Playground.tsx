@@ -1,17 +1,14 @@
 "use client";
 
 // Context cards for the model side of the unified chat rail, adapted from
-// public/chat.html (sampling params / service metrics / cURL). Rendered by
-// ChatPane while an inference-service object is selected.
+// public/chat.html (sampling params / cURL). Rendered by ChatPane while a
+// gateway model is selected.
 
 import { Box } from "@mui/material";
 
-import type { PlaygroundService } from "@/lib/cubepilot/types";
 import { useI18n } from "@/lib/i18n";
 
 import { Card, CardHead, monoSx } from "./ui";
-
-export const GATEWAY_BASE = "https://gateway.cubestack.local";
 
 /** Sampling params shown in the rail and used in the cURL snippet. */
 export interface SampleParams {
@@ -20,20 +17,16 @@ export interface SampleParams {
   maxTokens: number;
 }
 
-/** Model endpoint at the AI Gateway. */
-export function gatewayEndpoint(svc: PlaygroundService): string {
-  return `${GATEWAY_BASE}/v1/models/${svc.name}`;
-}
-
-/** Illustrative cURL snippet for a service + params (the $CUBE_TOKEN form). */
-export function gatewayCurl(svc: PlaygroundService, p: SampleParams): string {
+/** cURL snippet for the real gateway endpoint + selected model + params. */
+export function gatewayCurl(endpoint: string, model: string, p: SampleParams): string {
   return (
-    `curl -X POST \\\n  ${GATEWAY_BASE}/v1/chat/completions \\\n` +
-    `  -H "Authorization: Bearer $CUBE_TOKEN" \\\n  -H "Content-Type: application/json" \\\n` +
-    `  -d '{\n    "model": "${svc.name}",\n` +
+    `curl -X POST \\\n  ${endpoint}/v1/chat/completions \\\n` +
+    `  -H "Content-Type: application/json" \\\n` +
+    `  -d '{\n    "model": "${model}",\n` +
     `    "messages": [{"role": "user", "content": "你好"}],\n` +
     `    "temperature": ${p.temperature},\n` +
-    `    "max_tokens": ${p.maxTokens}\n  }'`
+    `    "max_tokens": ${p.maxTokens},\n` +
+    `    "stream": true\n  }'`
   );
 }
 
@@ -79,31 +72,6 @@ function SliderRow({
         sx={{ width: "100%", accentColor: "var(--accent)", height: 22 }}
       />
       {hint ? <Box sx={{ fontSize: 11, color: "text.secondary", mt: "6px" }}>{hint}</Box> : null}
-    </Box>
-  );
-}
-
-/** One metric cell of the 2×2 service-metrics grid. */
-function MetricCell({ label, value, unit }: { label: string; value: string; unit?: string }) {
-  return (
-    <Box
-      sx={{
-        p: "12px 18px",
-        borderBottom: 1,
-        borderColor: "divider",
-        "&:nth-child(odd)": { borderRight: 1 },
-        "&:nth-last-child(-n+2)": { borderBottom: 0 },
-      }}
-    >
-      <Box sx={{ fontSize: 11, color: "text.secondary" }}>{label}</Box>
-      <Box sx={{ ...monoSx, fontSize: 18, fontWeight: 650, letterSpacing: "-0.02em", mt: "3px" }}>
-        {value}
-        {unit ? (
-          <Box component="small" sx={{ fontSize: 11, fontWeight: 400, color: "text.secondary" }}>
-            {unit}
-          </Box>
-        ) : null}
-      </Box>
     </Box>
   );
 }
@@ -170,51 +138,28 @@ export function ParamsCard({
         max={4096}
         step={128}
         value={params.maxTokens}
-        hint={t("cubepilot.playground.maxTokensHint")}
         onChange={(v) => onChange({ maxTokens: v })}
       />
     </Card>
   );
 }
 
-/** 服务指标 card: QPS / P95 / throughput / replicas of the selected service. */
-export function MetricsCard({ svc }: { svc: PlaygroundService | null }) {
-  const { t } = useI18n();
-  return (
-    <Card data-od-id="metrics-card">
-      <CardHead title={t("cubepilot.playground.metricsTitle")} hint={t("cubepilot.playground.metricsWindow")} />
-      <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr" }}>
-        <MetricCell label={t("cubepilot.playground.metricsQps")} value={svc ? String(svc.qps) : "—"} />
-        <MetricCell label={t("cubepilot.playground.metricsP95")} value={svc ? String(svc.p95Ms) : "—"} unit=" ms" />
-        <MetricCell
-          label={t("cubepilot.playground.metricsTps")}
-          value={svc ? svc.tps.toLocaleString("en-US") : "—"}
-          unit=" /s"
-        />
-        <MetricCell
-          label={t("cubepilot.playground.metricsReplicas")}
-          value={svc ? svc.replicas.split(" /")[0] : "—"}
-          unit={svc ? ` / ${svc.replicas.split(" /")[1]}` : undefined}
-        />
-      </Box>
-    </Card>
-  );
-}
-
 /** API 调用 card: live cURL snippet with a copy button. */
 export function ApiCard({
-  svc,
+  endpoint,
+  model,
   params,
   copied,
   onCopy,
 }: {
-  svc: PlaygroundService | null;
+  endpoint: string;
+  model: string;
   params: SampleParams;
   copied: boolean;
   onCopy: () => void;
 }) {
   const { t } = useI18n();
-  const curl = svc ? gatewayCurl(svc, params) : "";
+  const curl = gatewayCurl(endpoint, model, params);
   return (
     <Card data-od-id="api-card">
       <Box
@@ -229,9 +174,7 @@ export function ApiCard({
         }}
       >
         <Box sx={{ fontSize: 12.5, fontWeight: 600 }}>{t("cubepilot.playground.apiTitle")}</Box>
-        {svc ? (
-          <CopyBtn text={copied ? t("cubepilot.playground.copied") : t("cubepilot.playground.apiCopy")} onClick={onCopy} />
-        ) : null}
+        <CopyBtn text={copied ? t("cubepilot.playground.copied") : t("cubepilot.playground.apiCopy")} onClick={onCopy} />
       </Box>
       <Box
         data-od-id="pg-curl"

@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { authedRequest, bareGet } from "@/test/auth";
 
@@ -8,8 +8,19 @@ const { POST } = await import("./route");
 const post = async (body: unknown) =>
   POST(await authedRequest({ method: "POST", body: JSON.stringify(body) }), undefined);
 
+const SSE_BODY = [
+  `data: ${JSON.stringify({ choices: [{ delta: { content: "Hello" } }] })}`,
+  "",
+  `data: ${JSON.stringify({ choices: [{ delta: { content: " world" } }] })}`,
+  "",
+  "data: [DONE]",
+  "",
+].join("\n");
+
 describe("/api/cubepilot/playground/chat", () => {
   afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
     delete process.env.SESSION_SECRET;
   });
 
@@ -23,32 +34,46 @@ describe("/api/cubepilot/playground/chat", () => {
     expect(((await res.json()) as { error: string }).error).toBe("invalid JSON body");
   });
 
-  it("requires a service and text", async () => {
-    expect((await post({ text: "你好" })).status).toBe(400);
-    expect((await post({ service: "glm-5.2-chat" })).status).toBe(400);
+  it("requires a model and messages", async () => {
+    expect((await post({ messages: [{ role: "user", content: "你好" }] })).status).toBe(400);
+    expect((await post({ model: "m1" })).status).toBe(400);
   });
 
-  it("returns 404 for unknown services", async () => {
-    const res = await post({ service: "nope", text: "你好" });
-    expect(res.status).toBe(404);
-    expect(((await res.json()) as { error: string }).error).toBe('service "nope" not found');
+  it("proxies the gateway SSE stream to the client", async () => {
+    vi.stubEnv("CUBESTACK_GATEWAT_URL", "http://gw.test:8080");
+    const seen: Record<string, unknown> = {};
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        seen.url = url;
+        seen.body = init?.body;
+        return new Response(SSE_BODY, { status: 200, headers: { "content-type": "text/event-stream" } });
+      }),
+    );
+    const res = await post({
+      model: "qwen38-27b-fp16",
+      messages: [{ role: "user", content: "你好" }],
+      temperature: 0.7,
+      topP: 0.9,
+      maxTokens: 1024,
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("text/event-stream");
+    expect(await res.text()).toBe(SSE_BODY);
+    expect(seen.url).toBe("http://gw.test:8080/v1/chat/completions");
+    const payload = JSON.parse(String(seen.body)) as Record<string, unknown>;
+    expect(payload.model).toBe("qwen38-27b-fp16");
+    expect(payload.stream).toBe(true);
+    expect(payload.temperature).toBe(0.7);
+    expect(payload.top_p).toBe(0.9);
+    expect(payload.max_tokens).toBe(1024);
   });
 
-  it("answers with a scripted reply filled with the service facts", async () => {
-    const res = await post({ service: "glm-5.2-chat", text: "你好", turn: 0 });
-    expect(res.status).toBe(201);
-    const body = (await res.json()) as { reply: { text: string } };
-    expect(body.reply.text).toContain("glm-5.2-chat");
-    expect(body.reply.text).toContain("AI Gateway");
-  });
-
-  it("rotates the scripted reply by turn", async () => {
-    const a = (await (await post({ service: "glm-5.2-chat", text: "a", turn: 0 })).json()) as {
-      reply: { text: string };
-    };
-    const b = (await (await post({ service: "glm-5.2-chat", text: "b", turn: 1 })).json()) as {
-      reply: { text: string };
-    };
-    expect(a.reply.text).not.toBe(b.reply.text);
+  it("maps gateway failures to 502", async () => {
+    vi.stubEnv("CUBESTACK_GATEWAT_URL", "http://gw.test:8080");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("model not found", { status: 400 })));
+    const res = await post({ model: "nope", messages: [{ role: "user", content: "hi" }] });
+    expect(res.status).toBe(502);
+    expect(((await res.json()) as { error: string }).error).toContain("400");
   });
 });

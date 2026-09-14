@@ -1,16 +1,18 @@
 "use client";
 
 // 聊天 tab — the unified conversation surface for inference models and the
-// CubePilot agent, mirroring public/chat.html: object list (inference models
+// CubePilot agent, mirroring public/chat.html: object list (gateway models
 // + AI assistant) | chat card | context rail that follows the selected
-// object (model: sampling params / service metrics / cURL; agent: status /
-// tool whitelist / recent calls / approval).
+// object (model: sampling params / cURL; agent: status / tool whitelist /
+// recent calls / approval).
 //
-// Demo: model replies come from /api/cubepilot/playground/chat (canned text,
-// typed out client-side like the prototype); the agent side is canned block
-// playback (greeting, three scenarios with action buttons, generic
-// fallback) with no route behind it, matching the prototype. Conversations
-// are ephemeral: switching objects resets the thread.
+// Model side: the object list is the real model catalog from the AI Gateway
+// (/api/cubepilot/playground/services → gateway /v1/models), and replies are
+// real streamed completions proxied through /api/cubepilot/playground/chat
+// (SSE). The agent side is canned block playback (greeting, three scenarios
+// with action buttons, generic fallback) with no route behind it, matching
+// the prototype. Conversations are ephemeral: switching objects resets the
+// thread.
 
 import { Box, SxProps, Theme } from "@mui/material";
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
@@ -24,7 +26,7 @@ import {
 } from "@/lib/cubepilot/store";
 import type {
   AgentBlock,
-  PlaygroundService,
+  GatewayModel,
   QuickChip,
 } from "@/lib/cubepilot/types";
 import { useI18n } from "@/lib/i18n";
@@ -33,8 +35,6 @@ import {
   ApiCard,
   CopyBtn,
   gatewayCurl,
-  gatewayEndpoint,
-  MetricsCard,
   ParamsCard,
   SampleParams,
 } from "./Playground";
@@ -94,7 +94,7 @@ const botMsgSx: SxProps<Theme> = {
 /** One thread message. Agent messages grow block by block during playback. */
 type ChatMsg =
   | { id: number; role: "user"; text: string }
-  | { id: number; role: "model"; text: string; meta?: string }
+  | { id: number; role: "model"; text: string; meta?: string; notice?: boolean }
   | { id: number; role: "agent"; blocks: AgentBlock[]; usedAction: string | null };
 
 const groupLabelSx: SxProps<Theme> = {
@@ -111,29 +111,29 @@ export function ChatPane() {
   const { t } = useI18n();
   const { showToast, toastView } = useToast();
 
-  const [services, setServices] = useState<PlaygroundService[]>([]);
+  const [models, setModels] = useState<GatewayModel[]>([]);
+  const [endpoint, setEndpoint] = useState<string | null>(null);
   const [objKind, setObjKind] = useState<"model" | "agent" | null>(null);
   const [svcId, setSvcId] = useState<string | null>(null);
   const [msgs, setMsgs] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [thinkingText, setThinkingText] = useState<string | null>(null);
-  /** Partial reply text while the typed-out effect plays; null = idle. */
+  /** Partial reply text while the SSE stream is in flight; null = idle. */
   const [streaming, setStreaming] = useState<string | null>(null);
   const [copied, setCopied] = useState<"endpoint" | "curl" | null>(null);
   const [params, setParams] = useState<SampleParams>({ temperature: 0.7, topP: 0.9, maxTokens: 1024 });
 
   const inputEl = useRef<HTMLTextAreaElement | null>(null);
   const threadEl = useRef<HTMLDivElement | null>(null);
-  const streamTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const playTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Guards against in-flight fetch/stream/playback from a previous object.
   const genRef = useRef(0);
   const idRef = useRef(0);
 
   const agent = AGENT_DEMO.agent;
-  const svc = services.find((s) => s.serviceId === svcId) ?? null;
-  const endpointText = svc ? gatewayEndpoint(svc) : "";
+  const svc = models.find((s) => s.id === svcId) ?? null;
+  const endpointText = endpoint ? `${endpoint}/v1/chat/completions` : "";
   const isModel = objKind === "model";
 
   const nextId = useCallback((): number => {
@@ -150,26 +150,25 @@ export function ChatPane() {
 
   function cancelPlayback(): void {
     genRef.current++;
-    if (streamTimer.current) clearInterval(streamTimer.current);
     if (playTimer.current) clearTimeout(playTimer.current);
     setStreaming(null);
     setThinkingText(null);
   }
 
-  function selectModel(serviceId: string): void {
-    const next = services.find((s) => s.serviceId === serviceId);
+  function selectModel(modelId: string): void {
+    const next = models.find((m) => m.id === modelId);
     if (!next) return;
     selectModelService(next);
   }
 
-  /** Point the chat at a service object (the mount path has it directly). */
-  function selectModelService(next: PlaygroundService | undefined): void {
+  /** Point the chat at a gateway model (the mount path has it directly). */
+  function selectModelService(next: GatewayModel | undefined): void {
     if (!next) return;
     cancelPlayback();
     setObjKind("model");
-    setSvcId(next.serviceId);
+    setSvcId(next.id);
     setMsgs([
-      { id: nextId(), role: "model", text: t("cubepilot.playground.switched", { name: next.name, persona: next.persona }) },
+      { id: nextId(), role: "model", text: t("cubepilot.playground.switched", { name: next.id }), notice: true },
     ]);
   }
 
@@ -181,19 +180,21 @@ export function ChatPane() {
     playAgentBlocks(agentGreeting());
   }
 
-  /** Load the service catalog; on first load select the first service. */
-  async function loadServices(): Promise<void> {
+  /** Load the gateway model catalog; on first load select the first model. */
+  async function loadModels(): Promise<void> {
     const gen = ++genRef.current;
     try {
       const res = await fetch("/api/cubepilot/playground/services");
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const body = (await res.json()) as { services: PlaygroundService[] };
+      const body = (await res.json().catch(() => null)) as
+        | { models?: GatewayModel[]; endpoint?: string | null; error?: string }
+        | null;
       if (genRef.current !== gen) return;
-      setServices(body.services);
-      // First load: default to the first service (the prototype's
-      // selectModel(MODELS[0])). The `services` state is still the pre-fetch
-      // [] in this closure, so the object is passed directly.
-      selectModelService(body.services[0]);
+      if (!res.ok) throw new Error(body?.error || `HTTP ${res.status}`);
+      setModels(body?.models ?? []);
+      setEndpoint(body?.endpoint ?? null);
+      // First load: default to the first model. The `models` state is still
+      // the pre-fetch [] in this closure, so the object is passed directly.
+      selectModelService((body?.models ?? [])[0]);
     } catch (e) {
       if (genRef.current === gen) showToast(t("cubepilot.failed", { error: String(e) }), "error");
     }
@@ -203,7 +204,7 @@ export function ChatPane() {
   // data is locale-neutral, so a load-once effect is what we want.
   /* eslint-disable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps */
   useEffect(() => {
-    void loadServices();
+    void loadModels();
     return () => {
       cancelPlayback();
     };
@@ -238,7 +239,7 @@ export function ChatPane() {
     if (!objKind) return;
     cancelPlayback();
     if (isModel) {
-      if (svc) setMsgs([{ id: nextId(), role: "model", text: t("cubepilot.playground.cleared", { persona: svc.persona }) }]);
+      if (svc) setMsgs([{ id: nextId(), role: "model", text: t("cubepilot.playground.cleared"), notice: true }]);
     } else {
       setMsgs([]);
       playAgentBlocks(agentGreeting());
@@ -253,36 +254,6 @@ export function ChatPane() {
     if (navigator.clipboard?.writeText) navigator.clipboard.writeText(text).then(done, done);
     else done();
   }
-
-  /**
-   * Play back the prototype's typed-out streaming effect for a reply.
-   * buildMeta is passed in rather than computed here so this callback
-   * depends only on stable values (refs, setters, nextId).
-   */
-  const startStream = useCallback(
-    (fullText: string, gen: number, buildMeta: (fullText: string, secs: string) => string): void => {
-      let i = 0;
-      let started = 0;
-      setStreaming("");
-      streamTimer.current = setInterval(() => {
-        if (genRef.current !== gen) {
-          if (streamTimer.current) clearInterval(streamTimer.current);
-          return;
-        }
-        if (!started) started = Date.now();
-        i += 2 + Math.floor(Math.random() * 3);
-        if (i >= fullText.length) {
-          if (streamTimer.current) clearInterval(streamTimer.current);
-          const secs = ((Date.now() - started) / 1000).toFixed(1);
-          setMsgs((m) => [...m, { id: nextId(), role: "model", text: fullText, meta: buildMeta(fullText, secs) }]);
-          setStreaming(null);
-        } else {
-          setStreaming(fullText.slice(0, i));
-        }
-      }, 34);
-    },
-    [nextId],
-  );
 
   /** Keyword → scenario, same rules as the prototype's detectAgentKey. */
   function detectScenario(text: string): string | null {
@@ -301,36 +272,87 @@ export function ChatPane() {
 
       if (objKind === "model") {
         if (!svc) return;
-        const turn = msgs.filter((m) => m.role === "user").length;
+        // Real conversation history for the gateway (notice lines and agent
+        // messages are UI-only and never part of the prompt).
+        const history = msgs
+          .filter((m): m is Extract<ChatMsg, { role: "user" | "model" }> => m.role === "user" || (m.role === "model" && !m.notice))
+          .map((m) => ({ role: m.role === "user" ? ("user" as const) : ("assistant" as const), content: m.text }));
         const gen = ++genRef.current;
         setMsgs((m) => [...m, { id: nextId(), role: "user", text }]);
         setInput("");
         if (el) el.style.height = "auto";
         setSending(true);
-        setThinkingText(t("cubepilot.playground.thinking", { name: svc.name }));
+        setThinkingText(t("cubepilot.playground.thinking", { name: svc.id }));
         const metaParams = t("cubepilot.playground.metaParams", {
           temperature: String(params.temperature),
           topP: String(params.topP),
           maxTokens: String(params.maxTokens),
         });
-        const buildMeta = (full: string, secs: string) =>
-          `${svc.name} · ${metaParams} · ` +
-          t("cubepilot.playground.metaGenerated", { chars: String(full.length), secs });
         (async () => {
+          // Date.now lives in the IIFE body (not the render graph).
+          const started = Date.now();
+          let full = "";
           try {
             const res = await fetch("/api/cubepilot/playground/chat", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ service: svc.serviceId, text, turn }),
+              body: JSON.stringify({
+                model: svc.id,
+                messages: [...history, { role: "user", content: text }],
+                temperature: params.temperature,
+                topP: params.topP,
+                maxTokens: params.maxTokens,
+              }),
             });
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const body = (await res.json()) as { reply: { text: string } };
+            if (!res.ok) {
+              const err = (await res.json().catch(() => null)) as { error?: string } | null;
+              throw new Error(err?.error || `HTTP ${res.status}`);
+            }
+            if (!res.body) throw new Error("empty response body");
             if (genRef.current !== gen) return;
             setThinkingText(null);
-            startStream(body.reply.text, gen, buildMeta);
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = "";
+            for (;;) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              if (genRef.current !== gen) {
+                try {
+                  await reader.cancel();
+                } catch {
+                  /* already closed */
+                }
+                return;
+              }
+              buffer += decoder.decode(value, { stream: true });
+              let nl: number;
+              while ((nl = buffer.indexOf("\n")) >= 0) {
+                const line = buffer.slice(0, nl).trim();
+                buffer = buffer.slice(nl + 1);
+                if (!line.startsWith("data:")) continue;
+                const payload = line.slice(5).trim();
+                if (!payload || payload === "[DONE]") continue;
+                const chunk = JSON.parse(payload) as { choices?: Array<{ delta?: { content?: string } }> };
+                const delta = chunk.choices?.[0]?.delta?.content ?? "";
+                if (delta) {
+                  full += delta;
+                  setStreaming(full);
+                }
+              }
+            }
+            if (genRef.current !== gen) return;
+            if (!full) throw new Error(t("cubepilot.playground.emptyReply"));
+            const secs = ((Date.now() - started) / 1000).toFixed(1);
+            const meta =
+              `${svc.id} · ${metaParams} · ` +
+              t("cubepilot.playground.metaGenerated", { chars: String(full.length), secs });
+            setMsgs((m) => [...m, { id: nextId(), role: "model", text: full, meta }]);
+            setStreaming(null);
           } catch (e) {
             if (genRef.current === gen) {
               setThinkingText(null);
+              setStreaming(null);
               showToast(t("cubepilot.failed", { error: String(e) }), "error");
             }
           } finally {
@@ -353,7 +375,7 @@ export function ChatPane() {
         }, 650);
       }
     },
-    [msgs, objKind, svc, sending, params, nextId, playAgentBlocks, startStream, showToast, t],
+    [msgs, objKind, svc, sending, params, nextId, playAgentBlocks, showToast, t],
   );
 
   /** Click an action button: append its canned results, mark it used. */
@@ -369,12 +391,12 @@ export function ChatPane() {
   }
 
   const chips: QuickChip[] = isModel ? MODEL_CHIPS : AGENT_CHIPS;
-  const objName = objKind === "agent" ? agent.name : (svc?.name ?? "—");
+  const objName = objKind === "agent" ? agent.name : (svc?.id ?? "—");
   const objRole =
     objKind === "agent"
       ? t("cubepilot.chat.roleAgent", { role: agent.role, beat: String(agent.heartbeat) })
       : svc
-        ? t("cubepilot.chat.roleModel", { engine: svc.engine, gpu: svc.gpu })
+        ? t("cubepilot.chat.roleModel")
         : "";
 
   return (
@@ -388,16 +410,16 @@ export function ChatPane() {
         {/* ── objects ── */}
         <Box data-od-id="object-list">
           <Box sx={groupLabelSx}>{t("cubepilot.chat.objectsModels")}</Box>
-          {services.map((s) => {
-            const active = isModel && s.serviceId === svcId;
+          {models.map((m) => {
+            const active = isModel && m.id === svcId;
             return (
               <Box
-                key={s.serviceId}
+                key={m.id}
                 component="button"
                 type="button"
-                onClick={() => selectModel(s.serviceId)}
+                onClick={() => selectModel(m.id)}
                 aria-pressed={active}
-                data-od-id={`obj-${s.serviceId}`}
+                data-od-id={`obj-${m.id}`}
                 sx={{
                   width: "100%",
                   textAlign: "left",
@@ -415,7 +437,7 @@ export function ChatPane() {
               >
                 <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
                   <Box sx={{ fontSize: 13.5, fontWeight: 600, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {s.name}
+                    {m.id}
                   </Box>
                   <Box
                     sx={{
@@ -435,7 +457,7 @@ export function ChatPane() {
                   </Box>
                 </Box>
                 <Box sx={{ ...monoSx, fontSize: 11, color: "text.secondary", mt: "5px", lineHeight: 1.5 }}>
-                  {s.model} · {s.engine}
+                  {m.ownedBy || t("cubepilot.playground.gateway")}
                 </Box>
               </Box>
             );
@@ -532,7 +554,7 @@ export function ChatPane() {
                 </Pill>
               ) : null}
             </Box>
-            {isModel && svc ? (
+            {isModel && svc && endpoint ? (
               <Box
                 data-od-id="pg-endpoint"
                 sx={{
@@ -622,7 +644,7 @@ export function ChatPane() {
               ) : m.role === "model" ? (
                 <Box key={m.id} sx={botMsgSx}>
                   <Box sx={{ ...monoSx, fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--accent-strong)", mb: "6px" }}>
-                    MODEL · {svc?.name ?? ""}
+                    MODEL · {svc?.id ?? ""}
                   </Box>
                   {m.text}
                   {m.meta ? (
@@ -724,7 +746,7 @@ export function ChatPane() {
                 sx={{ ...botMsgSx, "@keyframes cpBlink": { "50%": { opacity: 0 } } }}
               >
                 <Box sx={{ ...monoSx, fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--accent-strong)", mb: "6px" }}>
-                  MODEL · {svc.name}
+                  MODEL · {svc.id}
                 </Box>
                 {streaming}
                 <Box
@@ -918,15 +940,15 @@ export function ChatPane() {
               params={params}
               onChange={(patch) => setParams((p) => ({ ...p, ...patch }))}
             />
-            <MetricsCard svc={svc} />
-            <ApiCard
-              svc={svc}
-              params={params}
-              copied={copied === "curl"}
-              onCopy={() => {
-                if (svc) copyText(gatewayCurl(svc, params), "curl");
-              }}
-            />
+            {endpoint && svc ? (
+              <ApiCard
+                endpoint={endpoint}
+                model={svc.id}
+                params={params}
+                copied={copied === "curl"}
+                onCopy={() => copyText(gatewayCurl(endpoint, svc.id, params), "curl")}
+              />
+            ) : null}
           </Box>
         )}
       </Box>

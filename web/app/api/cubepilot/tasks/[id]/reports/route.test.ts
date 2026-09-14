@@ -1,19 +1,52 @@
 // @vitest-environment node
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { authedGet, bareGet } from "@/test/auth";
-import { __resetStore, listTasks } from "@/lib/cubepilot/store";
+
+const { getNamespacedCustomObject, listNamespacedCustomObject } = vi.hoisted(() => ({
+  getNamespacedCustomObject: vi.fn(),
+  listNamespacedCustomObject: vi.fn(),
+}));
+
+vi.mock("@/lib/kubernetes", () => ({
+  getCustomObjectsClient: () => ({ getNamespacedCustomObject, listNamespacedCustomObject }),
+}));
 
 const { GET } = await import("./route");
 
 const ctx = (id: string) => ({ params: Promise.resolve({ id }) });
 
+/** 404-shaped rejection, like the real client does for unknown names. */
+const notFound = () => {
+  const e = new Error("not found") as Error & { statusCode: number };
+  e.statusCode = 404;
+  return Promise.reject(e);
+};
+
+const TASK_CR = {
+  metadata: {
+    name: "alice-task-01",
+    creationTimestamp: "2026-09-10T06:00:00Z",
+    annotations: { "cubepilot/display-name": "每日集群巡检" },
+  },
+  spec: { instruction: "巡检", owner: "alice", trigger: "Cron", cron: "0 6 * * *", state: "Enabled" },
+};
+
+const RUN = (over: Record<string, unknown> = {}) => ({
+  metadata: { name: "run-00000001", creationTimestamp: "2026-09-13T06:00:00Z" },
+  spec: { creatorTaskRef: { name: "alice-task-01" }, trigger: "Cron" },
+  status: { phase: "Completed", startedAt: "2026-09-13T06:00:00Z", finishedAt: "2026-09-13T06:04:00Z" },
+  ...over,
+});
+
 describe("/api/cubepilot/tasks/[id]/reports", () => {
   beforeEach(() => {
-    __resetStore();
+    process.env.CUBESTACK_TASKS_NAMESPACE = "cubestack-system";
+    vi.clearAllMocks();
   });
 
   afterEach(() => {
+    delete process.env.CUBESTACK_TASKS_NAMESPACE;
     delete process.env.SESSION_SECRET;
   });
 
@@ -21,20 +54,85 @@ describe("/api/cubepilot/tasks/[id]/reports", () => {
     expect((await GET(await bareGet(), ctx("any"))).status).toBe(401);
   });
 
-  it("returns the task's reports newest first", async () => {
-    const daily = listTasks()[0]; // 每日集群巡检 (2 seeded runs)
-    const res = await GET(await authedGet(), ctx(daily.id));
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { reports: Array<{ taskName: string; status: string; p1: number }> };
-    expect(body.reports).toHaveLength(2);
-    expect(body.reports[0].taskName).toBe("每日集群巡检");
-    expect(body.reports.every((r) => r.status === "success")).toBe(true);
-    // Newest first: the -1d run (P1: 2) precedes the -2d run (P1: 1).
-    expect(body.reports[0].p1).toBe(2);
-    expect(body.reports[1].p1).toBe(1);
+  it("404s for an unknown task", async () => {
+    getNamespacedCustomObject.mockImplementation(() => notFound());
+    expect((await GET(await authedGet(), ctx("nope"))).status).toBe(404);
   });
 
-  it("404s for an unknown task", async () => {
-    expect((await GET(await authedGet(), ctx("nope"))).status).toBe(404);
+  it("maps TaskRun CRs to reports, newest first", async () => {
+    getNamespacedCustomObject.mockResolvedValue(TASK_CR);
+    listNamespacedCustomObject.mockResolvedValue({
+      items: [
+        RUN({
+          metadata: { name: "run-aaa", creationTimestamp: "2026-09-12T06:00:00Z" },
+          spec: { creatorTaskRef: { name: "alice-task-01" }, trigger: "Cron" },
+          status: {
+            phase: "Completed",
+            startedAt: "2026-09-12T06:00:00Z",
+            finishedAt: "2026-09-12T06:04:00Z",
+            summary: { total: 26, abnormal: 2, p0: 0, p1: 2, p2: 2 },
+            content: "# 集群日常巡检报告\n\n**24 / 26 项通过**",
+          },
+        }),
+        RUN({
+          metadata: { name: "run-bbb", creationTimestamp: "2026-09-13T06:00:00Z" },
+          spec: { creatorTaskRef: { name: "alice-task-01" }, trigger: "Manual" },
+          status: {
+            phase: "Failed",
+            startedAt: "2026-09-13T06:00:00Z",
+            finishedAt: "2026-09-13T06:01:22Z",
+            summary: { total: 20, abnormal: 1, p0: 1, p1: 0, p2: 0 },
+            content: "# 巡检失败",
+            error: "pre-check timed out",
+          },
+        }),
+      ],
+    });
+    const res = await GET(await authedGet(), ctx("alice-task-01"));
+    expect(res.status).toBe(200);
+    // TaskRuns are selected by the cubepilot/task label.
+    expect(listNamespacedCustomObject.mock.calls[0][0]).toMatchObject({
+      namespace: "cubestack-system",
+      plural: "taskruns",
+      labelSelector: "cubepilot/task=alice-task-01",
+    });
+    const body = (await res.json()) as { reports: Array<Record<string, unknown>> };
+    expect(body.reports.map((r) => r.id)).toEqual(["run-bbb", "run-aaa"]);
+    const latest = body.reports[0];
+    expect(latest).toMatchObject({
+      taskId: "alice-task-01",
+      taskName: "每日集群巡检", // display-name of the task CR
+      trigger: "Manual",
+      status: "failed",
+      startedAt: "2026-09-13T06:00:00Z",
+      finishedAt: "2026-09-13T06:01:22Z",
+      content: "# 巡检失败",
+      p0: 1,
+      p1: 0,
+      p2: 0,
+    });
+    expect(body.reports[1]).toMatchObject({ status: "success", p1: 2, p2: 2, trigger: "Cron" });
+  });
+
+  it("reports a Pending run as running with a creationTimestamp start", async () => {
+    getNamespacedCustomObject.mockResolvedValue(TASK_CR);
+    listNamespacedCustomObject.mockResolvedValue({
+      items: [
+        {
+          metadata: { name: "run-pending", creationTimestamp: "2026-09-14T06:00:00Z" },
+          spec: { creatorTaskRef: { name: "alice-task-01" }, trigger: "Manual" },
+          status: { phase: "Pending" },
+        },
+      ],
+    });
+    const body = (await (await GET(await authedGet(), ctx("alice-task-01"))).json()) as {
+      reports: Array<Record<string, unknown>>;
+    };
+    expect(body.reports[0]).toMatchObject({ status: "running", startedAt: "2026-09-14T06:00:00Z", finishedAt: "" });
+  });
+
+  it("503s when the namespace env is unset", async () => {
+    delete process.env.CUBESTACK_TASKS_NAMESPACE;
+    expect((await GET(await authedGet(), ctx("any"))).status).toBe(503);
   });
 });
