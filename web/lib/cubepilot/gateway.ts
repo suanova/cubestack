@@ -1,11 +1,13 @@
 // AI Gateway client — reaches the Envoy AI Gateway from the portal's
-// server-side route handlers. The base URL is either provided explicitly via
-// CUBESTACK_GATEWAT_URL (e.g. http://<node>:30880 for a NodePort, or the
-// in-cluster DNS name), or auto-discovered as the ai-gateway Service in the
-// envoy-gateway-system namespace:
-//   - inside the cluster: plain in-cluster DNS (http://<svc>.<ns>.svc:<port>);
-//   - local dev: the API-server service proxy, which works off-cluster and is
-//     authenticated with the kubeconfig credentials (client certs or token).
+// server-side route handlers. The base URL is resolved as:
+//   1. CUBESTACK_GATEWAT_URL when set (e.g. http://<node>:30880 for a
+//      NodePort, or an in-cluster DNS name);
+//   2. the ai-gateway Service discovered in envoy-gateway-system:
+//      - inside the cluster: plain in-cluster DNS (http://<svc>.<ns>.svc:<port>);
+//      - local dev: the API-server service proxy, which works off-cluster and
+//        is authenticated with the kubeconfig credentials (client certs/token);
+//   3. in-cluster last resort: the well-known default base
+//      (DEFAULT_GATEWAY_BASE), which needs no RBAC to list Services.
 // CUBESTACK_GATEWAY_TOKEN, when set, is sent as a bearer header on every
 // gateway request.
 
@@ -18,6 +20,14 @@ import { getCoreClient, getKubeConfig } from "@/lib/kubernetes";
 
 /** Namespace the AI Gateway Service is expected to live in. */
 export const GATEWAY_NAMESPACE = "envoy-gateway-system";
+
+/**
+ * Well-known in-cluster base of the Envoy AI Gateway. Used when the portal
+ * runs inside a cluster and CUBESTACK_GATEWAT_URL is unset — including when
+ * Service discovery is unavailable (e.g. no RBAC to list Services). It is an
+ * in-cluster DNS name, so it is only offered when actually running in-cluster.
+ */
+const DEFAULT_GATEWAY_BASE = "http://envoy-default-ai-gateway.envoy-gateway-system.svc:8080";
 
 /** A resolved gateway base plus how to reach it. */
 export interface GatewayBase {
@@ -39,14 +49,12 @@ function safeRead(path: string): string | undefined {
 }
 
 /**
- * Resolve the gateway base. CUBESTACK_GATEWAT_URL wins; otherwise the
- * ai-gateway Service is discovered in envoy-gateway-system and mapped to an
- * in-cluster DNS URL (in cluster) or an API-server service-proxy URL
- * (local dev). Null when nothing is configured or found.
+ * Discover the ai-gateway Service in envoy-gateway-system and map it to a
+ * reachable base: an in-cluster DNS URL when running in the cluster, or an
+ * API-server service-proxy URL off-cluster. Null when nothing is found or the
+ * cluster cannot be listed.
  */
-export async function resolveGatewayBase(): Promise<GatewayBase | null> {
-  const explicit = (process.env.CUBESTACK_GATEWAT_URL ?? "").trim();
-  if (explicit) return { url: explicit.replace(/\/+$/, ""), via: "direct" };
+async function discoverGatewayBase(): Promise<GatewayBase | null> {
   try {
     const core = getCoreClient();
     const res = await core.listNamespacedService({ namespace: GATEWAY_NAMESPACE });
@@ -66,6 +74,20 @@ export async function resolveGatewayBase(): Promise<GatewayBase | null> {
   } catch {
     return null;
   }
+}
+
+/**
+ * Resolve the gateway base. CUBESTACK_GATEWAT_URL wins; otherwise the
+ * ai-gateway Service is discovered (see discoverGatewayBase); in-cluster,
+ * the well-known default base is the last resort; null when nothing applies.
+ */
+export async function resolveGatewayBase(): Promise<GatewayBase | null> {
+  const explicit = (process.env.CUBESTACK_GATEWAT_URL ?? "").trim();
+  if (explicit) return { url: explicit.replace(/\/+$/, ""), via: "direct" };
+  const discovered = await discoverGatewayBase();
+  if (discovered) return discovered;
+  if (inCluster()) return { url: DEFAULT_GATEWAY_BASE, via: "direct" };
+  return null;
 }
 
 /** Bearer header for the gateway when CUBESTACK_GATEWAY_TOKEN is set. */

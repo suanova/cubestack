@@ -40,20 +40,41 @@ rules:
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["list"]
+  # Discover the AI Gateway Service in envoy-gateway-system (playground model
+  # list / chat). Cross-namespace, so it lives here rather than in the
+  # release-namespace Role (which would also fail to install before the
+  # gateway namespace exists). Best-effort: in-cluster the app also falls back
+  # to a well-known gateway DNS name that needs no RBAC, and off-cluster it
+  # uses the API-server service proxy (kubeconfig, not this ServiceAccount).
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list"]
   # Read and write the operator's CRs. Reads are cluster-wide because the UI
   # aggregates them (listClusterCustomObject) and the CRDs are a mix of
-  # namespaced and cluster scope. Writes (create/update/delete) are cluster-wide
+  # namespaced and cluster scope. Writes (create/patch/delete) are cluster-wide
   # because the UI creates an environment/service in whichever namespace the
   # user picks, and the portal has no per-user role or namespace scoping —
   # sessions carry only the username (see the chart README, "Authorization
   # model"), so every valid session is effectively a platform admin. Guard the
-  # htpasswd credentials as admin credentials. profiles and modelversions stay
-  # read-only: the UI never writes them.
+  # htpasswd credentials as admin credentials. Mutations are HTTP PATCH
+  # (JSON-Patch, hence the patch verb; the UI never sends PUT/update).
+  # profiles and modelversions stay read-only: the UI never writes them.
+  # Task CRs are likewise cluster-wide:
+  # their namespace comes from CUBESTACK_TASKS_NAMESPACE and need not be the
+  # release namespace. The UI creates tasks and deletes them, and patches
+  # spec.state / the manual-run annotation (JSON-Patch, hence the patch verb);
+  # taskruns (run reports) and tasktemplates stay read-only.
   - apiGroups: ["ai.cubestack.io"]
     resources: ["inferenceservices", "devenvironments"]
-    verbs: ["create", "update", "delete", "get", "list", "watch"]
+    verbs: ["create", "patch", "delete", "get", "list", "watch"]
   - apiGroups: ["ai.cubestack.io"]
     resources: ["inferenceruntimeprofiles", "modelversions"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["ai.cubestack.io"]
+    resources: ["tasks"]
+    verbs: ["create", "patch", "delete", "get", "list", "watch"]
+  - apiGroups: ["ai.cubestack.io"]
+    resources: ["taskruns", "tasktemplates"]
     verbs: ["get", "list", "watch"]
 
 ---
