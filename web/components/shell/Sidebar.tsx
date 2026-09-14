@@ -32,9 +32,8 @@ const LINK_ITEMS: NavItem[] = [
     dataOdId: "nav-monitoring",
   },
   { key: "nav.inference", href: "/inference-services", icon: "server", dataOdId: "nav-inference" },
-  { key: "nav.playground", icon: "terminal", dataOdId: "nav-playground" },
   { key: "nav.devenv", href: "/dev-environments", icon: "code", dataOdId: "nav-devenv" },
-  { key: "nav.copilot", icon: "spark", dataOdId: "nav-copilot" },
+  { key: "nav.cubepilot", href: "/cubepilot", icon: "spark", dataOdId: "nav-copilot" },
 ];
 
 function NavLink({

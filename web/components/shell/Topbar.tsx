@@ -23,6 +23,7 @@ function crumbKey(pathname: string): MessageKey | null {
   // service routes (e.g. /inference-services/svc-a) still show the breadcrumb.
   if (pathname === "/inference-services" || pathname.startsWith("/inference-services/")) return "nav.inference";
   if (pathname === "/dev-environments" || pathname.startsWith("/dev-environments/")) return "nav.devenv";
+  if (pathname === "/cubepilot" || pathname.startsWith("/cubepilot/")) return "nav.cubepilot";
   return null;
 }
 

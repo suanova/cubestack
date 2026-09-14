@@ -10,5 +10,7 @@ export function isActive(href: string, pathname: string): boolean {
     return pathname === "/inference-services" || pathname.startsWith("/inference-services/");
   if (href === "/dev-environments")
     return pathname === "/dev-environments" || pathname.startsWith("/dev-environments/");
+  if (href === "/cubepilot")
+    return pathname === "/cubepilot" || pathname.startsWith("/cubepilot/");
   return false; // anything else is not a real route
 }
