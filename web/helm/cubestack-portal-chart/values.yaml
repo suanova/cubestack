@@ -86,14 +86,18 @@ secrets:
     existingSecretKey: "session-secret"
     # Generate random secret if create is true
     length: 32
-  # Portal login credentials. The chart creates a Secret named
-  # "cubestack-htpasswd", which is the portal's built-in default, so no
-  # further configuration is needed.
-  #
-  # Provide pre-hashed htpasswd content (one `user:bcrypt-hash`
-  # line per entry), e.g.:
+  # Portal login credentials. Provide pre-hashed htpasswd content (one
+  # `user:bcrypt-hash` line per entry) and the chart creates the Secret:
   #   --set-file secrets.htpasswd.content=/path/to/htpasswd
+  # Leave content empty to manage the Secret yourself (external secret store);
+  # create it with secretName below.
   htpasswd:
+    # Secret name the portal reads (HTPASSWD_SECRET_NAME) and the Role grants
+    # get on. Default matches the app's built-in default.
+    secretName: cubestack-htpasswd
+    # Data key inside the Secret holding the htpasswd file
+    # (HTPASSWD_SECRET_KEY).
+    key: htpasswd
     content: ""
 
 # Pod disruption budget for HA. Set exactly one of minAvailable / maxUnavailable.

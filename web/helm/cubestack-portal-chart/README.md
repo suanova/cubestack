@@ -54,6 +54,8 @@ The following table lists the configurable parameters of the Portal chart and th
 | `resources.requests.memory` | Memory request | `256Mi` |
 | `namespace` | Target namespace | `cubestack-system` |
 | `secrets.htpasswd.content` | Pre-hashed htpasswd content (raw `user:bcrypt-hash` line, not base64) | `""` |
+| `secrets.htpasswd.secretName` | Secret holding the htpasswd file (deployment `HTPASSWD_SECRET_NAME`; the Role grants `get` on exactly this name) | `cubestack-htpasswd` |
+| `secrets.htpasswd.key` | Data key inside that Secret (deployment `HTPASSWD_SECRET_KEY`) | `htpasswd` |
 
 ### Environment Variables
 
@@ -102,15 +104,19 @@ helm install cubestack-portal ./web/helm/cubestack-portal-chart \
 Single-quote the value: a bcrypt hash contains `$`, which an unquoted or
 double-quoted shell would otherwise expand as a variable.
 
-The chart creates a Secret named `cubestack-htpasswd` in the target namespace,
-which matches the portal's built-in lookup default — no environment variables
-or additional configuration are required for login.
+The chart creates a Secret named `secrets.htpasswd.secretName`
+(`cubestack-htpasswd` by default) in the target namespace, holding the content
+under `secrets.htpasswd.key` (`htpasswd` by default) — the same name, key and
+namespace the deployment passes to the app and the Role grants `get` on, so no
+extra configuration is required for login.
 
-To manage credentials outside Helm, create a Secret named
-`cubestack-htpasswd` with the pre-hashed file stored under the `htpasswd` data
-key and leave `secrets.htpasswd.content` empty. The chart will not create or
-modify that Secret. Without either source, the portal reports "auth not
-configured" when login is attempted.
+To manage credentials outside Helm, create the Secret yourself with that name
+and data key and leave `secrets.htpasswd.content` empty. The chart will not
+create or modify it (it only templates the Secret when content is set).
+Overriding `secretName` (or `key`) keeps the deployment env, the Role's
+`resourceNames` and the created Secret in sync — but an externally managed
+Secret must use the same name. Without either source, the portal reports
+"auth not configured" when login is attempted.
 
 ### Authorization model
 
@@ -153,8 +159,19 @@ kubectl -n cubestack-system create secret generic my-session-secret \
 
 The chart automatically creates namespaced and cluster-scoped RBAC:
 
-- `Role` + `RoleBinding`: read the htpasswd Secret (`cubestack-htpasswd` by default), get/list/watch the operator CRs (`inferenceservices`, `devenvironments`, `inferenceruntimeprofiles`, `modelversions`)
-- `ClusterRole` + `ClusterRoleBinding`: list namespaces and nodes, and get/list/watch/create/update/delete the operator CRs cluster-wide (the UI aggregates them across namespaces)
+- `Role` + `RoleBinding`: `get` on the htpasswd Secret (`secrets.htpasswd.secretName`, `cubestack-htpasswd` by default) in the target namespace
+- `ClusterRole` + `ClusterRoleBinding`: `list` namespaces / nodes / services (the services rule is the AI Gateway discovery in `envoy-gateway-system`), plus exactly the operator-CR verbs the UI calls, cluster-wide (the UI aggregates and writes across namespaces):
+  - `inferenceservices`: create, get, list, patch
+  - `devenvironments`: create, delete, list, patch
+  - `inferenceruntimeprofiles`, `modelversions`: list
+  - `tasks`: create, delete, get, list, patch
+  - `taskruns`, `tasktemplates`: get, list
+  - `agentinstances`: create, get, patch
+  - `agenttemplates`: get; `skills`: get, list
+
+No `watch` is granted (nothing in the portal watches), mutations are HTTP
+PATCH (JSON-Patch) so `update` is not needed, and no status subresource is
+written. Add the verbs back when a feature needs them.
 
 Cluster-scoped object names include the release namespace as a suffix so
 same-named releases in different namespaces do not collide.

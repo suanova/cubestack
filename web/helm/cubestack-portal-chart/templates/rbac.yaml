@@ -10,15 +10,14 @@ metadata:
     app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
     helm.sh/chart: {{ include "cubestack-portal-chart.chart" . }}
 rules:
-  # Read htpasswd secret for authentication
+  # Read the htpasswd Secret for authentication. The name is the chart's
+  # secrets.htpasswd.secretName (deployment env HTPASSWD_SECRET_NAME); keep the
+  # two in sync when overriding either. The operator CRs need no rule here:
+  # the ClusterRole below already grants them cluster-wide.
   - apiGroups: [""]
     resources: ["secrets"]
-    resourceNames: ["cubestack-htpasswd"]
+    resourceNames: [{{ .Values.secrets.htpasswd.secretName | quote }}]
     verbs: ["get"]
-  # Read operator CRDs for UI APIs
-  - apiGroups: ["ai.cubestack.io"]
-    resources: ["inferenceservices", "devenvironments", "inferenceruntimeprofiles", "modelversions"]
-    verbs: ["get", "list", "watch"]
 ---
 # Cluster-scoped: `namespaces` cannot be read through a namespaced Role, and
 # the name carries the release namespace so same-named releases in different
@@ -41,41 +40,62 @@ rules:
     resources: ["nodes"]
     verbs: ["list"]
   # Discover the AI Gateway Service in envoy-gateway-system (playground model
-  # list / chat). Cross-namespace, so it lives here rather than in the
-  # release-namespace Role (which would also fail to install before the
-  # gateway namespace exists). Best-effort: in-cluster the app also falls back
-  # to a well-known gateway DNS name that needs no RBAC, and off-cluster it
-  # uses the API-server service proxy (kubeconfig, not this ServiceAccount).
+  # list / chat) — list only: in-cluster the app then talks to
+  # http://<svc>.<ns>.svc:<port> over DNS, so no services/proxy permission is
+  # needed. Cross-namespace, so it lives here rather than in the
+  # release-namespace Role (which would also fail to install before the gateway
+  # namespace exists). Off-cluster the API-server service proxy is used with the
+  # kubeconfig credentials, not this ServiceAccount.
   - apiGroups: [""]
     resources: ["services"]
-    verbs: ["get", "list"]
+    verbs: ["list"]
   # Read and write the operator's CRs. Reads are cluster-wide because the UI
   # aggregates them (listClusterCustomObject) and the CRDs are a mix of
-  # namespaced and cluster scope. Writes (create/patch/delete) are cluster-wide
-  # because the UI creates an environment/service in whichever namespace the
-  # user picks, and the portal has no per-user role or namespace scoping —
-  # sessions carry only the username (see the chart README, "Authorization
-  # model"), so every valid session is effectively a platform admin. Guard the
-  # htpasswd credentials as admin credentials. Mutations are HTTP PATCH
-  # (JSON-Patch, hence the patch verb; the UI never sends PUT/update).
-  # profiles and modelversions stay read-only: the UI never writes them.
-  # Task CRs are likewise cluster-wide:
-  # their namespace comes from CUBESTACK_TASKS_NAMESPACE and need not be the
-  # release namespace. The UI creates tasks and deletes them, and patches
-  # spec.state / the manual-run annotation (JSON-Patch, hence the patch verb);
-  # taskruns (run reports) and tasktemplates stay read-only.
+  # namespaced and cluster scope. Writes are cluster-wide because the UI creates
+  # an environment/service/task in whichever namespace the user picks, and the
+  # portal has no per-user role or namespace scoping — sessions carry only the
+  # username (see the chart README, "Authorization model"), so every valid
+  # session is effectively a platform admin. Guard the htpasswd credentials as
+  # admin credentials. Mutations are HTTP PATCH (JSON-Patch, hence the patch
+  # verb; the UI never sends PUT/update) and no status subresource is written.
+  #
+  # Each verb below maps to a call in the app; unused verbs are deliberately
+  # NOT granted (no watch/informer anywhere — add "watch" back with the first
+  # informer; nothing deletes inferenceservices; nothing writes agenttemplates,
+  # skills, taskruns, tasktemplates or the profiles).
   - apiGroups: ["ai.cubestack.io"]
-    resources: ["inferenceservices", "devenvironments"]
-    verbs: ["create", "patch", "delete", "get", "list", "watch"]
+    resources: ["inferenceservices"]
+    verbs: ["create", "get", "list", "patch"]
+  - apiGroups: ["ai.cubestack.io"]
+    resources: ["devenvironments"]
+    verbs: ["create", "delete", "list", "patch"]
   - apiGroups: ["ai.cubestack.io"]
     resources: ["inferenceruntimeprofiles", "modelversions"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["list"]
+  # Tasks: created from the UI, toggled / manually triggered by JSON-Patch and
+  # deleted; the namespace comes from CUBESTACK_TASKS_NAMESPACE, not the release
+  # ns, hence the cluster-wide grant. taskruns (run reports) and tasktemplates
+  # are read-only.
   - apiGroups: ["ai.cubestack.io"]
     resources: ["tasks"]
-    verbs: ["create", "patch", "delete", "get", "list", "watch"]
+    verbs: ["create", "delete", "get", "list", "patch"]
   - apiGroups: ["ai.cubestack.io"]
     resources: ["taskruns", "tasktemplates"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list"]
+  # Agent CRDs (CubePilot agent tab): agentinstances are created on the first
+  # config save and patched (selectedModel / userInstructions / confirmPolicy /
+  # allowlist / enabledSkills — JSON-Patch, hence the patch verb). The builtin
+  # agenttemplate (runtime, model catalog, policy default) and the skills (the
+  # agent's tool whitelist) are read-only.
+  - apiGroups: ["ai.cubestack.io"]
+    resources: ["agentinstances"]
+    verbs: ["create", "get", "patch"]
+  - apiGroups: ["ai.cubestack.io"]
+    resources: ["agenttemplates"]
+    verbs: ["get"]
+  - apiGroups: ["ai.cubestack.io"]
+    resources: ["skills"]
+    verbs: ["get", "list"]
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1

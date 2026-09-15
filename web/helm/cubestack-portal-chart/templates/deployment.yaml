@@ -63,6 +63,12 @@ spec:
         # cubestack-system, which may differ from .Values.namespace).
         - name: HTPASSWD_SECRET_NAMESPACE
           value: {{ .Values.namespace | quote }}
+        # Secret name / data key of the htpasswd file (the chart's defaults match
+        # the app's built-in defaults; the Role grants get on this name).
+        - name: HTPASSWD_SECRET_NAME
+          value: {{ .Values.secrets.htpasswd.secretName | quote }}
+        - name: HTPASSWD_SECRET_KEY
+          value: {{ .Values.secrets.htpasswd.key | quote }}
         - name: SESSION_SECRET
           valueFrom:
             secretKeyRef:
