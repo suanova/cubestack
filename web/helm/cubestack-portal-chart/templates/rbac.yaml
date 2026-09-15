@@ -1,3 +1,4 @@
+{{- $operatorNs := .Values.operatorNamespace | default .Values.namespace -}}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -18,6 +19,16 @@ rules:
     resources: ["secrets"]
     resourceNames: [{{ .Values.secrets.htpasswd.secretName | quote }}]
     verbs: ["get"]
+  {{- if eq $operatorNs .Values.namespace }}
+  # External-model credentials: adding a keyed model on the config page writes a
+  # Secret named llm-<model> in the *operator* namespace (the CR only ever
+  # carries a reference). RBAC cannot scope a rule by name prefix, so this is
+  # every Secret in the namespace. When operatorNamespace differs, the same rule
+  # is installed there instead (see below).
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "get", "update", "delete"]
+  {{- end }}
 ---
 # Cluster-scoped: `namespaces` cannot be read through a namespaced Role, and
 # the name carries the release namespace so same-named releases in different
@@ -85,14 +96,16 @@ rules:
   # Agent CRDs (CubePilot agent tab): agentinstances are created on the first
   # config save and patched (selectedModel / userInstructions / confirmPolicy /
   # allowlist / enabledSkills — JSON-Patch, hence the patch verb). The builtin
-  # agenttemplate (runtime, model catalog, policy default) and the skills (the
-  # agent's tool whitelist) are read-only.
+  # agenttemplate (runtime, model catalog, policy default — the config page also
+  # edits its models) and the skills (the agent's tool whitelist) are read-mostly.
   - apiGroups: ["ai.cubestack.io"]
     resources: ["agentinstances"]
-    verbs: ["create", "get", "patch"]
+    verbs: ["create", "get", "list", "patch"]
+  # agenttemplates: read the catalog and edit it — the config page adds / edits /
+  # removes external models on the builtin template (JSON-Patch, hence patch).
   - apiGroups: ["ai.cubestack.io"]
     resources: ["agenttemplates"]
-    verbs: ["get"]
+    verbs: ["get", "patch"]
   - apiGroups: ["ai.cubestack.io"]
     resources: ["skills"]
     verbs: ["get", "list"]
@@ -134,3 +147,43 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "cubestack-portal-chart.serviceAccountName" . }}
     namespace: {{ .Values.namespace }}
+{{- if ne $operatorNs .Values.namespace }}
+---
+# The operator CRs (and therefore the external-model credential Secrets the
+# config page writes) live in a different namespace than the portal: grant the
+# Secret access where it is actually needed. The namespace must already exist —
+# it does whenever the operator's CRs do.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "cubestack-portal-chart.fullname" . }}-operator-role
+  namespace: {{ $operatorNs }}
+  labels:
+    app.kubernetes.io/name: {{ include "cubestack-portal-chart.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+    helm.sh/chart: {{ include "cubestack-portal-chart.chart" . }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "get", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "cubestack-portal-chart.fullname" . }}-operator-role-binding
+  namespace: {{ $operatorNs }}
+  labels:
+    app.kubernetes.io/name: {{ include "cubestack-portal-chart.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+    helm.sh/chart: {{ include "cubestack-portal-chart.chart" . }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "cubestack-portal-chart.fullname" . }}-operator-role
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "cubestack-portal-chart.serviceAccountName" . }}
+    namespace: {{ .Values.namespace }}
+{{- end }}

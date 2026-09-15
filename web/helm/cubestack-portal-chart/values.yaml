@@ -76,6 +76,39 @@ securityContext:
 # Namespace to install into
 namespace: cubestack-system
 
+# Namespace holding the CubePilot operator CRs (AgentTemplate / AgentInstance /
+# Skill / Task*). Empty = the target namespace above. Point this at the
+# operator's namespace when it differs from the portal's — an empty 配置 page is
+# usually this value (the app falls back to "cubestack-system").
+operatorNamespace: ""
+
+# CubePilot agent API (chat backend). Empty = derived in-cluster Service DNS:
+#   http://cubepilot-api.<operatorNamespace>.svc:8080
+# Set it when the API runs elsewhere or the Service is named differently.
+agentApiUrl: ""
+
+# AI Gateway: the model catalog (chat tab + 系统默认 model source) and the
+# playground chat upstream.
+gateway:
+  # Base URL, e.g. http://ai-gateway.envoy-gateway-system.svc:18080. Empty =
+  # discover the ai-gateway Service in `namespace` (in-cluster: direct DNS).
+  url: ""
+  # Namespace the gateway Service lives in. Empty = envoy-gateway-system.
+  namespace: ""
+  # Bearer token sent as Authorization on every gateway call. Prefer an existing
+  # Secret so the token is never rendered from a value file.
+  token:
+    existingSecret: ""
+    existingSecretKey: "token"
+
+# Portal log verbosity: error | warn | info | debug.
+# - info (default): one line per API request, plus warnings/errors.
+# - debug: adds every cluster/gateway call with its arguments and outcome —
+#   use it when a page looks empty (namespace, CRD, RBAC and gateway problems
+#   all surface there). Read the lines with:
+#     kubectl -n <namespace> logs deploy/<release>-cubestack-portal -f
+logLevel: info
+
 # Secrets for sensitive data
 secrets:
   # Session secret for UI

@@ -52,7 +52,13 @@ The following table lists the configurable parameters of the Portal chart and th
 | `resources.limits.memory` | Memory limit | `512Mi` |
 | `resources.requests.cpu` | CPU request | `100m` |
 | `resources.requests.memory` | Memory request | `256Mi` |
-| `namespace` | Target namespace | `cubestack-system` |
+| `namespace` | Target namespace (Role/Secrets/htpasswd live here) | `cubestack-system` |
+| `operatorNamespace` | Namespace holding the operator CRs (AgentTemplate / AgentInstance / Skill / Task*); empty = `namespace` | `""` |
+| `agentApiUrl` | CubePilot agent API base; empty = `http://cubepilot-api.<operatorNamespace>.svc:8080` | `""` |
+| `gateway.url` | AI Gateway base; empty = discover the `ai-gateway` Service in `gateway.namespace` | `""` |
+| `gateway.namespace` | Namespace the gateway Service lives in | `""` (= `envoy-gateway-system`) |
+| `gateway.token.existingSecret` / `.existingSecretKey` | Existing Secret holding the gateway bearer token (`CUBESTACK_GATEWAY_TOKEN`) | `""` / `token` |
+| `logLevel` | Portal log verbosity: `error` \| `warn` \| `info` \| `debug` (`debug` logs every cluster/gateway call) | `info` |
 | `secrets.htpasswd.content` | Pre-hashed htpasswd content (raw `user:bcrypt-hash` line, not base64) | `""` |
 | `secrets.htpasswd.secretName` | Secret holding the htpasswd file (deployment `HTPASSWD_SECRET_NAME`; the Role grants `get` on exactly this name) | `cubestack-htpasswd` |
 | `secrets.htpasswd.key` | Data key inside that Secret (deployment `HTPASSWD_SECRET_KEY`) | `htpasswd` |
@@ -155,6 +161,49 @@ kubectl -n cubestack-system create secret generic my-session-secret \
   --from-literal=session-secret=<your-secret>
 ```
 
+## Troubleshooting an empty page
+
+The portal renders what the cluster returns, so an empty 配置 / 任务 page is
+almost always a cluster-side problem. The page keeps the raw error (or, when the
+builtin AgentTemplate is missing, an explicit "not found" notice) on screen
+instead of a toast, and the pod logs carry the same detail — check these in
+order:
+
+Start from the values that decide *where* the portal looks:
+`operatorNamespace` (`CUBESTACK_TASKS_NAMESPACE`), `agentApiUrl`
+(`CUBESTACK_PILOT_URL`) and `gateway.*` — an empty 配置 page is almost always
+`operatorNamespace` pointing away from the CRs.
+
+```bash
+# 1. Which namespace/CRDs is the portal actually using? (logged once at the
+#    first request with logLevel=debug)
+kubectl -n <release-ns> logs deploy/<release>-cubestack-portal | head -20
+kubectl -n <release-ns> logs deploy/<release>-cubestack-portal -f          # live
+kubectl -n <release-ns> set env deploy/<release>-cubestack-portal CUBESTACK_LOG_LEVEL=debug
+
+# 2. Do the CRs the page reads exist in the operator namespace?
+kubectl -n cubestack-system get agenttemplates,agentinstances,skills,tasks
+
+# 3. Are the CRDs installed at all? (a 404 from the API server → HTTP 503)
+kubectl get crd | grep ai.cubestack.io
+
+# 4. Does the portal ServiceAccount have permission? (403 is logged verbatim)
+kubectl auth can-i list agenttemplates.ai.cubestack.io \
+  --as=system:serviceaccount:<release-ns>:<release>-cubestack-portal -n cubestack-system
+```
+
+Log levels (`logLevel` / `CUBESTACK_LOG_LEVEL`):
+
+| Level | What it prints |
+| --- | --- |
+| `error` | cluster call failures, RBAC denials |
+| `warn` | the above plus failed API requests (5xx) and unresolved gateway/agent API bases |
+| `info` (default) | the above plus one line per API request (`[info] api: request method=GET path=/api/... user=admin status=200 ms=12`) |
+| `debug` | the above plus every cluster call (`[debug] k8s: get plural=agenttemplates namespace=cubestack-system name=cubepilot`), gateway/agent API resolution and the startup line with the resolved namespaces |
+
+Secrets are never logged: credential handling prints the Secret name and
+namespace only.
+
 ## RBAC
 
 The chart automatically creates namespaced and cluster-scoped RBAC:
@@ -168,6 +217,11 @@ The chart automatically creates namespaced and cluster-scoped RBAC:
   - `taskruns`, `tasktemplates`: get, list
   - `agentinstances`: create, get, patch
   - `agenttemplates`: get; `skills`: get, list
+
+When `operatorNamespace` differs from `namespace`, a second Role/RoleBinding is
+created **in the operator namespace** for the external-model credential Secrets
+(`llm-<model>`), which are written next to the CRs; the portal namespace keeps
+only the htpasswd read then.
 
 No `watch` is granted (nothing in the portal watches), mutations are HTTP
 PATCH (JSON-Patch) so `update` is not needed, and no status subresource is

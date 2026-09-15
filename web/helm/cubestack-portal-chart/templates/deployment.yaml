@@ -63,12 +63,42 @@ spec:
         # cubestack-system, which may differ from .Values.namespace).
         - name: HTPASSWD_SECRET_NAMESPACE
           value: {{ .Values.namespace | quote }}
+        # Portal log verbosity (error | warn | info | debug).
+        - name: CUBESTACK_LOG_LEVEL
+          value: {{ .Values.logLevel | quote }}
         # Secret name / data key of the htpasswd file (the chart's defaults match
         # the app's built-in defaults; the Role grants get on this name).
         - name: HTPASSWD_SECRET_NAME
           value: {{ .Values.secrets.htpasswd.secretName | quote }}
         - name: HTPASSWD_SECRET_KEY
           value: {{ .Values.secrets.htpasswd.key | quote }}
+        # Namespace holding the operator CRs (tasks + agent tabs). Empty in
+        # values means "the target namespace".
+        - name: CUBESTACK_TASKS_NAMESPACE
+          value: {{ .Values.operatorNamespace | default .Values.namespace | quote }}
+        {{- if .Values.agentApiUrl }}
+        # CubePilot agent API (chat backend); unset = in-cluster Service DNS.
+        - name: CUBESTACK_PILOT_URL
+          value: {{ .Values.agentApiUrl | quote }}
+        {{- end }}
+        {{- if .Values.gateway.url }}
+        # AI Gateway base (model catalog / playground chat).
+        - name: CUBESTACK_GATEWAT_URL
+          value: {{ .Values.gateway.url | quote }}
+        {{- end }}
+        {{- if .Values.gateway.namespace }}
+        # Namespace the AI Gateway Service is discovered in.
+        - name: CUBESTACK_GATEWAY_NAMESPACE
+          value: {{ .Values.gateway.namespace | quote }}
+        {{- end }}
+        {{- if .Values.gateway.token.existingSecret }}
+        # Bearer token for the gateway, from an existing Secret (never a value).
+        - name: CUBESTACK_GATEWAY_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.gateway.token.existingSecret | quote }}
+              key: {{ .Values.gateway.token.existingSecretKey | quote }}
+        {{- end }}
         - name: SESSION_SECRET
           valueFrom:
             secretKeyRef:
