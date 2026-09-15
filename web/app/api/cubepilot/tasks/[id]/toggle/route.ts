@@ -1,6 +1,6 @@
 // /api/cubepilot/tasks/[id]/toggle — flip spec.state (Enabled ↔ Paused).
 
-import { getTaskCr, k8sErrorResponse, namespaceMissingResponse, patchTaskCrState, taskFromCr, tasksNamespace } from "@/lib/cubepilot/taskcrd";
+import { getTaskCr, isTaskOwner, k8sErrorResponse, patchTaskCrState, taskFromCr } from "@/lib/cubepilot/taskcrd";
 import { withAuth } from "@/lib/auth/guard";
 
 export const runtime = "nodejs";
@@ -8,9 +8,8 @@ export const dynamic = "force-dynamic";
 
 type Ctx = { params: Promise<{ id: string }> };
 
-export const POST = withAuth<Ctx>(async (_req, _session, ctx) => {
+export const POST = withAuth<Ctx>(async (_req, session, ctx) => {
   const { id } = await ctx.params;
-  if (!tasksNamespace()) return namespaceMissingResponse();
   let existing;
   try {
     existing = await getTaskCr(id);
@@ -19,6 +18,9 @@ export const POST = withAuth<Ctx>(async (_req, _session, ctx) => {
   }
   if (!existing) {
     return Response.json({ error: "task not found" }, { status: 404 });
+  }
+  if (!isTaskOwner(existing, session.user)) {
+    return Response.json({ error: "not your task" }, { status: 403 });
   }
   const next = (existing.spec?.state ?? "Enabled") === "Paused" ? "Enabled" : "Paused";
   let updated;

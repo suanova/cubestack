@@ -1,10 +1,10 @@
 // Shared types for the 智能助手 (Copilot) module.
 //
-// The portal has no agent/LLM backend yet, so this module is served by
-// in-memory demo state (lib/cubepilot/store.ts) behind /api/cubepilot/* routes.
-// The shapes mirror the CubePilot REST contract (github.com/suanova/cubepilot
-// web/src/api/types.ts) so a real backend can replace the demo store later
-// without touching the pages.
+// The shapes mirror the CubePilot contract (github.com/suanova/cubepilot
+// web/src/api/types.ts + docs/cubepilot/api.md): the task tab is served by
+// the ai.cubestack.io task CRDs, the agent tab by the AgentInstance /
+// AgentTemplate / Skill CRDs plus the agent API (chat SSE + HITL), and the
+// LLM catalog by the AI Gateway (same source as the chat tab).
 
 /** One chat session (a conversation with the assistant). */
 export interface SessionInfo {
@@ -82,43 +82,53 @@ export interface Report {
   p2: number;
 }
 
-/** An OpenAI-compatible model in the platform catalog (reference LLM config). */
-export interface LlmModel {
+/** One model the AgentTemplate inlines (reference TemplateModel); the config
+ *  page lists these and selectedModel must be one of them. The operator wires
+ *  them into the AI Gateway. */
+export interface TemplateModelOption {
   name: string;
-  /** API root, e.g. https://llm.cubestack.local/v1 (no /chat/completions). */
-  endpoint: string;
-  /** true when the model is backed by a stored credential, false when public. */
-  keyed: boolean;
+  endpoint?: string;
 }
 
-/** The caller's own assistant selections (reference /api/agent/config). */
+/** The caller's own assistant selections (reference /api/v1/agent/config:
+ *  {exists, selectedModel, userInstructions}). Field names are the
+ *  AgentInstance CRD's: exists = the instance is provisioned; selectedModel
+ *  "" = "Runtime Default" (clear the override); userInstructions "" = template
+ *  instructions only. models is the AgentTemplate's catalog (template-level,
+ *  read-only here). */
 export interface AgentConfig {
-  /** false = the caller has no provisioned instance. */
   exists: boolean;
-  /** Selected model name; "" = runtime default. */
-  model: string;
-  /** Custom system prompt; "" = built-in persona only. */
-  systemPrompt: string;
+  selectedModel: string;
+  userInstructions: string;
+  models?: TemplateModelOption[];
 }
 
-/** The caller's instance runtime status (reference /api/agent/status). */
+/** The caller's instance status (reference /api/v1/agent/status), projected
+ *  from the AgentInstance CR (spec + status). */
 export interface AgentStatus {
   exists: boolean;
+  /** The instance CR name (e.g. <user>-cubepilot). */
   id?: string;
+  /** Creating | Ready | Failed (empty = the operator has not observed it). */
   phase?: string;
+  /** CR creation time (provisioning start), RFC3339. */
   startedAt?: string;
   uptimeSeconds?: number;
-  gatewayImage?: string;
   user: string;
+  lastActivity?: string;
+  message?: string;
+  podName?: string;
+  pvcName?: string;
 }
 
 /** One confirm allowlist rule (reference issue #116). */
 export interface AllowlistRule {
   pattern: string;
   argPattern?: string;
-  /** Human meaning, set for platform builtin read-only rules. */
+  /** Human meaning, set for the hardcoded platform builtin read-only rules. */
   label?: string;
-  /** true when the rule comes from the instance's own state, not the template. */
+  /** true = the caller's own rule (stored on the AgentInstance CR, removable);
+   *  false = a hardcoded platform default. */
   owned: boolean;
 }
 
@@ -150,60 +160,61 @@ export interface GatewayModel {
   ownedBy: string;
 }
 
-// ── unified chat: agent (CubePilot) side ─────────────────────────────────
+// ── unified chat: agent (CubePilot) side — the real contract ─────────────
+// The agent conversation is served by the CubePilot agent API (SSE,
+// docs/cubepilot/api.md §4/§7); history is the runtime's document
+// (user messages are plain strings, assistant/toolResult messages are block
+// arrays).
 
-/** One canned demo block of an agent reply, played back sequentially. */
-export interface AgentBlock {
-  /** Paragraph text. */
-  p?: string;
-  /** Command block (mono, dark). */
-  cmd?: string;
-  /** Tool output block (mono, boxed). */
-  out?: string;
-  /** Action buttons offered to the user. */
-  actions?: AgentAction[];
-  /** Meta line under the reply (tools used, references…). */
-  meta?: string;
+/** One content block of a history message. */
+export interface HistoryContentBlock {
+  type: "text" | "toolCall";
+  text?: string;
+  name?: string;
+  id?: string;
+  arguments?: unknown;
 }
 
-/** A clickable action inside an agent reply (demo: appends canned results). */
-export interface AgentAction {
+/** One history message (GET /api/v1/sessions/{key}/messages → items). */
+export interface HistoryMessage {
+  role: "user" | "assistant" | "toolResult";
+  content: string | HistoryContentBlock[];
+}
+
+/** One SSE event of POST /api/v1/messages (data lines; type discriminates). */
+export type AgentSseEvent =
+  | { type: "message_start"; sessionId: string }
+  | { type: "agent_thinking"; sessionId: string }
+  | { type: "message_delta"; sessionId: string; delta: string }
+  | { type: "text_replace"; sessionId: string; delta: string }
+  | { type: "tool_call"; sessionId: string; name: string; callId?: string; arguments?: unknown }
+  | { type: "tool_result"; sessionId: string; callId?: string; name?: string; output?: string }
+  | { type: "message_done"; sessionId: string; error?: string; stopped?: boolean }
+  | { type: "approval_pending"; sessionId: string; callId: string; name?: string; command?: string; level?: string; message?: string }
+  | { type: "approval_resolved"; sessionId: string; callId: string; approved: boolean }
+  | {
+      type: "question_pending";
+      sessionId: string;
+      callId: string;
+      question?: { questions?: AgentQuestionItem[]; timeoutSeconds?: number };
+    }
+  | { type: "question_resolved"; sessionId: string; callId: string; message?: string };
+
+/** One question of an ask_user prompt (question.questions[]). */
+export interface AgentQuestionItem {
+  questionId: string;
+  header?: string;
+  question: string;
+  options?: AgentQuestionOption[];
+  multiSelect?: boolean;
+}
+
+export interface AgentQuestionOption {
   label: string;
-  /** Label swapped in after the action is used. */
-  doneLabel: string;
-  primary?: boolean;
-  /** Blocks appended to the message when the action is clicked. */
-  results: AgentBlock[];
+  description?: string;
 }
 
-/** Demo profile of the CubePilot agent shown in the object list and rail. */
-export interface AgentInfo {
-  id: string;
-  name: string;
-  role: string;
-  /** Seconds since the last heartbeat (demo). */
-  heartbeat: number;
-  /** Number of read-only tools. */
-  ro: number;
-  /** Number of write tools (approval required). */
-  rw: number;
-}
-
-/** One tool-whitelist row in the agent rail. */
-export interface AgentTool {
-  name: string;
-  scope: "ro" | "rw";
-}
-
-/** One recent-tool-call row in the agent rail. */
-export interface AgentCall {
-  time: string;
-  tool: string;
-  scope: "ro" | "rw";
-}
-
-/** A quick-question chip above the thread; agent chips carry a scenario key. */
+/** A quick-question chip above the thread (a prompt preset). */
 export interface QuickChip {
   label: string;
-  key?: string;
 }

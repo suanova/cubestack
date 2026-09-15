@@ -24,14 +24,14 @@ const notFound = (what: string) => {
 
 const TASK_CR = {
   metadata: {
-    name: "alice-task-01",
+    name: "tester-task-01",
     creationTimestamp: "2026-09-10T06:00:00Z",
     annotations: { "cubepilot/display-name": "每日集群巡检" },
   },
   spec: {
     templateRef: "cluster-inspect",
     instruction: "对集群执行全量巡检:节点 Ready 状态与资源压力",
-    owner: "alice",
+    owner: "tester",
     trigger: "Cron",
     cron: "0 6 * * *",
     state: "Enabled",
@@ -46,14 +46,25 @@ const TASK_CR = {
 
 const OLDER_TASK_CR = {
   metadata: {
-    name: "bob-task-99",
+    name: "tester-task-99",
     creationTimestamp: "2026-09-01T06:00:00Z",
   },
   spec: {
     instruction: "检查磁盘使用率",
-    owner: "bob",
+    owner: "tester",
     trigger: "Manual",
   },
+};
+
+/** Another user's task: the listing is owner-scoped, so it must not appear. */
+const FOREIGN_TASK_CR = {
+  metadata: {
+    name: "platform-task-a1b2c3d4",
+    // Newest of all: without the owner filter it would sort first.
+    creationTimestamp: "2026-09-15T02:46:54Z",
+    annotations: { "cubepilot/display-name": "每日集群巡检" },
+  },
+  spec: { instruction: "对 all 范围执行全量巡检", owner: "platform", trigger: "Cron", cron: "0 6 * * *", state: "Enabled" },
 };
 
 describe("/api/cubepilot/tasks", () => {
@@ -72,7 +83,7 @@ describe("/api/cubepilot/tasks", () => {
   });
 
   it("lists tasks from CRDs, newest first", async () => {
-    listNamespacedCustomObject.mockResolvedValue({ items: [OLDER_TASK_CR, TASK_CR] });
+    listNamespacedCustomObject.mockResolvedValue({ items: [OLDER_TASK_CR, FOREIGN_TASK_CR, TASK_CR] });
     const res = await GET(await authedGet(), undefined);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { tasks: Array<Record<string, unknown>> };
@@ -82,7 +93,8 @@ describe("/api/cubepilot/tasks", () => {
       namespace: "cubestack-system",
       plural: "tasks",
     });
-    expect(body.tasks.map((t) => t.id)).toEqual(["alice-task-01", "bob-task-99"]);
+    // Owner-scoped: the newer platform task is not the caller's, so it is gone.
+    expect(body.tasks.map((t) => t.id)).toEqual(["tester-task-01", "tester-task-99"]);
     const daily = body.tasks[0];
     expect(daily).toMatchObject({
       // The display-name annotation wins over the DNS-1123 CR name.
@@ -91,7 +103,7 @@ describe("/api/cubepilot/tasks", () => {
       schedule: "0 6 * * *",
       templateRef: "cluster-inspect",
       enabled: true,
-      creator: "alice",
+      creator: "tester",
       createdAt: "2026-09-10T06:00:00Z",
       lastRunAt: "2026-09-13T06:00:00Z",
       lastStatus: "success",
@@ -99,8 +111,14 @@ describe("/api/cubepilot/tasks", () => {
     });
     // The CR without an annotation falls back to the CR name; empty state
     // reads as enabled; no status yet means no lastStatus.
-    expect(body.tasks[1]).toMatchObject({ name: "bob-task-99", enabled: true, schedule: "" });
+    expect(body.tasks[1]).toMatchObject({ name: "tester-task-99", enabled: true, schedule: "" });
     expect(body.tasks[1].lastStatus).toBeUndefined();
+  });
+
+  it("hides tasks owned by other users", async () => {
+    listNamespacedCustomObject.mockResolvedValue({ items: [FOREIGN_TASK_CR] });
+    const body = (await (await GET(await authedGet(), undefined)).json()) as { tasks: unknown[] };
+    expect(body.tasks).toEqual([]);
   });
 
   it("maps a Paused CR to enabled=false", async () => {
@@ -109,12 +127,12 @@ describe("/api/cubepilot/tasks", () => {
     expect(body.tasks[0].enabled).toBe(false);
   });
 
-  it("503s when the namespace env is unset", async () => {
+  it("falls back to the default namespace when the env is unset", async () => {
     delete process.env.CUBESTACK_TASKS_NAMESPACE;
+    listNamespacedCustomObject.mockResolvedValue({ items: [] });
     const res = await GET(await authedGet(), undefined);
-    expect(res.status).toBe(503);
-    expect(((await res.json()) as { error: string }).error).toContain("CUBESTACK_TASKS_NAMESPACE");
-    expect(listNamespacedCustomObject).not.toHaveBeenCalled();
+    expect(res.status).toBe(200);
+    expect(listNamespacedCustomObject.mock.calls[0][0]).toMatchObject({ namespace: "cubestack-system" });
   });
 
   it("503s when the CRDs are not installed (404 from the API server)", async () => {

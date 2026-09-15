@@ -45,6 +45,7 @@ function buildRequest(init?: RequestInit, url = "http://localhost", cookie?: str
     headers,
     cookies: { get: valueFor },
     body: bodyStr ?? null,
+    text: async () => bodyStr ?? "",
     json: async () => {
       // Mirror NextRequest.json(): an absent/empty body rejects with a
       // SyntaxError instead of resolving undefined.

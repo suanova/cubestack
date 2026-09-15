@@ -24,8 +24,8 @@ const notFound = () => {
 };
 
 const TASK_CR = {
-  metadata: { name: "alice-task-01", creationTimestamp: "2026-09-10T06:00:00Z" },
-  spec: { instruction: "巡检", owner: "alice", trigger: "Manual", state: "Enabled" },
+  metadata: { name: "tester-task-01", creationTimestamp: "2026-09-10T06:00:00Z" },
+  spec: { instruction: "巡检", owner: "tester", trigger: "Manual", state: "Enabled" },
 };
 
 describe("/api/cubepilot/tasks/[id]/run", () => {
@@ -46,8 +46,9 @@ describe("/api/cubepilot/tasks/[id]/run", () => {
   it("sets the manual-run annotation with an RFC3339 timestamp", async () => {
     getNamespacedCustomObject.mockResolvedValue(TASK_CR);
     patchNamespacedCustomObject.mockResolvedValue({});
-    const res = await POST(await authedRequest({ method: "POST" }), ctx("alice-task-01"));
-    expect(res.status).toBe(200);
+    const res = await POST(await authedRequest({ method: "POST" }), ctx("tester-task-01"));
+    // 202 Accepted: the trigger is registered, the scheduler owns execution.
+    expect(res.status).toBe(202);
     expect(await res.json()).toEqual({ started: true });
     const call = patchNamespacedCustomObject.mock.calls[0][0] as {
       namespace: string;
@@ -55,12 +56,20 @@ describe("/api/cubepilot/tasks/[id]/run", () => {
       name: string;
       body: Array<{ op: string; path: string; value: Record<string, string> }>;
     };
-    expect(call).toMatchObject({ namespace: "cubestack-system", plural: "tasks", name: "alice-task-01" });
+    expect(call).toMatchObject({ namespace: "cubestack-system", plural: "tasks", name: "tester-task-01" });
     // JSON-Patch "add" replacing the merged annotations map.
     expect(call.body).toHaveLength(1);
     expect(call.body[0].path).toBe("/metadata/annotations");
     const stamp = call.body[0].value["cubepilot/manual-run"];
     expect(stamp).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/);
+  });
+
+  it("403s on another user's task", async () => {
+    getNamespacedCustomObject.mockResolvedValue({ ...TASK_CR, spec: { ...TASK_CR.spec, owner: "someone-else" } });
+    const res = await POST(await authedRequest({ method: "POST" }), ctx("tester-task-01"));
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe("not your task");
+    expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
   it("404s for an unknown task", async () => {
@@ -69,8 +78,11 @@ describe("/api/cubepilot/tasks/[id]/run", () => {
     expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
-  it("503s when the namespace env is unset", async () => {
+  it("falls back to the default namespace when the env is unset", async () => {
     delete process.env.CUBESTACK_TASKS_NAMESPACE;
-    expect((await POST(await authedRequest({ method: "POST" }), ctx("any"))).status).toBe(503);
+    getNamespacedCustomObject.mockResolvedValue(TASK_CR);
+    patchNamespacedCustomObject.mockResolvedValue({});
+    expect((await POST(await authedRequest({ method: "POST" }), ctx("any"))).status).toBe(202);
+    expect(patchNamespacedCustomObject.mock.calls[0][0]).toMatchObject({ namespace: "cubestack-system" });
   });
 });

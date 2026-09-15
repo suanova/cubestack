@@ -77,10 +77,11 @@ describe("/api/cubepilot/tasktemplates", () => {
     });
   });
 
-  it("503s when the namespace env is unset", async () => {
+  it("falls back to the default namespace when the env is unset", async () => {
     delete process.env.CUBESTACK_TASKS_NAMESPACE;
+    listNamespacedCustomObject.mockResolvedValue({ items: [] });
     const res = await GET(await authedGet(), undefined);
-    expect(res.status).toBe(503);
-    expect(((await res.json()) as { error: string }).error).toContain("CUBESTACK_TASKS_NAMESPACE");
+    expect(res.status).toBe(200);
+    expect(listNamespacedCustomObject.mock.calls[0][0]).toMatchObject({ namespace: "cubestack-system" });
   });
 });

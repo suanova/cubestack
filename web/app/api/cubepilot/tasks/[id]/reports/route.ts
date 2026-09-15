@@ -3,12 +3,11 @@
 
 import {
   getTaskCr,
+  isTaskOwner,
   k8sErrorResponse,
   listTaskRunCrs,
-  namespaceMissingResponse,
   reportFromCr,
   taskFromCr,
-  tasksNamespace,
 } from "@/lib/cubepilot/taskcrd";
 import { withAuth } from "@/lib/auth/guard";
 
@@ -17,9 +16,8 @@ export const dynamic = "force-dynamic";
 
 type Ctx = { params: Promise<{ id: string }> };
 
-export const GET = withAuth<Ctx>(async (_req, _session, ctx) => {
+export const GET = withAuth<Ctx>(async (_req, session, ctx) => {
   const { id } = await ctx.params;
-  if (!tasksNamespace()) return namespaceMissingResponse();
   let existing;
   try {
     existing = await getTaskCr(id);
@@ -28,6 +26,9 @@ export const GET = withAuth<Ctx>(async (_req, _session, ctx) => {
   }
   if (!existing) {
     return Response.json({ error: "task not found" }, { status: 404 });
+  }
+  if (!isTaskOwner(existing, session.user)) {
+    return Response.json({ error: "not your task" }, { status: 403 });
   }
   let runs;
   try {

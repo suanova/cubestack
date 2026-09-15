@@ -5,13 +5,12 @@ import { isValidCron } from "@/lib/cubepilot/cron";
 import {
   createTaskCr,
   getTemplateCr,
+  isTaskOwner,
   k8sErrorResponse,
   listTaskCrs,
-  namespaceMissingResponse,
   renderInstruction,
   resolveParams,
   taskFromCr,
-  tasksNamespace,
 } from "@/lib/cubepilot/taskcrd";
 import { withAuth } from "@/lib/auth/guard";
 
@@ -26,22 +25,25 @@ interface CreateTaskBody {
   params?: Record<string, string>;
 }
 
-export const GET = withAuth(async () => {
-  if (!tasksNamespace()) return namespaceMissingResponse();
+export const GET = withAuth(async (_req, session) => {
   let items;
   try {
     items = await listTaskCrs();
   } catch (e) {
     return k8sErrorResponse(e);
   }
-  const tasks = items.map(taskFromCr).filter((t) => t.id);
+  // Owner-scoped listing, mirroring the reference API: a user sees only their
+  // own tasks (a task runs with its owner's identity).
+  const tasks = items
+    .filter((cr) => isTaskOwner(cr, session.user))
+    .map(taskFromCr)
+    .filter((t) => t.id);
   // Newest first, mirroring the reference API's ordering.
   tasks.sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""));
   return Response.json({ tasks });
 });
 
 export const POST = withAuth(async (req, session) => {
-  if (!tasksNamespace()) return namespaceMissingResponse();
   let body: CreateTaskBody;
   try {
     body = (await req.json()) as CreateTaskBody;

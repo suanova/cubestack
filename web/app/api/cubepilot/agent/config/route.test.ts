@@ -1,17 +1,68 @@
 // @vitest-environment node
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { authedGet, authedRequest, bareGet } from "@/test/auth";
-import { __resetStore } from "@/lib/cubepilot/store";
+
+const {
+  getNamespacedCustomObject,
+  createNamespacedCustomObject,
+  patchNamespacedCustomObject,
+} = vi.hoisted(() => ({
+  getNamespacedCustomObject: vi.fn(),
+  createNamespacedCustomObject: vi.fn(),
+  patchNamespacedCustomObject: vi.fn(),
+}));
+
+vi.mock("@/lib/kubernetes", () => ({
+  getCustomObjectsClient: () => ({
+    getNamespacedCustomObject,
+    createNamespacedCustomObject,
+    patchNamespacedCustomObject,
+  }),
+}));
 
 const { GET, PUT } = await import("./route");
 
+/** 404-shaped rejection, like the real client does for unknown names. */
+const notFound = () => {
+  const e = new Error("not found") as Error & { statusCode: number };
+  e.statusCode = 404;
+  return Promise.reject(e);
+};
+
+const TEMPLATE_CR = {
+  metadata: { name: "cubepilot" },
+  spec: {
+    runtime: "OpenClaw",
+    confirmPolicy: "Allowlist",
+    models: [
+      { name: "glm-5.2-chat", endpoint: "http://ai-gateway.envoy-gateway-system.svc:18080" },
+      { name: "deepseek-v4-flash", endpoint: "http://ai-gateway.envoy-gateway-system.svc:18080" },
+    ],
+  },
+};
+
+/** getNamespacedCustomObject is shared by instances and the template; branch on the plural. */
+function mockK8s(instanceCr: unknown | null, templateCr: unknown | null = TEMPLATE_CR): void {
+  getNamespacedCustomObject.mockImplementation(({ plural }: { plural: string }) => {
+    if (plural === "agenttemplates") return templateCr ? Promise.resolve(templateCr) : notFound();
+    return instanceCr ? Promise.resolve(instanceCr) : notFound();
+  });
+}
+
+const INSTANCE_CR = {
+  metadata: { name: "tester-cubepilot" },
+  spec: { owner: "tester", selectedModel: "glm-5.2-chat", userInstructions: "be terse" },
+};
+
 describe("/api/cubepilot/agent/config", () => {
   beforeEach(() => {
-    __resetStore();
+    process.env.CUBESTACK_TASKS_NAMESPACE = "cubestack-system";
+    vi.clearAllMocks();
   });
 
   afterEach(() => {
+    delete process.env.CUBESTACK_TASKS_NAMESPACE;
     delete process.env.SESSION_SECRET;
   });
 
@@ -19,42 +70,123 @@ describe("/api/cubepilot/agent/config", () => {
     expect((await GET(await bareGet(), undefined)).status).toBe(401);
   });
 
-  it("returns the seeded config", async () => {
+  it("GET: no instance yet → empty config with the template's model catalog", async () => {
+    mockK8s(null);
     const res = await GET(await authedGet(), undefined);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { config: { exists: boolean; model: string; systemPrompt: string } };
-    expect(body.config.exists).toBe(true);
-    expect(body.config.model).toBe("glm-5.2-chat");
-    expect(body.config.systemPrompt).toContain("CubeStack");
+    const body = (await res.json()) as { config: { exists: boolean; selectedModel: string; models?: unknown[] } };
+    expect(body.config).toEqual({
+      exists: false,
+      selectedModel: "",
+      userInstructions: "",
+      models: [
+        { name: "glm-5.2-chat", endpoint: "http://ai-gateway.envoy-gateway-system.svc:18080" },
+        { name: "deepseek-v4-flash", endpoint: "http://ai-gateway.envoy-gateway-system.svc:18080" },
+      ],
+    });
   });
 
-  it("saves a known model and prompt", async () => {
+  it("GET: reads spec fields from the instance CR", async () => {
+    mockK8s(INSTANCE_CR);
+    const res = await GET(await authedGet(), undefined);
+    const body = (await res.json()) as { config: { exists: boolean; selectedModel: string; userInstructions: string } };
+    expect(res.status).toBe(200);
+    expect(body.config.exists).toBe(true);
+    expect(body.config.selectedModel).toBe("glm-5.2-chat");
+    expect(body.config.userInstructions).toBe("be terse");
+  });
+
+  it("PUT: first save creates the instance (owner + identity + templateRef)", async () => {
+    mockK8s(null);
+    const created = {
+      metadata: { name: "tester-cubepilot" },
+      spec: { owner: "tester", selectedModel: "glm-5.2-chat" },
+    };
+    createNamespacedCustomObject.mockResolvedValue(created);
     const res = await PUT(
-      await authedRequest({ method: "PUT", body: JSON.stringify({ config: { model: "deepseek-v4", systemPrompt: "新提示词" } }) }),
+      await authedRequest({ method: "PUT", body: JSON.stringify({ config: { selectedModel: "glm-5.2-chat" } }) }),
       undefined,
     );
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { config: { model: string; systemPrompt: string } };
-    expect(body.config.model).toBe("deepseek-v4");
-    expect(body.config.systemPrompt).toBe("新提示词");
+    const body = (await res.json()) as { config: { exists: boolean; selectedModel: string } };
+    expect(body.config.exists).toBe(true);
+    expect(body.config.selectedModel).toBe("glm-5.2-chat");
+    const [init] = createNamespacedCustomObject.mock.calls[0] as [
+      { body?: { metadata?: { name?: string }; spec?: Record<string, unknown> } },
+    ];
+    expect(init.body?.metadata?.name).toBe("tester-cubepilot");
+    const spec = init.body?.spec;
+    expect(spec?.owner).toBe("tester");
+    expect(spec?.templateRef).toBe("cubepilot");
+    expect(spec?.identity).toEqual({ mode: "user", principalRef: { userRef: "tester" } });
   });
 
-  it("rejects an unknown model and a non-string prompt", async () => {
-    const badModel = await PUT(
-      await authedRequest({ method: "PUT", body: JSON.stringify({ config: { model: "nope" } }) }),
+  it("PUT: existing instance → JSON-Patch add on the changed fields", async () => {
+    mockK8s(INSTANCE_CR);
+    patchNamespacedCustomObject.mockResolvedValue(INSTANCE_CR);
+    const res = await PUT(
+      await authedRequest({ method: "PUT", body: JSON.stringify({ config: { selectedModel: "glm-5.2-chat", userInstructions: "" } }) }),
       undefined,
     );
-    expect(badModel.status).toBe(400);
-    expect(((await badModel.json()) as { error: string }).error).toBe('unknown model "nope"');
+    expect(res.status).toBe(200);
+    expect(patchNamespacedCustomObject).toHaveBeenCalledTimes(1);
+    const [init] = patchNamespacedCustomObject.mock.calls[0] as [{ name?: string; body?: unknown[] }];
+    expect(init.name).toBe("tester-cubepilot");
+    expect(init.body).toEqual([
+      { op: "add", path: "/spec/selectedModel", value: "glm-5.2-chat" },
+      // "" clears: the field is removed, not written as an empty string.
+      { op: "remove", path: "/spec/userInstructions" },
+    ]);
+  });
 
-    const badPrompt = await PUT(
-      await authedRequest({ method: "PUT", body: JSON.stringify({ config: { systemPrompt: 42 } }) }),
+  it("PUT: a model the template does not declare → 400", async () => {
+    mockK8s(INSTANCE_CR);
+    const res = await PUT(
+      await authedRequest({ method: "PUT", body: JSON.stringify({ config: { selectedModel: "nope" } }) }),
       undefined,
     );
-    expect(badPrompt.status).toBe(400);
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain('model "nope" is not in the cubepilot template');
+    expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
+  });
 
-    expect(
-      (await PUT(await authedRequest({ method: "PUT", body: "not-json" }), undefined)).status,
-    ).toBe(400);
+  it("PUT: a template without models accepts only the runtime default", async () => {
+    mockK8s(INSTANCE_CR, { metadata: { name: "cubepilot" }, spec: {} });
+    const rejected = await PUT(
+      await authedRequest({ method: "PUT", body: JSON.stringify({ config: { selectedModel: "glm-5.2-chat" } }) }),
+      undefined,
+    );
+    expect(rejected.status).toBe(400);
+    patchNamespacedCustomObject.mockResolvedValue(INSTANCE_CR);
+    const cleared = await PUT(
+      await authedRequest({ method: "PUT", body: JSON.stringify({ config: { selectedModel: "" } }) }),
+      undefined,
+    );
+    expect(cleared.status).toBe(200);
+    expect(patchNamespacedCustomObject.mock.calls[0][0]).toMatchObject({
+      body: [{ op: "remove", path: "/spec/selectedModel" }],
+    });
+  });
+
+  it("PUT: non-string fields → 400", async () => {
+    const res = await PUT(
+      await authedRequest({ method: "PUT", body: JSON.stringify({ config: { selectedModel: 42 } }) }),
+      undefined,
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("PUT: invalid JSON → 400", async () => {
+    const res = await PUT(await authedRequest({ method: "PUT", body: "not json" }), undefined);
+    expect(res.status).toBe(400);
+  });
+
+  it("PUT: instance name taken by another user → 409", async () => {
+    mockK8s({ metadata: { name: "tester-cubepilot" }, spec: { owner: "other" } });
+    const res = await PUT(
+      await authedRequest({ method: "PUT", body: JSON.stringify({ config: { selectedModel: "glm-5.2-chat" } }) }),
+      undefined,
+    );
+    expect(res.status).toBe(409);
   });
 });

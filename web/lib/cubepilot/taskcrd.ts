@@ -7,9 +7,9 @@
 // cubepilot/display-name annotation, manual-run via annotation, TaskRuns
 // labelled cubepilot/task=<task name>).
 //
-// All CRs live in one namespace (the operator's); it is provided by
-// CUBESTACK_TASKS_NAMESPACE. There is no default: unset = the routes answer
-// 503 with a clear message.
+// All CRs live in one namespace (the operator's). CUBESTACK_TASKS_NAMESPACE
+// names it; when unset, the default cubestack-system applies (the operator's
+// conventional namespace and the portal chart's default install namespace).
 
 import { randomBytes } from "node:crypto";
 
@@ -90,28 +90,39 @@ export interface TaskTemplateCr {
 
 // ── namespace ─────────────────────────────────────────────────────────────
 
-/** The task-CR namespace, or null when CUBESTACK_TASKS_NAMESPACE is unset. */
-export function tasksNamespace(): string | null {
+/** Default task-CR namespace (the operator's conventional namespace). */
+export const DEFAULT_TASKS_NAMESPACE = "cubestack-system";
+
+/** The task-CR namespace: CUBESTACK_TASKS_NAMESPACE, or the default when unset. */
+export function tasksNamespace(): string {
   const ns = (process.env.CUBESTACK_TASKS_NAMESPACE ?? "").trim();
-  return ns || null;
+  return ns || DEFAULT_TASKS_NAMESPACE;
 }
 
-/** Response for the unset-namespace case (all task routes). */
-export function namespaceMissingResponse(): Response {
-  return Response.json(
-    { error: "CUBESTACK_TASKS_NAMESPACE is not set (namespace of the ai.cubestack.io task CRDs)" },
-    { status: 503 },
-  );
+/** HTTP status of a k8s client API error (client-node v2 sets `code`;
+ *  tolerate `statusCode` for older builds). */
+export function k8sErrorCode(e: unknown): number | undefined {
+  const x = e as { code?: unknown; statusCode?: unknown } | null;
+  const v = x?.code ?? x?.statusCode;
+  return typeof v === "number" ? v : undefined;
 }
 
 /** Response for k8s API failures (404 → CRDs probably not installed). */
 export function k8sErrorResponse(e: unknown): Response {
-  const statusCode = (e as { statusCode?: number })?.statusCode;
   const message = e instanceof Error ? e.message : String(e);
-  return Response.json({ error: `cluster error: ${message}` }, { status: statusCode === 404 ? 503 : 502 });
+  return Response.json({ error: `cluster error: ${message}` }, { status: k8sErrorCode(e) === 404 ? 503 : 502 });
 }
 
 // ── DTO projection (CR → the tab's shapes) ───────────────────────────────
+
+/**
+ * The reference's per-task isolation (handlers_tasks.go): a Task carries its
+ * owner, and only the owner sees or acts on it — the task executes with the
+ * owner's identity, so acting on someone else's task would run as them.
+ */
+export function isTaskOwner(cr: TaskCr, user: string): boolean {
+  return (cr.spec?.owner ?? "") === user;
+}
 
 export function taskFromCr(cr: TaskCr): Task {
   const lastStatus = cr.status?.lastStatus;
@@ -171,7 +182,7 @@ async function listCr<T>(plural: string, labelSelector?: string): Promise<T[]> {
   const res = await co.listNamespacedCustomObject({
     group: GROUP,
     version: VERSION,
-    namespace: tasksNamespace() as string,
+    namespace: tasksNamespace(),
     plural,
     ...(labelSelector ? { labelSelector } : {}),
   });
@@ -184,12 +195,12 @@ async function getCr<T>(plural: string, name: string): Promise<T | null> {
     return (await co.getNamespacedCustomObject({
       group: GROUP,
       version: VERSION,
-      namespace: tasksNamespace() as string,
+      namespace: tasksNamespace(),
       plural,
       name,
     })) as T;
   } catch (e) {
-    if ((e as { statusCode?: number })?.statusCode === 404) return null;
+    if (k8sErrorCode(e) === 404) return null;
     throw e;
   }
 }
@@ -241,7 +252,7 @@ export interface CreateTaskCrInput {
 
 export async function createTaskCr(input: CreateTaskCrInput): Promise<TaskCr> {
   const co = getCustomObjectsClient();
-  const ns = tasksNamespace() as string;
+  const ns = tasksNamespace();
   const body = {
     apiVersion: `${GROUP}/${VERSION}`,
     kind: "Task",
@@ -277,7 +288,7 @@ export async function patchTaskCrState(name: string, state: "Enabled" | "Paused"
   return (await co.patchNamespacedCustomObject({
     group: GROUP,
     version: VERSION,
-    namespace: tasksNamespace() as string,
+    namespace: tasksNamespace(),
     plural: "tasks",
     name,
     body,
@@ -300,7 +311,7 @@ export async function markManualRun(task: TaskCr): Promise<void> {
   await co.patchNamespacedCustomObject({
     group: GROUP,
     version: VERSION,
-    namespace: tasksNamespace() as string,
+    namespace: tasksNamespace(),
     plural: "tasks",
     name: task.metadata?.name as string,
     body,
@@ -313,7 +324,7 @@ export async function deleteTaskCr(name: string): Promise<void> {
   await co.deleteNamespacedCustomObject({
     group: GROUP,
     version: VERSION,
-    namespace: tasksNamespace() as string,
+    namespace: tasksNamespace(),
     plural: "tasks",
     name,
   });

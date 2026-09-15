@@ -24,8 +24,8 @@ const notFound = () => {
 };
 
 const TASK_CR = {
-  metadata: { name: "alice-task-01", creationTimestamp: "2026-09-10T06:00:00Z" },
-  spec: { instruction: "巡检", owner: "alice", trigger: "Manual", state: "Enabled" },
+  metadata: { name: "tester-task-01", creationTimestamp: "2026-09-10T06:00:00Z" },
+  spec: { instruction: "巡检", owner: "tester", trigger: "Manual", state: "Enabled" },
 };
 
 describe("/api/cubepilot/tasks/[id]", () => {
@@ -46,16 +46,24 @@ describe("/api/cubepilot/tasks/[id]", () => {
   it("deletes the task CR", async () => {
     getNamespacedCustomObject.mockResolvedValue(TASK_CR);
     deleteNamespacedCustomObject.mockResolvedValue({});
-    const res = await DELETE(await authedGet(), ctx("alice-task-01"));
+    const res = await DELETE(await authedGet(), ctx("tester-task-01"));
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ deleted: "alice-task-01" });
+    expect(await res.json()).toEqual({ deleted: "tester-task-01" });
     expect(deleteNamespacedCustomObject.mock.calls[0][0]).toMatchObject({
       group: "ai.cubestack.io",
       version: "v1alpha1",
       namespace: "cubestack-system",
       plural: "tasks",
-      name: "alice-task-01",
+      name: "tester-task-01",
     });
+  });
+
+  it("403s on another user's task", async () => {
+    getNamespacedCustomObject.mockResolvedValue({ ...TASK_CR, spec: { ...TASK_CR.spec, owner: "someone-else" } });
+    const res = await DELETE(await authedGet(), ctx("tester-task-01"));
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe("not your task");
+    expect(deleteNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
   it("404s for an unknown task", async () => {
@@ -64,8 +72,12 @@ describe("/api/cubepilot/tasks/[id]", () => {
     expect(deleteNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
-  it("503s when the namespace env is unset", async () => {
+  it("falls back to the default namespace when the env is unset", async () => {
     delete process.env.CUBESTACK_TASKS_NAMESPACE;
-    expect((await DELETE(await authedGet(), ctx("any"))).status).toBe(503);
+    getNamespacedCustomObject.mockResolvedValue(TASK_CR);
+    deleteNamespacedCustomObject.mockResolvedValue({});
+    expect((await DELETE(await authedGet(), ctx("any"))).status).toBe(200);
+    expect(getNamespacedCustomObject.mock.calls[0][0]).toMatchObject({ namespace: "cubestack-system" });
+    expect(deleteNamespacedCustomObject.mock.calls[0][0]).toMatchObject({ namespace: "cubestack-system" });
   });
 });

@@ -9,7 +9,7 @@ import CubepilotPage from "./page";
 // The test file avoids JSX because tsconfig sets jsx: "preserve" (for Next),
 // which vitest's import-analysis can't transform.
 
-/** Stub every endpoint the three panes fetch on mount. */
+/** Stub every endpoint the three panes fetch on mount + the agent flow. */
 function stubApi() {
   vi.stubGlobal(
     "fetch",
@@ -20,16 +20,27 @@ function stubApi() {
         return json({ taskTemplates: [] });
       if (url.includes("/api/cubepilot/tasks")) return json({ tasks: [], reports: [] });
       if (url.includes("/api/cubepilot/agent/config"))
-        return json({ config: { exists: true, model: "glm-5.2-chat", systemPrompt: "演示提示词" } });
+        return json({
+          config: {
+            exists: true,
+            selectedModel: "glm-5.2-chat",
+            userInstructions: "演示提示词",
+            // The AgentTemplate's inlined catalog (the config page's model list).
+            models: [{ name: "glm-5.2-chat", endpoint: "http://gw.test:8080" }],
+          },
+        });
       if (url.includes("/api/cubepilot/agent/status"))
         return json({
           exists: true,
-          id: "agent-tester",
+          id: "tester-cubepilot",
           phase: "Ready",
-          startedAt: new Date().toISOString(),
+          startedAt: new Date(Date.now() - 3600 * 1000).toISOString(),
           uptimeSeconds: 3600,
-          gatewayImage: "cubestack/cubepilot-gateway:v1.4.0",
           user: "tester",
+          lastActivity: new Date(Date.now() - 300 * 1000).toISOString(),
+          message: "ready",
+          podName: "cubepilot-tester-abc12",
+          pvcName: "pvc-tester",
         });
       if (url.includes("/api/cubepilot/agent/confirm"))
         return json({
@@ -38,9 +49,41 @@ function stubApi() {
           templatePolicy: "Allowlist",
           override: "",
           allowlist: [],
-          channel: "up",
+          channel: "unknown",
         });
-      if (url.includes("/api/cubepilot/llms")) return json({ llms: [{ name: "glm-5.2-chat", endpoint: "https://llm/v1", keyed: true }] });
+      if (url.includes("/api/cubepilot/skills"))
+        return json({
+          skills: [
+            { name: "cluster-inspect", displayName: "集群巡检", description: "巡检", enabled: true },
+            { name: "gpu-health", displayName: "GPU 体检", description: "GPU", enabled: true },
+          ],
+        });
+      if (url.includes("/api/cubepilot/pilot/api/v1/sessions") && !url.includes("/approval"))
+        return json({ sessions: [] }); // fresh user → the greeting, not a restore
+      if (url.includes("/approval"))
+        return json({ approved: true, decision: "approve", approvalId: "app-1" });
+      if (url.includes("/api/cubepilot/pilot/api/v1/messages")) {
+        // The agent turn: real SSE events (the client accumulates deltas,
+        // pairs the tool result by callId, and renders the HITL card).
+        const events = [
+          { type: "message_start", sessionId: "agent:main:conv-1" },
+          { type: "agent_thinking", sessionId: "agent:main:conv-1" },
+          { type: "message_delta", sessionId: "agent:main:conv-1", delta: "正在检查 Ceph 状态…" },
+          { type: "tool_call", sessionId: "agent:main:conv-1", callId: "call-1", name: "shell", arguments: { cmd: "ceph df" } },
+          { type: "tool_result", sessionId: "agent:main:conv-1", callId: "call-1", output: "POOL USED: 71%" },
+          { type: "message_delta", sessionId: "agent:main:conv-1", delta: "OSD 使用率 71%。" },
+          { type: "approval_pending", sessionId: "agent:main:conv-1", callId: "app-1", name: "shell", command: "ceph osd set-noscrub", level: "write" },
+          { type: "message_done", sessionId: "agent:main:conv-1" },
+        ];
+        const enc = new TextEncoder();
+        const stream = new ReadableStream({
+          start(controller) {
+            for (const e of events) controller.enqueue(enc.encode(`data: ${JSON.stringify(e)}\n\n`));
+            controller.close();
+          },
+        });
+        return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+      }
       if (url.includes("/api/cubepilot/playground/services"))
         return json({
           models: [{ id: "glm-5.2-chat", ownedBy: "cubestack" }],
@@ -190,7 +233,7 @@ describe("cubepilot page", () => {
     act(() => root.unmount());
   }, 10000);
 
-  it("switches to the agent: rail swaps, greeting plays, actions work", async () => {
+  it("switches to the agent: real rail, data greeting, SSE turn with an approval card", async () => {
     const { container, root } = renderPage();
     await act(async () => {});
 
@@ -200,24 +243,35 @@ describe("cubepilot page", () => {
       agentObj.click();
     });
 
-    // The context rail swaps to the agent cards.
+    // The context rail swaps to the agent cards (status + whitelist +
+    // approval; no canned recent-calls card).
+    expect(container.querySelector('[data-od-id="agent-status-card"]')).not.toBeNull();
+    // The rail splits the confirmation allowlist from the agent's skills.
+    expect(container.querySelector('[data-od-id="allowlist-card"]')).not.toBeNull();
     expect(container.querySelector('[data-od-id="tool-whitelist-card"]')).not.toBeNull();
-    expect(container.querySelector('[data-od-id="recent-calls-card"]')).not.toBeNull();
     expect(container.querySelector('[data-od-id="approval-card"]')).not.toBeNull();
+    expect(container.querySelector('[data-od-id="recent-calls-card"]')).toBeNull();
     expect(container.querySelector('[data-od-id="params-card"]')).toBeNull();
-    expect(container.textContent).toContain("CUBEPILOT");
 
-    // The greeting plays block by block (60ms, then 380ms steps).
+    // The greeting is data-driven (skills from the CRs, model from the CR)
+    // because the stub user has no sessions yet.
     let greeted = false;
     for (let i = 0; i < 100 && !greeted; i++) {
       await act(async () => {
         await new Promise((r) => setTimeout(r, 50));
       });
-      greeted = (container.textContent ?? "").includes("会话审计已开启");
+      greeted =
+        (container.textContent ?? "").includes("技能 2 项") &&
+        (container.textContent ?? "").includes("当前模型 glm-5.2-chat") &&
+        (container.textContent ?? "").includes("会话审计已开启");
     }
     expect(greeted).toBe(true);
+    // The whitelist card lists the platform skills with their enabled state.
+    expect(container.textContent).toContain("集群巡检");
+    expect(container.textContent).toContain("GPU 体检");
+    expect(container.textContent).toContain("已启用");
 
-    // Quick chip → canned ceph scenario plays, including its action row.
+    // Quick chip → a real turn streams through the pilot proxy.
     const chip = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(
       (b) => b.textContent === "分析 Ceph OSD 使用率告警",
     );
@@ -225,27 +279,40 @@ describe("cubepilot page", () => {
     act(() => {
       chip!.click();
     });
-    let cephDone = false;
-    for (let i = 0; i < 120 && !cephDone; i++) {
+
+    // The SSE events land: accumulated text, the paired tool result, and
+    // the pending approval card with its decision buttons.
+    let turnDone = false;
+    for (let i = 0; i < 100 && !turnDone; i++) {
       await act(async () => {
         await new Promise((r) => setTimeout(r, 50));
       });
-      cephDone = (container.textContent ?? "").includes("ceph.df / pg.stat / smartctl");
+      const text = container.textContent ?? "";
+      turnDone =
+        text.includes("正在检查 Ceph 状态…") &&
+        text.includes("OSD 使用率 71%。") &&
+        text.includes("POOL USED: 71%") &&
+        text.includes("ceph osd set-noscrub") &&
+        text.includes("写操作待审批");
     }
-    expect(cephDone).toBe(true);
+    expect(turnDone).toBe(true);
+    expect(container.querySelector('[data-od-id="approval-approve"]')).not.toBeNull();
+    expect(container.querySelector('[data-od-id="stop-btn"]')).toBeNull();
 
-    // Click the action button: its canned results are appended and the
-    // button flips to its done label.
-    const action = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(
-      (b) => b.textContent === "执行只读诊断",
-    );
-    expect(action).toBeDefined();
+    // Approve the write op: the card flips to its resolved state.
+    const approve = container.querySelector('[data-od-id="approval-approve"]') as HTMLElement;
     act(() => {
-      action!.click();
+      approve.click();
     });
-    await act(async () => {});
-    expect(container.textContent).toContain("已执行");
-    expect(container.textContent).toContain("4096 active+clean");
+    let approved = false;
+    for (let i = 0; i < 50 && !approved; i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 50));
+      });
+      approved = (container.textContent ?? "").includes("已批准");
+    }
+    expect(approved).toBe(true);
+    expect(container.querySelector('[data-od-id="approval-approve"]')).toBeNull();
 
     // Back to the model: the model rail is restored and the thread resets.
     const modelObj = container.querySelector('[data-od-id="obj-glm-5.2-chat"]') as HTMLElement;

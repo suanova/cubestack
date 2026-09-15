@@ -24,8 +24,8 @@ const notFound = () => {
 };
 
 const TASK_CR = (state?: string) => ({
-  metadata: { name: "alice-task-01", creationTimestamp: "2026-09-10T06:00:00Z" },
-  spec: { instruction: "巡检", owner: "alice", trigger: "Manual", ...(state ? { state } : {}) },
+  metadata: { name: "tester-task-01", creationTimestamp: "2026-09-10T06:00:00Z" },
+  spec: { instruction: "巡检", owner: "tester", trigger: "Manual", ...(state ? { state } : {}) },
 });
 
 describe("/api/cubepilot/tasks/[id]/toggle", () => {
@@ -46,7 +46,7 @@ describe("/api/cubepilot/tasks/[id]/toggle", () => {
   it("flips Enabled to Paused", async () => {
     getNamespacedCustomObject.mockResolvedValue(TASK_CR("Enabled"));
     patchNamespacedCustomObject.mockResolvedValue(TASK_CR("Paused"));
-    const res = await POST(await authedRequest({ method: "POST" }), ctx("alice-task-01"));
+    const res = await POST(await authedRequest({ method: "POST" }), ctx("tester-task-01"));
     expect(res.status).toBe(200);
     const body = (await res.json()) as { task: { enabled: boolean } };
     expect(body.task.enabled).toBe(false);
@@ -58,7 +58,7 @@ describe("/api/cubepilot/tasks/[id]/toggle", () => {
   it("flips Paused back to Enabled", async () => {
     getNamespacedCustomObject.mockResolvedValue(TASK_CR("Paused"));
     patchNamespacedCustomObject.mockResolvedValue(TASK_CR("Enabled"));
-    const res = await POST(await authedRequest({ method: "POST" }), ctx("alice-task-01"));
+    const res = await POST(await authedRequest({ method: "POST" }), ctx("tester-task-01"));
     const body = (await res.json()) as { task: { enabled: boolean } };
     expect(body.task.enabled).toBe(true);
     expect((patchNamespacedCustomObject.mock.calls[0][0] as { body: unknown }).body).toEqual([
@@ -69,10 +69,18 @@ describe("/api/cubepilot/tasks/[id]/toggle", () => {
   it("treats a missing state as Enabled (pre-CRD CRs)", async () => {
     getNamespacedCustomObject.mockResolvedValue(TASK_CR());
     patchNamespacedCustomObject.mockResolvedValue(TASK_CR("Paused"));
-    await POST(await authedRequest({ method: "POST" }), ctx("alice-task-01"));
+    await POST(await authedRequest({ method: "POST" }), ctx("tester-task-01"));
     expect((patchNamespacedCustomObject.mock.calls[0][0] as { body: unknown }).body).toEqual([
       { op: "add", path: "/spec/state", value: "Paused" },
     ]);
+  });
+
+  it("403s on another user's task", async () => {
+    getNamespacedCustomObject.mockResolvedValue({ ...TASK_CR("Enabled"), spec: { ...TASK_CR("Enabled").spec, owner: "someone-else" } });
+    const res = await POST(await authedRequest({ method: "POST" }), ctx("tester-task-01"));
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe("not your task");
+    expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
   it("404s for an unknown task", async () => {
@@ -81,8 +89,12 @@ describe("/api/cubepilot/tasks/[id]/toggle", () => {
     expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
-  it("503s when the namespace env is unset", async () => {
+  it("falls back to the default namespace when the env is unset", async () => {
     delete process.env.CUBESTACK_TASKS_NAMESPACE;
-    expect((await POST(await authedRequest({ method: "POST" }), ctx("any"))).status).toBe(503);
+    getNamespacedCustomObject.mockResolvedValue(TASK_CR("Paused"));
+    patchNamespacedCustomObject.mockResolvedValue(TASK_CR("Enabled"));
+    expect((await POST(await authedRequest({ method: "POST" }), ctx("any"))).status).toBe(200);
+    expect(getNamespacedCustomObject.mock.calls[0][0]).toMatchObject({ namespace: "cubestack-system" });
+    expect(patchNamespacedCustomObject.mock.calls[0][0]).toMatchObject({ namespace: "cubestack-system" });
   });
 });

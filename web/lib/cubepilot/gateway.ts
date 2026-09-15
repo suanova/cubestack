@@ -36,7 +36,7 @@ export interface GatewayBase {
   via: "direct" | "apiserver";
 }
 
-function inCluster(): boolean {
+export function inCluster(): boolean {
   return Boolean(process.env.KUBERNETES_SERVICE_HOST && process.env.KUBERNETES_SERVICE_PORT);
 }
 

@@ -1,38 +1,41 @@
 "use client";
 
-// 配置 tab — model selection, LLM catalog, system prompt, instance status,
-// confirmation policy + allowlist, mirroring the reference
-// AgentView (cubepilot web/src/views/AgentView.tsx).
+// 配置 tab — model selection, system prompt, LLM catalog, instance status,
+// confirmation policy + allowlist. Model / prompt / policy persist to the
+// caller's AgentInstance CR (the first save provisions it); the model catalog,
+// the LLM catalog and the runtime come from the AgentTemplate inlined in
+// GET /agent/config (reference AgentView: "models are inlined in the
+// AgentTemplate"), so the page needs no AI Gateway round trip.
 
 import { Box } from "@mui/material";
 import { ReactNode, useCallback, useEffect, useState } from "react";
 
-import type {
-  AgentConfig,
-  AgentStatus,
-  AllowlistRule,
-  ConfirmView,
-  LlmModel,
-} from "@/lib/cubepilot/types";
+import type { AgentConfig, AgentStatus, AllowlistRule, ConfirmView, TemplateModelOption } from "@/lib/cubepilot/types";
 import { useI18n } from "@/lib/i18n";
+
+import { ruleKey } from "@/lib/cubepilot/allowlist";
 
 import { fmtUptime } from "./format";
 import { Btn, Card, CardHead, CpInput, CpTextArea, Icons, Pill, inputSx, monoSx, useToast } from "./ui";
 
-const ruleKey = (r: AllowlistRule) => r.pattern + "|" + (r.argPattern || "");
+/** The policy the select shows: the override when it is one we offer, else the
+ *  effective policy when that is, else Allowlist. */
+function supportedPolicy(v: Pick<ConfirmView, "override" | "confirmPolicy">): string {
+  for (const candidate of [v.override, v.confirmPolicy]) {
+    if (candidate === "Allowlist" || candidate === "None") return candidate;
+  }
+  return "Allowlist";
+}
 
 export function ConfigPane() {
   const { t } = useI18n();
   const { showToast, toastView } = useToast();
 
-  const [config, setConfig] = useState<AgentConfig>({ exists: false, model: "", systemPrompt: "" });
+  const [config, setConfig] = useState<AgentConfig>({ exists: false, selectedModel: "", userInstructions: "" });
   const [status, setStatus] = useState<AgentStatus | null>(null);
   const [confirm, setConfirm] = useState<ConfirmView | null>(null);
   const [policySel, setPolicySel] = useState("");
-  const [llms, setLlms] = useState<LlmModel[]>([]);
-  const [llmForm, setLlmForm] = useState({ name: "", endpoint: "", apiKey: "", public: false });
-  const [editingModel, setEditingModel] = useState<string | null>(null);
-  const [llmBusy, setLlmBusy] = useState(false);
+  const models: TemplateModelOption[] = config.models ?? [];
   const [confirmBusy, setConfirmBusy] = useState(false);
   const [ruleForm, setRuleForm] = useState({ pattern: "", argPattern: "" });
   const [saving, setSaving] = useState(false);
@@ -44,17 +47,15 @@ export function ConfigPane() {
       return (await res.json()) as T;
     };
     try {
-      const [cfgRes, stRes, cfRes, llmRes] = await Promise.all([
+      const [cfgRes, stRes, cfRes] = await Promise.all([
         get<{ config: AgentConfig }>("/api/cubepilot/agent/config"),
         get<AgentStatus>("/api/cubepilot/agent/status"),
         get<ConfirmView>("/api/cubepilot/agent/confirm"),
-        get<{ llms: LlmModel[] }>("/api/cubepilot/llms"),
       ]);
       setConfig(cfgRes.config);
       setStatus(stRes);
       setConfirm(cfRes);
-      setPolicySel(cfRes.override);
-      setLlms(llmRes.llms);
+      setPolicySel(supportedPolicy(cfRes));
     } catch (e) {
       showToast(t("cubepilot.failed", { error: String(e) }), "error");
     }
@@ -76,12 +77,19 @@ export function ConfigPane() {
       const res = await fetch("/api/cubepilot/agent/config", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ config: { model: config.model, systemPrompt: config.systemPrompt } }),
+        body: JSON.stringify({
+          config: { selectedModel: config.selectedModel, userInstructions: config.userInstructions },
+        }),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(body.error ?? `HTTP ${res.status}`);
+      }
       const body = (await res.json()) as { config: AgentConfig };
       setConfig(body.config);
       showToast(t("cubepilot.config.saved"));
+      // The first save provisions the instance — refresh status/confirm.
+      void loadAll();
     } catch (e) {
       showToast(t("cubepilot.failed", { error: String(e) }), "error");
     } finally {
@@ -90,6 +98,8 @@ export function ConfigPane() {
   }
 
   // ── confirmations ──
+  // The PUT carries the instance's OWNED state only (template rules are
+  // inherited, never stored on the instance).
 
   async function persistConfirm(body: { confirmPolicy?: string; allowlist?: AllowlistRule[] }) {
     if (confirmBusy) return;
@@ -100,15 +110,22 @@ export function ConfigPane() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        const b = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(b.error ?? `HTTP ${res.status}`);
+      }
       const v = (await res.json()) as ConfirmView;
       setConfirm(v);
-      setPolicySel(v.override);
+      setPolicySel(supportedPolicy(v));
     } catch (e) {
       showToast(t("cubepilot.failed", { error: String(e) }), "error");
     } finally {
       setConfirmBusy(false);
     }
+  }
+
+  function ownedRules(): AllowlistRule[] {
+    return (confirm?.allowlist ?? []).filter((r) => r.owned);
   }
 
   function changePolicy(value: string) {
@@ -122,113 +139,33 @@ export function ConfigPane() {
       showToast(t("cubepilot.config.errPattern"));
       return;
     }
-    if (!confirm) return;
     const entry: AllowlistRule = { pattern, argPattern: ruleForm.argPattern.trim() || undefined, owned: true };
-    if (confirm.allowlist.some((r) => ruleKey(r) === ruleKey(entry))) {
+    if (ownedRules().some((r) => ruleKey(r) === ruleKey(entry))) {
       showToast(t("cubepilot.config.dupeRule"));
       return;
     }
-    void persistConfirm({ allowlist: [...confirm.allowlist, entry] });
+    void persistConfirm({ allowlist: [...ownedRules(), entry] });
     setRuleForm({ pattern: "", argPattern: "" });
     showToast(t("cubepilot.config.ruleAdded"));
   }
 
   function removeRule(key: string) {
-    if (!confirm) return;
-    void persistConfirm({ allowlist: confirm.allowlist.filter((r) => ruleKey(r) !== key) });
+    void persistConfirm({ allowlist: ownedRules().filter((r) => ruleKey(r) !== key) });
     showToast(t("cubepilot.config.ruleRemoved"));
   }
 
   function resetConfirm() {
-    setPolicySel("");
+    setPolicySel("Allowlist");
     void persistConfirm({ confirmPolicy: "", allowlist: [] });
-  }
-
-  // ── LLM catalog ──
-
-  function resetLlmForm() {
-    setLlmForm({ name: "", endpoint: "", apiKey: "", public: false });
-    setEditingModel(null);
-  }
-
-  function startEditLlm(m: LlmModel) {
-    // The stored key is never sent to the browser; a blank key on edit keeps
-    // the current credential.
-    setLlmForm({ name: m.name, endpoint: m.endpoint, apiKey: "", public: !m.keyed });
-    setEditingModel(m.name);
-  }
-
-  async function removeLlm(name: string) {
-    if (llmBusy) return;
-    if (!window.confirm(t("cubepilot.config.removeConfirm", { name }))) return;
-    setLlmBusy(true);
-    try {
-      const res = await fetch(`/api/cubepilot/llms/${encodeURIComponent(name)}`, { method: "DELETE" });
-      if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as { error?: string };
-        throw new Error(body.error ?? `HTTP ${res.status}`);
-      }
-      showToast(t("cubepilot.config.llmRemoved"));
-      if (editingModel === name) resetLlmForm();
-      const body = (await fetch("/api/cubepilot/llms")).json() as Promise<{ llms: LlmModel[] }>;
-      setLlms((await body).llms);
-    } catch (e) {
-      showToast(t("cubepilot.failed", { error: String(e) }), "error");
-    } finally {
-      setLlmBusy(false);
-    }
-  }
-
-  async function submitLlm() {
-    if (llmBusy) return;
-    if (!llmForm.endpoint.trim()) {
-      showToast(t("cubepilot.config.errEndpoint"));
-      return;
-    }
-    if (!editingModel && !llmForm.name.trim()) {
-      showToast(t("cubepilot.config.errName"));
-      return;
-    }
-    if (!editingModel && !llmForm.apiKey && !llmForm.public) {
-      showToast(t("cubepilot.config.errKey"));
-      return;
-    }
-    setLlmBusy(true);
-    try {
-      if (editingModel) {
-        const res = await fetch(`/api/cubepilot/llms/${encodeURIComponent(editingModel)}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ endpoint: llmForm.endpoint, apiKey: llmForm.apiKey || undefined, public: llmForm.public }),
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        showToast(t("cubepilot.config.llmUpdated"));
-      } else {
-        const res = await fetch("/api/cubepilot/llms", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            name: llmForm.name,
-            endpoint: llmForm.endpoint,
-            apiKey: llmForm.apiKey || undefined,
-            public: llmForm.public,
-          }),
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        showToast(t("cubepilot.config.llmAdded"));
-      }
-      resetLlmForm();
-      const body = (await fetch("/api/cubepilot/llms")).json() as Promise<{ llms: LlmModel[] }>;
-      setLlms((await body).llms);
-    } catch (e) {
-      showToast(t("cubepilot.failed", { error: String(e) }), "error");
-    } finally {
-      setLlmBusy(false);
-    }
   }
 
   const hasInstance = !!status?.exists;
   const allowlistPolicy = confirm?.confirmPolicy === "Allowlist";
+  // The select offers Allowlist / None only: a CR holding anything else (e.g. a
+  // legacy AlwaysAsk) shows the safe default instead of a blank select, and the
+  // effective pill below still reports what the runtime enforces.
+  const defaultRules = (confirm?.allowlist ?? []).filter((r) => !r.owned);
+  const ownedList = (confirm?.allowlist ?? []).filter((r) => r.owned);
 
   return (
     <Box data-od-id="cp-config-pane">
@@ -238,7 +175,7 @@ export function ConfigPane() {
           <Box sx={{ fontSize: 18, fontWeight: 650, letterSpacing: "-0.01em" }}>{t("cubepilot.config.title")}</Box>
           <Box sx={{ fontSize: 13, color: "text.secondary", mt: "3px" }}>{t("cubepilot.config.desc")}</Box>
         </Box>
-        <Btn variant="primary" onClick={() => void saveConfig()} disabled={!hasInstance || saving} title={!hasInstance ? t("cubepilot.config.saveDisabled") : undefined} data-od-id="cp-config-save">
+        <Btn variant="primary" onClick={() => void saveConfig()} disabled={saving} data-od-id="cp-config-save">
           {Icons.check()}
           {t("cubepilot.config.save")}
         </Btn>
@@ -256,102 +193,49 @@ export function ConfigPane() {
                 <Box
                   component="select"
                   aria-label={t("cubepilot.config.model")}
-                  value={config.model || ""}
-                  onChange={(e) => setConfig((c) => ({ ...c, model: e.target.value }))}
+                  value={config.selectedModel || ""}
+                  onChange={(e) => setConfig((c) => ({ ...c, selectedModel: e.target.value }))}
                   sx={inputSx}
                   data-od-id="cp-config-model-select"
                 >
-                  <Box component="option" value="" disabled>
-                    {t("cubepilot.config.modelSelect")}
+                  <Box component="option" value="">
+                    {t("cubepilot.config.modelDefault")}
                   </Box>
-                  {llms.map((m) => (
+                  {models.map((m) => (
                     <Box key={m.name} component="option" value={m.name}>
                       {m.name}
                     </Box>
                   ))}
                 </Box>
-                {llms.length === 0 ? (
+                {models.length === 0 ? (
                   <Box sx={{ fontSize: 12, color: "#e15c5c" }}>{t("cubepilot.config.noModels")}</Box>
                 ) : null}
-              </Box>
-              <Box sx={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-                <Box component="label" sx={{ fontSize: 12.5, color: "text.secondary", fontWeight: 550 }}>{t("cubepilot.config.runtime")}</Box>
-                {/* Single fixed runtime; the no-op onChange silences React's
-                    value-without-onChange warning. */}
-                <Box component="select" aria-label={t("cubepilot.config.runtime")} value="CubePilot" onChange={() => {}} sx={inputSx}>
-                  <Box component="option" value="CubePilot">CubePilot</Box>
-                </Box>
               </Box>
             </Box>
           </Card>
 
-          {/* LLM Config */}
+          {/* LLM Config (read-only: the models are inlined in the AgentTemplate) */}
           <Card data-od-id="cp-config-llm">
             <CardHead title={t("cubepilot.config.llmTitle")} hint={t("cubepilot.config.llmHint")} />
             <Box sx={{ p: "16px", display: "flex", flexDirection: "column", gap: "8px" }}>
-              <Box sx={{ display: "flex", flexDirection: "column", gap: "8px", mb: "12px" }}>
-                {llms.length === 0 ? (
-                  <Box sx={{ fontSize: 13, color: "text.secondary" }}>{t("cubepilot.config.llmNone")}</Box>
-                ) : null}
-                {llms.map((m) => (
-                  <Box key={m.name} sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px", fontSize: 13 }}>
-                    <Box sx={{ ...monoSx, fontSize: 12.5 }}>{m.name}</Box>
-                    <Box sx={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                      <Pill variant="neutral">{m.keyed ? t("cubepilot.config.llmKeyed") : t("cubepilot.config.llmPublic")}</Pill>
-                      <Btn small variant="ghost" disabled={llmBusy} onClick={() => startEditLlm(m)}>
-                        {t("cubepilot.config.llmEdit")}
-                      </Btn>
-                      <Btn small variant="ghost" disabled={llmBusy} onClick={() => void removeLlm(m.name)}>
-                        {t("cubepilot.config.llmRemove")}
-                      </Btn>
-                    </Box>
-                  </Box>
-                ))}
-              </Box>
-              {editingModel ? (
-                <Box sx={{ fontSize: 12.5, color: "text.secondary", mb: "4px" }}>{t("cubepilot.config.llmEditing", { name: editingModel })}</Box>
-              ) : (
-                <CpInput
-                  placeholder={t("cubepilot.config.llmNamePh")}
-                  aria-label={t("cubepilot.config.llmNamePh")}
-                  value={llmForm.name}
-                  onChange={(e) => setLlmForm((f) => ({ ...f, name: e.target.value }))}
-                />
-              )}
-              <CpInput
-                placeholder={t("cubepilot.config.llmEndpointPh")}
-                aria-label={t("cubepilot.config.llmEndpointPh")}
-                value={llmForm.endpoint}
-                onChange={(e) => setLlmForm((f) => ({ ...f, endpoint: e.target.value }))}
-              />
-              <Box sx={{ fontSize: 12, color: "text.secondary", my: "2px" }}>{t("cubepilot.config.llmEndpointHint")}</Box>
-              <CpInput
-                type="password"
-                disabled={llmForm.public}
-                placeholder={editingModel ? t("cubepilot.config.llmKeyPhEdit") : t("cubepilot.config.llmKeyPh")}
-                aria-label={t("cubepilot.config.llmKeyPh")}
-                value={llmForm.apiKey}
-                onChange={(e) => setLlmForm((f) => ({ ...f, apiKey: e.target.value }))}
-              />
-              <Box
-                component="label"
-                sx={{ display: "flex", alignItems: "center", gap: "8px", fontSize: 13, mb: "10px", cursor: "pointer" }}
-              >
-                <input
-                  type="checkbox"
-                  checked={llmForm.public}
-                  onChange={(e) => setLlmForm((f) => ({ ...f, public: e.target.checked, apiKey: e.target.checked ? "" : f.apiKey }))}
-                />
-                {t("cubepilot.config.llmPublicLabel")}
-              </Box>
-              <Btn variant="primary" disabled={llmBusy} onClick={() => void submitLlm()} sx={{ width: "100%" }} data-od-id="cp-config-llm-submit">
-                {llmBusy ? t("cubepilot.config.llmSaving") : editingModel ? t("cubepilot.config.llmSave") : t("cubepilot.config.llmAdd")}
-              </Btn>
-              {editingModel ? (
-                <Btn disabled={llmBusy} onClick={resetLlmForm} sx={{ width: "100%", mt: "6px" }}>
-                  {t("cubepilot.config.llmCancel")}
-                </Btn>
+              {models.length === 0 ? (
+                <Box sx={{ fontSize: 13, color: "text.secondary" }}>{t("cubepilot.config.llmNone")}</Box>
               ) : null}
+              {models.map((m) => (
+                <Box key={m.name} sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px", fontSize: 13 }}>
+                  <Box sx={{ minWidth: 0 }}>
+                    <Box sx={{ ...monoSx, fontSize: 12.5 }}>{m.name}</Box>
+                    {m.endpoint ? (
+                      <Box sx={{ ...monoSx, fontSize: 10.5, color: "text.secondary", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={m.endpoint}>
+                        {m.endpoint}
+                      </Box>
+                    ) : null}
+                  </Box>
+                  <Pill variant="neutral">
+                    {m.name === config.selectedModel ? t("cubepilot.config.llmSelected") : t("cubepilot.config.llmTemplate")}
+                  </Pill>
+                </Box>
+              ))}
             </Box>
           </Card>
 
@@ -363,8 +247,8 @@ export function ConfigPane() {
                 rows={6}
                 placeholder={t("cubepilot.config.promptPh")}
                 aria-label={t("cubepilot.config.promptTitle")}
-                value={config.systemPrompt || ""}
-                onChange={(e) => setConfig((c) => ({ ...c, systemPrompt: e.target.value }))}
+                value={config.userInstructions || ""}
+                onChange={(e) => setConfig((c) => ({ ...c, userInstructions: e.target.value }))}
                 data-od-id="cp-config-prompt-input"
               />
             </Box>
@@ -375,16 +259,23 @@ export function ConfigPane() {
         <Card sx={{ position: "sticky", top: 70 }} data-od-id="cp-config-status">
           <CardHead
             title={t("cubepilot.config.instTitle")}
-            actions={<Pill variant={hasInstance ? "ok" : "neutral"} dot pulse={hasInstance}>{hasInstance ? t("cubepilot.config.instRunning") : "—"}</Pill>}
+            actions={
+              <Pill variant={hasInstance ? (status?.phase === "Ready" ? "ok" : "warn") : "neutral"} dot pulse={hasInstance && status?.phase === "Ready"}>
+                {hasInstance ? (status?.phase || t("cubepilot.config.instPending")) : "—"}
+              </Pill>
+            }
           />
           <Box sx={{ p: "16px", display: "grid", gridTemplateColumns: "1fr", gap: "12px" }}>
             {status ? (
               <>
                 <InstRow k={t("cubepilot.config.instId")} v={<Box component="span" sx={{ ...monoSx, fontSize: 12 }}>{status.id || "-"}</Box>} />
-                <InstRow k={t("cubepilot.config.instPhase")} v={status.phase || "-"} />
                 <InstRow k={t("cubepilot.config.instUptime")} v={fmtUptime(status.uptimeSeconds)} />
-                <InstRow k={t("cubepilot.config.instImage")} v={<Box component="span" sx={{ ...monoSx, fontSize: 11.5 }}>{status.gatewayImage || "-"}</Box>} />
-                <InstRow k={t("cubepilot.config.instVolume")} v={<Box component="span" sx={{ ...monoSx, fontSize: 11.5 }}>data-{status.user}</Box>} />
+                <InstRow k={t("cubepilot.config.instLastActivity")} v={status.lastActivity || "-"} />
+                <InstRow k={t("cubepilot.config.instPod")} v={<Box component="span" sx={{ ...monoSx, fontSize: 11.5 }}>{status.podName || "-"}</Box>} />
+                <InstRow k={t("cubepilot.config.instVolume")} v={<Box component="span" sx={{ ...monoSx, fontSize: 11.5 }}>{status.pvcName || "-"}</Box>} />
+                {status.message ? (
+                  <InstRow k={t("cubepilot.config.instMessage")} v={<Box sx={{ fontSize: 12 }}>{status.message}</Box>} />
+                ) : null}
               </>
             ) : null}
           </Box>
@@ -397,6 +288,8 @@ export function ConfigPane() {
         <Box sx={{ p: "16px", display: "flex", flexDirection: "column", gap: "14px" }}>
           <Box sx={{ display: "flex", flexDirection: "column", gap: "6px" }}>
             <Box component="label" sx={{ fontSize: 12.5, color: "text.secondary", fontWeight: 550 }}>{t("cubepilot.config.policy")}</Box>
+            {/* Two policies only: Allowlist (safe commands auto-pass) and None
+                (everything passes, audited). */}
             <Box
               component="select"
               aria-label={t("cubepilot.config.policy")}
@@ -406,9 +299,7 @@ export function ConfigPane() {
               sx={inputSx}
               data-od-id="cp-config-policy"
             >
-              <Box component="option" value="">{t("cubepilot.config.policyFollow", { policy: confirm?.templatePolicy || "Allowlist" })}</Box>
               <Box component="option" value="Allowlist">{t("cubepilot.config.policyAllowlist")}</Box>
-              <Box component="option" value="AlwaysAsk">{t("cubepilot.config.policyAlwaysAsk")}</Box>
               <Box component="option" value="None">{t("cubepilot.config.policyNone")}</Box>
             </Box>
             {confirm?.exists ? (
@@ -421,27 +312,23 @@ export function ConfigPane() {
 
           {allowlistPolicy ? (
             <>
-              <Box sx={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+              <Box sx={{ display: "flex", flexDirection: "column", gap: "10px" }}>
                 <Box component="label" sx={{ fontSize: 12.5, color: "text.secondary", fontWeight: 550 }}>{t("cubepilot.config.allowlistTitle")}</Box>
-                <Box sx={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-                  {confirm?.allowlist.map((r) => (
-                    <Box key={ruleKey(r)} sx={{ display: "flex", alignItems: "center", gap: "9px", p: "8px 12px", border: 1, borderColor: "divider", borderRadius: 6, bgcolor: "var(--surface)" }}>
-                      <Box sx={{ color: "text.secondary", display: "flex" }}>{Icons.tool({ size: 13 })}</Box>
-                      <Box component="span" sx={{ ...monoSx, fontSize: 12, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={r.label || r.pattern}>
-                        {r.label || r.pattern}
-                      </Box>
-                      <Pill variant={r.owned ? "accent" : "neutral"}>{r.owned ? t("cubepilot.config.ruleYours") : t("cubepilot.config.rulePlatform")}</Pill>
-                      {r.owned ? (
-                        <Btn small disabled={confirmBusy} onClick={() => removeRule(ruleKey(r))}>
-                          {t("cubepilot.config.ruleRemove")}
-                        </Btn>
-                      ) : null}
-                    </Box>
-                  ))}
-                  {confirm && confirm.allowlist.length === 0 ? (
-                    <Box sx={{ color: "text.secondary", fontSize: 13 }}>{t("cubepilot.config.allowlistEmpty")}</Box>
-                  ) : null}
-                </Box>
+                <AllowlistTagGroup
+                  groupId="cp-allowlist-default"
+                  label={t("cubepilot.config.allowlistDefault")}
+                  rules={defaultRules}
+                  hint={t("cubepilot.config.allowlistDefaultNote")}
+                />
+                <AllowlistTagGroup
+                  groupId="cp-allowlist-owned"
+                  label={t("cubepilot.config.allowlistYours")}
+                  rules={ownedList}
+                  busy={confirmBusy}
+                  emptyText={t("cubepilot.config.allowlistEmpty")}
+                  removeLabel={t("cubepilot.config.ruleRemove")}
+                  onRemove={removeRule}
+                />
               </Box>
               <Box sx={{ display: "flex", gap: "6px" }}>
                 <CpInput
@@ -452,12 +339,17 @@ export function ConfigPane() {
                   sx={{ flex: 1, minWidth: 0, ...monoSx, fontSize: 12.5 }}
                   data-od-id="cp-config-rule-pattern"
                 />
+                {/* The placeholder is the safe-args regex (the argPattern the
+                    platform's read-only builtins use); the aria-label stays a
+                    short human name so screen readers do not read a regex. */}
                 <CpInput
                   placeholder={t("cubepilot.config.ruleArgPh")}
-                  aria-label={t("cubepilot.config.ruleArgPh")}
+                  aria-label={t("cubepilot.config.ruleArgLabel")}
+                  title={t("cubepilot.config.ruleArgPh")}
                   value={ruleForm.argPattern}
                   onChange={(e) => setRuleForm((f) => ({ ...f, argPattern: e.target.value }))}
                   sx={{ flex: 1, minWidth: 0, ...monoSx, fontSize: 12.5 }}
+                  data-od-id="cp-config-rule-arg"
                 />
                 <Btn disabled={confirmBusy} onClick={addRule}>
                   {t("cubepilot.config.ruleAdd")}
@@ -468,16 +360,92 @@ export function ConfigPane() {
               </Btn>
             </>
           ) : (
-            <Box sx={{ fontSize: 13, color: "text.secondary" }}>
-              {confirm?.confirmPolicy === "AlwaysAsk"
-                ? t("cubepilot.config.policyAlwaysAskNote")
-                : t("cubepilot.config.policyNoneNote")}
-            </Box>
+            <Box sx={{ fontSize: 13, color: "text.secondary" }}>{t("cubepilot.config.policyNoneNote")}</Box>
           )}
         </Box>
       </Card>
 
       {toastView}
+    </Box>
+  );
+}
+
+/** One labelled group of allowlist tags. Rules the caller owns carry a remove
+ *  control; the hardcoded platform defaults are read-only. */
+function AllowlistTagGroup({
+  groupId,
+  label,
+  rules,
+  hint,
+  emptyText,
+  removeLabel,
+  busy,
+  onRemove,
+}: {
+  groupId: string;
+  label: string;
+  rules: AllowlistRule[];
+  hint?: string;
+  emptyText?: string;
+  removeLabel?: string;
+  busy?: boolean;
+  onRemove?: (key: string) => void;
+}) {
+  return (
+    <Box data-od-id={groupId} sx={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+      <Box sx={{ fontSize: 11.5, color: "text.secondary" }}>
+        {label}
+        {hint ? <Box component="span" sx={{ ml: "6px" }}>{hint}</Box> : null}
+      </Box>
+      <Box sx={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+        {rules.map((r) => (
+          <Box
+            key={ruleKey(r)}
+            data-od-id="cp-allowlist-tag"
+            data-owned={r.owned ? "true" : "false"}
+            title={[r.label || r.pattern, r.argPattern ? `argPattern: ${r.argPattern}` : ""].filter(Boolean).join("\n")}
+            sx={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: "5px",
+              maxWidth: "100%",
+              border: 1,
+              borderColor: r.owned ? "color-mix(in oklch, var(--accent) 40%, var(--border))" : "divider",
+              bgcolor: r.owned ? "var(--accent-soft)" : "var(--surface)",
+              borderRadius: 999,
+              p: "3px 9px",
+            }}
+          >
+            {/* The tag shows the command; the human meaning (and the
+                argPattern) live in the tooltip. */}
+            <Box component="span" sx={{ ...monoSx, fontSize: 11.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {r.pattern}
+            </Box>
+            {r.owned && onRemove ? (
+              <Box
+                component="button"
+                type="button"
+                aria-label={removeLabel}
+                disabled={busy}
+                onClick={() => onRemove(ruleKey(r))}
+                data-od-id="cp-allowlist-remove"
+                sx={{
+                  border: "none",
+                  bgcolor: "transparent",
+                  p: 0,
+                  cursor: busy ? "default" : "pointer",
+                  color: "text.secondary",
+                  display: "flex",
+                  "&:hover": { color: "text.primary" },
+                }}
+              >
+                {Icons.close({ size: 12 })}
+              </Box>
+            ) : null}
+          </Box>
+        ))}
+        {rules.length === 0 && emptyText ? <Box sx={{ fontSize: 12.5, color: "text.secondary" }}>{emptyText}</Box> : null}
+      </Box>
     </Box>
   );
 }

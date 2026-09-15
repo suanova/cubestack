@@ -2,7 +2,7 @@
 // task once, via the cubepilot/manual-run annotation (the run report then
 // appears as a TaskRun CR).
 
-import { getTaskCr, k8sErrorResponse, markManualRun, namespaceMissingResponse, tasksNamespace } from "@/lib/cubepilot/taskcrd";
+import { getTaskCr, isTaskOwner, k8sErrorResponse, markManualRun } from "@/lib/cubepilot/taskcrd";
 import { withAuth } from "@/lib/auth/guard";
 
 export const runtime = "nodejs";
@@ -10,9 +10,8 @@ export const dynamic = "force-dynamic";
 
 type Ctx = { params: Promise<{ id: string }> };
 
-export const POST = withAuth<Ctx>(async (_req, _session, ctx) => {
+export const POST = withAuth<Ctx>(async (_req, session, ctx) => {
   const { id } = await ctx.params;
-  if (!tasksNamespace()) return namespaceMissingResponse();
   let existing;
   try {
     existing = await getTaskCr(id);
@@ -22,10 +21,14 @@ export const POST = withAuth<Ctx>(async (_req, _session, ctx) => {
   if (!existing) {
     return Response.json({ error: "task not found" }, { status: 404 });
   }
+  if (!isTaskOwner(existing, session.user)) {
+    return Response.json({ error: "not your task" }, { status: 403 });
+  }
   try {
     await markManualRun(existing);
   } catch (e) {
     return k8sErrorResponse(e);
   }
-  return Response.json({ started: true });
+  // 202 Accepted: the trigger is registered, the scheduler owns execution.
+  return Response.json({ started: true }, { status: 202 });
 });
