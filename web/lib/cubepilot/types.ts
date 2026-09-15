@@ -88,6 +88,13 @@ export interface Report {
 export interface TemplateModelOption {
   name: string;
   endpoint?: string;
+  /** "system" = served by the platform (the AI Gateway, the chat tab's source);
+   *  "external" = declared on the AgentTemplate (added here or by the platform)
+   *  and rendered into the gateway by the operator. */
+  origin?: "system" | "external";
+  /** external models only: the model binds a platform-managed credential
+   *  Secret (a public model has none). */
+  keyed?: boolean;
 }
 
 /** The caller's own assistant selections (reference /api/v1/agent/config:
@@ -101,6 +108,10 @@ export interface AgentConfig {
   selectedModel: string;
   userInstructions: string;
   models?: TemplateModelOption[];
+  /** true when the builtin AgentTemplate is missing from the operator
+   *  namespace — the operator is not installed, or CUBESTACK_TASKS_NAMESPACE
+   *  points somewhere else. The page then has no catalog and no runtime. */
+  templateMissing?: boolean;
 }
 
 /** The caller's instance status (reference /api/v1/agent/status), projected

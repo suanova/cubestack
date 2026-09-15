@@ -17,9 +17,11 @@ import { readFileSync } from "node:fs";
 import { Readable } from "node:stream";
 
 import { getCoreClient, getKubeConfig } from "@/lib/kubernetes";
+import { logger } from "@/lib/log";
 
-/** Namespace the AI Gateway Service is expected to live in. */
-export const GATEWAY_NAMESPACE = "envoy-gateway-system";
+/** Namespace the AI Gateway Service is expected to live in
+ *  (CUBESTACK_GATEWAY_NAMESPACE overrides the default). */
+export const GATEWAY_NAMESPACE = (process.env.CUBESTACK_GATEWAY_NAMESPACE ?? "").trim() || "envoy-gateway-system";
 
 /**
  * Well-known in-cluster base of the Envoy AI Gateway. Used when the portal
@@ -83,10 +85,22 @@ async function discoverGatewayBase(): Promise<GatewayBase | null> {
  */
 export async function resolveGatewayBase(): Promise<GatewayBase | null> {
   const explicit = (process.env.CUBESTACK_GATEWAT_URL ?? "").trim();
-  if (explicit) return { url: explicit.replace(/\/+$/, ""), via: "direct" };
+  if (explicit) {
+    logger("gateway").debug("base from CUBESTACK_GATEWAT_URL", { url: explicit });
+    return { url: explicit.replace(/\/+$/, ""), via: "direct" };
+  }
   const discovered = await discoverGatewayBase();
-  if (discovered) return discovered;
-  if (inCluster()) return { url: DEFAULT_GATEWAY_BASE, via: "direct" };
+  if (discovered) {
+    logger("gateway").debug("base discovered from the Service", { url: discovered.url, via: discovered.via });
+    return discovered;
+  }
+  if (inCluster()) {
+    logger("gateway").debug("base from the well-known in-cluster name", { url: DEFAULT_GATEWAY_BASE });
+    return { url: DEFAULT_GATEWAY_BASE, via: "direct" };
+  }
+  logger("gateway").warn("no gateway base resolved — system model list and playground chat are unavailable", {
+    hint: "set CUBESTACK_GATEWAT_URL or install the gateway in " + GATEWAY_NAMESPACE,
+  });
   return null;
 }
 

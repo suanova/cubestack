@@ -14,6 +14,7 @@
 import { randomBytes } from "node:crypto";
 
 import { getCustomObjectsClient } from "@/lib/kubernetes";
+import { logger } from "@/lib/log";
 import type { Report, Task, TaskParam, TaskTemplate } from "./types";
 
 const GROUP = "ai.cubestack.io";
@@ -110,7 +111,16 @@ export function k8sErrorCode(e: unknown): number | undefined {
 /** Response for k8s API failures (404 → CRDs probably not installed). */
 export function k8sErrorResponse(e: unknown): Response {
   const message = e instanceof Error ? e.message : String(e);
-  return Response.json({ error: `cluster error: ${message}` }, { status: k8sErrorCode(e) === 404 ? 503 : 502 });
+  const code = k8sErrorCode(e);
+  // Every failed cluster call funnels here: log it with the status so a
+  // deployment can tell "CRDs not installed" (404) from "RBAC denied" (403)
+  // without changing any code.
+  if (code === 403) {
+    logger("k8s").error("forbidden by RBAC — check the portal ServiceAccount rules", { status: code, error: message });
+  } else {
+    logger("k8s").error("cluster call failed", { status: code ?? "-", error: message });
+  }
+  return Response.json({ error: `cluster error: ${message}` }, { status: code === 404 ? 503 : 502 });
 }
 
 // ── DTO projection (CR → the tab's shapes) ───────────────────────────────
@@ -179,6 +189,8 @@ export function templateFromCr(cr: TaskTemplateCr): TaskTemplate {
 
 async function listCr<T>(plural: string, labelSelector?: string): Promise<T[]> {
   const co = getCustomObjectsClient();
+  const ns = tasksNamespace();
+  logger("k8s").debug("list", { plural, namespace: ns, selector: labelSelector });
   const res = await co.listNamespacedCustomObject({
     group: GROUP,
     version: VERSION,
@@ -190,17 +202,21 @@ async function listCr<T>(plural: string, labelSelector?: string): Promise<T[]> {
 }
 
 async function getCr<T>(plural: string, name: string): Promise<T | null> {
+  const ns = tasksNamespace();
   try {
     const co = getCustomObjectsClient();
     return (await co.getNamespacedCustomObject({
       group: GROUP,
       version: VERSION,
-      namespace: tasksNamespace(),
+      namespace: ns,
       plural,
       name,
     })) as T;
   } catch (e) {
-    if (k8sErrorCode(e) === 404) return null;
+    if (k8sErrorCode(e) === 404) {
+      logger("k8s").warn("get 404 (treated as absent)", { plural, namespace: ns, name, error: e });
+      return null;
+    }
     throw e;
   }
 }

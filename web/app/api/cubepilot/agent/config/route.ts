@@ -5,9 +5,11 @@
 // the instance on first save (idempotent, like the reference API's
 // POST /api/v1/instances).
 //
-// The model catalog is the AgentTemplate's spec.models (the reference's rule:
-// "models are inlined in the AgentTemplate"; the operator wires them into the
-// AI gateway), so a save never depends on the gateway being reachable.
+// The model catalog is the union of the AgentTemplate's spec.models (the
+// reference's rule: "models are inlined in the AgentTemplate"; the operator
+// wires them into the AI gateway) and the system catalog the gateway serves
+// (the chat tab's source). The template part resolves offline, so a save never
+// depends on the gateway being reachable.
 
 import {
   DEFAULT_AGENT_NAME,
@@ -23,7 +25,9 @@ import {
   type AgentTemplateCr,
   type JsonPatchOp,
 } from "@/lib/cubepilot/agentcrd";
-import type { AgentConfig } from "@/lib/cubepilot/types";
+import { gatewayFetch } from "@/lib/cubepilot/gateway";
+import { logger } from "@/lib/log";
+import type { AgentConfig, TemplateModelOption } from "@/lib/cubepilot/types";
 import { withAuth } from "@/lib/auth/guard";
 
 export const runtime = "nodejs";
@@ -37,12 +41,41 @@ function clearOrAdd(value: string | undefined, path: string, current: string | u
   return current !== undefined ? [{ op: "remove", path }] : [];
 }
 
-function configFromCr(cr: AgentInstanceCr | null, tmpl: AgentTemplateCr | null): AgentConfig {
+/** The selectable catalog: the template's own (external) models first, then the
+ *  system catalog the platform serves (the AI Gateway — the same source the chat
+ *  tab lists). A name in both keeps the external entry, which carries the
+ *  endpoint and the credential reference. */
+function catalog(tmpl: AgentTemplateCr | null, system: TemplateModelOption[]): TemplateModelOption[] {
+  const own = templateModels(tmpl);
+  const seen = new Set(own.map((m) => m.name));
+  return [...own, ...system.filter((m) => !seen.has(m.name))];
+}
+
+/**
+ * The system catalog: the models the AI Gateway serves. Best effort and
+ * bounded — an absent or slow gateway simply means "no system models"; the
+ * template's own models still work, so nothing here depends on the gateway.
+ */
+async function systemModels(): Promise<TemplateModelOption[]> {
+  try {
+    const res = await gatewayFetch("/v1/models", { signal: AbortSignal.timeout(2500) });
+    if (!res.ok) return [];
+    const body = (await res.json()) as { data?: Array<{ id?: string }> };
+    return (body.data ?? [])
+      .filter((m): m is { id: string } => typeof m.id === "string" && m.id.length > 0)
+      .map((m) => ({ name: m.id, origin: "system" as const }));
+  } catch {
+    return [];
+  }
+}
+
+function configFromCr(cr: AgentInstanceCr | null, tmpl: AgentTemplateCr | null, system: TemplateModelOption[]): AgentConfig {
   return {
     exists: Boolean(cr),
     selectedModel: cr?.spec?.selectedModel ?? "",
     userInstructions: cr?.spec?.userInstructions ?? "",
-    models: templateModels(tmpl),
+    models: catalog(tmpl, system),
+    templateMissing: !tmpl,
   };
 }
 
@@ -52,7 +85,14 @@ export const GET = withAuth(async (_req, session) => {
       getAgentInstanceCr(agentInstanceName(session.user)),
       getAgentTemplateCr(DEFAULT_AGENT_NAME),
     ]);
-    return Response.json({ config: configFromCr(cr, tmpl) });
+    if (!tmpl) {
+      logger("agent").warn("builtin AgentTemplate missing — the config page has no catalog or runtime", {
+        template: DEFAULT_AGENT_NAME,
+        namespace: process.env.CUBESTACK_TASKS_NAMESPACE ?? "cubestack-system",
+        hint: "install the CubePilot operator, or point CUBESTACK_TASKS_NAMESPACE at the namespace holding the CRs",
+      });
+    }
+    return Response.json({ config: configFromCr(cr, tmpl, await systemModels()) });
   } catch (e) {
     return k8sErrorResponse(e);
   }
@@ -79,8 +119,10 @@ export const PUT = withAuth(async (req, session) => {
     // the template's models would leave the instance unable to resolve a
     // model. "" = Runtime Default (clear the override), always allowed.
     if (patch.selectedModel) {
-      const known = templateModels(tmpl).map((m) => m.name);
-      if (!known.includes(patch.selectedModel)) {
+      // The template's own models resolve without touching the gateway; only a
+      // model we have not seen there costs the (bounded) system lookup.
+      const own = templateModels(tmpl).map((m) => m.name);
+      if (!own.includes(patch.selectedModel) && !(await systemModels()).some((m) => m.name === patch.selectedModel)) {
         return Response.json(
           { error: `model "${patch.selectedModel}" is not in the ${DEFAULT_AGENT_NAME} template (add it under Agent Config -> LLM Config first)` },
           { status: 400 },
@@ -93,7 +135,7 @@ export const PUT = withAuth(async (req, session) => {
         selectedModel: patch.selectedModel,
         userInstructions: patch.userInstructions,
       });
-      return Response.json({ config: configFromCr(cr, tmpl) });
+      return Response.json({ config: configFromCr(cr, tmpl, await systemModels()) });
     }
     if (existing.spec?.owner !== session.user) {
       return Response.json({ error: "agent instance name already taken by another user" }, { status: 409 });
@@ -106,7 +148,7 @@ export const PUT = withAuth(async (req, session) => {
       ...clearOrAdd(patch.userInstructions, "/spec/userInstructions", existing.spec?.userInstructions),
     ];
     const cr = ops.length > 0 ? await patchAgentInstanceCr(name, ops) : existing;
-    return Response.json({ config: configFromCr(cr, tmpl) });
+    return Response.json({ config: configFromCr(cr, tmpl, await systemModels()) });
   } catch (e) {
     if (e instanceof InstanceConflictError) {
       return Response.json({ error: e.message }, { status: 409 });

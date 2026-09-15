@@ -8,9 +8,11 @@
 // All agent CRs live in the operator's namespace — the same one as the task
 // CRs (CUBESTACK_TASKS_NAMESPACE, default cubestack-system).
 
-import { getCustomObjectsClient } from "@/lib/kubernetes";
+import { getCoreClient, getCustomObjectsClient } from "@/lib/kubernetes";
+import { logger } from "@/lib/log";
 
 import { k8sErrorCode, k8sErrorResponse, tasksNamespace } from "./taskcrd";
+import type { TemplateModelCr } from "./llm";
 import type { TemplateModelOption } from "./types";
 
 const GROUP = "ai.cubestack.io";
@@ -69,7 +71,7 @@ export interface AgentTemplateCr {
     /** OpenClaw | Hermes — the agent runtime (template-level, not per-instance). */
     runtime?: string;
     defaultModel?: string;
-    models?: Array<{ name?: string; endpoint?: string }>;
+    models?: TemplateModelCr[];
     instructions?: string;
     confirmPolicy?: string;
     allowlist?: AllowlistRuleCr[];
@@ -149,17 +151,26 @@ export function skillEnabled(instance: AgentInstanceCr | null, skill: SkillCr): 
 // ── k8s operations ────────────────────────────────────────────────────────
 
 async function getCr<T>(plural: string, name: string): Promise<T | null> {
+  const ns = tasksNamespace();
   try {
     const co = getCustomObjectsClient();
-    return (await co.getNamespacedCustomObject({
+    const out = (await co.getNamespacedCustomObject({
       group: GROUP,
       version: VERSION,
-      namespace: tasksNamespace(),
+      namespace: ns,
       plural,
       name,
     })) as T;
+    logger("agent").debug("get ok", { plural, namespace: ns, name });
+    return out;
   } catch (e) {
-    if (k8sErrorCode(e) === 404) return null;
+    if (k8sErrorCode(e) === 404) {
+      // Treated as "absent": log it, because a 404 here is usually a missing
+      // namespace, a CRD that is not installed, or the operator not having
+      // created the object — the three causes of an empty page.
+      logger("agent").warn("get 404 (treated as absent)", { plural, namespace: ns, name, error: e });
+      return null;
+    }
     throw e;
   }
 }
@@ -192,12 +203,33 @@ export function getAgentTemplateCr(name: string): Promise<AgentTemplateCr | null
  *  order). Entries without a name are dropped: they cannot be selected. */
 export function templateModels(tmpl: AgentTemplateCr | null): TemplateModelOption[] {
   return (tmpl?.spec?.models ?? [])
-    .filter((m): m is { name: string; endpoint?: string } => typeof m.name === "string" && m.name.length > 0)
-    .map((m) => ({ name: m.name, endpoint: m.endpoint }));
+    .filter((m): m is TemplateModelCr & { name: string } => typeof m.name === "string" && m.name.length > 0)
+    .map((m) => ({
+      name: m.name,
+      endpoint: m.endpoint,
+      origin: "external" as const,
+      keyed: Boolean(m.credentialRef?.name),
+    }));
+}
+
+/** The caller's agent instances that explicitly select a model — the delete
+ *  guard for a model edit (reference instancesSelecting). */
+export async function instancesSelectingModel(model: string): Promise<Array<{ name: string; owner: string }>> {
+  const co = getCustomObjectsClient();
+  const res = (await co.listNamespacedCustomObject({
+    group: GROUP,
+    version: VERSION,
+    namespace: tasksNamespace(),
+    plural: "agentinstances",
+  })) as { items?: Array<{ metadata?: { name?: string }; spec?: { selectedModel?: string; templateRef?: string } }> };
+  return (res.items ?? [])
+    .filter((i) => i.spec?.selectedModel === model && (i.spec?.templateRef ?? DEFAULT_AGENT_NAME) === DEFAULT_AGENT_NAME)
+    .map((i) => ({ name: i.metadata?.name ?? "", owner: (i.spec as { owner?: string } | undefined)?.owner ?? "" }));
 }
 
 export async function patchAgentInstanceCr(name: string, ops: JsonPatchOp[]): Promise<AgentInstanceCr> {
   const co = getCustomObjectsClient();
+  logger("agent").debug("patch", { plural: "agentinstances", namespace: tasksNamespace(), name, paths: ops.map((o) => o.path) });
   return (await co.patchNamespacedCustomObject({
     group: GROUP,
     version: VERSION,
@@ -256,6 +288,57 @@ export async function ensureAgentInstance(input: CreateAgentInstanceInput): Prom
     const existing = await getAgentInstanceCr(name);
     if (existing && existing.spec?.owner === input.user) return { cr: existing, alreadyExists: true };
     throw new InstanceConflictError("an agent instance with this name belongs to another user");
+  }
+}
+
+/** JSON-Patch the builtin AgentTemplate (the model catalog lives there). */
+export async function patchAgentTemplateCr(name: string, ops: JsonPatchOp[]): Promise<AgentTemplateCr> {
+  const co = getCustomObjectsClient();
+  logger("agent").debug("patch", { plural: "agenttemplates", namespace: tasksNamespace(), name, paths: ops.map((o) => o.path) });
+  return (await co.patchNamespacedCustomObject({
+    group: GROUP,
+    version: VERSION,
+    namespace: tasksNamespace(),
+    plural: "agenttemplates",
+    name,
+    body: ops,
+    fieldManager: "cubestack-web",
+  })) as AgentTemplateCr;
+}
+
+/**
+ * Create the credential Secret for a keyed model, or refresh its apiKey when it
+ * already exists (so re-adding a model with a new key takes effect). The key is
+ * never written to a CR — the template only carries the Secret reference.
+ */
+export async function upsertLlmCredential(secretName: string, apiKey: string): Promise<void> {
+  const core = getCoreClient();
+  const ns = tasksNamespace();
+  // Never log apiKey: only the Secret name and its namespace.
+  logger("agent").debug("upsert credential secret", { namespace: ns, name: secretName });
+  const data = { apiKey: Buffer.from(apiKey, "utf8").toString("base64") };
+  try {
+    await core.createNamespacedSecret({ namespace: ns, body: { metadata: { name: secretName, namespace: ns }, type: "Opaque", data } });
+    return;
+  } catch (e) {
+    if (k8sErrorCode(e) !== 409) throw e;
+  }
+  await core.patchNamespacedSecret({
+    name: secretName,
+    namespace: ns,
+    body: { data },
+  });
+}
+
+/** Delete a credential Secret; a missing Secret is success (the goal is that it
+ *  does not exist). */
+export async function deleteLlmCredential(secretName: string): Promise<void> {
+  const core = getCoreClient();
+  logger("agent").debug("delete credential secret", { namespace: tasksNamespace(), name: secretName });
+  try {
+    await core.deleteNamespacedSecret({ name: secretName, namespace: tasksNamespace() });
+  } catch (e) {
+    if (k8sErrorCode(e) !== 404) throw e;
   }
 }
 

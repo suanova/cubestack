@@ -24,8 +24,8 @@ const CONFIG_READY = {
   userInstructions: "巡检优先,写操作全部走审批",
   // The AgentTemplate's inlined models: the page lists these (no gateway call).
   models: [
-    { name: "glm-5.2-chat", endpoint: "http://ai-gateway.test:8080" },
-    { name: "deepseek-v4-flash", endpoint: "http://ai-gateway.test:8080" },
+    { name: "glm-5.2-chat", endpoint: "http://ai-gateway.test:8080", origin: "external", keyed: true },
+    { name: "system-only", origin: "system" },
   ],
 };
 
@@ -46,7 +46,7 @@ const CONFIG_NONE = {
   exists: false,
   selectedModel: "",
   userInstructions: "",
-  models: [{ name: "glm-5.2-chat", endpoint: "http://ai-gateway.test:8080" }],
+  models: [{ name: "glm-5.2-chat", endpoint: "http://ai-gateway.test:8080", origin: "external", keyed: false }],
 };
 
 /** One enabled + one disabled skill: the materialized whitelist of an
@@ -145,6 +145,7 @@ const PENDING_APPROVAL = {
 
 /** What the stubbed endpoints were actually called with (contract checks). */
 interface Captured {
+  llmPosts: Array<{ method: string; path: string; body: unknown }>;
   approvalPosts: Array<{ path: string; body: { decision?: string } }>;
   questionPosts: Array<{ path: string; body: { id?: string; answers?: Record<string, string[]>; cancel?: boolean } }>;
   pendingPaths: string[];
@@ -176,7 +177,7 @@ function confirmAfterPut(body: { confirmPolicy?: string; allowlist?: AllowlistRu
 
 /** Stub every endpoint the three panes touch with CR-shaped responses. */
 async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
-  const captured: Captured = { approvalPosts: [], questionPosts: [], pendingPaths: [], configPuts: [], confirmPuts: [] };
+  const captured: Captured = { approvalPosts: [], questionPosts: [], pendingPaths: [], configPuts: [], confirmPuts: [], llmPosts: [] };
   let config = stubs.config ?? CONFIG_READY;
   let confirm = stubs.confirm ?? CONFIRM;
   const sessions = stubs.sessions === undefined ? [] : stubs.sessions;
@@ -214,6 +215,16 @@ async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
         confirm = confirmAfterPut(body, confirm);
       }
       return json(confirm);
+    }
+    if (path.endsWith("/api/cubepilot/agent/llms") && method === "POST") {
+      const body = post() as { name: string; endpoint: string; public?: boolean };
+      captured.llmPosts.push({ method: "POST", path, body });
+      return json({ model: { name: body.name, endpoint: body.endpoint } });
+    }
+    if (path.includes("/api/cubepilot/agent/llms/") && (method === "PUT" || method === "DELETE")) {
+      const body = post() as { endpoint?: string; public?: boolean; apiKey?: string };
+      captured.llmPosts.push({ method, path, body });
+      return method === "DELETE" ? json({ deleted: decodeURIComponent(path.split("/").pop() ?? "") }) : json({ model: { name: "x" } });
     }
     if (path.endsWith("/api/cubepilot/skills")) return json(stubs.skills ?? SKILLS);
     // The chat tab still reads the gateway catalog; the config page does not.
@@ -450,12 +461,13 @@ test.describe("cubepilot config (AgentInstance CR + AgentTemplate catalog)", () 
     const pane = page.locator('[data-od-id="cp-config-pane"]');
     await expect(pane).toBeVisible();
 
-    // Model from the CR, options from the template's models (+ the default).
+    // Model from the CR; the dropdown lists the template's own models plus the
+    // system catalog (+ the runtime default).
     const modelSelect = page.locator('[data-od-id="cp-config-model-select"]');
     await expect(modelSelect).toHaveValue("glm-5.2-chat");
     await expect(modelSelect.locator("option")).toHaveCount(3);
     await expect(modelSelect).toContainText("运行时默认");
-    await expect(modelSelect).toContainText("deepseek-v4-flash");
+    await expect(modelSelect).toContainText("system-only");
 
     await expect(page.locator('[data-od-id="cp-config-prompt-input"]')).toHaveValue("巡检优先,写操作全部走审批");
 
@@ -490,12 +502,46 @@ test.describe("cubepilot config (AgentInstance CR + AgentTemplate catalog)", () 
     await expect(owned).toContainText("helm ls");
     await expect(owned.locator('[data-od-id="cp-allowlist-remove"]')).toHaveCount(1);
 
+    // LLM 配置: two sources — the system catalog (read-only) and your own
+    // models (written to the AgentTemplate, keyed ones through a Secret).
+    await expect(page.locator('[data-od-id="cp-config-llm"]')).toBeVisible();
+    await expect(page.locator('[data-od-id="cp-config-llm-src-system"]')).toHaveAttribute("aria-pressed", "true");
+    await expect(page.locator('[data-od-id="cp-config-llm-system"]')).toContainText("system-only");
+    await page.locator('[data-od-id="cp-config-llm-src-external"]').click();
+    await expect(page.locator('[data-od-id="cp-config-llm-external"]')).toContainText("glm-5.2-chat");
+    await expect(page.locator('[data-od-id="cp-config-llm-external"]')).toContainText("密钥");
+
+    await page.locator('[data-od-id="cp-config-llm-name"]').fill("Local Qwen");
+    await page.locator('[data-od-id="cp-config-llm-endpoint"]').fill("http://llm.local:8080/v1/chat/completions");
+    await page.locator('[data-od-id="cp-config-llm-public"]').check();
+    await page.locator('[data-od-id="cp-config-llm-save"]').click();
+    await expect(page.getByText('已添加模型「Local Qwen」')).toBeVisible();
+    expect(captured.llmPosts.at(-1)).toEqual({
+      method: "POST",
+      path: "/api/cubepilot/agent/llms",
+      body: { name: "Local Qwen", endpoint: "http://llm.local:8080/v1/chat/completions", public: true },
+    });
+
+    // Editing prefills the form; the name is immutable.
+    await page.locator('[data-od-id="cp-config-llm-edit"]').first().click();
+    await expect(page.locator('[data-od-id="cp-config-llm-name"]')).toBeDisabled();
+    await page.locator('[data-od-id="cp-config-llm-endpoint"]').fill("http://gw.test:9090/v1");
+    await page.locator('[data-od-id="cp-config-llm-save"]').click();
+    await expect(page.getByText("已更新模型「glm-5.2-chat」")).toBeVisible();
+    expect(captured.llmPosts.at(-1)).toMatchObject({ method: "PUT", body: { endpoint: "http://gw.test:9090/v1" } });
+
+    // Removing asks for confirmation and deletes by name.
+    page.on("dialog", (d) => void d.accept());
+    await page.locator('[data-od-id="cp-config-llm-remove"]').first().click();
+    await expect(page.getByText("已删除模型「glm-5.2-chat」")).toBeVisible();
+    expect(captured.llmPosts.at(-1)).toMatchObject({ method: "DELETE" });
+
     // The argPattern input advertises a short regex example as its placeholder.
     await expect(page.locator('[data-od-id="cp-config-rule-arg"]')).toHaveAttribute("placeholder", ARG_PATTERN_EXAMPLE);
 
     // Adding a rule persists the instance's own list (defaults are hardcoded).
     await page.locator('[data-od-id="cp-config-rule-pattern"]').fill("ceph df");
-    await page.getByRole("button", { name: "添加" }).click();
+    await page.locator('[data-od-id="cp-config-rule-add"]').click();
     await expect(owned).toContainText("ceph df");
     expect(captured.confirmPuts.at(-1)?.allowlist).toEqual([{ pattern: "helm ls", owned: true }, { pattern: "ceph df", owned: true }]);
 
@@ -542,6 +588,8 @@ test.describe("cubepilot config (AgentInstance CR + AgentTemplate catalog)", () 
     // says so instead of failing on a missing gateway.
     const pane = page.locator('[data-od-id="cp-config-pane"]');
     await expect(pane).toContainText("模板未声明模型");
+    await page.locator('[data-od-id="cp-config-llm-src-external"]').click();
+    await expect(page.locator('[data-od-id="cp-config-llm"]')).toContainText("模板暂未声明模型");
     await expect(page.locator('[data-od-id="cp-config-model-select"]').locator("option")).toHaveCount(1);
     await expect(page.locator('[data-od-id="cp-config-prompt-input"]')).toHaveValue("巡检优先,写操作全部走审批");
     await expect(page.locator('[data-od-id="cp-config-status"]')).toContainText("admin-cubepilot");

@@ -8,7 +8,7 @@ vi.mock("@/lib/kubernetes", () => ({
   getKubeConfig: () => ({ getCurrentCluster: () => ({ server: "https://k8s.test" }) }),
 }));
 
-import { gatewayFetch, gatewayTokenHeader, resolveGatewayBase } from "./gateway";
+import { GATEWAY_NAMESPACE, gatewayFetch, gatewayTokenHeader, resolveGatewayBase } from "./gateway";
 
 describe("lib/cubepilot/gateway", () => {
   afterEach(() => {
@@ -77,5 +77,15 @@ describe("lib/cubepilot/gateway", () => {
   it("returns null off-cluster when discovery finds nothing (no in-cluster default)", async () => {
     listNamespacedService.mockResolvedValue({ items: [] });
     expect(await resolveGatewayBase()).toBeNull();
+  });
+});
+
+describe("GATEWAY_NAMESPACE", () => {
+  // The module-level constant is evaluated at import time, so this asserts the
+  // resolution rule rather than re-reading the env: an unset/blank
+  // CUBESTACK_GATEWAY_NAMESPACE falls back to envoy-gateway-system.
+  it("resolves to a non-empty namespace", () => {
+    expect(GATEWAY_NAMESPACE).toBe(process.env.CUBESTACK_GATEWAY_NAMESPACE?.trim() || "envoy-gateway-system");
+    expect(GATEWAY_NAMESPACE.length).toBeGreaterThan(0);
   });
 });

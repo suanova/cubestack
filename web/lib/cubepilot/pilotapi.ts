@@ -12,6 +12,8 @@
 //      (the chart's Service name, in the same namespace as the agent CRs)
 //   3. null → the routes answer 503 with a setup hint.
 
+import { logger } from "@/lib/log";
+
 import { inCluster } from "./gateway";
 import { tasksNamespace } from "./taskcrd";
 
@@ -42,7 +44,13 @@ export function resolvePilotBase(): string | null {
  */
 export async function pilotFetch(path: string, user: string, init: RequestInit = {}): Promise<Response> {
   const base = resolvePilotBase();
-  if (!base) throw new Error("agent API base unresolved");
+  if (!base) {
+    logger("pilot").warn("agent API base unresolved — chat is unavailable", {
+      hint: "set CUBESTACK_PILOT_URL or install cubepilot-api in " + (process.env.CUBESTACK_TASKS_NAMESPACE ?? "cubestack-system"),
+    });
+    throw new Error("agent API base unresolved");
+  }
+  logger("pilot").debug("upstream", { method: init.method ?? "GET", url: base + path });
   const headers: Record<string, string> = {
     "X-CubePilot-User": user,
     ...(init.headers as Record<string, string> | undefined),

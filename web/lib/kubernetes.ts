@@ -5,18 +5,38 @@ import {
   KubeConfig,
 } from "@kubernetes/client-node";
 
+import { currentLevel, logger } from "@/lib/log";
+
 /**
  * Build a KubeConfig for wherever the portal is running.
  *
  * Prefers in-cluster credentials (the service account mounted into the pod),
  * and falls back to the default kubeconfig for local development.
  */
+let loggedConfig = false;
+
 export function getKubeConfig(): KubeConfig {
   const kc = new KubeConfig();
-  if (process.env.KUBERNETES_SERVICE_HOST && process.env.KUBERNETES_SERVICE_PORT) {
+  const inCluster = Boolean(process.env.KUBERNETES_SERVICE_HOST && process.env.KUBERNETES_SERVICE_PORT);
+  if (inCluster) {
     kc.loadFromCluster(); // running inside a k8s pod
   } else {
     kc.loadFromDefault(); // local dev (e.g. ~/.kube/config)
+  }
+  if (!loggedConfig) {
+    loggedConfig = true;
+    // The single most useful startup line: where the portal thinks the cluster
+    // and the operator CRs are. CUBESTACK_TASKS_NAMESPACE drives every task and
+    // agent CR; an empty page is usually this namespace not existing.
+    const cluster = kc.getCurrentCluster();
+    logger("k8s").debug("client configured", {
+      mode: inCluster ? "in-cluster" : "kubeconfig",
+      server: cluster?.server,
+      operatorNamespace: process.env.CUBESTACK_TASKS_NAMESPACE ?? "cubestack-system(default)",
+      gatewayNamespace: process.env.CUBESTACK_GATEWAY_NAMESPACE ?? "envoy-gateway-system(default)",
+      htpasswdNamespace: process.env.HTPASSWD_SECRET_NAMESPACE ?? "cubestack-system(default)",
+      logLevel: currentLevel(),
+    });
   }
   return kc;
 }
