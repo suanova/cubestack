@@ -1,0 +1,6 @@
+apiVersion: v2
+name: cubestack-bmc-exporter
+description: BMC out-of-band monitoring — idrac_exporter (standard Redfish groups) and bmc-oem-exporter (PCIeDevices OEM fields) with Prometheus ScrapeConfigs
+type: application
+version: 0.1.0
+appVersion: 0.1.0

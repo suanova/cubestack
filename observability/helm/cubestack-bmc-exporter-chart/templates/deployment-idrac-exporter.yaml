@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cubestack-bmc-exporter.fullname" . }}-idrac-exporter
+  labels:
+    {{- include "cubestack-bmc-exporter.componentLabels" (dict "component" "idrac-exporter" "Release" .Release "Chart" .Chart "Values" .Values) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "cubestack-bmc-exporter.componentLabels" (dict "component" "idrac-exporter" "Release" .Release "Chart" .Chart "Values" .Values) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cubestack-bmc-exporter.componentLabels" (dict "component" "idrac-exporter" "Release" .Release "Chart" .Chart "Values" .Values) | nindent 8 }}
+    spec:
+      {{- with .Values.idracExporter.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.idracExporter.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: idrac-exporter
+          image: "{{ .Values.idracExporter.image.repository }}:{{ .Values.idracExporter.image.tag }}"
+          imagePullPolicy: {{ .Values.idracExporter.image.pullPolicy }}
+          ports:
+            - name: metrics
+              containerPort: 9348
+          readinessProbe:
+            httpGet:
+              path: /
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+              readOnly: true
+      volumes:
+        - name: config
+          secret:
+            secretName: {{ include "cubestack-bmc-exporter.fullname" . }}-idrac-config

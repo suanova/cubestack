@@ -1,0 +1,13 @@
+BMC out-of-band monitoring deployed.
+
+Both exporters are up when the Pods are ready and Prometheus has picked up the
+ScrapeConfigs:
+
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+  kubectl -n {{ .Release.Namespace }} get scrapeconfig -l app.kubernetes.io/instance={{ .Release.Name }}
+
+Prometheus targets (job=bmc-oem-exporter / job=idrac-exporter, instance=BMC IP)
+should show up within one scrape interval ({{ .Values.scrapeConfigs.interval }}).
+
+BMC credentials live in secret {{ include "cubestack-bmc-exporter.fullname" . }}-bmc-credentials.
+The "BMC Hardware" Grafana dashboard (uid bmc-hardware-cubestack) covers these metrics.
