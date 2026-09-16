@@ -65,7 +65,6 @@ $SSHT "sudo kubectl -n monitoring delete deploy,svc,scrapeconfig,secret \
     --ignore-not-found >/dev/null 2>&1; \
   sudo helm upgrade --install cubestack-bmc-exporter /tmp/bmc-deploy/cubestack-bmc-exporter-chart \
     -n monitoring \
-    --set fullnameOverride=cubestack-bmc-exporter \
     --set bmc.username="$BMC_USER" --set bmc.password="$BMC_PASS" \
     --set bmcOemExporter.image.repository=docker.io/library/bmc-oem-exporter \
     --set idracExporter.image.repository=docker.io/library/idrac-exporter \

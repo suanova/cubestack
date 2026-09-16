@@ -1,5 +1,8 @@
 {{- define "cubestack-bmc-exporter.fullname" -}}
-{{- default (printf "%s-%s" .Release.Name .Chart.Name) .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
+{{- /* Singleton chart: resource names default to the release name (e.g.
+     release "cubestack-bmc-exporter" -> "cubestack-bmc-exporter-bmc-oem-exporter"),
+     not the "<release>-<chart>" double name. fullnameOverride still wins. */ -}}
+{{- default .Release.Name .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
 {{- define "cubestack-bmc-exporter.labels" -}}

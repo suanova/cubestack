@@ -48,6 +48,11 @@ idracExporter:
 scrapeConfigs:
   # Requires the Prometheus Operator ScrapeConfig CRD (monitoring.coreos.com/v1alpha1).
   enabled: true
+  # Label value matched by the Prometheus CR's scrapeConfigSelector. The
+  # kube-prometheus-stack default selector is the helm release name
+  # (scrapeConfigSelectorNilUsesHelmValues), so set this to the actual release
+  # name of the stack (test env / installer use "kube-prometheus").
+  releaseLabel: kube-prometheus
   interval: 60s
   bmcOem:
     # Scrape paths verified against real H3C BMCs:

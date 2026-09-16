@@ -5,7 +5,8 @@ metadata:
   name: {{ include "cubestack-bmc-exporter.fullname" . }}-bmc-oem-exporter
   labels:
     {{- include "cubestack-bmc-exporter.labels" . | nindent 4 }}
-    # Selected by the kube-prometheus-stack Prometheus (release label convention).
+    # Must match the stack's scrapeConfigSelector (default: its helm release name).
+    release: {{ .Values.scrapeConfigs.releaseLabel }}
 spec:
   metricsPath: {{ .Values.scrapeConfigs.bmcOem.metricsPath }}
   scrapeInterval: {{ .Values.scrapeConfigs.interval }}
