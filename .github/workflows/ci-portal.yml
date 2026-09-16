@@ -199,8 +199,12 @@ jobs:
             --timeout 120s
       - name: Verify portal deployment
         run: |
-          kubectl -n cubestack-system wait --for=condition=Available deployment/portal-test-cubestack-portal-chart --timeout=120s
-          kubectl -n cubestack-system get pods -l app.kubernetes.io/name=cubestack-portal-chart
+          # The chart names resources <release>-<nameOverride> (Helm fullname),
+          # so select the release's Deployment by label instead of hardcoding a
+          # name that drifts whenever nameOverride or the release name changes.
+          kubectl -n cubestack-system wait --for=condition=Available \
+            deployment -l app.kubernetes.io/instance=portal-test --timeout=120s
+          kubectl -n cubestack-system get pods -l app.kubernetes.io/name=cubestack-portal
       - name: Run datapath e2e suite (real route + mock Prometheus)
         run: npm run test:e2e:datapath
         working-directory: web

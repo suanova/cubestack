@@ -262,10 +262,12 @@ export const POST = withAuth(async (req) => {
  * PATCH /api/devenvironments
  *
  * Starts or stops one environment by setting its `spec.running`. Body:
- * `{ namespace, name, running: boolean }`. A merge-patch body is used (an
- * object, not a JSON-Patch array) so `spec.running` is created when the listed
- * resource omits it (existing resources created before the field was added to
- * the API), instead of `replace`, which would fail when the target is absent.
+ * `{ namespace, name, running: boolean }`. The change is sent as an RFC 6902
+ * JSON-Patch array because the generated client pins
+ * `Content-Type: application/json-patch+json` (an object body would be
+ * rejected with a 400 decode error). The `add` operation replaces
+ * `spec.running` when present and creates it when the resource omits it
+ * (existing resources created before the field was added to the API).
  */
 export const PATCH = withAuth(async (req) => {
   try {
@@ -280,8 +282,8 @@ export const PATCH = withAuth(async (req) => {
       namespace: body.namespace,
       plural: PLURAL_DEVENV,
       name: body.name,
-      // application/json merge-patch semantics: creates /spec/running if absent.
-      body: { spec: { running: body.running } },
+      // JSON-Patch `add`: replaces /spec/running when present, creates it when absent.
+      body: [{ op: "add", path: "/spec/running", value: body.running }],
       fieldManager: "cubestack-web",
     });
     return Response.json({ ok: true });

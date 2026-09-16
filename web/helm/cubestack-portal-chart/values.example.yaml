@@ -78,6 +78,20 @@ securityContext:
 # Namespace to install into
 namespace: cubestack-system
 
+# Namespace holding the operator CRs (empty = the namespace above).
+operatorNamespace: ""
+# Agent API base (empty = http://cubepilot-api.<operatorNamespace>.svc:8080).
+agentApiUrl: ""
+gateway:
+  url: ""
+  namespace: ""
+  token:
+    existingSecret: ""
+    existingSecretKey: "token"
+
+# error | warn | info | debug — debug logs every cluster/gateway call.
+logLevel: info
+
 # Secrets for sensitive data
 secrets:
   sessionSecret:
@@ -86,9 +100,14 @@ secrets:
     existingSecretKey: "session-secret"
     length: 32
   # Portal login credentials. Provide your own htpasswd content at install
-  # time (--set-file secrets.htpasswd.content=/path/to/htpasswd). The chart
-  # creates Secret "cubestack-htpasswd", the portal's built-in default.
+  # time: --set-file secrets.htpasswd.content=/path/to/htpasswd
+  # The chart then creates Secret <secretName> with that content under <key>
+  # (defaults match the portal's built-in ones). Leave content empty to manage
+  # the Secret yourself; the name must still match secretName (the Role grants
+  # get on exactly that name).
   htpasswd:
+    secretName: cubestack-htpasswd
+    key: htpasswd
     content: ""
 
 # Pod disruption budget for HA. Set exactly one of minAvailable / maxUnavailable.

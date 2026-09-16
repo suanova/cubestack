@@ -228,6 +228,22 @@ spec:
                   - type
                   type: object
                 type: array
+              podAntiAffinity:
+                description: |-
+                  PodAntiAffinity spreads this service's pods (of every role) across the
+                  given topology domains: no two pods of the service may share a domain.
+                  The label selector is fixed by the platform to the service itself.
+                properties:
+                  topologyKey:
+                    description: |-
+                      TopologyKey is the domain across which the service's pods must be
+                      spread, e.g. kubernetes.io/hostname. Must be a valid Kubernetes label
+                      key: an optional lowercase DNS prefix followed by a lowercase name.
+                    pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?([.][a-z0-9]([-a-z0-9]*[a-z0-9])?)*[/])?[a-z0-9]([-a-z0-9_.]*[a-z0-9])?$
+                    type: string
+                required:
+                - topologyKey
+                type: object
               readinessPolicy:
                 description: ReadinessPolicy aggregates the service readiness condition.
                 properties:
@@ -440,6 +456,19 @@ spec:
                             liveness:
                               description: Liveness is the liveness probe.
                               properties:
+                                exec:
+                                  description: Exec runs a command inside the container.
+                                  properties:
+                                    command:
+                                      description: Command is the command line run
+                                        inside the container.
+                                      items:
+                                        type: string
+                                      minItems: 1
+                                      type: array
+                                  required:
+                                  - command
+                                  type: object
                                 failureThreshold:
                                   description: FailureThreshold is the consecutive
                                     failure count before giving up.
@@ -489,13 +518,26 @@ spec:
                                   type: integer
                               type: object
                               x-kubernetes-validations:
-                              - message: exactly one of httpGet or tcpSocket must
-                                  be set
+                              - message: exactly one of httpGet, tcpSocket or exec
+                                  must be set
                                 rule: '(has(self.httpGet) ? 1 : 0) + (has(self.tcpSocket)
-                                  ? 1 : 0) == 1'
+                                  ? 1 : 0) + (has(self.exec) ? 1 : 0) == 1'
                             readiness:
                               description: Readiness is the readiness probe.
                               properties:
+                                exec:
+                                  description: Exec runs a command inside the container.
+                                  properties:
+                                    command:
+                                      description: Command is the command line run
+                                        inside the container.
+                                      items:
+                                        type: string
+                                      minItems: 1
+                                      type: array
+                                  required:
+                                  - command
+                                  type: object
                                 failureThreshold:
                                   description: FailureThreshold is the consecutive
                                     failure count before giving up.
@@ -545,13 +587,26 @@ spec:
                                   type: integer
                               type: object
                               x-kubernetes-validations:
-                              - message: exactly one of httpGet or tcpSocket must
-                                  be set
+                              - message: exactly one of httpGet, tcpSocket or exec
+                                  must be set
                                 rule: '(has(self.httpGet) ? 1 : 0) + (has(self.tcpSocket)
-                                  ? 1 : 0) == 1'
+                                  ? 1 : 0) + (has(self.exec) ? 1 : 0) == 1'
                             startup:
                               description: Startup is the startup probe.
                               properties:
+                                exec:
+                                  description: Exec runs a command inside the container.
+                                  properties:
+                                    command:
+                                      description: Command is the command line run
+                                        inside the container.
+                                      items:
+                                        type: string
+                                      minItems: 1
+                                      type: array
+                                  required:
+                                  - command
+                                  type: object
                                 failureThreshold:
                                   description: FailureThreshold is the consecutive
                                     failure count before giving up.
@@ -601,10 +656,10 @@ spec:
                                   type: integer
                               type: object
                               x-kubernetes-validations:
-                              - message: exactly one of httpGet or tcpSocket must
-                                  be set
+                              - message: exactly one of httpGet, tcpSocket or exec
+                                  must be set
                                 rule: '(has(self.httpGet) ? 1 : 0) + (has(self.tcpSocket)
-                                  ? 1 : 0) == 1'
+                                  ? 1 : 0) + (has(self.exec) ? 1 : 0) == 1'
                           type: object
                         resources:
                           description: Resources declares CPU, memory and per-Pod
@@ -617,6 +672,16 @@ spec:
                               description: CPU is written to requests.cpu.
                               pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                               x-kubernetes-int-or-string: true
+                            extendedResources:
+                              additionalProperties:
+                                format: int64
+                                type: integer
+                              description: |-
+                                ExtendedResources lists additional extended resources, e.g.
+                                rdma/hca_shared_devices, written to both requests and limits like
+                                gpuPerPod. Keys must not collide with cpu, memory or the GPU extended
+                                resource of either supported vendor (handled by the fields above; L1 VAP).
+                              type: object
                             gpuPerPod:
                               description: |-
                                 GPUPerPod is the number of GPUs per Pod, mapped to the vendor's extended
@@ -663,12 +728,35 @@ spec:
                             Volumes lists additional volumes from the supported subset, e.g. shm
                             emptyDir or InfiniBand hostPath.
                           items:
-                            description: 'Volume is a supported subset of Kubernetes
-                              Volumes: emptyDir and hostPath.'
+                            description: |-
+                              Volume is a supported subset of Kubernetes Volumes: emptyDir and hostPath.
+                              Each volume is mounted into the container at its At path.
                             properties:
+                              at:
+                                description: At is the in-container mount path of
+                                  the volume.
+                                pattern: ^/
+                                type: string
                               emptyDir:
                                 description: EmptyDir is an empty directory volume,
-                                  e.g. for /dev/shm.
+                                  e.g. a Memory-backed /dev/shm.
+                                properties:
+                                  medium:
+                                    description: |-
+                                      Medium is the storage medium: "" is the node default (disk), Memory is
+                                      tmpfs. An 8Gi Memory-backed /dev/shm fits the vLLM TP>1 SHM transport.
+                                    enum:
+                                    - ""
+                                    - Memory
+                                    type: string
+                                  sizeLimit:
+                                    anyOf:
+                                    - type: integer
+                                    - type: string
+                                    description: SizeLimit is the maximum size of
+                                      the volume.
+                                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                    x-kubernetes-int-or-string: true
                                 type: object
                               hostPath:
                                 description: HostPath is a host path volume, e.g.
@@ -686,6 +774,7 @@ spec:
                                 minLength: 1
                                 type: string
                             required:
+                            - at
                             - name
                             type: object
                             x-kubernetes-validations:

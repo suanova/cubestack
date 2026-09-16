@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regenerates the static content of helm/cubestack-operator-chart from the kustomize
+# Regenerates the static content of helm/cubestack-controller-manager-chart from the kustomize
 # sources in config/. Idempotent: run after any change under config/ and commit
 # the chart. CI runs this script and fails on git diff (make helm-resources-check).
 #
@@ -10,11 +10,15 @@
 # are NOT shipped by the chart — they come with the upstream LeaderWorkerSet
 # controller prerequisite (hack/install-lws-controller.sh applies the pinned
 # lws module's config/default, which includes its own CRDs).
+#
+# Requires helm on PATH: after regenerating, the script renders the chart with
+# helm template to validate the values-driven gateway args (section 3).
 set -euo pipefail
 cd "$(dirname "$0")/.."          # operator/
 OP="${PWD}"
-CHART="${OP}/helm/cubestack-operator-chart"
+CHART="${OP}/helm/cubestack-controller-manager-chart"
 TEMPLATES="${CHART}/templates"
+RENDER_DIR="$(mktemp -d)"
 
 # Start from an empty templates/ so objects that disappear from the kustomize
 # output (or config/vap) have their stale template files removed — the drift
@@ -42,7 +46,7 @@ if [ ! -x "${OP}/bin/kustomize" ]; then
   make -s -C "${OP}" kustomize
 fi
 OUT="$(mktemp)"
-trap 'rm -f "${OUT}"' EXIT
+trap 'rm -rf "${OUT}" "${RENDER_DIR}"' EXIT
 "${OP}/bin/kustomize" build "${OP}/config/default" > "${OUT}"
 
 # Rewrite the manager image to values references. The images transformer in
@@ -55,6 +59,50 @@ sed -i 's|^\(\s*\)image: example\.com/cubestack:v0\.0\.1$|\1image: "{{ .Values.i
 grep -q 'image: "{{ .Values.image' "${OUT}" || { echo "image rewrite no-op'd — update needle in update-helm-resources.sh"; exit 1; }
 # Replace the hardcoded namespace (metadata + binding subjects) with the release ns.
 sed -i 's|namespace: cubestack-system|namespace: {{ .Release.Namespace }}|g' "${OUT}"
+
+# Rewrite the manager's platform-Gateway args into values-driven Go template
+# conditionals: --gateway-name / --gateway-namespace (literals from the
+# config/manager base) become {{- with .Values.gateway.* }} blocks and the
+# flags deliberately absent from the kustomize base, see
+# config/manager/manager.yaml — the domain and the dataplane namespace — are
+# injected as {{- if/with .Values.gateway.* }} blocks. Each flag renders only
+# while its value is non-empty, so the empty defaults reproduce the
+# unconfigured state (no gateway flags at all).
+awk '
+/^[[:space:]]*- --gateway-name=cubestack-gateway$/ {
+  if (gateway_name++) { print "duplicate --gateway-name line in kustomize output" > "/dev/stderr"; exit 1 }
+  ind = substr($0, 1, index($0, "-") - 1)
+  print ind "{{- with .Values.gateway.name }}"
+  print ind "- --gateway-name={{ . }}"
+  print ind "{{- end }}"
+  print ind "{{- with .Values.gateway.namespace }}"
+  print ind "- --gateway-namespace={{ . }}"
+  print ind "{{- end }}"
+  print ind "{{- if .Values.gateway.domain }}"
+  print ind "- --gateway-domain={{ .Values.gateway.domain }}"
+  print ind "{{- end }}"
+  print ind "{{- with .Values.gateway.dataplaneNamespace }}"
+  print ind "- --gateway-dataplane-namespace={{ . }}"
+  print ind "{{- end }}"
+  next
+}
+/^[[:space:]]*- --gateway-namespace=cubestack-system$/ {
+  if (gateway_name != 1) { print "--gateway-namespace seen without --gateway-name" > "/dev/stderr"; exit 1 }
+  if (gateway_namespace++) { print "duplicate --gateway-namespace line in kustomize output" > "/dev/stderr"; exit 1 }
+  next
+}
+{ print }
+END {
+  # Fail loudly if the needles above matched nothing (e.g. the args in
+  # config/manager/manager.yaml changed): a silent no-op would ship a chart
+  # whose publish feature cannot be enabled by values while the drift gate
+  # stays green.
+  if (gateway_name != 1 || gateway_namespace != 1) {
+    print "gateway args not found in kustomize output — update needle in update-helm-resources.sh" > "/dev/stderr"
+    exit 1
+  }
+}
+' "${OUT}" > "${OUT}.gw" && mv "${OUT}.gw" "${OUT}"
 
 awk -v out="${TEMPLATES}" '
 function flush() {
@@ -81,4 +129,52 @@ function flush() {
 END { flush() }
 ' "${OUT}"
 rm -f "${OUT}"
+
+# --- 3. Validate the values-driven gateway args (route publishing) ---
+# The manager's platform-Gateway args are injected into the deployment
+# template from .Values.gateway (section 2 rewrite). Assert the rendered args
+# for every value combination that changes behavior: defaults pass
+# name/namespace (the platform conventions) and the dataplane namespace but no
+# domain; an explicit domain is passed verbatim; an emptied name/namespace or
+# dataplane namespace drops its flag; and emptying all four reproduces the
+# pre-entry state — no gateway flags at all (RouteReady=False,
+# GatewayNotConfigured, and environments left default-deny inbound). A silent
+# no-op here would ship a chart whose publish feature cannot be enabled by
+# values.
+command -v helm >/dev/null 2>&1 || { echo "helm not found — required to validate the rendered chart (section 3 of update-helm-resources.sh)"; exit 1; }
+# expect_render <case> <present|absent> <grep pattern (anchored at the arg line)> [helm --set args...]
+expect_render() {
+  local what="$1" presence="$2" pattern="$3"
+  shift 3
+  local file="${RENDER_DIR}/${what}.yaml"
+  helm template cubestack "${CHART}" "$@" > "${file}" || { echo "helm template failed for case '${what}' (section 3)"; exit 1; }
+  if grep -Eq -- "${pattern}" "${file}"; then
+    [ "${presence}" = present ] || { echo "gateway args render check failed: ${what} unexpectedly rendered ${pattern}"; exit 1; }
+  else
+    [ "${presence}" = absent ] || { echo "gateway args render check failed: ${what} did not render ${pattern}"; exit 1; }
+  fi
+}
+GW_ARG='^[[:space:]]*- --gateway-'
+# Defaults: the convention values are passed; domain stays unset (publish off).
+expect_render defaults present '^[[:space:]]*- --gateway-name=cubestack-gateway$'
+expect_render defaults present '^[[:space:]]*- --gateway-namespace=cubestack-system$'
+expect_render defaults absent  '^[[:space:]]*- --gateway-domain='
+# The dataplane namespace is passed by default: it is what lets the DevEnvironment
+# controller admit the Gateway's proxies into environment pods.
+expect_render defaults present '^[[:space:]]*- --gateway-dataplane-namespace=envoy-gateway-system$'
+# Setting the domain enables route publishing.
+expect_render domain-set present '^[[:space:]]*- --gateway-domain=example\.com$' --set gateway.domain=example.com
+# Emptied name/namespace drop their flags while the other keeps rendering; a
+# custom name is passed verbatim.
+expect_render name-empty absent '^[[:space:]]*- --gateway-name=' --set gateway.name=
+expect_render name-empty present '^[[:space:]]*- --gateway-namespace=cubestack-system$' --set gateway.name=
+expect_render namespace-empty absent '^[[:space:]]*- --gateway-namespace=' --set gateway.namespace=
+expect_render namespace-empty present '^[[:space:]]*- --gateway-name=cubestack-gateway$' --set gateway.namespace=
+expect_render name-custom present '^[[:space:]]*- --gateway-name=my-gateway$' --set gateway.name=my-gateway
+# Emptied dataplane namespace drops its flag alone, leaving environments default-deny.
+expect_render dataplane-empty absent '^[[:space:]]*- --gateway-dataplane-namespace=' --set gateway.dataplaneNamespace=
+expect_render dataplane-empty present '^[[:space:]]*- --gateway-name=cubestack-gateway$' --set gateway.dataplaneNamespace=
+# All four empty: reproduce the unconfigured state (no gateway flags at all).
+expect_render all-empty absent "${GW_ARG}" \
+  --set gateway.name= --set gateway.namespace= --set gateway.domain= --set gateway.dataplaneNamespace=
 echo "chart resources regenerated under ${CHART}"

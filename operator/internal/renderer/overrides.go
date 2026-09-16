@@ -35,6 +35,10 @@ const (
 	// ReasonReservedVolumeName marks a role declaring a podTemplate volume whose
 	// name is reserved for the injected S3 credentials copy (design §4.5).
 	ReasonReservedVolumeName ErrorReason = "ReservedVolumeName"
+	// ReasonModelSchedulingConflict marks a podTemplate.nodeSelector that pins
+	// the accelerator product label to a value contradicting the declared
+	// accelerator.models (design §3.2): the merge would be unsatisfiable.
+	ReasonModelSchedulingConflict ErrorReason = "ModelSchedulingConflict"
 )
 
 // Error is a single render failure.

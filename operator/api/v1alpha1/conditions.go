@@ -60,10 +60,12 @@ const (
 	ConditionEndpointReady ConditionType = "EndpointReady"
 
 	// ConditionRouteReady indicates that the public route is published, or
-	// that publishing was not requested. (InferenceService)
+	// that publishing was not requested. (InferenceService, DevEnvironment)
 	ConditionRouteReady ConditionType = "RouteReady"
 
-	// ConditionReady aggregates all roles per readinessPolicy. (InferenceService)
+	// ConditionReady aggregates all roles per readinessPolicy, and for a
+	// DevEnvironment reflects the phase derived from the workload.
+	// (InferenceService, DevEnvironment)
 	ConditionReady ConditionType = "Ready"
 
 	// ConditionProgressing indicates that the controller is still applying the
@@ -82,10 +84,6 @@ const (
 	// ConditionPodScheduled indicates that the Pod has been scheduled.
 	// (DevEnvironment)
 	ConditionPodScheduled ConditionType = "PodScheduled"
-
-	// ConditionStorageReady indicates that the workspace PVC is Bound.
-	// (DevEnvironment)
-	ConditionStorageReady ConditionType = "StorageReady"
 
 	// ConditionBrandMatchValid indicates that gpuType matches the image brand
 	// (nvidia<->base-cuda, metax<->base-maca). (DevEnvironment)

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// +kubebuilder:rbac:groups=ai.cubestack.io,resources=devenvironments,verbs=get;list;watch
+// +kubebuilder:rbac:groups=ai.cubestack.io,resources=devenvironments,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=ai.cubestack.io,resources=devenvironments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=ai.cubestack.io,resources=devenvironments/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
@@ -22,7 +22,7 @@ limitations under the License.
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;delete
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=list;patch
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=tcproutes,verbs=get;list;watch;create;update;patch;delete
@@ -35,12 +35,12 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
+	"maps"
 	"net"
 	"slices"
 	"strconv"
@@ -76,6 +76,13 @@ type DevEnvironmentControllerConfig struct {
 	GatewayName string
 	// GatewayNamespace is the namespace of the shared Gateway.
 	GatewayNamespace string
+	// GatewayDataplaneNamespace is the namespace the shared Gateway's dataplane
+	// pods run in, which is where its traffic to an environment originates. It
+	// is not GatewayNamespace: the Gateway object and its Envoy dataplane are
+	// separate deployments and Envoy Gateway places the latter in its own
+	// namespace. Empty disables the ingress allowance in desiredNetworkPolicy,
+	// leaving environments at the default-deny floor.
+	GatewayDataplaneNamespace string
 	// GatewayIP is a static fallback address used when the Gateway has no
 	// status address yet.
 	GatewayIP string
@@ -99,8 +106,6 @@ const (
 	reasonScheduled              = "Scheduled"
 	reasonNotScheduled           = "NotScheduled"
 	reasonNotCreated             = "PodNotCreated"
-	reasonBound                  = "Bound"
-	reasonWaiting                = "Waiting"
 	reasonNotApplicable          = "NotApplicable"
 	reasonBrandMismatch          = "BrandMismatch"
 	reasonBrandValid             = "BrandMatchValid"
@@ -129,12 +134,57 @@ const (
 	gatewayKind     = "Gateway"
 	serviceKind     = "Service"
 
+	// Labels Envoy Gateway puts on the dataplane pods it creates for a Gateway.
+	// They identify which Gateway a proxy pod belongs to, which is what lets a
+	// NetworkPolicy admit that dataplane specifically rather than every pod that
+	// happens to share its namespace.
+	gatewayDataplaneNameLabel      = "gateway.envoyproxy.io/owning-gateway-name"
+	gatewayDataplaneNamespaceLabel = "gateway.envoyproxy.io/owning-gateway-namespace"
+
+	// namespaceNameLabel carries a Namespace's own name; it is what a
+	// NetworkPolicy peer uses to select a namespace by name.
+	namespaceNameLabel = "kubernetes.io/metadata.name"
+
 	// sshPortName names the SSH Service port and the "ssh" endpoint; the ssh
-	// endpoint address uses the generic login user of the base image.
+	// endpoint address carries the environment's login account, which is
+	// spec.runtime.user or defaultRuntimeUser when the spec names none.
 	sshPortName       = "ssh"
 	mainPortName      = "main"
 	sshKeysVolumeName = "ssh-keys"
-	sshEndpointUser   = "user"
+
+	// sshServicePort is the port the platform publishes ssh on — the Service
+	// port, the TCPRoute backendRef and the endpoint address — while
+	// sshContainerPort is where the base images' sshd actually listens. sshd
+	// runs as the container account and cannot bind a privileged port, so it
+	// chooses the unprivileged one and the Service maps the two (design Gap B).
+	sshServicePort   = 22
+	sshContainerPort = 2222
+
+	// Where the images read the mounted ssh material: sshd's host identity (its
+	// presence gates ssh) and the platform keys. Both are absolute paths outside
+	// any home. The platform keys cannot live in $HOME: the workspace claim is
+	// mounted there, its root is not writable by the account, and the mount target
+	// for a file beneath it is created root-owned by the runtime — which would both
+	// hide and break the ~/.ssh the images bake. Under /run the platform keys stay
+	// out of the user's way and the account keeps ~/.ssh for its own files
+	// (images/README.md).
+	sshHostKeyPath        = "/etc/ssh/ssh_host_ed25519_key"
+	sshAuthorizedKeysPath = "/run/ssh/authorized_keys"
+
+	// defaultRuntimeUser is the account an environment logs in as when
+	// spec.runtime.user names none; it is also the account the platform's base
+	// images conventionally use.
+	defaultRuntimeUser = "user"
+
+	// defaultWorkspacePath is where the workspace PVC mounts when neither
+	// spec.storage.mountPath nor a declared HOME nor the runtime identity implies
+	// another home.
+	defaultWorkspacePath = "/workspace"
+
+	// homeEnv is the variable spec.runtime.env declares the account's home
+	// through; it is the second input to the workspace mount path
+	// (::resolveMountPath).
+	homeEnv = "HOME"
 
 	// Jupyter token: the managed Secret <env>-auth holds the random token under
 	// the data key jupyterTokenKey, and the workload reads it through the
@@ -150,12 +200,21 @@ const (
 	// token is created or refilled without ever putting the plaintext on the pod.
 	jupyterTokenRevisionAnnotationKey = "ai.cubestack.io/jupyter-token-revision"
 
+	// sshKeysRevisionAnnotationKey records a non-sensitive digest of the ssh
+	// material mounted into the pod on the StatefulSet pod template. The mounts
+	// are subPath, and Kubernetes does not propagate Secret updates into those,
+	// so a rotated authorized_keys is inert until the pod is recreated; the
+	// digest makes the template (and stsSpecHash) change when the Secret's
+	// content does, which rolls the workload onto it.
+	sshKeysRevisionAnnotationKey = "ai.cubestack.io/ssh-keys-revision"
+
 	// compute node pool labels: development pods are pinned to the compute
 	// pool, isolated from the inference pool (design §8.1).
 	computeNodePoolLabelKey = "cubestack.io/node-pool"
 	computeNodePoolValue    = "compute"
 
 	sshEd25519Algorithm = "ssh-ed25519"
+	sshHostKeyPEMType   = "OPENSSH PRIVATE KEY"
 
 	// Kubernetes Event reasons emitted on lifecycle transitions (design §11.2):
 	// Created on adoption, Started/Stopped on phase transitions into
@@ -164,6 +223,13 @@ const (
 	eventReasonStarted = "Started"
 	eventReasonStopped = "Stopped"
 	eventReasonFailed  = "Failed"
+
+	// legacyStorageReadyCondition is the workspace condition the pre-delegation
+	// controller reported while it managed the claim itself. The claim's
+	// lifecycle belongs to the StatefulSet now, so nothing can set or clear it
+	// any more; an environment created by that manager still carries it, and it
+	// is dropped during reconcile rather than left on status forever.
+	legacyStorageReadyCondition = "StorageReady"
 )
 
 // DevEnvironmentReconciler provisions the managed StatefulSet (scale 0/1),
@@ -198,8 +264,13 @@ func (r *DevEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	if !slices.Contains(env.Finalizers, devEnvFinalizer) {
+		// Patch, not Update: Update sends the whole object and carries the
+		// resourceVersion we read, so any write landing in between 409-conflicts
+		// and forces a retry reconcile. A merge patch has no such precondition,
+		// and the finalizer is the only field this call means to change.
+		patch := client.MergeFrom(env.DeepCopy())
 		env.Finalizers = append(env.Finalizers, devEnvFinalizer)
-		if err := r.Update(ctx, &env); err != nil {
+		if err := r.Patch(ctx, &env, patch); err != nil {
 			return ctrl.Result{}, err
 		}
 		if r.Recorder != nil {
@@ -211,11 +282,19 @@ func (r *DevEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	desired := env.DeepCopy()
 	desired.Status.ObservedGeneration = env.Generation
+	// StorageReady is no longer part of the API (the workspace claim's lifecycle
+	// moved to the StatefulSet), so a condition left on status by the manager
+	// that still reported it would never be updated again. Drop it here, before
+	// any path below writes status.
+	meta.RemoveStatusCondition(&desired.Status.Conditions, legacyStorageReadyCondition)
 
 	// 1. Brand match gate: gpuType must match the image brand. A mismatch is a
 	// hard failure — nothing is provisioned (design §4.2). An environment that
 	// was running before the image or gpuType changed is withdrawn so the Failed
 	// phase reflects reality: the workload is stopped and the routes removed.
+	// An environment requesting no GPU (gpuCount 0) is exempt: with no
+	// accelerator there is no brand to match, which is what makes a CPU image
+	// usable at all.
 	if reason := brandMismatchReason(&env); reason != "" {
 		if err := r.stopCompute(ctx, &env); err != nil {
 			return ctrl.Result{}, err
@@ -225,7 +304,6 @@ func (r *DevEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 		setBrandMatchValidCondition(&desired.Status.Conditions, false, reasonBrandMismatch, reason)
 		meta.RemoveStatusCondition(&desired.Status.Conditions, aiv1alpha1.ConditionPodScheduled)
-		meta.RemoveStatusCondition(&desired.Status.Conditions, aiv1alpha1.ConditionStorageReady)
 		meta.RemoveStatusCondition(&desired.Status.Conditions, aiv1alpha1.ConditionRouteReady)
 		desired.Status.Endpoints = nil
 		setPhase(&desired.Status, aiv1alpha1.PhaseFailed, reasonBrandMismatch)
@@ -236,16 +314,30 @@ func (r *DevEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		r.emitLifecycleTransition(&env, desired)
 		return ctrl.Result{}, nil
 	}
-	setBrandMatchValidCondition(&desired.Status.Conditions, true, reasonBrandValid, "gpuType matches the image brand")
+	if desiredGPUCount(&env) == 0 {
+		setBrandMatchValidCondition(&desired.Status.Conditions, true, reasonNotApplicable, "no GPU requested; image brand not checked")
+	} else {
+		setBrandMatchValidCondition(&desired.Status.Conditions, true, reasonBrandValid, "gpuType matches the image brand")
+	}
 
 	// 2. SSH secret: a managed host keypair + authorized_keys when SSH is
 	// exposed (design §6.3).
 	if sshExposed(&env) {
-		keysSecret, err := r.reconcileSSHSecret(ctx, &env)
+		keysSecret, digest, err := r.reconcileSSHSecret(ctx, &env)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
 		desired.Status.SSHKeysSecret = keysSecret
+		// Carry the key revision to applyStatefulSet below, like the jupyter
+		// token: the keys are subPath mounts, so only a roll picks up changed
+		// Secret bytes. env is re-fetched every reconcile and only its status is
+		// persisted, so this in-memory annotation never lands on the
+		// DevEnvironment object; it only drives the pod template and stsSpecHash
+		// (see desiredStatefulSet).
+		if env.Annotations == nil {
+			env.Annotations = map[string]string{}
+		}
+		env.Annotations[sshKeysRevisionAnnotationKey] = digest
 	} else {
 		desired.Status.SSHKeysSecret = nil
 	}
@@ -285,15 +377,12 @@ func (r *DevEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, err
 	}
 
-	// 5. Observe the pod and workspace PVC, aggregate conditions and phase.
+	// 5. Observe the pod, aggregate conditions and phase.
 	pod, err := r.environmentPod(ctx, &env)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	setPodScheduledCondition(&desired.Status.Conditions, pod)
-	if err := r.setStorageReadyCondition(ctx, &env, &desired.Status.Conditions); err != nil {
-		return ctrl.Result{}, err
-	}
 	r.setPhaseAndReady(&env, &desired.Status, pod)
 
 	if err := r.updateStatusIfChanged(ctx, &env, desired); err != nil {
@@ -307,7 +396,14 @@ func (r *DevEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 // the observed one.
 func (r *DevEnvironmentReconciler) updateStatusIfChanged(ctx context.Context, env *aiv1alpha1.DevEnvironment, desired *aiv1alpha1.DevEnvironment) error {
 	if !apiequality.Semantic.DeepEqual(env.Status, desired.Status) {
-		return r.Status().Update(ctx, desired)
+		// Patch, not Update: Update carries the resourceVersion of the object we
+		// read, and that read is served by the informer cache, which lags the API
+		// server — most visibly right after the finalizer patch above requeues
+		// immediately, so the very next reconcile describes a version the server
+		// has already moved past. It then 409-conflicts and forces a retry
+		// reconcile. Status is this controller's own observed state, so it needs
+		// no compare-and-swap; a merge patch drops the precondition.
+		return r.Status().Patch(ctx, desired, client.MergeFrom(env))
 	}
 	return nil
 }
@@ -331,8 +427,9 @@ func (r *DevEnvironmentReconciler) stopCompute(ctx context.Context, env *aiv1alp
 }
 
 // cleanup runs when the environment is being deleted: it reports the
-// Terminating phase, deletes the managed resources, removes the workspace PVC
-// only when pvcRetention=delete (design §7), and drops the finalizer.
+// Terminating phase, deletes the managed resources (the StatefulSet deletion
+// carries the workspace PVC's own retention policy, design §7), and drops the
+// finalizer.
 func (r *DevEnvironmentReconciler) cleanup(ctx context.Context, env *aiv1alpha1.DevEnvironment) error {
 	desired := env.DeepCopy()
 	setPhase(&desired.Status, aiv1alpha1.PhaseTerminating, reasonDeleting)
@@ -340,8 +437,10 @@ func (r *DevEnvironmentReconciler) cleanup(ctx context.Context, env *aiv1alpha1.
 		return err
 	}
 
+	if err := r.deleteStatefulSet(ctx, env); err != nil {
+		return err
+	}
 	for _, obj := range []client.Object{
-		&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: env.Name, Namespace: env.Namespace}},
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: env.Name, Namespace: env.Namespace}},
 		&networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: env.Name, Namespace: env.Namespace}},
 		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: sshSecretName(env), Namespace: env.Namespace}},
@@ -365,26 +464,6 @@ func (r *DevEnvironmentReconciler) cleanup(ctx context.Context, env *aiv1alpha1.
 		return err
 	}
 
-	// The workspace PVC survives by default: the StatefulSet retains it on
-	// delete. Remove it only when pvcRetention=delete. The PVC's controller
-	// owner is the StatefulSet (created via volumeClaimTemplate), so ownership
-	// is verified by the environment label instead of a controller ownerRef.
-	if env.Spec.Storage != nil && env.Spec.Storage.PVCRetention == aiv1alpha1.PVCRetentionDelete {
-		pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: workspacePVCName(env), Namespace: env.Namespace}}
-		if err := r.Get(ctx, client.ObjectKeyFromObject(pvc), pvc); err != nil {
-			if !apierrors.IsNotFound(err) {
-				return err
-			}
-			// A missing PVC is already cleaned up; fall through to the
-			// finalizer removal so the environment does not stall in
-			// Terminating.
-		} else if pvc.Labels[devEnvironmentLabelKey] == env.Name {
-			if err := r.Delete(ctx, pvc); err != nil && !apierrors.IsNotFound(err) {
-				return err
-			}
-		}
-	}
-
 	// Re-fetch for a fresh resourceVersion before mutating finalizers: the
 	// status update above bumped it, so a stale Update would 409-conflict and
 	// force a retry reconcile.
@@ -394,6 +473,76 @@ func (r *DevEnvironmentReconciler) cleanup(ctx context.Context, env *aiv1alpha1.
 	}
 	fresh.Finalizers = slices.DeleteFunc(fresh.Finalizers, func(f string) bool { return f == devEnvFinalizer })
 	return r.Update(ctx, fresh)
+}
+
+// deleteStatefulSet deletes the environment's StatefulSet, which is what ends
+// the workload and, per its retention policy, disposes of the workspace claim. A
+// missing or foreign StatefulSet is left alone.
+func (r *DevEnvironmentReconciler) deleteStatefulSet(ctx context.Context, env *aiv1alpha1.DevEnvironment) error {
+	sts := &appsv1.StatefulSet{}
+	if err := r.Get(ctx, client.ObjectKey{Name: env.Name, Namespace: env.Namespace}, sts); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if err := ensureDevEnvOwned(sts, env); err != nil {
+		return nil
+	}
+	if desiredWhenDeleted(env) == appsv1.RetainPersistentVolumeClaimRetentionPolicyType {
+		if err := r.detachWorkspaceClaims(ctx, env, sts); err != nil {
+			return err
+		}
+	}
+	return client.IgnoreNotFound(r.Delete(ctx, sts))
+}
+
+// detachWorkspaceClaims makes the environment's workspace claims independent of
+// the StatefulSet, so that deleting the set cannot take the workspace with it.
+//
+// cleanup runs straight off the deletion timestamp, which is what makes this
+// necessary: an environment deleted right after pvcRetention was set to retain
+// is deleted before the policy reaches the StatefulSet, whose whenDeleted still
+// says delete. The claim then carries a controller reference to the set and is
+// garbage-collected with it — the retain request loses exactly the data it asked
+// to keep. The policy is converged onto the set first, so the StatefulSet
+// controller stops treating the claims as deletable, and the reference is then
+// removed here rather than waited for: a set stopped before the policy changed
+// (replicas 0, no pod) is never revisited by that controller, which only fixes
+// claims for pods it can see, so waiting on it would leave the environment stuck
+// in Terminating.
+func (r *DevEnvironmentReconciler) detachWorkspaceClaims(ctx context.Context, env *aiv1alpha1.DevEnvironment, sts *appsv1.StatefulSet) error {
+	if policy := sts.Spec.PersistentVolumeClaimRetentionPolicy; policy == nil ||
+		policy.WhenDeleted != appsv1.RetainPersistentVolumeClaimRetentionPolicyType {
+		original := sts.DeepCopy()
+		sts.Spec.PersistentVolumeClaimRetentionPolicy = &appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
+			WhenDeleted: appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+			WhenScaled:  appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+		}
+		if err := r.Patch(ctx, sts, client.MergeFrom(original)); err != nil {
+			return err
+		}
+	}
+
+	// Looked up by label, not by the claim's name: the name is the StatefulSet
+	// controller's to derive (<claim>-<set>-<ordinal>) and it is the one that
+	// provisions the claim, so matching what it created beats recomputing it.
+	var claims corev1.PersistentVolumeClaimList
+	if err := r.List(ctx, &claims, client.InNamespace(env.Namespace),
+		client.MatchingLabels{devEnvironmentLabelKey: env.Name}); err != nil {
+		return err
+	}
+	for i := range claims.Items {
+		claim := &claims.Items[i]
+		original := claim.DeepCopy()
+		claim.OwnerReferences = slices.DeleteFunc(claim.OwnerReferences, func(ref metav1.OwnerReference) bool {
+			return ref.UID == sts.UID
+		})
+		if len(claim.OwnerReferences) == len(original.OwnerReferences) {
+			continue
+		}
+		if err := r.Patch(ctx, claim, client.MergeFrom(original)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // deleteRoutes removes the HTTPRoute and TCPRoutes created for the
@@ -449,7 +598,6 @@ func (r *DevEnvironmentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&networkingv1.NetworkPolicy{}).
 		Owns(&corev1.Secret{}).
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.enqueueForDevEnv)).
-		Watches(&corev1.PersistentVolumeClaim{}, handler.EnqueueRequestsFromMapFunc(r.enqueueForDevEnv)).
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.enqueueForDevEnvKeysSecret)).
 		Watches(&aiv1alpha1.DevEnvironment{}, handler.EnqueueRequestsFromMapFunc(r.enqueueAllDevEnvironments))
 	if gatewayAPICRDsInstalled(mgr) {
@@ -517,17 +665,22 @@ func gatewayAPICRDsInstalled(mgr ctrl.Manager) bool {
 
 // brandMismatchReason returns a non-empty message when gpuType does not match
 // the image brand: nvidia <-> base-cuda and metax <-> base-maca (design §4.2).
-// Custom images must carry their brand marker in the name (P1 baseline).
+// Custom images must carry their brand marker in the name (P1 baseline). An
+// environment that requests no GPU has no brand to match, so it is exempt —
+// which is what lets a CPU-only environment run a CPU image.
 func brandMismatchReason(env *aiv1alpha1.DevEnvironment) string {
+	if desiredGPUCount(env) == 0 {
+		return ""
+	}
 	image := strings.ToLower(env.Spec.Image)
 	switch env.Spec.Resources.GPUType {
 	case aiv1alpha1.GPUTypeNVIDIA:
 		if !strings.Contains(image, "base-cuda") {
-			return fmt.Sprintf("image %q does not match gpuType nvidia (expected a base-cuda image)", env.Spec.Image)
+			return fmt.Sprintf("image %q does not match gpuType nvidia (expected a base-cuda image); set spec.resources.gpuCount: 0 for a CPU-only environment", env.Spec.Image)
 		}
 	case aiv1alpha1.GPUTypeMetaX:
 		if !strings.Contains(image, "base-maca") {
-			return fmt.Sprintf("image %q does not match gpuType metax (expected a base-maca image)", env.Spec.Image)
+			return fmt.Sprintf("image %q does not match gpuType metax (expected a base-maca image); set spec.resources.gpuCount: 0 for a CPU-only environment", env.Spec.Image)
 		}
 	}
 	return ""
@@ -543,7 +696,10 @@ func sshExposed(env *aiv1alpha1.DevEnvironment) bool {
 }
 
 // mainContainerPort is the primary container port by type: jupyter 8888,
-// ssh 22, vscode 8080 (design §6.1).
+// vscode 8080, ssh the unprivileged port the base images' sshd binds
+// (design §6.1, Gap B). It is the port the container listens on, which is what
+// the readiness probe targets; the Service publishes ssh on sshServicePort
+// instead, since only the container side had to move.
 func mainContainerPort(t aiv1alpha1.DevEnvironmentType) int32 {
 	switch t {
 	case aiv1alpha1.DevEnvironmentTypeJupyter:
@@ -551,8 +707,18 @@ func mainContainerPort(t aiv1alpha1.DevEnvironmentType) int32 {
 	case aiv1alpha1.DevEnvironmentTypeVSCode:
 		return 8080
 	default:
-		return 22
+		return sshContainerPort
 	}
+}
+
+// desiredGPUCount resolves the requested accelerator count. A nil count means
+// the field was never defaulted — a Go-constructed object — which the API
+// server would have set to 1.
+func desiredGPUCount(env *aiv1alpha1.DevEnvironment) int32 {
+	if env.Spec.Resources.GPUCount == nil {
+		return 1
+	}
+	return *env.Spec.Resources.GPUCount
 }
 
 // gpuResource is the GPU extended resource by vendor (design §8.1).
@@ -565,11 +731,18 @@ func gpuResource(t aiv1alpha1.GPUType) corev1.ResourceName {
 
 // desiredResources maps the requested compute to container resources: the GPU
 // is both requested and limited; CPU/memory are limits only (design §3.2.2).
+// A GPUCount of 0 asks for no accelerator, so the vendor resource is left out
+// entirely rather than requested at zero — a zero request would still pin the
+// pod to a node advertising that resource.
 func desiredResources(env *aiv1alpha1.DevEnvironment) corev1.ResourceRequirements {
-	gpuName := gpuResource(env.Spec.Resources.GPUType)
-	gpu := resource.NewQuantity(int64(env.Spec.Resources.GPUCount), resource.DecimalSI)
-	limits := corev1.ResourceList{gpuName: *gpu}
-	requests := corev1.ResourceList{gpuName: *gpu}
+	limits := corev1.ResourceList{}
+	requests := corev1.ResourceList{}
+	if count := desiredGPUCount(env); count > 0 {
+		gpuName := gpuResource(env.Spec.Resources.GPUType)
+		gpu := resource.NewQuantity(int64(count), resource.DecimalSI)
+		limits[gpuName] = *gpu
+		requests[gpuName] = *gpu
+	}
 	if env.Spec.Resources.CPU != "" {
 		limits[corev1.ResourceCPU] = resource.MustParse(env.Spec.Resources.CPU)
 	}
@@ -604,6 +777,64 @@ func desiredSecurityContext(rt *aiv1alpha1.RuntimeSpec) *corev1.SecurityContext 
 	}
 }
 
+// desiredPermissionInitContainer returns the init container that makes the
+// workspace claim writable by the account the environment runs as. A claim is
+// mounted root:root, and a non-root account can neither write it nor create the
+// ~/.ssh it keeps there, so something has to establish the ownership on the way
+// in.
+//
+// It is the workspace claim, and only the workspace claim. The pod-level fsGroup
+// this replaces was the alternative, and it is Pod-scoped: it chowns every volume
+// in the pod mounted read-write, including a PVC shared through spec.volumes that
+// this platform does not own. Kubernetes has no per-mount fsGroup, so the only
+// way to scope the operation to the storage the platform provisions for the
+// environment is to perform it here — and an init container that does not mount a
+// volume has no path through which it could modify one.
+//
+// The privilege is correspondingly narrow: root, with every capability dropped
+// and three added back. CAP_CHOWN is what changing the owner of a file the
+// process does not own requires. CAP_FOWNER and CAP_FSETID are what setting the
+// mode on a claim root that belongs to a *previous* identity requires: a claim
+// outlives the identity it was initialized for, so editing
+// spec.runtime.securityContext leaves one owned by a uid the container is
+// neither the owner nor grouped with. Without CAP_FOWNER the chmod is EPERM and
+// the environment never starts; without CAP_FSETID it succeeds and silently
+// drops the setgid bit. It is not privileged, cannot escalate, and reaches no
+// host path. Note that a namespace enforcing the Restricted Pod Security
+// Standard rejects exactly this — root and any capability beyond
+// NET_BIND_SERVICE — so a namespace hosting DevEnvironments has to be at
+// Baseline, where these three are among the capabilities that remain allowed.
+// What the container actually runs is ::permissionInitScript.
+func desiredPermissionInitContainer(env *aiv1alpha1.DevEnvironment) corev1.Container {
+	// Both pointers are always set by desiredSecurityContext, which defaults them
+	// to the platform's 1000/1000 when the spec names neither.
+	sc := desiredSecurityContext(env.Spec.Runtime)
+	return corev1.Container{
+		Name:    permissionInitContainerName,
+		Image:   permissionInitImage,
+		Command: []string{"/bin/sh", "-c", permissionInitScript},
+		Env: []corev1.EnvVar{
+			{Name: permissionInitPathEnv, Value: permissionInitMountPath},
+			{Name: permissionInitUIDEnv, Value: strconv.FormatInt(*sc.RunAsUser, 10)},
+			{Name: permissionInitGIDEnv, Value: strconv.FormatInt(*sc.RunAsGroup, 10)},
+		},
+		SecurityContext: &corev1.SecurityContext{
+			RunAsUser:                ptr(int64(0)),
+			RunAsGroup:               ptr(int64(0)),
+			RunAsNonRoot:             ptr(false),
+			Privileged:               ptr(false),
+			AllowPrivilegeEscalation: ptr(false),
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{"ALL"},
+				Add:  []corev1.Capability{"CHOWN", "FOWNER", "FSETID"},
+			},
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: workspaceClaimName, MountPath: permissionInitMountPath},
+		},
+	}
+}
+
 // jupyterTokenPodAnnotations returns the pod-template annotations derived from
 // env for a jupyter environment: a non-sensitive sha256 digest of the managed
 // token carried from reconcileJupyterAuthSecret via env.Annotations (in-memory
@@ -623,15 +854,120 @@ func jupyterTokenPodAnnotations(env *aiv1alpha1.DevEnvironment) map[string]strin
 	return map[string]string{jupyterTokenRevisionAnnotationKey: rev}
 }
 
+// sshKeysPodAnnotations is jupyterTokenPodAnnotations for the ssh material: the
+// digest carried from reconcileSSHSecret via env.Annotations (in-memory only,
+// never persisted on the DevEnvironment) changes the pod template — and so
+// stsSpecHash — whenever the mounted Secret bytes change, which is the only way
+// a subPath mount ever picks them up. It also rolls the workload once on upgrade
+// from a controller that stamped no revision at all.
+func sshKeysPodAnnotations(env *aiv1alpha1.DevEnvironment) map[string]string {
+	if !sshExposed(env) {
+		return nil
+	}
+	rev := env.Annotations[sshKeysRevisionAnnotationKey]
+	if rev == "" {
+		return nil
+	}
+	return map[string]string{sshKeysRevisionAnnotationKey: rev}
+}
+
+// podTemplateAnnotations merges the annotations that roll the workload when
+// controller-managed secret material changes.
+func podTemplateAnnotations(env *aiv1alpha1.DevEnvironment) map[string]string {
+	ann := map[string]string{}
+	maps.Copy(ann, jupyterTokenPodAnnotations(env))
+	maps.Copy(ann, sshKeysPodAnnotations(env))
+	if len(ann) == 0 {
+		return nil
+	}
+	return ann
+}
+
+// runtimeUser is the account the environment's sshd serves: spec.runtime.user,
+// else the platform default.
+func runtimeUser(env *aiv1alpha1.DevEnvironment) string {
+	if env.Spec.Runtime != nil && env.Spec.Runtime.User != "" {
+		return env.Spec.Runtime.User
+	}
+	return defaultRuntimeUser
+}
+
+// resolveMountPath is where the workspace PVC mounts: an explicit
+// spec.storage.mountPath wins, then the home the environment declares through
+// HOME in spec.runtime.env, then the home the runtime identity implies — /root
+// for root, /home/<user> for a named account — else the platform default. A
+// container account is constrained by the CRD pattern to
+// ^[a-z_][a-z0-9_-]*$, so it cannot inject a path separator.
+//
+// A declared HOME precedes the home the identity implies because it is the more
+// specific statement about where the container will look: an image whose
+// launcher relocates the account's home — stock docker-stacks moves root's to
+// /home/root — says so in HOME, and any other mount leaves the claim unused
+// while the workload writes to the container filesystem.
+//
+// The identity cases read the spec rather than runtimeUser: an environment that
+// names no account gets /workspace, not /home/user.
+func resolveMountPath(env *aiv1alpha1.DevEnvironment) string {
+	if env.Spec.Storage != nil && env.Spec.Storage.MountPath != "" {
+		return env.Spec.Storage.MountPath
+	}
+	if home := declaredHome(env); home != "" {
+		return home
+	}
+	if sc := env.Spec.Runtime; sc != nil && sc.SecurityContext != nil &&
+		sc.SecurityContext.RunAsUser != nil && *sc.SecurityContext.RunAsUser == 0 {
+		return "/root"
+	}
+	if env.Spec.Runtime != nil && env.Spec.Runtime.User != "" {
+		return "/home/" + env.Spec.Runtime.User
+	}
+	return defaultWorkspacePath
+}
+
+// declaredHome is the home an environment declares through HOME in
+// spec.runtime.env, empty when it declares none. The last entry named HOME is
+// the one the container applies, so a final entry that is not usable leaves the
+// environment declaring no home rather than reviving an earlier one the
+// container overrides.
+//
+// An absolute path written out is the only usable form. A valueFrom source
+// cannot be read while reconciling without watching whatever it reads, a
+// relative value does not name a mount path, and the kubelet expands $(VAR) —
+// the claim would be mounted at the unexpanded text while the container's home
+// is the expanded one, which is the mismatch this whole derivation exists to
+// avoid.
+func declaredHome(env *aiv1alpha1.DevEnvironment) string {
+	if env.Spec.Runtime == nil {
+		return ""
+	}
+	home := ""
+	for _, v := range env.Spec.Runtime.Env {
+		if v.Name != homeEnv {
+			continue
+		}
+		if v.ValueFrom != nil || !strings.HasPrefix(v.Value, "/") || strings.Contains(v.Value, "$(") {
+			home = ""
+			continue
+		}
+		home = v.Value
+	}
+	return home
+}
+
 // desiredStatefulSet renders the environment StatefulSet: replicas 1/0 from
-// spec.running, the workspace volumeClaimTemplate, and PVC retention so the
-// workspace data survives stop and delete (the finalizer removes it only when
-// pvcRetention=delete).
+// spec.running, the workspace volumeClaimTemplate, and PVC retention. The
+// workspace PVC's lifecycle belongs to the StatefulSet: it creates the claim
+// from the template and, per whenDeleted, removes it when the StatefulSet is
+// deleted — so the controller neither creates nor deletes workspace claims.
 func (r *DevEnvironmentReconciler) desiredStatefulSet(env *aiv1alpha1.DevEnvironment) *appsv1.StatefulSet {
 	replicas := int32(0)
 	if env.Spec.Running {
 		replicas = 1
 	}
+	// spec.storage.pvcRetention is carried by the StatefulSet rather than acted
+	// on by the controller: whenDeleted is the field that expresses it, and the
+	// StatefulSet controller removes the claim it created. Stopping must never
+	// discard the workspace, so whenScaled stays Retain regardless.
 	return &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{Name: env.Name, Namespace: env.Namespace, Labels: r.envLabels(env.Name)},
 		Spec: appsv1.StatefulSetSpec{
@@ -639,20 +975,35 @@ func (r *DevEnvironmentReconciler) desiredStatefulSet(env *aiv1alpha1.DevEnviron
 			Replicas:    &replicas,
 			Selector:    &metav1.LabelSelector{MatchLabels: map[string]string{devEnvironmentLabelKey: env.Name}},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: r.envLabels(env.Name), Annotations: jupyterTokenPodAnnotations(env)},
+				ObjectMeta: metav1.ObjectMeta{Labels: r.envLabels(env.Name), Annotations: podTemplateAnnotations(env)},
 				Spec:       r.desiredPodSpec(env),
 			},
 			VolumeClaimTemplates: r.desiredVolumeClaimTemplates(env),
 			PersistentVolumeClaimRetentionPolicy: &appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
-				WhenDeleted: appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+				WhenDeleted: desiredWhenDeleted(env),
 				WhenScaled:  appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
 			},
 		},
 	}
 }
 
+// desiredWhenDeleted is the StatefulSet claim-deletion policy that carries
+// spec.storage.pvcRetention. The fallback mirrors the schema default (delete), so
+// an object that reached the controller without the field defaulted behaves as
+// the API server would have made it. Rendering reads it, and so does cleanup,
+// which has to know the environment's policy even before it has been reconciled
+// onto the StatefulSet.
+func desiredWhenDeleted(env *aiv1alpha1.DevEnvironment) appsv1.PersistentVolumeClaimRetentionPolicyType {
+	if env.Spec.Storage != nil && env.Spec.Storage.PVCRetention == aiv1alpha1.PVCRetentionRetain {
+		return appsv1.RetainPersistentVolumeClaimRetentionPolicyType
+	}
+	return appsv1.DeletePersistentVolumeClaimRetentionPolicyType
+}
+
 // desiredPodSpec renders the pod spec: compute-pool nodeSelector, the main
-// container with the workspace and data volume mounts, and the SSH keys volume.
+// container with the workspace and data volume mounts, the SSH keys volume, and —
+// when the environment has its own storage — the init container that makes that
+// storage writable (::desiredPermissionInitContainer).
 func (r *DevEnvironmentReconciler) desiredPodSpec(env *aiv1alpha1.DevEnvironment) corev1.PodSpec {
 	mainPort := mainContainerPort(env.Spec.Type)
 	container := corev1.Container{
@@ -691,7 +1042,7 @@ func (r *DevEnvironmentReconciler) desiredPodSpec(env *aiv1alpha1.DevEnvironment
 	container.Env = envVars
 	if env.Spec.Storage != nil {
 		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-			Name: workspaceClaimName, MountPath: env.Spec.Storage.MountPath,
+			Name: workspaceClaimName, MountPath: resolveMountPath(env),
 		})
 	}
 	for _, v := range env.Spec.Volumes {
@@ -702,17 +1053,34 @@ func (r *DevEnvironmentReconciler) desiredPodSpec(env *aiv1alpha1.DevEnvironment
 		container.VolumeMounts = append(container.VolumeMounts, mount)
 	}
 	if sshExposed(env) {
-		// Base images read the sshd host keys and authorized_keys from this
-		// path (documented in the sample CR); permissions are 0644 so a
-		// non-root sshd can read them, and the image's setup may tighten them.
-		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-			Name: sshKeysVolumeName, MountPath: "/etc/cubestack/ssh", ReadOnly: true,
-		})
+		// The images read the ssh material in place — no staging, no copy, no
+		// chmod (images/README.md) — so the Secret's keys are mounted as files
+		// with subPath: the host key where sshd looks for its identity, and the
+		// platform keys at the absolute path the images' AuthorizedKeysFile names.
+		// Neither needs a directory to exist in the image: the runtime creates a
+		// file mount target's parent. DefaultMode stays 0644: the files are
+		// root-owned and OpenSSH only enforces its private-key check on files owned
+		// by the uid reading them, so a tighter mode would make a non-root sshd
+		// exit with "no hostkeys available".
+		container.VolumeMounts = append(container.VolumeMounts,
+			corev1.VolumeMount{
+				Name: sshKeysVolumeName, MountPath: sshHostKeyPath, SubPath: sshHostKeyKey, ReadOnly: true,
+			},
+			corev1.VolumeMount{
+				Name: sshKeysVolumeName, MountPath: sshAuthorizedKeysPath,
+				SubPath: sshAuthorizedKeysKey, ReadOnly: true,
+			},
+		)
 	}
 
 	podSpec := corev1.PodSpec{
 		NodeSelector: map[string]string{computeNodePoolLabelKey: computeNodePoolValue},
 		Containers:   []corev1.Container{container},
+	}
+	if env.Spec.Storage != nil {
+		// The workspace claim is the platform's storage for this environment; a
+		// referenced PVC is not, and is never mounted into the init container.
+		podSpec.InitContainers = []corev1.Container{desiredPermissionInitContainer(env)}
 	}
 	for _, v := range env.Spec.Volumes {
 		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
@@ -735,7 +1103,7 @@ func (r *DevEnvironmentReconciler) desiredPodSpec(env *aiv1alpha1.DevEnvironment
 }
 
 // desiredVolumeClaimTemplates renders the workspace claim template, creating
-// the PVC <env>-workspace-0 that survives stop/start. The claim always uses the
+// the PVC workspace-<env>-0 that survives stop/start. The claim always uses the
 // platform-predefined workspaceStorageClassName and requests ReadWriteMany so
 // the volume can be mounted on any node and follow the pod across node faults.
 func (r *DevEnvironmentReconciler) desiredVolumeClaimTemplates(env *aiv1alpha1.DevEnvironment) []corev1.PersistentVolumeClaim {
@@ -762,11 +1130,18 @@ func (r *DevEnvironmentReconciler) desiredVolumeClaimTemplates(env *aiv1alpha1.D
 // port (when exposed and not the main port), and the extra application ports.
 func (r *DevEnvironmentReconciler) desiredService(env *aiv1alpha1.DevEnvironment) *corev1.Service {
 	mainPort := mainContainerPort(env.Spec.Type)
+	// The ssh container listens on the unprivileged sshContainerPort but is
+	// published on the conventional sshServicePort; every other type publishes
+	// the port it listens on.
+	mainServicePort := mainPort
+	if env.Spec.Type == aiv1alpha1.DevEnvironmentTypeSSH {
+		mainServicePort = sshServicePort
+	}
 	ports := []corev1.ServicePort{
-		{Name: mainPortName, Port: mainPort, TargetPort: intstr.FromInt32(mainPort), Protocol: corev1.ProtocolTCP},
+		{Name: mainPortName, Port: mainServicePort, TargetPort: intstr.FromInt32(mainPort), Protocol: corev1.ProtocolTCP},
 	}
 	if sshExposed(env) && env.Spec.Type != aiv1alpha1.DevEnvironmentTypeSSH {
-		ports = append(ports, corev1.ServicePort{Name: sshPortName, Port: 22, TargetPort: intstr.FromInt32(22), Protocol: corev1.ProtocolTCP})
+		ports = append(ports, corev1.ServicePort{Name: sshPortName, Port: sshServicePort, TargetPort: intstr.FromInt32(sshContainerPort), Protocol: corev1.ProtocolTCP})
 	}
 	for _, p := range env.Spec.Ports {
 		if p.Type == aiv1alpha1.PortTypeUDP {
@@ -784,25 +1159,49 @@ func (r *DevEnvironmentReconciler) desiredService(env *aiv1alpha1.DevEnvironment
 	}
 }
 
-// desiredNetworkPolicy enforces default-deny ingress with DNS egress
+// desiredNetworkPolicy enforces default-deny ingress — widened by exactly one
+// rule when the platform Gateway's dataplane is configured — with DNS egress
 // whitelisted (design §9.1).
 func (r *DevEnvironmentReconciler) desiredNetworkPolicy(env *aiv1alpha1.DevEnvironment) *networkingv1.NetworkPolicy {
 	tcp := corev1.ProtocolTCP
 	udp := corev1.ProtocolUDP
 	dnsPort := intstr.FromInt32(53)
+	cfg := r.defaultedConfig()
+	// Ingress is default-deny: an empty rule list admits nothing, and this is
+	// the only place an environment's inbound allowance is widened. The
+	// allowance below is the dataplane serving the environment's published
+	// routes, which reaches the pod from another namespace and would otherwise
+	// be refused.
+	//
+	// It carries no ports. An environment listens on its type's main port
+	// (jupyter 8888, vscode 8080, ssh 2222) plus whatever spec.ports declares, so
+	// naming any one of them would silently break the rest. The peer is already
+	// narrowed to a single Gateway's proxy pods, and a policy can admit no more
+	// ports than the container binds.
+	ingress := []networkingv1.NetworkPolicyIngressRule{}
+	if ns := cfg.GatewayDataplaneNamespace; ns != "" {
+		ingress = append(ingress, networkingv1.NetworkPolicyIngressRule{
+			From: []networkingv1.NetworkPolicyPeer{{
+				NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+					namespaceNameLabel: ns,
+				}},
+				PodSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+					gatewayDataplaneNameLabel:      cfg.GatewayName,
+					gatewayDataplaneNamespaceLabel: cfg.GatewayNamespace,
+				}},
+			}},
+		})
+	}
 	return &networkingv1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: env.Name, Namespace: env.Namespace, Labels: r.envLabels(env.Name)},
 		Spec: networkingv1.NetworkPolicySpec{
 			PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{devEnvironmentLabelKey: env.Name}},
 			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress},
-			// Ingress is an empty rule list: default-deny inbound. The platform
-			// gateway/portal whitelist rules are installed outside this
-			// controller (design §9.1).
-			Ingress: []networkingv1.NetworkPolicyIngressRule{},
+			Ingress:     ingress,
 			Egress: []networkingv1.NetworkPolicyEgressRule{
 				{
 					To: []networkingv1.NetworkPolicyPeer{{
-						NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"kubernetes.io/metadata.name": "kube-system"}},
+						NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{namespaceNameLabel: "kube-system"}},
 						PodSelector:       &metav1.LabelSelector{MatchLabels: map[string]string{"k8s-app": "kube-dns"}},
 					}},
 					Ports: []networkingv1.NetworkPolicyPort{
@@ -886,8 +1285,15 @@ func (r *DevEnvironmentReconciler) applyStatefulSet(ctx context.Context, env *ai
 	if err := ensureDevEnvOwned(existing, env); err != nil {
 		return err
 	}
+	// The retention policy is a mutable field the controller owns now, but it is
+	// derived from spec.storage, which stsSpecHash already covers — so a
+	// StatefulSet stored by a controller that hardcoded Retain hashes identically
+	// and would otherwise never be corrected. Compare it explicitly.
+	sameRetention := existing.Spec.PersistentVolumeClaimRetentionPolicy != nil &&
+		existing.Spec.PersistentVolumeClaimRetentionPolicy.WhenDeleted == sts.Spec.PersistentVolumeClaimRetentionPolicy.WhenDeleted &&
+		existing.Spec.PersistentVolumeClaimRetentionPolicy.WhenScaled == sts.Spec.PersistentVolumeClaimRetentionPolicy.WhenScaled
 	if existing.Annotations[stsSpecHashAnnotationKey] == sts.Annotations[stsSpecHashAnnotationKey] &&
-		existing.Spec.Replicas != nil && *existing.Spec.Replicas == *sts.Spec.Replicas {
+		existing.Spec.Replicas != nil && *existing.Spec.Replicas == *sts.Spec.Replicas && sameRetention {
 		return nil
 	}
 	// spec.volumeClaimTemplates is immutable once the StatefulSet exists, so an
@@ -903,9 +1309,10 @@ func (r *DevEnvironmentReconciler) applyStatefulSet(ctx context.Context, env *ai
 
 // stsSpecHash hashes the pod-template-affecting fields so applyStatefulSet can
 // detect template changes without comparing server-defaulted fields. It mirrors
-// the pod template exactly: in particular it includes the Jupyter token revision
-// (see jupyterTokenPodAnnotations), so creating or refilling a token changes the
-// hash and applyStatefulSet issues an update that rolls the workload.
+// the pod template exactly: in particular it includes the secret revisions the
+// template carries (see podTemplateAnnotations), so creating or refilling a
+// managed Secret changes the hash and applyStatefulSet issues an update that
+// rolls the workload.
 func stsSpecHash(env *aiv1alpha1.DevEnvironment) string {
 	type templateInput struct {
 		Type       aiv1alpha1.DevEnvironmentType
@@ -921,6 +1328,9 @@ func stsSpecHash(env *aiv1alpha1.DevEnvironment) string {
 		// a later token refill rolls them again. The plaintext never enters the
 		// hash input, only its non-sensitive digest.
 		JupyterTokenRevision string
+		// SSHKeysRevision is the equivalent digest for the ssh material the pod
+		// mounts as subPath files, which never see a Secret update in place.
+		SSHKeysRevision string
 	}
 	h := sha256.New()
 	h.Write(mustJSON(templateInput{
@@ -932,27 +1342,36 @@ func stsSpecHash(env *aiv1alpha1.DevEnvironment) string {
 		Volumes:              env.Spec.Volumes,
 		SSHExposed:           sshExposed(env),
 		JupyterTokenRevision: env.Annotations[jupyterTokenRevisionAnnotationKey],
+		SSHKeysRevision:      env.Annotations[sshKeysRevisionAnnotationKey],
 	}))
 	return fmt.Sprintf("sha256:%x", h.Sum(nil))
 }
 
 // reconcileSSHSecret creates or updates the managed SSH secret holding the
 // ed25519 host keypair and the authorized_keys content assembled from
-// spec.ssh.keysSecret. The host keypair is generated once and never rotated
-// (design §6.3); authorized_keys is refreshed when the user's keys change.
-func (r *DevEnvironmentReconciler) reconcileSSHSecret(ctx context.Context, env *aiv1alpha1.DevEnvironment) (*corev1.SecretKeySelector, error) {
+// spec.ssh.keysSecret. The host keypair is generated once and not rotated
+// (design §6.3), except to replace one sshd cannot read; authorized_keys is
+// refreshed when the user's keys change.
+//
+// It returns the non-sensitive digest of the mounted material alongside the
+// key selector, so the caller can record a revision on the pod template: the
+// pod reads the Secret through subPath mounts, which never see an update in
+// place, so refreshed authorized_keys only reach it when the workload rolls
+// (see sshKeysPodAnnotations).
+func (r *DevEnvironmentReconciler) reconcileSSHSecret(ctx context.Context, env *aiv1alpha1.DevEnvironment) (*corev1.SecretKeySelector, string, error) {
 	name := sshSecretName(env)
 	authorized, err := r.userAuthorizedKeys(ctx, env)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
+	selector := &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: name}, Key: sshAuthorizedKeysKey}
 
 	secret := &corev1.Secret{}
 	err = r.Get(ctx, types.NamespacedName{Namespace: env.Namespace, Name: name}, secret)
 	if apierrors.IsNotFound(err) {
 		privPEM, pubOpenSSH, err := generateSSHKeyPair()
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		desired := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: env.Namespace, Labels: r.envLabels(env.Name)},
@@ -964,26 +1383,61 @@ func (r *DevEnvironmentReconciler) reconcileSSHSecret(ctx context.Context, env *
 			},
 		}
 		if err := ctrl.SetControllerReference(env, desired, r.Scheme); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		if err := r.Create(ctx, desired); err != nil {
-			return nil, err
+			return nil, "", err
 		}
-		return &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: name}, Key: sshAuthorizedKeysKey}, nil
+		return selector, sshKeysDigest(desired), nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if err := ensureDevEnvOwned(secret, env); err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	if string(secret.Data[sshAuthorizedKeysKey]) != authorized {
+	// A managed Secret can exist without carrying any data — created by hand, or
+	// emptied by hand — and both repairs below write into its map, so an empty map
+	// has to be in place first. reconcileJupyterAuthSecret needs the same guard
+	// for its token.
+	changed := false
+	if secret.Data == nil {
+		secret.Data = map[string][]byte{}
+	}
+	if hostKeyUnreadable(secret.Data[sshHostKeyKey]) {
+		privPEM, pubOpenSSH, err := generateSSHKeyPair()
+		if err != nil {
+			return nil, "", err
+		}
+		secret.Data[sshHostKeyKey] = privPEM
+		secret.Data[sshHostPubKeyKey] = pubOpenSSH
+		changed = true
+	}
+	// The key has to be written even when authorized is empty: the pod mounts it
+	// by subPath, and a key that is missing from the Secret — rather than present
+	// and empty — leaves the mount with nothing to resolve, so the environment
+	// never starts. This is the shape Create already gives it.
+	if cur, ok := secret.Data[sshAuthorizedKeysKey]; !ok || string(cur) != authorized {
 		secret.Data[sshAuthorizedKeysKey] = []byte(authorized)
+		changed = true
+	}
+	if changed {
 		if err := r.Update(ctx, secret); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 	}
-	return &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: name}, Key: sshAuthorizedKeysKey}, nil
+	return selector, sshKeysDigest(secret), nil
+}
+
+// sshKeysDigest hashes the Secret content the pod mounts — the host key and the
+// platform authorized_keys — into the non-sensitive revision recorded on the
+// pod template. The host key never rotates in place (design §6.3), but a Secret
+// deleted and regenerated mints a new one, and that must roll the pod too.
+func sshKeysDigest(secret *corev1.Secret) string {
+	return assetDataHash(map[string]string{
+		sshHostKeyKey:        string(secret.Data[sshHostKeyKey]),
+		sshAuthorizedKeysKey: string(secret.Data[sshAuthorizedKeysKey]),
+	})
 }
 
 func sshSecretName(env *aiv1alpha1.DevEnvironment) string {
@@ -1097,24 +1551,61 @@ func (r *DevEnvironmentReconciler) userAuthorizedKeys(ctx context.Context, env *
 	return string(s.Data[key]), nil
 }
 
-// generateSSHKeyPair produces an ed25519 host keypair: the private key as a
-// PKCS8 PEM block (readable by sshd) and the public key in OpenSSH one-line
-// format. The base image contract defines how they are consumed.
+// generateSSHKeyPair produces an ed25519 host keypair: the private key as an
+// OpenSSH-format PEM block (sshHostKeyPEMType) and the public key in OpenSSH
+// one-line format. The base image contract defines how they are consumed —
+// sshd reads the private key in place, so the format has to be one sshd
+// accepts: OpenSSH has no PKCS#8 support for Ed25519 and rejects the generic
+// "PRIVATE KEY" block with "invalid format".
 func generateSSHKeyPair() (privPEM, pubOpenSSH []byte, err error) {
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, nil, err
 	}
-	privDER, err := x509.MarshalPKCS8PrivateKey(priv)
-	if err != nil {
-		return nil, nil, err
-	}
-	privPEM = pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privDER})
-
 	pub := priv.Public().(ed25519.PublicKey)
+	privPEM = pem.EncodeToMemory(&pem.Block{Type: sshHostKeyPEMType, Bytes: sshEd25519PrivateKeyBlob(pub, priv)})
 	pubOpenSSH = append([]byte(sshEd25519Algorithm+" "), base64.StdEncoding.EncodeToString(sshEd25519Blob(pub))...)
 	pubOpenSSH = append(pubOpenSSH, '\n')
 	return privPEM, pubOpenSSH, nil
+}
+
+// sshEd25519PrivateKeyBlob serialises the keypair in OpenSSH's own private key
+// format (PROTOCOL.key), unencrypted: the "openssh-key-v1" magic, the cipher
+// and KDF names ("none"), the public key blob, then the private section — two
+// check integers, the raw public key, the 64-byte private key (seed followed
+// by the public key, as crypto/ed25519 lays it out), an empty comment, and the
+// 1,2,3… padding up to the cipher's 8-byte block size.
+func sshEd25519PrivateKeyBlob(pub ed25519.PublicKey, priv ed25519.PrivateKey) []byte {
+	buf := []byte("openssh-key-v1\x00")
+	buf = appendSSHString(buf, []byte("none"))  // ciphername
+	buf = appendSSHString(buf, []byte("none"))  // kdfname
+	buf = appendSSHString(buf, nil)             // kdfoptions
+	buf = binary.BigEndian.AppendUint32(buf, 1) // number of keys
+	buf = appendSSHString(buf, sshEd25519Blob(pub))
+
+	var section []byte
+	// The two check integers must be equal; they detect a wrong passphrase, so
+	// any value works for an unencrypted key.
+	section = binary.BigEndian.AppendUint32(section, 0)
+	section = binary.BigEndian.AppendUint32(section, 0)
+	section = appendSSHString(section, []byte(sshEd25519Algorithm))
+	section = appendSSHString(section, pub) // raw key, not the blob
+	section = appendSSHString(section, priv)
+	section = appendSSHString(section, nil) // comment
+	for i := 1; len(section)%8 != 0; i++ {
+		section = append(section, byte(i))
+	}
+	return appendSSHString(buf, section)
+}
+
+// hostKeyUnreadable reports whether the stored host key is not in a format
+// sshd can read, so a Secret written before the format change above — or by
+// hand — is regenerated instead of leaving the environment without ssh. A
+// regenerated host key changes the host fingerprint, which is unavoidable: the
+// key it replaces never authenticated anything.
+func hostKeyUnreadable(pemBytes []byte) bool {
+	block, _ := pem.Decode(pemBytes)
+	return block == nil || block.Type != sshHostKeyPEMType
 }
 
 // sshEd25519Blob builds the SSH wire-format public key blob: two
@@ -1430,11 +1921,11 @@ func serviceBackendRef(serviceName string, port int32) gatewayv1.BackendRef {
 }
 
 // servicePortFor is the Service port number behind a named endpoint: the ssh
-// port is always 22 (main port for the ssh container type), extras use the
-// declared containerPort.
+// port is always sshServicePort (which the Service maps to the container's
+// sshContainerPort), extras use the declared containerPort.
 func servicePortFor(env *aiv1alpha1.DevEnvironment, name string) int32 {
 	if name == sshPortName {
-		return 22
+		return sshServicePort
 	}
 	for _, p := range env.Spec.Ports {
 		if p.Name == name {
@@ -1509,7 +2000,7 @@ func (r *DevEnvironmentReconciler) buildEndpoints(env *aiv1alpha1.DevEnvironment
 	if sshExposed(env) {
 		status.Endpoints = append(status.Endpoints, aiv1alpha1.Endpoint{
 			Name:    sshPortName,
-			Address: fmt.Sprintf("ssh://%s@%s", sshEndpointUser, net.JoinHostPort(gwIP, strconv.Itoa(int(ports[sshPortName])))),
+			Address: fmt.Sprintf("ssh://%s@%s", runtimeUser(env), net.JoinHostPort(gwIP, strconv.Itoa(int(ports[sshPortName])))),
 		})
 	}
 	for _, p := range env.Spec.Ports {
@@ -1544,10 +2035,6 @@ func (r *DevEnvironmentReconciler) environmentPod(ctx context.Context, env *aiv1
 
 func podName(env *aiv1alpha1.DevEnvironment) string {
 	return env.Name + "-0"
-}
-
-func workspacePVCName(env *aiv1alpha1.DevEnvironment) string {
-	return env.Name + "-" + workspaceClaimName + "-0"
 }
 
 // envLabels are the labels every managed resource carries: the owning
@@ -1609,38 +2096,6 @@ func setPodScheduledCondition(conditions *[]metav1.Condition, pod *corev1.Pod) {
 			Type: aiv1alpha1.ConditionPodScheduled, Status: metav1.ConditionTrue, Reason: reasonScheduled, Message: "The environment pod is scheduled",
 		})
 	}
-}
-
-// setStorageReadyCondition sets the StorageReady condition from the workspace
-// PVC. When no workspace storage is configured it is True/NotApplicable.
-func (r *DevEnvironmentReconciler) setStorageReadyCondition(ctx context.Context, env *aiv1alpha1.DevEnvironment, conditions *[]metav1.Condition) error {
-	if env.Spec.Storage == nil {
-		meta.SetStatusCondition(conditions, metav1.Condition{
-			Type: aiv1alpha1.ConditionStorageReady, Status: metav1.ConditionTrue, Reason: reasonNotApplicable, Message: "No workspace storage is configured",
-		})
-		return nil
-	}
-	pvc := &corev1.PersistentVolumeClaim{}
-	err := r.Get(ctx, types.NamespacedName{Namespace: env.Namespace, Name: workspacePVCName(env)}, pvc)
-	if apierrors.IsNotFound(err) {
-		meta.SetStatusCondition(conditions, metav1.Condition{
-			Type: aiv1alpha1.ConditionStorageReady, Status: metav1.ConditionFalse, Reason: reasonWaiting, Message: "The workspace PVC has not been created yet",
-		})
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if pvc.Status.Phase != corev1.ClaimBound {
-		meta.SetStatusCondition(conditions, metav1.Condition{
-			Type: aiv1alpha1.ConditionStorageReady, Status: metav1.ConditionFalse, Reason: reasonWaiting, Message: fmt.Sprintf("The workspace PVC is %s", pvc.Status.Phase),
-		})
-		return nil
-	}
-	meta.SetStatusCondition(conditions, metav1.Condition{
-		Type: aiv1alpha1.ConditionStorageReady, Status: metav1.ConditionTrue, Reason: reasonBound, Message: "The workspace PVC is bound",
-	})
-	return nil
 }
 
 // setDevEnvironmentRouteReadyCondition sets the RouteReady condition from the gateway

@@ -66,13 +66,16 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
-	var gatewayDomain, gatewayName, gatewayNamespace string
+	var gatewayDomain, gatewayName, gatewayNamespace, gatewayDataplaneNamespace string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&gatewayDomain, "gateway-domain", "",
 		"Platform domain; the public hostname of a published InferenceService is <modelName>.<gateway-domain>.")
 	flag.StringVar(&gatewayName, "gateway-name", "", "Name of the platform Gateway published HTTPRoutes attach to.")
 	flag.StringVar(&gatewayNamespace, "gateway-namespace", "cubestack-system", "Namespace of the platform Gateway.")
+	flag.StringVar(&gatewayDataplaneNamespace, "gateway-dataplane-namespace", "",
+		"Namespace the platform Gateway's dataplane pods run in; when set, DevEnvironment pods admit "+
+			"ingress from that Gateway. Leaving it empty keeps environments default-deny inbound.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
@@ -217,11 +220,12 @@ func main() {
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 		Config: controller.DevEnvironmentControllerConfig{
-			GatewayName:       "cubestack-gateway",
-			GatewayNamespace:  "cubestack-system",
-			HTTPPort:          80,
-			SSHPortRangeStart: 20000,
-			SSHPortRangeEnd:   20999,
+			GatewayName:               "cubestack-gateway",
+			GatewayNamespace:          "cubestack-system",
+			GatewayDataplaneNamespace: gatewayDataplaneNamespace,
+			HTTPPort:                  80,
+			SSHPortRangeStart:         20000,
+			SSHPortRangeEnd:           20999,
 		},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DevEnvironment")

@@ -79,14 +79,17 @@ function serviceStatus(s: InferenceServiceSummary): StatusClass {
 const gpuText = (s: InferenceServiceSummary): string =>
   s.gpuPerPod ? `${s.gpuPerPod} × ${s.gpuModel ?? s.vendor ?? "GPU"}` : "—";
 
-// Render the replica counts as separate lines (decode / prefill / group size)
-// so the column reads clearly instead of one crammed line.
+// One row per integer override the profile declares (decodeReplicas /
+// prefillReplicas / groupSize on a PD profile, whatever a standard profile
+// declares), so no knob name is hardcoded and the column reads clearly
+// instead of one crammed line.
 function ReplicaRows({ s }: { s: InferenceServiceSummary }) {
-  const rows: Array<[string, string]> = [
-    ["decode", String(s.decode.current)],
-    ["prefill", String(s.prefill.current)],
-    ["group", String(s.groupSize.current)],
-  ];
+  const rows = s.overrides
+    .filter((o) => o.type === "integer")
+    .map((o) => [o.name, o.current !== null ? String(o.current) : "—"] as [string, string]);
+  if (rows.length === 0) {
+    return <Typography sx={{ fontFamily: "var(--font-mono)", fontSize: 12.5 }}>—</Typography>;
+  }
   return (
     <Box sx={{ fontFamily: "var(--font-mono)", fontSize: 12.5, lineHeight: 1.7 }}>
       {rows.map(([label, value]) => (
@@ -181,7 +184,7 @@ export default function InferenceServicesPage() {
   });
 
   const handleApply = useCallback(
-    (decode: number, prefill: number, group: number) => {
+    (overrides: Record<string, number | string | boolean>) => {
       if (!selected) return;
       setScaleMsg(null);
       setScaleErr(null);
@@ -189,7 +192,7 @@ export default function InferenceServicesPage() {
       fetch("/api/inferenceservices", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ namespace: selected.namespace, name: selected.name, overrides: { decodeReplicas: decode, prefillReplicas: prefill, groupSize: group } }),
+        body: JSON.stringify({ namespace: selected.namespace, name: selected.name, overrides }),
       })
         .then(async (res) => {
           const body = (await res.json().catch(() => ({}))) as { error?: string };
@@ -327,7 +330,13 @@ export default function InferenceServicesPage() {
                 {t("inf.empty")}
               </Box>
             ) : selected ? (
+              // Keyed by the composite service identity so the panel (and the
+              // scale panel's local state) remounts on every selection change;
+              // without it, switching from a service with no declared
+              // overrides to one that has them would render inputs with
+              // undefined values for a frame (uncontrolled -> controlled).
               <DetailPanel
+                key={svcKey(selected)}
                 s={selected}
                 busy={scaleBusy}
                 msg={scaleMsg}
@@ -486,7 +495,7 @@ function DetailPanel({
   busy: boolean;
   msg: string | null;
   err: string | null;
-  onApply: (decode: number, prefill: number, group: number) => void;
+  onApply: (overrides: Record<string, number | string | boolean>) => void;
 }) {
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: "14px", minWidth: 0 }}>
@@ -621,6 +630,86 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
+// One row of the scale panel: renders the input matching the override type
+// declared by the profile (integer number, integer enum select, string text,
+// boolean switch).
+function ScaleInput({
+  o,
+  value,
+  onChange,
+}: {
+  o: InferenceServiceSummary["overrides"][number];
+  value: number | string | boolean;
+  onChange: (v: number | string | boolean) => void;
+}) {
+  if (o.type === "boolean") {
+    return <Switch checked={value === true} onChange={(e) => onChange(e.target.checked)} size="small" />;
+  }
+  // A declared enum is a closed set whatever its type, so it renders as a
+  // select — checked before the string/integer branches.
+  if (o.enum !== null && o.enum.length > 0) {
+    return (
+      <Select value={value} size="small" onChange={(e) => onChange(e.target.value as number | string)} sx={{ width: "100%", fontSize: 13, fontFamily: "var(--font-mono)" }}>
+        {o.enum.map((n) => (
+          <MenuItem key={String(n)} value={n}>
+            {String(n)}
+          </MenuItem>
+        ))}
+      </Select>
+    );
+  }
+  if (o.type === "string") {
+    return (
+      <input
+        value={typeof value === "string" ? value : ""}
+        onChange={(e) => onChange(e.target.value)}
+        style={{
+          width: "100%",
+          border: "1px solid var(--border)",
+          borderRadius: "var(--radius)",
+          padding: "8px 10px",
+          font: "inherit",
+          fontSize: 13,
+          background: "var(--bg)",
+          color: "var(--fg)",
+          outline: "none",
+        }}
+      />
+    );
+  }
+  return <NumberInput value={typeof value === "number" ? value : o.min ?? 1} min={o.min ?? undefined} max={o.max ?? undefined} onChange={onChange} />;
+}
+
+// Type/range/enum validity of a scale value against the profile declaration.
+// A declared enum is closed for string overrides too, otherwise a string enum
+// would accept any non-empty text and only be rejected by the API.
+function scaleValueValid(o: InferenceServiceSummary["overrides"][number], v: number | string | boolean | undefined): boolean {
+  if (v === undefined || v === null) return false;
+  if (o.type === "boolean") return typeof v === "boolean";
+  if (o.type === "string") {
+    if (typeof v !== "string" || v.trim() === "") return false;
+    return o.enum === null || o.enum.some((e) => e === v);
+  }
+  if (typeof v !== "number" || !Number.isInteger(v)) return false;
+  if (o.enum !== null && !o.enum.some((e) => e === v)) return false;
+  if (o.min !== null && v < o.min) return false;
+  if (o.max !== null && v > o.max) return false;
+  return true;
+}
+
+// Starting value for a scale input: the effective value, falling back to a
+// declared enum entry (an enum select needs a value inside the set), then to a
+// per-type default (mirrors the wizard's overrideValue).
+function scaleInitial(o: InferenceServiceSummary["overrides"][number]): number | string | boolean {
+  if (o.current !== null) return o.current;
+  if (o.enum !== null && o.enum.length > 0) return o.enum[0];
+  if (o.type === "boolean") return true;
+  if (o.type === "string") return "";
+  return o.min ?? 1;
+}
+
+// The scale panel edits exactly the override knobs the profile declares (one
+// input per knob) and submits them as a PATCH; nothing is hardcoded.
 function ScaleCard({
   s,
   busy,
@@ -632,59 +721,52 @@ function ScaleCard({
   busy: boolean;
   msg: string | null;
   err: string | null;
-  onApply: (decode: number, prefill: number, group: number) => void;
+  onApply: (overrides: Record<string, number | string | boolean>) => void;
 }) {
   const { t } = useI18n();
-  const [decode, setDecode] = useState(s.decode.current);
-  const [prefill, setPrefill] = useState(s.prefill.current);
-  const [group, setGroup] = useState(s.groupSize.current);
+  const [values, setValues] = useState<Record<string, number | string | boolean>>(() =>
+    Object.fromEntries(s.overrides.map((o) => [o.name, scaleInitial(o)])),
+  );
 
   // Re-sync local state when the selected service changes, or when its reported
-  // values actually change (e.g. the controller applied a scale). Depends on the
-  // service identity + the specific values read — NOT on the `s` object
-  // reference or the `s.decode` object (whose identity changes on every poll
-  // refresh) — so a 30s poll refresh (same values) must not clobber in-progress
-  // edits. exhaustive-deps is suppressed because the correct deps here are the
-  // primitive values, not the enclosing `s.*` objects.
+  // values actually change (e.g. the controller applied a scale). Depends on
+  // the service identity + a primitive snapshot of the effective values — NOT
+  // on the `s` object reference (whose identity changes on every poll refresh)
+  // — so a 30s poll refresh (same values) must not clobber in-progress edits.
+  // exhaustive-deps is suppressed because the correct deps are the primitives,
+  // not the enclosing `s` object. The snapshot serializes [name, value] tuples:
+  // a "name=value;" join would collide for values containing ";" or "=" and
+  // wrongly read edits as unchanged. It uses scaleInitial (not raw current) so
+  // an unset knob reads "unchanged" at its displayed fallback.
+  const currentValueKey = JSON.stringify(s.overrides.map((o) => [o.name, scaleInitial(o)]));
   /* eslint-disable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps */
   useEffect(() => {
-    setDecode(s.decode.current);
-    setPrefill(s.prefill.current);
-    setGroup(s.groupSize.current);
-  }, [s.namespace, s.name, s.decode.current, s.prefill.current, s.groupSize.current]);
+    setValues(Object.fromEntries(s.overrides.map((o) => [o.name, scaleInitial(o)])));
+  }, [s.namespace, s.name, currentValueKey]);
   /* eslint-enable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps */
 
-  const decodeInvalid = decode < s.decode.min || decode > s.decode.max;
-  const prefillInvalid = prefill < s.prefill.min || prefill > s.prefill.max;
-  const groupInvalid = s.groupSize.enum ? !s.groupSize.enum.includes(group) : group < 1;
-  const valid = !decodeInvalid && !prefillInvalid && !groupInvalid;
-  const unchanged = decode === s.decode.current && prefill === s.prefill.current && group === s.groupSize.current;
+  // Effective value per declared knob: the local edit when present, else the
+  // service's value or declared default (values can lag one render behind a
+  // poll that changed the declared override set).
+  const effective: Record<string, number | string | boolean> = Object.fromEntries(
+    s.overrides.map((o) => [o.name, values[o.name] ?? scaleInitial(o)]),
+  );
+  const invalid = s.overrides.some((o) => !scaleValueValid(o, effective[o.name]));
+  const unchanged = JSON.stringify(s.overrides.map((o) => [o.name, effective[o.name]])) === currentValueKey;
 
   return (
-    <Card title={t("inf.scale.title")} meta={t("inf.scale.hint", { decodeMax: String(s.decode.max), prefillMax: String(s.prefill.max) })}>
-      <Box sx={{ px: "18px", py: "12px", display: "flex", alignItems: "flex-end", gap: "12px" }}>
-        <Field label="decodeReplicas" error={decodeInvalid}>
-          <NumberInput value={decode} min={s.decode.min} max={s.decode.max} onChange={setDecode} />
-        </Field>
-        <Field label="prefillReplicas" error={prefillInvalid}>
-          <NumberInput value={prefill} min={s.prefill.min} max={s.prefill.max} onChange={setPrefill} />
-        </Field>
-        {s.groupSize.enum ? (
-          <Field label="groupSize" error={false}>
-            <Select value={group} size="small" onChange={(e) => setGroup(Number(e.target.value))} sx={{ width: "100%", fontSize: 13, fontFamily: "var(--font-mono)" }}>
-              {s.groupSize.enum.map((n) => (
-                <MenuItem key={n} value={n}>
-                  {n}
-                </MenuItem>
-              ))}
-            </Select>
-          </Field>
-        ) : (
-          <Field label="groupSize" error={groupInvalid}>
-            <NumberInput value={group} min={1} onChange={setGroup} />
-          </Field>
-        )}
-      </Box>
+    <Card title={t("inf.scale.title")} meta={t("inf.scale.hint")}>
+      {s.overrides.length === 0 ? (
+        <Box sx={{ px: "18px", py: "12px", fontSize: 12.5, color: "text.secondary" }}>{t("inf.scale.noOverrides")}</Box>
+      ) : (
+        <Box sx={{ px: "18px", py: "12px", display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(170px, 1fr))", gap: "12px", alignItems: "end" }}>
+          {s.overrides.map((o) => (
+            <Field key={o.name} label={o.name} error={!scaleValueValid(o, effective[o.name])}>
+              <ScaleInput o={o} value={effective[o.name]} onChange={(v) => setValues((prev) => ({ ...prev, [o.name]: v }))} />
+            </Field>
+          ))}
+        </Box>
+      )}
       {err ? (
         <Box sx={{ px: "18px", pb: "8px", fontSize: 11.5, color: soft(STATUS_ERR, 70) }}>{err}</Box>
       ) : null}
@@ -692,7 +774,7 @@ function ScaleCard({
         <Box sx={{ px: "18px", pb: "8px", fontSize: 11.5, color: "text.secondary" }}>{msg}</Box>
       ) : null}
       <Box sx={{ px: "18px", pb: "14px" }}>
-        <Button variant="contained" disabled={busy || !valid || unchanged} onClick={() => onApply(decode, prefill, group)} sx={{ textTransform: "none", fontSize: 12.5 }}>
+        <Button variant="contained" disabled={busy || invalid || unchanged || s.overrides.length === 0} onClick={() => onApply(effective)} sx={{ textTransform: "none", fontSize: 12.5 }}>
           {busy ? t("inf.scale.applying") : t("inf.scale.apply")}
         </Button>
       </Box>
@@ -709,7 +791,7 @@ function Field({ label, children, error }: { label: string; children: React.Reac
   );
 }
 
-function NumberInput({ value, min, max, onChange }: { value: number; min: number; max?: number; onChange: (n: number) => void }) {
+function NumberInput({ value, min, max, onChange }: { value: number; min?: number; max?: number; onChange: (n: number) => void }) {
   return (
     <input
       type="number"
@@ -889,6 +971,9 @@ function DeployWizard({
     const held = draft.overrides[o.name];
     if (held !== undefined) return held;
     if (o.default !== null && o.default !== undefined) return o.default;
+    // An enum select needs a value inside the declared set, otherwise MUI
+    // reports an out-of-range value ("") on first render.
+    if (o.enum !== null && o.enum.length > 0) return o.enum[0];
     if (o.type === "boolean") return true;
     if (o.type === "integer") return o.min ?? 1;
     return "";
@@ -932,6 +1017,15 @@ function DeployWizard({
       .catch((err: Error) => setCreateError(err.message))
       .finally(() => setCreateBusy(false));
   };
+
+  // Step-3 summary line for the GPU type: one entry per GPU role in
+  // pd-separation mode, a single vendor otherwise (reserved values — see
+  // GpuTypeSelect; per-role heterogeneous selection has no operator API yet).
+  const gpuSummary = !profile
+    ? "—"
+    : profile.servingMode === "pd-separation"
+      ? `prefill: ${profile.vendor ?? "—"} / decode: ${profile.vendor ?? "—"}`
+      : (profile.vendor ?? "—");
 
   const stepTitles = [
     t("inf.deploy.step.basic"),
@@ -1023,6 +1117,29 @@ function DeployWizard({
                   </Select>
                 </WizField>
 
+                {profile?.servingMode === "pd-separation" ? (
+                  <Box sx={{ mt: 3 }}>
+                    <Typography sx={{ fontSize: 12.5, fontWeight: 600, mb: "8px", color: "text.secondary" }}>
+                      {t("inf.deploy.gpu")}
+                    </Typography>
+                    <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
+                      <WizField label="prefill">
+                        <GpuTypeSelect id="wizard-gpu-prefill" vendor={profile.vendor} />
+                      </WizField>
+                      <WizField label="decode">
+                        <GpuTypeSelect id="wizard-gpu-decode" vendor={profile.vendor} />
+                      </WizField>
+                    </Box>
+                    <Typography sx={{ fontSize: 11.5, color: "text.secondary", mt: "8px" }}>
+                      {t("inf.deploy.gpuReserved")}
+                    </Typography>
+                  </Box>
+                ) : profile ? (
+                  <WizField label={t("inf.deploy.gpu")}>
+                    <GpuTypeSelect id="wizard-gpu" vendor={profile.vendor} />
+                  </WizField>
+                ) : null}
+
                 {profile && profile.overrides.length > 0 && (
                   <Box sx={{ mt: 3 }}>
                     <Typography sx={{ fontSize: 12.5, fontWeight: 600, mb: "8px", color: "text.secondary" }}>
@@ -1068,6 +1185,7 @@ function DeployWizard({
                     [t("inf.deploy.name"), draft.name.trim()],
                     [t("inf.deploy.namespace"), draft.namespace],
                     ["profileRef", draft.profileRef],
+                    [t("inf.deploy.gpu"), gpuSummary],
                     ["modelRef", draft.modelRef],
                     ...(profile
                       ? profile.overrides.map((o) => [`${t("inf.deploy.override")} ${o.name}`, String(overrideValue(o))] as [string, string])
@@ -1122,6 +1240,21 @@ function profileSummary(p: CreateOptionsResponse["profiles"][number]): string {
   const acc = [p.vendor, p.models.join("/")].filter(Boolean).join(" · ");
   const gpu = p.gpuPerPod ? ` · ${p.gpuPerPod}/pod` : "";
   return `${p.engine ?? ""} ${p.engineVersion ?? ""} · ${acc}${gpu}`;
+}
+
+/**
+ * GPU type select of the create wizard. Per-role heterogeneous selection
+ * (prefill on one vendor, decode on another) is reserved: the operator API
+ * does not accept per-role accelerators yet, so the profile's declared vendor
+ * is the only option and the select stays disabled until that lands.
+ */
+function GpuTypeSelect({ id, vendor }: { id: string; vendor: string | null }) {
+  const value = vendor ?? "";
+  return (
+    <Select size="small" fullWidth disabled data-od-id={id} value={value} onChange={() => {}}>
+      <MenuItem value={value}>{value || "—"}</MenuItem>
+    </Select>
+  );
 }
 
 function WizField({

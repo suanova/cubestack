@@ -12,6 +12,11 @@ spec:
   # Compute / resources
   resources:
     gpuType: nvidia
+    # gpuCount is the number of GPU cards. Omit it for the default of 1 — an
+    # omitted count always means one GPU. Set it to 0 for a CPU-only
+    # environment: the pod then carries no GPU resource at all, and the image
+    # brand is not checked, which is how the CPU images (ssh-ubuntu22.04,
+    # jupyter-minimal) are used.
     gpuCount: 1
     cpu: "16"
     memory: "64Gi"
@@ -22,8 +27,21 @@ spec:
   # not user-selectable.
   storage:
     size: 200Gi
-    pvcRetention: retain         # retain / delete
-    mountPath: /workspace        # workspace mount path (default); base images set HOME here
+    # pvcRetention decides what happens to the workspace claim when the
+    # environment is deleted: delete reclaims it with the environment (default),
+    # retain keeps it. Stopping is unaffected either way. A retained claim
+    # outlives the environment — nothing garbage-collects it — and is identified
+    # by its name (workspace-dev-llm-alice-0) and its
+    # ai.cubestack.io/dev-environment label: create an environment with the same
+    # name in the same namespace to reuse it, or delete the claim to reclaim the
+    # space.
+    pvcRetention: retain         # delete / retain
+    # mountPath is optional. Left out, the controller derives the workspace path
+    # from runtime: HOME from runtime.env when it names an absolute path
+    # outright, else /root when running as root (runAsUser 0), else /home/<user>,
+    # else /workspace. Set it to pin a path — e.g. for a bring-your-own image
+    # whose home is somewhere else.
+    mountPath: /home/ubuntu
 
   # Extra data volumes (referencing existing PVCs)
   volumes:
@@ -32,7 +50,15 @@ spec:
       mountPath: /data
       readOnly: true
 
-  # SSH access
+  # SSH access. The controller mints a per-environment Secret holding an ed25519
+  # host key and the authorized_keys assembled from keysSecret, and mounts those
+  # two keys as files: the host key at /etc/ssh/ssh_host_ed25519_key (its presence
+  # is what enables ssh in the image) and the keys at /run/ssh/authorized_keys.
+  # Both paths are outside the account's home, which the workspace claim may cover
+  # and make unwritable; the controller runs an init container that chowns the
+  # workspace claim to the container's own user/group so the workspace itself is
+  # writable. sshd listens on 2222 in the container and the Service publishes it
+  # as 22.
   ssh:
     enabled: true                # enable extra SSH for jupyter/vscode types
     keysSecret:
@@ -46,6 +72,13 @@ spec:
 
   # Container runtime customization
   runtime:
+    # The account the container runs as — the one the image's sshd serves, and the
+    # account the ssh endpoint advertises. Omit it for the platform default "user";
+    # set it to the image's own account: "ubuntu" for the self-authored images
+    # (ssh-ubuntu22.04, base-cuda, base-maca), "jovyan" for the stock-derived
+    # jupyter-minimal (which also needs securityContext.runAsGroup: 100, its stock
+    # gid — the platform default is 1000).
+    user: ubuntu
     env:
       - name: MODEL_REPO
         value: /models/llama3-8b

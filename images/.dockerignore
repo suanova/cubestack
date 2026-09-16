@@ -1,0 +1,15 @@
+# Ignore everything by default and re-include only what an image build needs.
+#
+# Build context for every Dockerfile here is the images/ directory (so common/
+# is COPYable), and docker only honors the context-root .dockerignore. Per-subdir
+# .dockerignore files would be inert — keep ignore rules here.
+
+**
+
+# Re-include the shared runtime logic and the two image directories.
+!common
+!common/**
+!ssh-ubuntu-server
+!ssh-ubuntu-server/**
+!jupyter
+!jupyter/**

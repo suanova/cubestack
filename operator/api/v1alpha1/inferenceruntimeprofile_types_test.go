@@ -22,6 +22,7 @@ import (
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -37,6 +38,13 @@ const (
 	testEndpointPortName  = "http"
 	testRefNamespace      = "project-a"
 	testRefServiceName    = "dsv4-flash-pd"
+
+	testVolumeShmName   = "shm"
+	testMemoryMedium    = "Memory"
+	testShmMountPath    = "/dev/shm"
+	testIBHostPath      = "/dev/infiniband"
+	testModelMountPath  = "/workspace/model"
+	testHCAResourceName = "rdma/hca_shared_devices"
 )
 
 func validInferenceRuntimeProfile(name string) *InferenceRuntimeProfile {
@@ -117,7 +125,7 @@ func validInferenceRuntimeProfile(name string) *InferenceRuntimeProfile {
 							GPUPerPod: ptrTo(int64(8)),
 						},
 						Mounts: []ModelMount{
-							{Model: "main", At: "/workspace/model", ReadOnly: true},
+							{Model: "main", At: testModelMountPath, ReadOnly: true},
 						},
 					},
 					Service: &RoleService{
@@ -142,7 +150,7 @@ func validInferenceRuntimeProfile(name string) *InferenceRuntimeProfile {
 							GPUPerPod: ptrTo(int64(8)),
 						},
 						Mounts: []ModelMount{
-							{Model: "main", At: "/workspace/model", ReadOnly: true},
+							{Model: "main", At: testModelMountPath, ReadOnly: true},
 						},
 					},
 					Service: &RoleService{
@@ -193,6 +201,54 @@ var _ = Describe("InferenceRuntimeProfile", func() {
 			irp.Spec.ReadinessPolicy = nil
 
 			Expect(k8sClient.Create(ctx, irp)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, irp)).To(Succeed())
+		})
+
+		It("accepts an exec readiness probe and round-trips it", func() {
+			command := []string{"/bin/bash", "-c", "curl -sf http://127.0.0.1:8000/health"}
+			irp := validInferenceRuntimeProfile("irp-exec-probe")
+			irp.Spec.Roles[1].PodTemplate.Probes = &Probes{Readiness: &Probe{
+				Exec:             &ExecAction{Command: command},
+				PeriodSeconds:    ptrTo(int32(10)),
+				FailureThreshold: ptrTo(int32(30)),
+			}}
+
+			Expect(k8sClient.Create(ctx, irp)).To(Succeed())
+
+			got := &InferenceRuntimeProfile{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: irp.Name}, got)).To(Succeed())
+			Expect(got.Spec.Roles[1].PodTemplate.Probes.Readiness.Exec.Command).To(Equal(command))
+
+			Expect(k8sClient.Delete(ctx, irp)).To(Succeed())
+		})
+
+		It("accepts additional volumes and extendedResources and round-trips the spec", func() {
+			irp := validInferenceRuntimeProfile("irp-volumes")
+			irp.Spec.Roles[1].PodTemplate.Volumes = []Volume{
+				{Name: "dshm", At: testShmMountPath, EmptyDir: &EmptyDirVolume{Medium: testMemoryMedium, SizeLimit: ptrTo(resource.MustParse("8Gi"))}},
+				{Name: "ib", At: testIBHostPath, HostPath: &HostPathVolume{Path: testIBHostPath}},
+			}
+			irp.Spec.Roles[1].PodTemplate.Resources.ExtendedResources = map[string]int64{testHCAResourceName: 2}
+
+			Expect(k8sClient.Create(ctx, irp)).To(Succeed())
+
+			got := &InferenceRuntimeProfile{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: irp.Name}, got)).To(Succeed())
+			Expect(got.Spec).To(Equal(irp.Spec))
+
+			Expect(k8sClient.Delete(ctx, irp)).To(Succeed())
+		})
+
+		It("accepts a podAntiAffinity topologyKey and round-trips the spec", func() {
+			irp := validInferenceRuntimeProfile("irp-antiaffinity")
+			irp.Spec.PodAntiAffinity = &PodAntiAffinity{TopologyKey: "kubernetes.io/hostname"}
+
+			Expect(k8sClient.Create(ctx, irp)).To(Succeed())
+
+			got := &InferenceRuntimeProfile{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: irp.Name}, got)).To(Succeed())
+			Expect(got.Spec).To(Equal(irp.Spec))
+
 			Expect(k8sClient.Delete(ctx, irp)).To(Succeed())
 		})
 
@@ -351,7 +407,7 @@ var _ = Describe("InferenceRuntimeProfile", func() {
 			Entry("volume without emptyDir or hostPath",
 				"irp-invalid-volume-no-source",
 				func(s *InferenceRuntimeProfileSpec) {
-					s.Roles[1].PodTemplate.Volumes = []Volume{{Name: "shm"}}
+					s.Roles[1].PodTemplate.Volumes = []Volume{{Name: testVolumeShmName, At: testShmMountPath}}
 				},
 				"exactly one of emptyDir or hostPath"),
 			Entry("volume with both emptyDir and hostPath",
@@ -359,17 +415,69 @@ var _ = Describe("InferenceRuntimeProfile", func() {
 				func(s *InferenceRuntimeProfileSpec) {
 					s.Roles[1].PodTemplate.Volumes = []Volume{{
 						Name:     "shm",
+						At:       "/dev/shm",
 						EmptyDir: &EmptyDirVolume{},
-						HostPath: &HostPathVolume{Path: "/dev/infiniband"},
+						HostPath: &HostPathVolume{Path: testIBHostPath},
 					}}
 				},
 				"exactly one of emptyDir or hostPath"),
+			Entry("volume missing at",
+				"irp-invalid-volume-no-at",
+				func(s *InferenceRuntimeProfileSpec) {
+					s.Roles[1].PodTemplate.Volumes = []Volume{{Name: testVolumeShmName, EmptyDir: &EmptyDirVolume{}}}
+				},
+				"spec.roles[1].podTemplate.volumes[0].at"),
+			Entry("volume with relative at",
+				"irp-invalid-volume-relative-at",
+				func(s *InferenceRuntimeProfileSpec) {
+					s.Roles[1].PodTemplate.Volumes = []Volume{{Name: testVolumeShmName, At: "dev/shm", EmptyDir: &EmptyDirVolume{}}}
+				},
+				"spec.roles[1].podTemplate.volumes[0].at"),
+			Entry("emptyDir with unsupported medium",
+				"irp-invalid-emptydir-medium",
+				func(s *InferenceRuntimeProfileSpec) {
+					s.Roles[1].PodTemplate.Volumes = []Volume{{
+						Name:     "shm",
+						At:       "/dev/shm",
+						EmptyDir: &EmptyDirVolume{Medium: "Disk"},
+					}}
+				},
+				"Unsupported value"),
+			Entry("podAntiAffinity without topologyKey",
+				"irp-invalid-antiaffinity-no-topology",
+				func(s *InferenceRuntimeProfileSpec) {
+					s.PodAntiAffinity = &PodAntiAffinity{}
+				},
+				"spec.podAntiAffinity.topologyKey"),
+			Entry("podAntiAffinity with an invalid topologyKey",
+				"irp-invalid-antiaffinity-topology",
+				func(s *InferenceRuntimeProfileSpec) {
+					s.PodAntiAffinity = &PodAntiAffinity{TopologyKey: "not a label key"}
+				},
+				"spec.podAntiAffinity.topologyKey"),
 			Entry("probe without httpGet or tcpSocket",
 				"irp-invalid-probe-no-action",
 				func(s *InferenceRuntimeProfileSpec) {
 					s.Roles[1].PodTemplate.Probes = &Probes{Readiness: &Probe{FailureThreshold: ptrTo(int32(3))}}
 				},
-				"exactly one of httpGet or tcpSocket"),
+				"exactly one of httpGet, tcpSocket or exec"),
+			Entry("probe with an empty exec command",
+				"irp-invalid-probe-empty-exec-command",
+				func(s *InferenceRuntimeProfileSpec) {
+					s.Roles[1].PodTemplate.Probes = &Probes{Readiness: &Probe{
+						Exec: &ExecAction{Command: []string{}},
+					}}
+				},
+				"spec.roles[1].podTemplate.probes.readiness.exec.command"),
+			Entry("probe with two probe actions",
+				"irp-invalid-probe-two-actions",
+				func(s *InferenceRuntimeProfileSpec) {
+					s.Roles[1].PodTemplate.Probes = &Probes{Readiness: &Probe{
+						HTTPGet: &HTTPGetAction{Path: "/health", Port: intstr.FromInt(8000)},
+						Exec:    &ExecAction{Command: []string{"/bin/true"}},
+					}}
+				},
+				"exactly one of httpGet, tcpSocket or exec"),
 			Entry("service port missing name",
 				"irp-invalid-port-name",
 				func(s *InferenceRuntimeProfileSpec) { s.Roles[0].Service.Ports[0].Name = "" },

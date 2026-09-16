@@ -17,6 +17,8 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"strings"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -64,7 +66,7 @@ func validDevEnvironment(name string) *DevEnvironment {
 			Running: true,
 			Resources: ResourcesSpec{
 				GPUType:  GPUTypeNVIDIA,
-				GPUCount: 1,
+				GPUCount: ptrTo(int32(1)),
 				CPU:      "16",
 				Memory:   "64Gi",
 			},
@@ -123,10 +125,15 @@ var _ = Describe("DevEnvironment", func() {
 			Expect(got.Spec.Type).To(Equal(DevEnvironmentTypeSSH))
 			Expect(got.Spec.Running).To(BeFalse())
 			Expect(got.Spec.Resources.GPUType).To(Equal(GPUTypeNVIDIA))
-			Expect(got.Spec.Resources.GPUCount).To(Equal(int32(1)))
+			Expect(got.Spec.Resources.GPUCount).To(Equal(ptrTo(int32(1))))
 			Expect(got.Spec.Storage.Size).To(Equal("10Gi"))
-			Expect(got.Spec.Storage.PVCRetention).To(Equal(PVCRetentionRetain))
-			Expect(got.Spec.Storage.MountPath).To(Equal("/workspace"))
+			// The workspace claim is provisioned and owned by the platform, so
+			// omitting the policy reclaims it with the environment; keeping the
+			// data is the explicit choice.
+			Expect(got.Spec.Storage.PVCRetention).To(Equal(PVCRetentionDelete))
+			// No schema default: an unset mountPath stays empty so the controller
+			// can derive it from the runtime identity (resolveMountPath).
+			Expect(got.Spec.Storage.MountPath).To(BeEmpty())
 			Expect(got.Spec.Network.RDMAType).To(Equal(RDMATypeRoCE))
 			Expect(got.Spec.Lifecycle.IdleTimeout).To(Equal(int32(0)))
 
@@ -235,6 +242,22 @@ var _ = Describe("DevEnvironment", func() {
 					s.Ports = []PortSpec{{Name: testPortName, ContainerPort: 65536}}
 				},
 				"spec.ports"),
+			Entry("runtime user with an uppercase letter",
+				"de-invalid-runtime-user-case",
+				func(s *DevEnvironmentSpec) { s.Runtime.User = "Jovyan" },
+				"spec.runtime.user"),
+			Entry("runtime user starting with a digit",
+				"de-invalid-runtime-user-digit",
+				func(s *DevEnvironmentSpec) { s.Runtime.User = "1user" },
+				"spec.runtime.user"),
+			Entry("runtime user that could split the ssh endpoint",
+				"de-invalid-runtime-user-at",
+				func(s *DevEnvironmentSpec) { s.Runtime.User = "user@host" },
+				"spec.runtime.user"),
+			Entry("runtime user longer than the maximum",
+				"de-invalid-runtime-user-long",
+				func(s *DevEnvironmentSpec) { s.Runtime.User = strings.Repeat("a", 33) },
+				"spec.runtime.user"),
 		)
 
 		// Required fields are enforced as "the key must be present", so an empty
@@ -267,9 +290,8 @@ var _ = Describe("DevEnvironment", func() {
 				"spec.resources"),
 		)
 
-		// gpuCount is an omitempty int32, so a zero value is dropped by the typed
-		// client and the schema default 1 applies instead. These cases are created
-		// as raw objects to send an explicit out-of-range value.
+		// These cases are created as raw objects so they can send values the typed
+		// client would not produce.
 		DescribeTable("rejects objects with invalid raw values",
 			func(name string, mutate func(map[string]any), wantMessage string) {
 				spec := map[string]any{
@@ -290,8 +312,33 @@ var _ = Describe("DevEnvironment", func() {
 			},
 			Entry("gpuCount below minimum",
 				"de-invalid-gpucount-raw",
-				func(s map[string]any) { s["resources"].(map[string]any)["gpuCount"] = 0 },
+				func(s map[string]any) { s["resources"].(map[string]any)["gpuCount"] = -1 },
 				"spec.resources.gpuCount"),
 		)
+
+		// gpuCount 0 means "no accelerator" and must survive a write. As a plain
+		// int32 with omitempty the zero would be dropped on the way out and the
+		// schema default of 1 restored — silently turning a CPU-only environment
+		// back into a GPU one on the controller's first Update.
+		It("keeps an explicit gpuCount of 0 across a write", func() {
+			de := validDevEnvironment("de-cpu-only")
+			de.Spec.Resources.GPUCount = ptrTo(int32(0))
+
+			Expect(k8sClient.Create(ctx, de)).To(Succeed())
+			Expect(de.Spec.Resources.GPUCount).NotTo(BeNil())
+			Expect(*de.Spec.Resources.GPUCount).To(Equal(int32(0)))
+
+			// A write that does not touch resources — the shape the controller's
+			// finalizer Update takes.
+			de.Labels = map[string]string{"probe": "true"}
+			Expect(k8sClient.Update(ctx, de)).To(Succeed())
+
+			got := &DevEnvironment{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: de.Name, Namespace: de.Namespace}, got)).To(Succeed())
+			Expect(got.Spec.Resources.GPUCount).NotTo(BeNil())
+			Expect(*got.Spec.Resources.GPUCount).To(Equal(int32(0)))
+
+			Expect(k8sClient.Delete(ctx, de)).To(Succeed())
+		})
 	})
 })

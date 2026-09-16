@@ -8,6 +8,12 @@
 # - endpoint.role must reference a role that defines a service
 # - hostNetwork requires dnsPolicy ClusterFirstWithHostNet; labels must not
 #   use the ai.cubestack.io/ prefix
+# - extendedResources keys must not collide with cpu/memory/vendor GPU
+#   resources, must follow the Kubernetes extended resource name rules
+#   (lowercase domain prefix, name part <= 63 chars, no reserved requests.
+#   prefix) and values must be >= 1
+# - at mount paths must be unique within a role, across both volumes and model
+#   mounts (kubelet rejects duplicate mountPaths)
 #
 # Deferred to the controller (L2): default type/bounds checks (the schemaless
 # default field is only equality-comparable in CEL), dependsOn cycle detection
@@ -70,6 +76,21 @@ spec:
     reason: Invalid
   - expression: "object.spec.roles.all(r, !has(r.podTemplate.labels) || !r.podTemplate.labels.exists(k, k.startsWith('ai.cubestack.io/')))"
     message: "podTemplate.labels must not use the ai.cubestack.io/ prefix"
+    reason: Invalid
+  - expression: "object.spec.roles.all(r, !has(r.podTemplate.resources) || !has(r.podTemplate.resources.extendedResources) || !r.podTemplate.resources.extendedResources.exists(k, k == 'cpu' || k == 'memory' || k == 'metax-tech.com/gpu' || k == 'nvidia.com/gpu'))"
+    message: "extendedResources keys must not collide with cpu, memory or vendor GPU resources"
+    reason: Invalid
+  - expression: "object.spec.roles.all(r, !has(r.podTemplate.resources) || !has(r.podTemplate.resources.extendedResources) || r.podTemplate.resources.extendedResources.all(k, r.podTemplate.resources.extendedResources[k] >= 1))"
+    message: "extendedResources values must be at least 1"
+    reason: Invalid
+  - expression: "object.spec.roles.all(r, !has(r.podTemplate.resources) || !has(r.podTemplate.resources.extendedResources) || r.podTemplate.resources.extendedResources.all(k, k.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?([.][a-z0-9]([-a-z0-9]*[a-z0-9])?)*[/]([A-Za-z0-9][-A-Za-z0-9_.]{0,61})?[A-Za-z0-9]$') && !k.startsWith('requests.')))"
+    message: "extendedResources keys must be domain-qualified extended resource names, e.g. rdma/hca_shared_devices"
+    reason: Invalid
+  - expression: "object.spec.roles.all(r, !has(r.podTemplate.volumes) || r.podTemplate.volumes.all(a, r.podTemplate.volumes.exists_one(b, b.at == a.at)))"
+    message: "podTemplate.volumes must not declare duplicate at mount paths within a role"
+    reason: Invalid
+  - expression: "object.spec.roles.all(r, !has(r.podTemplate.mounts) || !has(r.podTemplate.volumes) || !r.podTemplate.volumes.exists(v, r.podTemplate.mounts.exists(m, m.at == v.at)))"
+    message: "podTemplate.mounts and volumes must not overlap at the same at mount path"
     reason: Invalid
 ---
 apiVersion: admissionregistration.k8s.io/v1

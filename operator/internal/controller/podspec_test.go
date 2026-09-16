@@ -20,18 +20,35 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/suanova/cubestack/internal/renderer"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	aiv1alpha1 "github.com/suanova/cubestack/api/v1alpha1"
 )
 
 const (
-	testEngineImage   = "registry.local/engine:v1"
-	testModelPath     = "/workspace/model"
-	testRuntimeConfig = "runtime-config"
+	testEngineImage        = "registry.local/engine:v1"
+	testModelPath          = "/workspace/model"
+	testBootstrapMountPath = "/opt/bootstrap"
+	testRuntimeConfig      = "runtime-config"
+
+	testIBDevicePath = "/dev/infiniband"
+	testShmMountPath = "/dev/shm"
+	testMemoryMedium = "Memory"
+	testShmVolName   = "dshm"
+	testISVCName     = "svc-a"
+
+	testGPUModelMXC500 = "MXC500"
+	testGPUModelMXC550 = "MXC550"
 )
+
+// testExecProbeCommand is the command line of the exec-probe specs: the
+// renderer only copies it into the container, it never runs here.
+var testExecProbeCommand = []string{"/bin/bash", "-c", "curl -sf http://127.0.0.1:8000/health"}
 
 var _ = Describe("buildPodSpec", func() {
 	modelHostPath := func() *aiv1alpha1.ModelVersion {
@@ -70,6 +87,118 @@ var _ = Describe("buildPodSpec", func() {
 		c := spec.Containers[0]
 		Expect(c.Resources.Requests.Name("nvidia.com/gpu", resource.DecimalSI).String()).To(Equal("1"))
 		Expect(c.Resources.Limits.Name("nvidia.com/gpu", resource.DecimalSI).String()).To(Equal("1"))
+	})
+
+	It("renders an exec readiness probe", func() {
+		pt := aiv1alpha1.PodTemplate{
+			Image: testEngineImage,
+			Probes: &aiv1alpha1.Probes{Readiness: &aiv1alpha1.Probe{
+				Exec:             &aiv1alpha1.ExecAction{Command: testExecProbeCommand},
+				PeriodSeconds:    ptrTo(int32(10)),
+				FailureThreshold: ptrTo(int32(30)),
+			}},
+		}
+		spec := buildPodSpec(pt, "svc", modelHostPath(), aiv1alpha1.AcceleratorVendorMetax)
+		c := spec.Containers[0]
+		Expect(c.ReadinessProbe.Exec).To(Equal(&corev1.ExecAction{Command: testExecProbeCommand}))
+		Expect(c.ReadinessProbe.PeriodSeconds).To(Equal(int32(10)))
+		Expect(c.ReadinessProbe.FailureThreshold).To(Equal(int32(30)))
+	})
+
+	It("attaches the service-wide podAntiAffinity term with the platform selector", func() {
+		spec := &corev1.PodSpec{}
+		attachServiceAntiAffinity(spec, testISVCName, "kubernetes.io/hostname")
+		Expect(spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution).To(Equal([]corev1.PodAffinityTerm{{
+			LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"ai.cubestack.io/inference-service": testISVCName}},
+			TopologyKey:   "kubernetes.io/hostname",
+		}}))
+	})
+
+	It("propagates the profile-level podAntiAffinity to every role workload", func() {
+		// The declaration lives once at profile scope; desiredWorkload must put
+		// the identical term on every role's pod spec — a role without the term
+		// could co-locate with a constrained role, breaking the mutual guarantee.
+		r := &InferenceServiceReconciler{Scheme: testScheme}
+		profile := &aiv1alpha1.InferenceRuntimeProfile{Spec: aiv1alpha1.InferenceRuntimeProfileSpec{
+			PodAntiAffinity: &aiv1alpha1.PodAntiAffinity{TopologyKey: "topology.kubernetes.io/zone"},
+			Roles: []aiv1alpha1.Role{
+				{Name: testApplyRouterRole, Workload: aiv1alpha1.Workload{Kind: aiv1alpha1.WorkloadKindDeployment}},
+				{Name: "prefill", Workload: aiv1alpha1.Workload{Kind: aiv1alpha1.WorkloadKindDeployment}},
+			},
+		}}
+		isvc := &aiv1alpha1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: testISVCName, Namespace: testNamespace}}
+		wantTerm := corev1.PodAffinityTerm{
+			LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"ai.cubestack.io/inference-service": testISVCName}},
+			TopologyKey:   "topology.kubernetes.io/zone",
+		}
+		for _, role := range profile.Spec.Roles {
+			rr := &renderer.RenderedRole{Name: role.Name, Replicas: 1, PodTemplate: aiv1alpha1.PodTemplate{Image: testEngineImage}}
+			obj := r.desiredWorkload(isvc, profile, &role, rr, &renderer.Result{}, modelHostPath())
+			dep := obj.(*appsv1.Deployment)
+			Expect(dep.Spec.Template.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution).To(Equal([]corev1.PodAffinityTerm{wantTerm}))
+		}
+	})
+
+	It("attaches a required nodeAffinity In term for multi-model accelerators", func() {
+		spec := &corev1.PodSpec{}
+		attachModelNodeAffinity(spec, "metax-tech.com/gpu.product", []string{testGPUModelMXC500, testGPUModelMXC550})
+		Expect(spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution).To(Equal(&corev1.NodeSelector{
+			NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+				MatchExpressions: []corev1.NodeSelectorRequirement{{
+					Key:      "metax-tech.com/gpu.product",
+					Operator: corev1.NodeSelectorOpIn,
+					Values:   []string{testGPUModelMXC500, testGPUModelMXC550},
+				}},
+			}},
+		}))
+		// NodeSelectorTerms are OR-combined: the model constraint must be merged
+		// into every existing term, never appended as an alternative term — a
+		// node matching another term alone would otherwise schedule without the
+		// model label.
+		spec2 := &corev1.PodSpec{}
+		attachModelNodeAffinity(spec2, "metax-tech.com/gpu.product", []string{testGPUModelMXC500})
+		attachModelNodeAffinity(spec2, "example.com/extra", []string{"a"})
+		Expect(spec2.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution).To(Equal(&corev1.NodeSelector{
+			NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+				MatchExpressions: []corev1.NodeSelectorRequirement{
+					{Key: "metax-tech.com/gpu.product", Operator: corev1.NodeSelectorOpIn, Values: []string{testGPUModelMXC500}},
+					{Key: "example.com/extra", Operator: corev1.NodeSelectorOpIn, Values: []string{"a"}},
+				},
+			}},
+		}))
+	})
+
+	It("keeps a legacy volume without at as an unmounted volume", func() {
+		// Profiles stored before at became required (upgrade case) carry volumes
+		// without a mount path; the immutable spec cannot be fixed in place, so
+		// the render keeps the volume but skips the empty-path volumeMount.
+		pt := aiv1alpha1.PodTemplate{
+			Image: testEngineImage,
+			Volumes: []aiv1alpha1.Volume{
+				{Name: "legacy-shm", EmptyDir: &aiv1alpha1.EmptyDirVolume{Medium: testMemoryMedium}},
+				{Name: testShmVolName, At: testShmMountPath, EmptyDir: &aiv1alpha1.EmptyDirVolume{Medium: testMemoryMedium}},
+			},
+		}
+		spec := buildPodSpec(pt, "svc", modelHostPath(), aiv1alpha1.AcceleratorVendorMetax)
+		Expect(spec.Volumes).To(HaveLen(2))
+		Expect(spec.Containers[0].VolumeMounts).To(Equal([]corev1.VolumeMount{
+			{Name: testShmVolName, MountPath: testShmMountPath},
+		}))
+	})
+
+	It("maps extendedResources to requests and limits", func() {
+		pt := aiv1alpha1.PodTemplate{
+			Image: testEngineImage,
+			Resources: &aiv1alpha1.PodResources{
+				GPUPerPod:         ptrTo[int64](2),
+				ExtendedResources: map[string]int64{"rdma/hca_shared_devices": 2},
+			},
+		}
+		spec := buildPodSpec(pt, "svc", modelHostPath(), aiv1alpha1.AcceleratorVendorMetax)
+		c := spec.Containers[0]
+		Expect(c.Resources.Requests.Name("rdma/hca_shared_devices", resource.DecimalSI).String()).To(Equal("2"))
+		Expect(c.Resources.Limits.Name("rdma/hca_shared_devices", resource.DecimalSI).String()).To(Equal("2"))
+		Expect(c.Resources.Limits.Name("metax-tech.com/gpu", resource.DecimalSI).String()).To(Equal("2"))
 	})
 
 	It("composes a HostPath model volume", func() {
@@ -148,6 +277,30 @@ var _ = Describe("buildPodSpec", func() {
 		}}))
 	})
 
+	It("mounts mount-type assets as read-only ConfigMap volumes named asset-<name>", func() {
+		spec := &corev1.PodSpec{Containers: []corev1.Container{{Name: mainContainerName}}}
+		addMountAssetVolumes(spec, "svc-a", []aiv1alpha1.Asset{
+			{Name: "bootstrap", ConfigMapRef: aiv1alpha1.AssetConfigMapRef{Name: "src-bootstrap"}, Mount: &aiv1alpha1.AssetMount{Path: testBootstrapMountPath, Mode: 0755}},
+			{Name: testRuntimeConfig, ConfigMapRef: aiv1alpha1.AssetConfigMapRef{Name: "src-config"}, EnvFrom: ptrTo(true)},
+			{Name: "certs", ConfigMapRef: aiv1alpha1.AssetConfigMapRef{Name: "src-certs"}, Mount: &aiv1alpha1.AssetMount{Path: "/etc/certs", Mode: 0444}},
+		})
+
+		Expect(spec.Volumes).To(Equal([]corev1.Volume{
+			{Name: "asset-bootstrap", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "svc-a-bootstrap"},
+				DefaultMode:          ptrTo(int32(0755)),
+			}}},
+			{Name: "asset-certs", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "svc-a-certs"},
+				DefaultMode:          ptrTo(int32(0444)),
+			}}},
+		}))
+		Expect(spec.Containers[0].VolumeMounts).To(Equal([]corev1.VolumeMount{
+			{Name: "asset-bootstrap", MountPath: testBootstrapMountPath, ReadOnly: true},
+			{Name: "asset-certs", MountPath: "/etc/certs", ReadOnly: true},
+		}))
+	})
+
 	It("converts envFromAssets to envFrom ConfigMap refs named <isvc>-<asset>", func() {
 		pt := aiv1alpha1.PodTemplate{
 			Image:         testEngineImage,
@@ -190,8 +343,8 @@ var _ = Describe("buildPodSpec", func() {
 		pt := aiv1alpha1.PodTemplate{
 			Image: testEngineImage,
 			Volumes: []aiv1alpha1.Volume{
-				{Name: "shm", EmptyDir: &aiv1alpha1.EmptyDirVolume{}},
-				{Name: "ib", HostPath: &aiv1alpha1.HostPathVolume{Path: "/dev/infiniband"}},
+				{Name: testShmVolName, At: testShmMountPath, EmptyDir: &aiv1alpha1.EmptyDirVolume{Medium: testMemoryMedium, SizeLimit: ptrTo(resource.MustParse("8Gi"))}},
+				{Name: "ib", At: testIBDevicePath, HostPath: &aiv1alpha1.HostPathVolume{Path: testIBDevicePath}},
 			},
 			SecurityContext:               &aiv1alpha1.PodSecurityContext{Privileged: ptrTo(true), RunAsUser: ptrTo[int64](1000)},
 			TerminationGracePeriodSeconds: ptrTo[int64](60),
@@ -206,9 +359,17 @@ var _ = Describe("buildPodSpec", func() {
 		}
 		spec := buildPodSpec(pt, "svc", modelHostPath(), aiv1alpha1.AcceleratorVendorMetax)
 		Expect(spec.Volumes).To(HaveLen(2))
-		Expect(spec.Volumes[0].EmptyDir).NotTo(BeNil())
-		Expect(spec.Volumes[1].HostPath.Path).To(Equal("/dev/infiniband"))
+		Expect(spec.Volumes[0].EmptyDir).To(Equal(&corev1.EmptyDirVolumeSource{
+			Medium:    corev1.StorageMediumMemory,
+			SizeLimit: ptrTo(resource.MustParse("8Gi")),
+		}))
+		Expect(spec.Volumes[1].HostPath.Path).To(Equal(testIBDevicePath))
+		Expect(spec.Volumes[1].HostPath.Type).To(Equal(ptrTo(corev1.HostPathDirectory)))
 		c := spec.Containers[0]
+		Expect(c.VolumeMounts).To(Equal([]corev1.VolumeMount{
+			{Name: testShmVolName, MountPath: testShmMountPath},
+			{Name: "ib", MountPath: testIBDevicePath},
+		}))
 		Expect(c.SecurityContext.Privileged).To(Equal(ptrTo(true)))
 		Expect(c.SecurityContext.RunAsUser).To(Equal(ptrTo[int64](1000)))
 		Expect(spec.TerminationGracePeriodSeconds).To(Equal(ptrTo[int64](60)))
