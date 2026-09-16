@@ -64,6 +64,8 @@ export interface AgentTemplateCr {
   metadata?: {
     name?: string;
     creationTimestamp?: string;
+    /** Server-assigned; the precondition a compensating patch tests. */
+    resourceVersion?: string;
   };
   spec?: {
     displayName?: string;
@@ -96,9 +98,11 @@ export interface SkillCr {
 }
 
 /** One JSON-Patch op (client-node sends custom-object patches as
- *  application/json-patch+json; an "add" op replaces an existing member). */
+ *  application/json-patch+json; an "add" op replaces an existing member).
+ *  "test" carries a precondition: it fails the whole patch when the target
+ *  does not hold the given value. */
 export interface JsonPatchOp {
-  op: "add" | "replace" | "remove";
+  op: "add" | "replace" | "remove" | "test";
   path: string;
   value?: unknown;
 }

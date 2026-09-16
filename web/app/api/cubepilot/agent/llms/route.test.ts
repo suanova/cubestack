@@ -30,7 +30,7 @@ const { PUT, DELETE } = await import("./[name]/route");
 const ctx = (name: string) => ({ params: Promise.resolve({ name }) });
 
 const TEMPLATE_CR = {
-  metadata: { name: "cubepilot" },
+  metadata: { name: "cubepilot", resourceVersion: "1000" },
   spec: {
     runtime: "OpenClaw",
     models: [{ name: "glm-5.2-chat", endpoint: "http://gw:8080/v1", credentialRef: { name: "llm-glm-5.2-chat" } }],
@@ -130,7 +130,7 @@ describe("/api/cubepilot/agent/llms", () => {
   it("rolls the model back when the credential cannot be written", async () => {
     // The re-read after the failed write sees the entry the first patch added.
     const withModel = {
-      metadata: { name: "cubepilot" },
+      metadata: { name: "cubepilot", resourceVersion: "1000" },
       spec: {
         models: [...TEMPLATE_CR.spec.models, { name: "kimi", endpoint: "https://api.moonshot.cn/v1", credentialRef: { name: "llm-kimi" } }],
       },
@@ -140,9 +140,32 @@ describe("/api/cubepilot/agent/llms", () => {
     const res = await POST(await post({ name: "kimi", endpoint: "https://api.moonshot.cn/v1", apiKey: "sk-1" }), undefined);
     expect(res.status).toBe(502);
     // A model without its Secret is selectable and then fails every turn, so the
-    // entry goes away again.
+    // entry goes away again — but only while the template still holds the state
+    // this request wrote, hence the version test.
     const calls = patchNamespacedCustomObject.mock.calls as Array<[{ body?: unknown[] }]>;
-    expect(calls[calls.length - 1][0].body).toEqual([{ op: "remove", path: "/spec/models/1" }]);
+    expect(calls[calls.length - 1][0].body).toEqual([
+      { op: "test", path: "/metadata/resourceVersion", value: "1000" },
+      { op: "remove", path: "/spec/models/1" },
+    ]);
+  });
+
+  it("reports the credential failure when the rollback is refused", async () => {
+    const withModel = {
+      metadata: { name: "cubepilot", resourceVersion: "1000" },
+      spec: {
+        models: [...TEMPLATE_CR.spec.models, { name: "kimi", endpoint: "https://api.moonshot.cn/v1", credentialRef: { name: "llm-kimi" } }],
+      },
+    };
+    getNamespacedCustomObject.mockResolvedValueOnce(TEMPLATE_CR).mockResolvedValue(withModel);
+    createNamespacedSecret.mockRejectedValue(Object.assign(new Error("forbidden"), { statusCode: 403 }));
+    // The API server rejects the version test: someone patched the template
+    // after our model write, so the entry under that index is no longer ours.
+    patchNamespacedCustomObject
+      .mockResolvedValueOnce(TEMPLATE_CR)
+      .mockRejectedValueOnce(Object.assign(new Error("test failed"), { statusCode: 409 }));
+    const res = await POST(await post({ name: "kimi", endpoint: "https://api.moonshot.cn/v1", apiKey: "sk-1" }), undefined);
+    expect(res.status).toBe(502);
+    expect(patchNamespacedCustomObject).toHaveBeenCalledTimes(2);
   });
 
   it("refuses to rename an existing model", async () => {
@@ -185,8 +208,11 @@ describe("/api/cubepilot/agent/llms", () => {
     patchNamespacedSecret.mockRejectedValue(Object.assign(new Error("forbidden"), { statusCode: 403 }));
     const res = await PUT(await put({ endpoint: "https://new/v1", apiKey: "sk-2", public: false }), ctx("glm-5.2-chat"));
     expect(res.status).toBe(502);
+    // index and `previous` come from the read that preceded the edit, so the
+    // restore is only valid for the version our own edit produced.
     const calls = patchNamespacedCustomObject.mock.calls as Array<[{ body?: unknown[] }]>;
     expect(calls[calls.length - 1][0].body).toEqual([
+      { op: "test", path: "/metadata/resourceVersion", value: "1000" },
       { op: "replace", path: "/spec/models/0", value: TEMPLATE_CR.spec.models[0] },
     ]);
   });

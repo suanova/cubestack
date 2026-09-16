@@ -42,12 +42,18 @@ async function locate(name: string) {
 /**
  * Undo a model edit whose credential change failed, so the template never keeps
  * an entry the failed write left inconsistent (for example one naming a Secret
- * that was never written). Best effort — the original error is the one to
- * report.
+ * that was never written). The `test` on resourceVersion is what makes this safe:
+ * `index` and `previous` come from the read that preceded the edit, and a
+ * concurrent request may have changed the entry since — in that case the patch
+ * is rejected whole and the other request's write stands. Best effort — the
+ * original error is the one to report.
  */
-async function restoreModel(index: number, previous: TemplateModelCr): Promise<void> {
+async function restoreModel(index: number, previous: TemplateModelCr, resourceVersion: string): Promise<void> {
   try {
-    await patchAgentTemplateCr(DEFAULT_AGENT_NAME, [{ op: "replace", path: `/spec/models/${index}`, value: previous }]);
+    await patchAgentTemplateCr(DEFAULT_AGENT_NAME, [
+      { op: "test", path: "/metadata/resourceVersion", value: resourceVersion },
+      { op: "replace", path: `/spec/models/${index}`, value: previous },
+    ]);
   } catch {
     // Leave it: the caller still gets the credential failure.
   }
@@ -97,7 +103,7 @@ export const PUT = withAuth<Ctx>(async (req, _session, ctx) => {
           ? [{ op: "add" as const, path: `/spec/models/${index}/credentialRef`, value: credentialRef }]
           : []),
     ];
-    await patchAgentTemplateCr(DEFAULT_AGENT_NAME, ops);
+    const patched = await patchAgentTemplateCr(DEFAULT_AGENT_NAME, ops);
 
     // The old Secret is only deleted when it was the platform-managed one.
     let warning = "";
@@ -111,7 +117,7 @@ export const PUT = withAuth<Ctx>(async (req, _session, ctx) => {
       }
       if (!isPublic && apiKey !== "") await upsertLlmCredential(owned, apiKey);
     } catch (e) {
-      await restoreModel(index, existing);
+      await restoreModel(index, existing, patched.metadata?.resourceVersion ?? "");
       throw e;
     }
     return Response.json({ model: { name, endpoint, ...(credentialRef ? { credentialRef } : {}) }, ...(warning ? { warning } : {}) });

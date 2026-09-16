@@ -55,7 +55,7 @@ The following table lists the configurable parameters of the Portal chart and th
 | `namespace` | Target namespace (Role/Secrets/htpasswd live here) | `cubestack-system` |
 | `operatorNamespace` | Namespace holding the operator CRs (AgentTemplate / AgentInstance / Skill / Task*); empty = `namespace` | `""` |
 | `agentApiUrl` | CubePilot agent API base; empty = `http://cubepilot-api.<operatorNamespace>.svc:8080` | `""` |
-| `gateway.url` | AI Gateway base; empty = discover the `ai-gateway` Service in `gateway.namespace` | `""` |
+| `gateway.url` | AI Gateway base; empty = discover the `ai-gateway` Service in `gateway.namespace`. Must be `https://` when a token is set | `""` |
 | `gateway.namespace` | Namespace the gateway Service lives in | `""` (= `envoy-gateway-system`) |
 | `gateway.token.existingSecret` / `.existingSecretKey` | Existing Secret holding the gateway bearer token (`CUBESTACK_GATEWAY_TOKEN`) | `""` / `token` |
 | `logLevel` | Portal log verbosity: `error` \| `warn` \| `info` \| `debug` (`debug` logs every cluster/gateway call) | `info` |

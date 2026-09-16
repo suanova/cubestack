@@ -28,15 +28,21 @@ export const dynamic = "force-dynamic";
 
 /**
  * Undo a model whose credential could not be written: an entry pointing at a
- * Secret that does not exist is selectable and then fails every turn. Best
- * effort — the credential error is the one the caller needs to see.
+ * Secret that does not exist is selectable and then fails every turn. The
+ * `test` on resourceVersion limits the undo to the state this request created —
+ * without it a concurrent POST of the same model would be rolled back by the
+ * other request's failure. Best effort — the credential error is the one the
+ * caller needs to see.
  */
-async function rollbackAddedModel(name: string): Promise<void> {
+async function rollbackAddedModel(name: string, resourceVersion: string): Promise<void> {
   try {
     const tmpl = await getAgentTemplateCr(DEFAULT_AGENT_NAME);
     const index = modelIndex(tmpl?.spec?.models, name);
     if (index >= 0) {
-      await patchAgentTemplateCr(DEFAULT_AGENT_NAME, [{ op: "remove", path: `/spec/models/${index}` }]);
+      await patchAgentTemplateCr(DEFAULT_AGENT_NAME, [
+        { op: "test", path: "/metadata/resourceVersion", value: resourceVersion },
+        { op: "remove", path: `/spec/models/${index}` },
+      ]);
     }
   } catch {
     // Leave it: the caller still gets the credential failure.
@@ -79,14 +85,14 @@ export const POST = withAuth(async (req) => {
     };
     // Commit the model to the template BEFORE creating the credential Secret: a
     // failed template update leaves no orphaned key Secret.
-    await patchAgentTemplateCr(DEFAULT_AGENT_NAME, [
+    const patched = await patchAgentTemplateCr(DEFAULT_AGENT_NAME, [
       models.length > 0 ? { op: "add", path: "/spec/models/-", value: model } : { op: "add", path: "/spec/models", value: [model] },
     ]);
     if (!isPublic) {
       try {
         await upsertLlmCredential(llmCredentialName(name), apiKey);
       } catch (e) {
-        await rollbackAddedModel(name);
+        await rollbackAddedModel(name, patched.metadata?.resourceVersion ?? "");
         throw e;
       }
     }

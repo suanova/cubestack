@@ -174,8 +174,15 @@ async function stubTasks(page: Page, stub: Stub = {}): Promise<Captured> {
     if (toggleMatch && method === "POST") {
       const id = decodeURIComponent(toggleMatch[1]);
       // The route applies the state the client asks for; a body-less call flips.
-      const desired = (body as { state?: string } | null)?.state;
-      tasks = tasks.map((x) => (x.id === id ? { ...x, enabled: desired ? desired === "Enabled" : !x.enabled } : x));
+      // Mirror its contract: anything else is rejected, so a spec cannot pass
+      // here while the client violates the real route.
+      const desired = (body as { state?: unknown } | null)?.state;
+      if (desired !== undefined && desired !== "Enabled" && desired !== "Paused") {
+        return json({ error: 'state must be "Enabled" or "Paused"' }, 400);
+      }
+      tasks = tasks.map((x) =>
+        x.id === id ? { ...x, enabled: desired !== undefined ? desired === "Enabled" : !x.enabled } : x,
+      );
       return json({ task: tasks.find((x) => x.id === id) });
     }
 

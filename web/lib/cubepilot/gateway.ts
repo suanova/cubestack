@@ -36,6 +36,8 @@ export interface GatewayBase {
   url: string;
   /** direct: plain URL (env override / in-cluster DNS). apiserver: service proxy. */
   via: "direct" | "apiserver";
+  /** Set when CUBESTACK_GATEWAT_URL supplied the URL rather than discovery. */
+  configured?: boolean;
 }
 
 export function inCluster(): boolean {
@@ -87,7 +89,7 @@ export async function resolveGatewayBase(): Promise<GatewayBase | null> {
   const explicit = (process.env.CUBESTACK_GATEWAT_URL ?? "").trim();
   if (explicit) {
     logger("gateway").debug("base from CUBESTACK_GATEWAT_URL", { url: explicit });
-    return { url: explicit.replace(/\/+$/, ""), via: "direct" };
+    return { url: explicit.replace(/\/+$/, ""), via: "direct", configured: true };
   }
   const discovered = await discoverGatewayBase();
   if (discovered) {
@@ -114,11 +116,11 @@ export function gatewayTokenHeader(): Record<string, string> {
 let warnedPlainHttpToken = false;
 
 /**
- * Note a bearer token about to cross a plain-HTTP hop. It is not refused: an
- * in-cluster http://<service> URL is the chart's documented default (the token
- * stays on the cluster network), and CUBESTACK_GATEWAT_URL may point at a
- * gateway that terminates TLS itself. Over a network the operator does not
- * control, the token should travel over https.
+ * Note a bearer token about to cross a plain-HTTP hop on a base we resolved
+ * ourselves (the in-cluster Service DNS the chart documents, where the token
+ * stays on the cluster network). It is not refused — that is the supported
+ * default. A base the operator configured is held to a higher standard; see
+ * gatewayFetch.
  */
 function warnIfTokenOverPlainHttp(url: string, headers: Record<string, string>): void {
   if (warnedPlainHttpToken || !headers.Authorization || url.startsWith("https://")) return;
@@ -213,6 +215,21 @@ export async function gatewayFetch(path: string, init: RequestInit = {}): Promis
     );
   }
   const token = gatewayTokenHeader();
+  // A base we resolved ourselves may be plain HTTP (the in-cluster Service DNS
+  // the chart documents) — warned about, not refused. A configured one is the
+  // operator's own URL: sending the token over cleartext there is refused,
+  // because nothing about an http:// URL they typed implies a trusted network.
+  if (base.configured && token.Authorization && !base.url.startsWith("https://")) {
+    // Logged as well as thrown: some callers treat a gateway failure as "no
+    // models" and would otherwise swallow the reason.
+    logger("gateway").warn("refusing to send CUBESTACK_GATEWAY_TOKEN over a non-HTTPS CUBESTACK_GATEWAT_URL", {
+      url: base.url,
+      hint: "use an https:// gateway URL, or unset CUBESTACK_GATEWAY_TOKEN",
+    });
+    throw new Error(
+      `refusing to send CUBESTACK_GATEWAY_TOKEN to ${base.url}: CUBESTACK_GATEWAT_URL is not https`,
+    );
+  }
   warnIfTokenOverPlainHttp(base.url, token);
   const headers = { ...token, ...(init.headers as Record<string, string> | undefined) };
   const url = base.url + path;

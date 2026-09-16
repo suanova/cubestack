@@ -92,6 +92,8 @@ agentApiUrl: ""
 gateway:
   # Base URL, e.g. http://ai-gateway.envoy-gateway-system.svc:18080. Empty =
   # discover the ai-gateway Service in `namespace` (in-cluster: direct DNS).
+  # With `token` set, a URL set here must be https:// — a token is never sent
+  # to a cleartext URL the operator configured.
   url: ""
   # Namespace the gateway Service lives in. Empty = envoy-gateway-system.
   namespace: ""
