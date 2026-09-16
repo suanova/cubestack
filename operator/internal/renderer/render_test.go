@@ -18,6 +18,14 @@ const (
 	assetDataKey = "key"
 )
 
+const (
+	metaxModelC500  = "MXC500"
+	metaxModelC550  = "MXC550"
+	nvidiaModelH200 = "H200"
+	// metaxModelC900 is a model outside the declared model lists of the specs.
+	metaxModelC900 = "MXC900"
+)
+
 func envValue(name, value string) aiv1alpha1.EnvVar {
 	return aiv1alpha1.EnvVar{Name: name, Value: &value}
 }
@@ -109,6 +117,83 @@ var _ = Describe("Render", func() {
 		Expect(prefill.PodTemplate.Env[1].Value).To(Equal(stringPtr("prefill")))
 
 		Expect(res.Assets).To(Equal(map[string]map[string]string{bootstrapAsset: {assetDataKey: "value"}}))
+	})
+
+	// gpuPrefill marks the prefill role as the GPU role of the fixture profile.
+	gpuPrefill := func(p *aiv1alpha1.InferenceRuntimeProfile) {
+		p.Spec.Roles[1].PodTemplate.Resources = &aiv1alpha1.PodResources{GPUPerPod: ptrTo(int64(8))}
+	}
+
+	It("injects a single accelerator model as a nodeSelector on the GPU role only", func() {
+		p := renderProfile()
+		gpuPrefill(p)
+		p.Spec.Accelerator = aiv1alpha1.Accelerator{Vendor: aiv1alpha1.AcceleratorVendorMetax, Models: []string{metaxModelC500}}
+		res := Render(renderISVC(), p, renderModel(), nil)
+		Expect(res.Errors).To(BeEmpty())
+		Expect(res.Roles[0].PodTemplate.NodeSelector).To(BeEmpty(), "the CPU-only router role is not constrained to GPU nodes")
+		Expect(res.Roles[1].PodTemplate.NodeSelector).To(HaveKeyWithValue(metaxProductLabel, metaxModelC500))
+		Expect(res.Roles[1].ModelNodeAffinity).To(BeNil())
+	})
+
+	It("injects several accelerator models as a required nodeAffinity term on the GPU role only", func() {
+		p := renderProfile()
+		gpuPrefill(p)
+		p.Spec.Accelerator = aiv1alpha1.Accelerator{Vendor: aiv1alpha1.AcceleratorVendorMetax, Models: []string{metaxModelC500, metaxModelC550}}
+		res := Render(renderISVC(), p, renderModel(), nil)
+		Expect(res.Errors).To(BeEmpty())
+		Expect(res.Roles[0].ModelNodeAffinity).To(BeNil())
+		Expect(res.Roles[1].PodTemplate.NodeSelector).To(BeEmpty())
+		Expect(res.Roles[1].ModelNodeAffinity).NotTo(BeNil())
+		Expect(res.Roles[1].ModelNodeAffinity.Label).To(Equal(metaxProductLabel))
+		Expect(res.Roles[1].ModelNodeAffinity.Models).To(Equal([]string{metaxModelC500, metaxModelC550}))
+	})
+
+	It("reports a nodeSelector that pins the vendor label to a model outside the declared models", func() {
+		p := renderProfile()
+		gpuPrefill(p)
+		p.Spec.Accelerator = aiv1alpha1.Accelerator{Vendor: aiv1alpha1.AcceleratorVendorMetax, Models: []string{metaxModelC500}}
+		p.Spec.Roles[1].PodTemplate.NodeSelector = map[string]string{metaxProductLabel: metaxModelC900}
+		res := Render(renderISVC(), p, renderModel(), nil)
+		Expect(res.Errors).To(HaveLen(1))
+		Expect(string(res.Errors[0].Reason)).To(Equal("ModelSchedulingConflict"))
+		Expect(res.Errors[0].Msg).To(ContainSubstring("contradicts"))
+		// The contradictory role is not mutated into an unsatisfiable merge.
+		Expect(res.Roles[1].PodTemplate.NodeSelector).To(Equal(map[string]string{metaxProductLabel: metaxModelC900}))
+	})
+
+	It("accepts an identical nodeSelector pin and merges the selector", func() {
+		p := renderProfile()
+		gpuPrefill(p)
+		p.Spec.Accelerator = aiv1alpha1.Accelerator{Vendor: aiv1alpha1.AcceleratorVendorNvidia, Models: []string{nvidiaModelH200}}
+		p.Spec.Roles[1].PodTemplate.NodeSelector = map[string]string{nvidiaProductLabel: nvidiaModelH200, "pool": "gpu"}
+		res := Render(renderISVC(), p, renderModel(), nil)
+		Expect(res.Errors).To(BeEmpty())
+		Expect(res.Roles[1].PodTemplate.NodeSelector).To(Equal(map[string]string{nvidiaProductLabel: nvidiaModelH200, "pool": "gpu"}))
+	})
+
+	It("reports a multi-model pin outside the declared models", func() {
+		p := renderProfile()
+		gpuPrefill(p)
+		p.Spec.Accelerator = aiv1alpha1.Accelerator{Vendor: aiv1alpha1.AcceleratorVendorMetax, Models: []string{metaxModelC500, metaxModelC550}}
+		p.Spec.Roles[1].PodTemplate.NodeSelector = map[string]string{metaxProductLabel: metaxModelC500}
+		res := Render(renderISVC(), p, renderModel(), nil)
+		Expect(res.Errors).To(BeEmpty())
+		// MXC500 is among the declared models: the pin is consistent.
+		p.Spec.Roles[1].PodTemplate.NodeSelector = map[string]string{metaxProductLabel: "C500"}
+		res = Render(renderISVC(), p, renderModel(), nil)
+		Expect(res.Errors).To(HaveLen(1))
+		Expect(string(res.Errors[0].Reason)).To(Equal("ModelSchedulingConflict"))
+	})
+
+	It("ignores the vendor label pin on a CPU-only role", func() {
+		// A role without gpuPerPod runs anywhere and is never constrained to
+		// GPU-model nodes (design §3.2: the constraint guards model placement).
+		p := renderProfile()
+		p.Spec.Accelerator = aiv1alpha1.Accelerator{Vendor: aiv1alpha1.AcceleratorVendorMetax, Models: []string{metaxModelC500}}
+		p.Spec.Roles[0].PodTemplate.NodeSelector = map[string]string{metaxProductLabel: metaxModelC900}
+		res := Render(renderISVC(), p, renderModel(), nil)
+		Expect(res.Errors).To(BeEmpty())
+		Expect(res.Roles[0].PodTemplate.NodeSelector).To(Equal(map[string]string{metaxProductLabel: metaxModelC900}))
 	})
 
 	It("defaults replicas to 1 when unset", func() {

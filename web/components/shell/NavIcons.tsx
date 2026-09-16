@@ -12,7 +12,6 @@ export type IconName =
   | "grid"
   | "activity"
   | "server"
-  | "terminal"
   | "code"
   | "spark"
   | "globe";
@@ -38,12 +37,6 @@ const ICONS: Record<IconName, ReactNode> = {
       <rect x="3.5" y="4.5" width="17" height="6.5" rx="1.5" />
       <rect x="3.5" y="13" width="17" height="6.5" rx="1.5" />
       <path d="M7 7.75h.01M7 16.25h.01M11 7.75h3M11 16.25h3" />
-    </>
-  ),
-  terminal: (
-    <>
-      <path d="M4 5.5h16v11H4z" />
-      <path d="M8 20.5h8M9 9.5l2.5 2.5L9 14.5M13.5 14.5H16" />
     </>
   ),
   code: (

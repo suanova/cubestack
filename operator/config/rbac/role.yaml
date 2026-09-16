@@ -33,20 +33,19 @@ rules:
   - persistentvolumeclaims
   verbs:
   - create
-  - delete
   - get
   - list
+  - patch
   - watch
 - apiGroups:
   - ai.cubestack.io
   resources:
   - devenvironments
-  - inferenceruntimeprofiles
-  - inferenceservices
-  - modelversions
   verbs:
   - get
   - list
+  - patch
+  - update
   - watch
 - apiGroups:
   - ai.cubestack.io
@@ -65,6 +64,16 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - ai.cubestack.io
+  resources:
+  - inferenceruntimeprofiles
+  - inferenceservices
+  - modelversions
+  verbs:
+  - get
+  - list
+  - watch
 - apiGroups:
   - apps
   resources:

@@ -19,6 +19,15 @@ const (
 	overridesNamespace = "overrides"
 )
 
+// Vendor product labels, written by the vendor device plugin to every GPU
+// node and used as the fact source of the accelerator.models scheduling
+// constraint (design §3.2): metax records metax-tech.com/gpu.product=MXC500,
+// nvidia nvidia.com/gpu.product=H200.
+const (
+	metaxProductLabel  = "metax-tech.com/gpu.product"
+	nvidiaProductLabel = "nvidia.com/gpu.product"
+)
+
 // Result is the outcome of a full render: resolved overrides, per-role
 // workload structure and rendered pod templates, and rendered asset data.
 // Errors is empty when the render succeeds; any error means the Rendered
@@ -42,6 +51,22 @@ type RenderedRole struct {
 	// {{ model.credentialsPath }}: the controller injects the S3 credentials
 	// volume only into these roles (design §4.5).
 	UsesCredentials bool
+
+	// ModelNodeAffinity constrains scheduling when the profile declares more
+	// than one accelerator model (design §3.2): the controller renders a
+	// required nodeAffinity In term on the vendor product label. Nil when a
+	// single model is declared — that case is injected as a nodeSelector.
+	ModelNodeAffinity *ModelNodeAffinity
+}
+
+// ModelNodeAffinity is the multi-model scheduling constraint resolved from
+// the profile accelerator (design §3.2): the platform node label that records
+// the GPU model and the models the node must offer.
+type ModelNodeAffinity struct {
+	// Label is the vendor product label of the accelerator vendor.
+	Label string
+	// Models are the declared accelerator models, all required via In.
+	Models []string
 }
 
 // Render renders the full profile for one InferenceService: validates and
@@ -114,6 +139,7 @@ func Render(isvc *aiv1alpha1.InferenceService, profile *aiv1alpha1.InferenceRunt
 		ctx.role = roleV
 		rr.PodTemplate, res.Errors = renderPodTemplate(ctx, rr.PodTemplate, res.Errors)
 		rr.UsesCredentials = roleV.usesCredentials
+		res.Errors = injectModelSelector(&rr, profile.Spec.Accelerator, res.Errors)
 		// A role that will receive the injected S3 credentials volume must not
 		// declare a podTemplate volume of the same name: the pod template would
 		// carry two volumes named model-credentials and Kubernetes would reject
@@ -201,6 +227,53 @@ type renderContext struct {
 	// role is the role currently being rendered; nil in service-level
 	// contexts (asset data).
 	role *roleVars
+}
+
+// injectModelSelector constrains the role's scheduling to the declared
+// accelerator models (design §3.2): one model merges into the pod template
+// nodeSelector, several models produce a required nodeAffinity In term on the
+// vendor product label (recorded in the rendered role for the controller).
+// A podTemplate.nodeSelector pinning the vendor label to a value outside the
+// declared models is a ModelSchedulingConflict: the merge would render a pod
+// that can never be scheduled, and the immutable profile must fail at the
+// Rendered stage.
+func injectModelSelector(rr *RenderedRole, accel aiv1alpha1.Accelerator, errs []Error) []Error {
+	if len(accel.Models) == 0 {
+		return errs
+	}
+	// Only roles that request GPUs are constrained to GPU-model nodes. A
+	// CPU-only auxiliary role (e.g. a router) must be able to run on any node
+	// — pinning it to GPU-model nodes would strand it on clusters without
+	// GPU nodes (or with no model label on non-GPU nodes).
+	if rr.PodTemplate.Resources == nil || rr.PodTemplate.Resources.GPUPerPod == nil {
+		return errs
+	}
+	label := metaxProductLabel
+	if accel.Vendor == aiv1alpha1.AcceleratorVendorNvidia {
+		label = nvidiaProductLabel
+	}
+
+	if pinned, ok := rr.PodTemplate.NodeSelector[label]; ok {
+		if !slices.Contains(accel.Models, pinned) {
+			return append(errs, Error{
+				Reason: ReasonModelSchedulingConflict,
+				Msg: fmt.Sprintf("role %q podTemplate.nodeSelector pins %q to %q, which contradicts the declared accelerator models %v",
+					rr.Name, label, pinned, accel.Models),
+			})
+		}
+		// An identical pin is consistent: the merge below is a no-op for the
+		// single-model case, the nodeAffinity term stays satisfiable otherwise.
+	}
+
+	if len(accel.Models) == 1 {
+		if rr.PodTemplate.NodeSelector == nil {
+			rr.PodTemplate.NodeSelector = map[string]string{}
+		}
+		rr.PodTemplate.NodeSelector[label] = accel.Models[0]
+		return errs
+	}
+	rr.ModelNodeAffinity = &ModelNodeAffinity{Label: label, Models: accel.Models}
+	return errs
 }
 
 // roleVars are the role-level variables of the current role.

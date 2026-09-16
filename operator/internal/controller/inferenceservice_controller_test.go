@@ -68,7 +68,7 @@ const (
 func validResolveProfile(name string) *aiv1alpha1.InferenceRuntimeProfile {
 	irp := validInferenceRuntimeProfile(name)
 	irp.Spec.Assets = []aiv1alpha1.Asset{
-		{Name: testAssetName, ConfigMapRef: aiv1alpha1.AssetConfigMapRef{Name: name + "-cm-a"}, Mount: &aiv1alpha1.AssetMount{Path: "/opt/bootstrap", Mode: 0755}},
+		{Name: testAssetName, ConfigMapRef: aiv1alpha1.AssetConfigMapRef{Name: name + "-cm-a"}, Mount: &aiv1alpha1.AssetMount{Path: testBootstrapMountPath, Mode: 0755}},
 		{Name: testRuntimeConfig, ConfigMapRef: aiv1alpha1.AssetConfigMapRef{Name: name + "-cm-b"}, EnvFrom: ptrTo(true)},
 	}
 	for _, cmName := range []string{name + "-cm-a", name + "-cm-b"} {
@@ -1475,6 +1475,53 @@ var _ = Describe("InferenceService controller", func() {
 				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: testNamespace}, svc)).To(Succeed())
 				g.Expect(svc.Status.Model.Credentials.ResourceVersion).To(Equal(got.ResourceVersion))
 			}, "15s", "200ms").Should(Succeed())
+		})
+
+		It("mounts the mount-type asset ConfigMap into every role workload", func() {
+			name := "isvc-mount-asset"
+			irp := validRenderProfile(name)
+			irp.Spec.Assets = []aiv1alpha1.Asset{
+				{Name: testAssetName, ConfigMapRef: aiv1alpha1.AssetConfigMapRef{Name: name + "-cm"}, Mount: &aiv1alpha1.AssetMount{Path: testBootstrapMountPath, Mode: 0755}},
+			}
+			Expect(k8sClient.Create(ctx, irp)).To(Succeed())
+			mv := validModelVersion(name + "-mv")
+			Expect(k8sClient.Create(ctx, mv)).To(Succeed())
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: name + "-cm", Namespace: systemNamespace},
+				Data:       map[string]string{testConfigMapDataKey: testConfigMapDataValue},
+			}
+			Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+			isvc := validInferenceService(name, mv.Name)
+			isvc.Spec.ProfileRef = irp.Name
+			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
+
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.InferenceService{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: testNamespace}, got)).To(Succeed())
+				g.Expect(meta.IsStatusConditionTrue(got.Status.Conditions, aiv1alpha1.ConditionProvisioned)).To(BeTrue())
+			}, "15s", "200ms").Should(Succeed())
+
+			// The ConfigMap copy exists (design §4.4) and the workload mounts it
+			// at the declared path with the declared mode — the entrypoint-script
+			// pattern must not hit /scripts/start.sh: No such file or directory.
+			copyName := name + "-" + testAssetName
+			copy := &corev1.ConfigMap{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: copyName, Namespace: testNamespace}, copy)).To(Succeed())
+
+			dep := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-router", Namespace: testNamespace}, dep)).To(Succeed())
+			Expect(dep.Spec.Template.Spec.Volumes).To(ContainElement(corev1.Volume{
+				Name: "asset-" + testAssetName,
+				VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: copyName},
+					DefaultMode:          ptrTo(int32(0755)),
+				}},
+			}))
+			Expect(dep.Spec.Template.Spec.Containers[0].VolumeMounts).To(ContainElement(corev1.VolumeMount{
+				Name:      "asset-" + testAssetName,
+				MountPath: testBootstrapMountPath,
+				ReadOnly:  true,
+			}))
 		})
 
 		It("marks Provisioned false with SecretCopyFailed when the source credentials Secret is missing", func() {

@@ -36,6 +36,9 @@ import (
 // injected into the pod template and used as the Service selector.
 const roleLabelKey = "ai.cubestack.io/role"
 
+// leaderWorkerIndex is the LWS worker-index label value of a group's leader.
+const leaderWorkerIndex = "0"
+
 // controllerSelectorLabels are the labels the controller injects into the pod
 // template and uses as the Service selector (design §3.2: on conflict the
 // controller's values win).
@@ -66,8 +69,26 @@ func podObjectMeta(isvcName, roleName string, pt aiv1alpha1.PodTemplate, hashAnn
 	return labels, annotations
 }
 
+// roleSelectorLabels are the Service selector labels of one role: the
+// controller selector labels, plus — for LeaderWorkerSet roles — the leader
+// index. Only a group's leader serves the role's endpoint: its workers run the
+// engine's headless side (design §4.3), so a Service balancing across the
+// whole group would send requests to pods that cannot answer them.
+func roleSelectorLabels(isvcName string, role *aiv1alpha1.Role) map[string]string {
+	labels := controllerSelectorLabels(isvcName, role.Name)
+	if role.Workload.Kind == aiv1alpha1.WorkloadKindLeaderWorkerSet {
+		labels[leaderworkersetv1.WorkerIndexLabelKey] = leaderWorkerIndex
+	}
+	return labels
+}
+
 // desiredService builds the cluster Service <isvc>-<role> of one role.
 func desiredService(isvc *aiv1alpha1.InferenceService, role *aiv1alpha1.Role, scheme *runtime.Scheme) *corev1.Service {
+	return desiredServiceWithSelector(isvc, role, roleSelectorLabels(isvc.Name, role), scheme)
+}
+
+// desiredServiceWithSelector builds one role Service with the given selector.
+func desiredServiceWithSelector(isvc *aiv1alpha1.InferenceService, role *aiv1alpha1.Role, selector map[string]string, scheme *runtime.Scheme) *corev1.Service {
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-%s", isvc.Name, role.Name),
@@ -75,7 +96,7 @@ func desiredService(isvc *aiv1alpha1.InferenceService, role *aiv1alpha1.Role, sc
 			Labels:    managedLabels(isvc.Name, isvc.Spec.ProfileRef, role.Name),
 		},
 		Spec: corev1.ServiceSpec{
-			Selector: controllerSelectorLabels(isvc.Name, role.Name),
+			Selector: selector,
 		},
 	}
 	if role.Service != nil {
@@ -92,9 +113,10 @@ func desiredService(isvc *aiv1alpha1.InferenceService, role *aiv1alpha1.Role, sc
 }
 
 // desiredHeadlessService builds the headless Service <isvc>-<role>-hl
-// (ClusterIP: None) for per-Pod discovery.
+// (ClusterIP: None) for per-Pod discovery. Its selector deliberately stays
+// unfiltered — selecting every pod of the group is the point of this Service.
 func desiredHeadlessService(isvc *aiv1alpha1.InferenceService, role *aiv1alpha1.Role, scheme *runtime.Scheme) *corev1.Service {
-	svc := desiredService(isvc, role, scheme)
+	svc := desiredServiceWithSelector(isvc, role, controllerSelectorLabels(isvc.Name, role.Name), scheme)
 	svc.Name = fmt.Sprintf("%s-%s-hl", isvc.Name, role.Name)
 	svc.Spec.ClusterIP = corev1.ClusterIPNone
 	return svc

@@ -21,6 +21,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	aiv1alpha1 "github.com/suanova/cubestack/api/v1alpha1"
 )
@@ -42,8 +43,9 @@ func vendorResource(vendor aiv1alpha1.AcceleratorVendor) string {
 }
 
 // buildPodSpec converts the rendered platform pod template into a corev1.PodSpec:
-// resources mapping (cpu/memory → requests; gpuPerPod → the vendor's extended
-// resource in requests AND limits), model volume composition (design §4.5),
+// resources mapping (cpu/memory → requests; gpuPerPod and extendedResources →
+// the extended resources in requests AND limits), model volume composition
+// (design §4.5), additional volumes mounted at their declared at path,
 // envFromAssets → envFrom ConfigMap refs (<isvc>-<asset>), hostPort backfill
 // when hostNetwork is enabled. The container is named main.
 func buildPodSpec(pt aiv1alpha1.PodTemplate, isvcName string, model *aiv1alpha1.ModelVersion, vendor aiv1alpha1.AcceleratorVendor) corev1.PodSpec {
@@ -84,6 +86,12 @@ func buildPodSpec(pt aiv1alpha1.PodTemplate, isvcName string, model *aiv1alpha1.
 			container.Resources.Requests[resourceName] = gpu
 			container.Resources.Limits[resourceName] = gpu
 		}
+		for name, n := range pt.Resources.ExtendedResources {
+			resourceName := corev1.ResourceName(name)
+			q := *resource.NewQuantity(n, resource.DecimalSI)
+			container.Resources.Requests[resourceName] = q
+			container.Resources.Limits[resourceName] = q
+		}
 	}
 	if pt.SecurityContext != nil {
 		container.SecurityContext = &corev1.SecurityContext{
@@ -121,13 +129,111 @@ func buildPodSpec(pt aiv1alpha1.PodTemplate, isvcName string, model *aiv1alpha1.
 		vol := corev1.Volume{Name: v.Name}
 		switch {
 		case v.EmptyDir != nil:
-			vol.EmptyDir = &corev1.EmptyDirVolumeSource{}
+			vol.EmptyDir = &corev1.EmptyDirVolumeSource{
+				Medium:    corev1.StorageMedium(v.EmptyDir.Medium),
+				SizeLimit: v.EmptyDir.SizeLimit,
+			}
 		case v.HostPath != nil:
 			vol.HostPath = &corev1.HostPathVolumeSource{Path: v.HostPath.Path, Type: ptr(corev1.HostPathDirectory)}
 		}
 		spec.Volumes = append(spec.Volumes, vol)
+		// Each additional volume is mounted at its declared at path. The mount
+		// is writable (unlike the readOnly model and asset mounts): /dev/shm
+		// tmpfs and hostPath device directories are write targets. An empty at
+		// only occurs on profiles stored before at became required (the spec is
+		// immutable, so a legacy volume keeps its pre-upgrade unmounted form).
+		if v.At == "" {
+			continue
+		}
+		spec.Containers[0].VolumeMounts = append(spec.Containers[0].VolumeMounts, corev1.VolumeMount{
+			Name:      v.Name,
+			MountPath: v.At,
+		})
 	}
 	return spec
+}
+
+// attachServiceAntiAffinity adds the service-wide anti-affinity term to one
+// role's pod spec (design §3.2 podAntiAffinity): no two pods of this service
+// may share the declared topology domain. The label selector is fixed by the
+// platform to the service label — it cannot be customized. desiredWorkload
+// calls it for every role from the single profile-level declaration, so all
+// role pods carry the same term and the guarantee is mutual.
+func attachServiceAntiAffinity(spec *corev1.PodSpec, isvcName, topologyKey string) {
+	if spec.Affinity == nil {
+		spec.Affinity = &corev1.Affinity{}
+	}
+	if spec.Affinity.PodAntiAffinity == nil {
+		spec.Affinity.PodAntiAffinity = &corev1.PodAntiAffinity{}
+	}
+	spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution = append(
+		spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution,
+		corev1.PodAffinityTerm{
+			LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{inferenceServiceLabelKey: isvcName}},
+			TopologyKey:   topologyKey,
+		},
+	)
+}
+
+// attachModelNodeAffinity constrains scheduling to nodes offering one of the
+// declared accelerator models when the profile declares several (design §3.2):
+// a required nodeAffinity In term on the vendor product label, AND-combined
+// with any existing affinity. Single-model profiles are injected as a
+// nodeSelector instead and never reach this helper.
+func attachModelNodeAffinity(spec *corev1.PodSpec, label string, models []string) {
+	if spec.Affinity == nil {
+		spec.Affinity = &corev1.Affinity{}
+	}
+	if spec.Affinity.NodeAffinity == nil {
+		spec.Affinity.NodeAffinity = &corev1.NodeAffinity{}
+	}
+	requirement := corev1.NodeSelectorRequirement{Key: label, Operator: corev1.NodeSelectorOpIn, Values: models}
+	required := spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+	if required == nil {
+		spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution = &corev1.NodeSelector{
+			NodeSelectorTerms: []corev1.NodeSelectorTerm{{MatchExpressions: []corev1.NodeSelectorRequirement{requirement}}},
+		}
+		return
+	}
+	// NodeSelectorTerms are OR-combined, so the model constraint must be merged
+	// into every existing term: a new alternative term would let a node that
+	// matches another term schedule without the model label.
+	for i := range required.NodeSelectorTerms {
+		required.NodeSelectorTerms[i].MatchExpressions = append(required.NodeSelectorTerms[i].MatchExpressions, requirement)
+	}
+	if len(required.NodeSelectorTerms) == 0 {
+		required.NodeSelectorTerms = append(required.NodeSelectorTerms, corev1.NodeSelectorTerm{MatchExpressions: []corev1.NodeSelectorRequirement{requirement}})
+	}
+}
+
+// addMountAssetVolumes mounts every profile asset declared with assets[].mount
+// as a read-only ConfigMap volume named asset-<name> backed by the rendered
+// copy <isvc>-<name> (design §4.4: mount assets apply to every role, mounted
+// with defaultMode set to the declared mode). asset- is a reserved volume-name
+// prefix: a podTemplate.volumes entry colliding with it is rejected by the
+// apiserver at workload create time and surfaces as a reconcile error.
+func addMountAssetVolumes(spec *corev1.PodSpec, isvcName string, assets []aiv1alpha1.Asset) {
+	for _, asset := range assets {
+		if asset.Mount == nil {
+			continue
+		}
+		volumeName := fmt.Sprintf("asset-%s", asset.Name)
+		volume := corev1.Volume{
+			Name: volumeName,
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: fmt.Sprintf("%s-%s", isvcName, asset.Name)},
+					DefaultMode:          ptr(asset.Mount.Mode),
+				},
+			},
+		}
+		spec.Volumes = append(spec.Volumes, volume)
+		spec.Containers[0].VolumeMounts = append(spec.Containers[0].VolumeMounts, corev1.VolumeMount{
+			Name:      volumeName,
+			MountPath: asset.Mount.Path,
+			ReadOnly:  true,
+		})
+	}
 }
 
 // modelVolumes builds the model volume of each mount (design §4.5): one
@@ -190,6 +296,8 @@ func probeToK8s(p *aiv1alpha1.Probe) *corev1.Probe {
 		probe.HTTPGet = &corev1.HTTPGetAction{Path: p.HTTPGet.Path, Port: p.HTTPGet.Port}
 	case p.TCPSocket != nil:
 		probe.TCPSocket = &corev1.TCPSocketAction{Port: p.TCPSocket.Port}
+	case p.Exec != nil:
+		probe.Exec = &corev1.ExecAction{Command: p.Exec.Command}
 	}
 	return probe
 }

@@ -66,7 +66,17 @@ function ephemeralSecret(): Uint8Array {
   return _ephemeral;
 }
 
-/** Whether the signed-cookie Set-Cookie should carry the Secure flag. */
-export function secureCookies(): boolean {
-  return process.env.NODE_ENV === "production";
+/**
+ * Explicit override for the session cookie's Secure flag, read from
+ * SESSION_COOKIE_SECURE. Returns null when unset — then the flag is decided
+ * per request from the externally-visible scheme (see session.ts). An override
+ * is needed when a TLS terminator does not forward the original scheme via
+ * X-Forwarded-Proto, or to force non-secure cookies on an internal http-only
+ * front end.
+ */
+export function secureCookieOverride(): boolean | null {
+  const raw = process.env.SESSION_COOKIE_SECURE;
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  return null;
 }

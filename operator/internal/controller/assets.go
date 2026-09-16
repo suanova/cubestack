@@ -73,9 +73,10 @@ const (
 	devEnvSSHKeysDelegatedLabel = "ai.cubestack.io/ssh-keys-delegated"
 	devEnvSSHKeysDelegatedValue = "true"
 
-	// workspaceClaimName is the StatefulSet volumeClaimTemplate name; the
-	// controller creates the PVC <env>-workspace-0 from it (K8s PVC naming:
-	// <sts>-<claim>-<ordinal>).
+	// workspaceClaimName is the StatefulSet volumeClaimTemplate name. The claim
+	// it provisions is <claim>-<set>-<ordinal> (K8s PVC naming), i.e.
+	// workspace-<env>-0, created by the StatefulSet controller rather than by
+	// this one.
 	workspaceClaimName = "workspace"
 
 	// workspaceStorageClassName is the platform-predefined workspace StorageClass.
@@ -83,7 +84,82 @@ const (
 	// requests ReadWriteMany so the volume can be mounted on any node and follow
 	// the pod during drift rescheduling (design §7.2).
 	workspaceStorageClassName = "cephfs-ephemeral"
+
+	// permissionInitContainerName is the init container that establishes the
+	// workspace claim's root ownership before the environment starts.
+	permissionInitContainerName = "initialize-managed-volume"
+
+	// permissionInitImage is the image that container runs: the upstream busybox
+	// base, mirrored into the platform registry so nodes never reach Docker Hub.
+	// It is deliberately not the environment's own image — a bring-your-own image
+	// may be distroless, and the init container fails closed, so an image without
+	// a shell would leave the environment unable to start at all. An offline
+	// deployment mirrors it under the same name/host as its other images.
+	permissionInitImage = "harbor.isuanova.com/suanova/busybox:1.38.0"
+
+	// permissionInitMountPath is where that container mounts the workspace claim.
+	// It is a path of the init container's own — the claim is also mounted at the
+	// environment's workspace path by the main container, and the two mounts are
+	// independent.
+	permissionInitMountPath = "/managed"
+
+	// The variables permissionInitScript reads. They are passed as environment
+	// rather than interpolated into the script so the values the container acted
+	// on are visible on the pod itself.
+	permissionInitPathEnv = "WORKSPACE_PATH"
+	permissionInitUIDEnv  = "WORKSPACE_UID"
+	permissionInitGIDEnv  = "WORKSPACE_GID"
 )
+
+// permissionInitScript establishes the workspace claim's root ownership: the
+// account the environment runs as has to own the directory it works in.
+//
+// `set -e` is the fail-closed requirement, not decoration: if `stat` or `chown`
+// fails — a read-only filesystem, a driver that refuses the change, storage that
+// is not there — the init container exits non-zero and the environment never
+// starts, rather than coming up with a home it cannot write.
+//
+// The chown is conditional and recursive — the same pair of choices the
+// fsGroupChangePolicy: OnRootMismatch it replaces made: a workspace whose root
+// already carries the right owner is left alone, and one whose root does not is
+// repaired all the way down. A claim provisioned from the volumeClaimTemplate
+// belongs to this environment alone, so everything already in it is the
+// environment's to own, and the walk therefore runs once — on the start after an
+// ownership change — rather than on every start. The setgid bit is what makes
+// everything the account creates afterwards inherit the directory's group.
+//
+// The chmod comes before the chown because that direction costs nothing on the
+// common path: a claim the init container owns — every freshly provisioned one —
+// is owned and grouped by the caller, so the mode is set with no capability
+// involved and no chance of losing S_ISGID, and a chown preserves S_ISGID on a
+// directory (the kernel clears it only on non-directories).
+//
+// That ordering is not what makes the sequence correct, though, and must not be
+// mistaken for it. A claim outlives the identity it was initialized for: edit
+// spec.runtime.securityContext on a live environment and the init container
+// finds a root owned by the *previous* uid, which is neither the caller nor
+// grouped with it. That path needs the container's other two capabilities, and
+// both were measured on cs2 against cephfs:
+//
+//   - Without CAP_FOWNER the chmod is EPERM — root does not own the directory
+//     and CAP_CHOWN does not help — so `set -e` takes the environment down and
+//     the ownership repair never runs.
+//   - With CAP_FOWNER alone it succeeds and silently does not stick: a mode
+//     change from outside the file's group drops S_ISGID, leaving 0775.
+//
+// Measured end state for that path with all three held: 2000:2000 2775, the
+// tree chowned, every level writable by the new identity.
+const permissionInitScript = `set -e
+current="$(stat -c '%u:%g' "$WORKSPACE_PATH")"
+if [ "$current" != "$WORKSPACE_UID:$WORKSPACE_GID" ]; then
+	echo "permission-init: chown -R $WORKSPACE_PATH $current -> $WORKSPACE_UID:$WORKSPACE_GID"
+	chmod 2775 "$WORKSPACE_PATH"
+	chown -R "$WORKSPACE_UID:$WORKSPACE_GID" "$WORKSPACE_PATH"
+else
+	echo "permission-init: $WORKSPACE_PATH already owned by $current"
+fi
+echo "permission-init: $WORKSPACE_PATH ready"
+`
 
 // modelKeyMain is the model key of the main model; model volumes are named
 // model-<key> (design §4.5, v1alpha1 fixes the key to main).
@@ -123,18 +199,33 @@ func (r *InferenceServiceReconciler) provisionAssets(ctx context.Context, isvc *
 
 		existing := &corev1.ConfigMap{}
 		err := r.Get(ctx, client.ObjectKey{Name: cm.Name, Namespace: cm.Namespace}, existing)
-		switch {
-		case apierrors.IsNotFound(err):
-			if err := r.Create(ctx, cm); err != nil {
+		if apierrors.IsNotFound(err) {
+			if cerr := r.Create(ctx, cm); cerr == nil {
+				// Fresh copy created with the rendered data: nothing to sync.
+				statuses = append(statuses, aiv1alpha1.AssetStatus{
+					Name:   asset.Name,
+					Source: asset.ConfigMapRef.Name,
+					Hash:   cm.Annotations[assetHashAnnotationKey],
+				})
+				continue
+			} else if !apierrors.IsAlreadyExists(cerr) {
+				return nil, cerr
+			}
+			// Lost the create race: a concurrent reconcile created the copy in
+			// between. Fall through to the sync path against the winner's copy
+			// instead of failing the reconcile (self-heals on requeue anyway).
+			if err := r.Get(ctx, client.ObjectKey{Name: cm.Name, Namespace: cm.Namespace}, existing); err != nil {
 				return nil, err
 			}
-		case err != nil:
+		} else if err != nil {
 			return nil, err
+		}
+
 		// Compare the copy's actual data, not the stored hash annotation: an
 		// in-place edit of the data leaves the annotation untouched and must
 		// still be repaired. A same-name foreign ConfigMap must not be
 		// overwritten — only a copy owned by this service may be updated.
-		case assetDataHash(existing.Data) != assetDataHash(cm.Data):
+		if assetDataHash(existing.Data) != assetDataHash(cm.Data) {
 			if err := ensureOwned(existing, isvc.UID); err != nil {
 				return nil, err
 			}

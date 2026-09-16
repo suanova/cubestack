@@ -23,7 +23,10 @@ function stubCluster() {
       return Promise.resolve({
         items: [
           {
-            metadata: { name: "metax-sglang-dsv4-pd" },
+            metadata: {
+              name: "metax-sglang-dsv4-pd",
+              labels: { "inference.ai.cubestack.io/serving-mode": "pd-separation" },
+            },
             spec: {
               engine: { name: "sglang", version: "vendor-0.5.12-rc1" },
               accelerator: { vendor: "metax", models: ["MXC500"] },
@@ -78,6 +81,7 @@ describe("inference services create options route", () => {
       models: ["MXC500"],
       architectures: ["deepseek_v4"],
       quantizations: ["w8a8"],
+      servingMode: "pd-separation",
       gpuPerPod: 8,
     });
     expect(profile.overrides).toEqual([

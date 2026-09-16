@@ -66,10 +66,11 @@ describe("inference services page", () => {
     expect(container.textContent).toContain("dsv4-flash-pd");
     expect(container.textContent).toContain("sglang");
     expect(container.textContent).toContain("8 × MXC500");
-    // Replicas render multi-line (decode / prefill / group each on its own row).
-    expect(container.textContent).toContain("decode 2");
-    expect(container.textContent).toContain("prefill 1");
-    expect(container.textContent).toContain("group 1");
+    // Replicas render multi-line, one row per integer override the profile
+    // declares (no hardcoded knob names).
+    expect(container.textContent).toContain("decodeReplicas 2");
+    expect(container.textContent).toContain("prefillReplicas 1");
+    expect(container.textContent).toContain("groupSize 1");
     // Both services are pending (no status yet from the controller).
     expect(container.textContent).toContain("Pending");
 
@@ -103,6 +104,37 @@ describe("inference services page", () => {
     act(() => root.unmount());
   });
 
+  it("switching from a service with no declared overrides keeps scale inputs controlled", async () => {
+    // An unresolvable profileRef (e.g. an inline profile the cluster cannot
+    // resolve) projects an empty override set. Switching from such a service to
+    // one with declared overrides used to render the inputs with undefined
+    // values for one frame -> React/MUI uncontrolled-to-controlled errors.
+    const list = [
+      inferenceServiceSummary({ name: "bare", namespace: "default", createdAt: "2026-09-01T07:00:00Z", overrides: [] }),
+      inferenceServiceSummary({ name: "pd", namespace: "project-a", createdAt: "2026-09-01T06:00:00Z" }),
+    ];
+    stubData(list);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    // "bare" (no overrides) is selected first; select the service with knobs.
+    const pdRow = container.querySelector('[data-od-id="svc-row-pd"]');
+    expect(pdRow).not.toBeNull();
+    await act(async () => {
+      (pdRow as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    const logged = [...errSpy.mock.calls, ...warnSpy.mock.calls].map((c) => c.map(String).join(" ")).join("\n");
+    expect(logged).not.toMatch(/uncontrolled|out-of-range/);
+
+    errSpy.mockRestore();
+    warnSpy.mockRestore();
+    act(() => root.unmount());
+  });
+
   it("scales the service in the selected namespace when names collide", async () => {
     // The same service name in two namespaces: selecting team-b's row and
     // applying must PATCH team-b, not the first name match (team-a).
@@ -131,12 +163,12 @@ describe("inference services page", () => {
       (rows[1] as HTMLElement).click();
     });
 
-    // Change decodeReplicas and apply.
-    const decodeInput = container.querySelector('input[type="number"]') as HTMLInputElement;
+    // Change the first numeric knob (prefillReplicas) and apply.
+    const numInput = container.querySelector('input[type="number"]') as HTMLInputElement;
     await act(async () => {
       const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
-      setter.call(decodeInput, "3");
-      decodeInput.dispatchEvent(new Event("input", { bubbles: true }));
+      setter.call(numInput, "3");
+      numInput.dispatchEvent(new Event("input", { bubbles: true }));
     });
     const applyBtn = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "应用");
     expect(applyBtn).toBeDefined();
@@ -147,6 +179,123 @@ describe("inference services page", () => {
 
     expect(patches).toHaveLength(1);
     expect(patches[0]).toMatchObject({ namespace: "team-b", name: "api" });
+
+    act(() => root.unmount());
+  });
+
+  it("renders a declared string enum as a select, not a free-text input", async () => {
+    // A string override with a declared enum is a closed set: it must render the
+    // enum as a select (previously the string branch won and it was text).
+    const list = [
+      inferenceServiceSummary({
+        name: "str-enum",
+        namespace: "project-a",
+        overrides: [
+          { name: "quantization", type: "string", min: null, max: null, enum: ["w8a8", "fp16"], current: null },
+        ],
+      }),
+    ];
+    stubData(list);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    // The select shows the first declared entry (an enum select needs a value
+    // inside the set) and renders it as text; a free-text input would show none.
+    const trigger = container.querySelector('[role="combobox"]');
+    expect(trigger).not.toBeNull();
+    expect((trigger?.textContent ?? "").replace(/\u200b/g, "").trim()).toBe("w8a8");
+
+    // Both declared options are offered by the select.
+    await act(async () => {
+      (trigger as HTMLElement).dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
+    });
+    const options = Array.from(document.querySelectorAll('[role="option"]')).map((el) => el.textContent);
+    expect(options).toEqual(["w8a8", "fp16"]);
+
+    act(() => root.unmount());
+  });
+
+  it("keeps Apply disabled while a string enum holds a value outside the enum", async () => {
+    // The service's stored value is no longer in the declared enum: the numeric
+    // edit alone must not enable Apply, i.e. string enums are validated too.
+    const list = [
+      inferenceServiceSummary({
+        name: "stale-enum",
+        namespace: "project-a",
+        overrides: [
+          { name: "quantization", type: "string", min: null, max: null, enum: ["w8a8", "fp16"], current: "int4" },
+          { name: "maxModelLen", type: "integer", min: 1, max: 100, enum: null, current: 10 },
+        ],
+      }),
+    ];
+    stubData(list);
+    // The out-of-enum stored value makes MUI warn; that is the state under test.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    const numInput = container.querySelector('input[type="number"]') as HTMLInputElement;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
+      setter.call(numInput, "20");
+      numInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    const applyBtn = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "应用");
+    expect((applyBtn as HTMLButtonElement).disabled).toBe(true);
+
+    warnSpy.mockRestore();
+    act(() => root.unmount());
+  });
+
+  it("still treats edits as changed when values contain the snapshot delimiters", async () => {
+    // The edited-vs-service comparison used to join "name=value;" pairs, so a
+    // value containing ";" or "=" could make two different states collide:
+    // a="p;b=q", b="r" joins to the same string as a="p", b="q;b=r".
+    const list = [
+      inferenceServiceSummary({
+        name: "delims",
+        namespace: "project-a",
+        overrides: [
+          { name: "a", type: "string", min: null, max: null, enum: null, current: "p;b=q" },
+          { name: "b", type: "string", min: null, max: null, enum: null, current: "r" },
+        ],
+      }),
+    ];
+    const patches: Array<Record<string, unknown> | undefined> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method === "PATCH") {
+          patches.push(JSON.parse(String(init.body)));
+          return { ok: true, status: 200, json: async () => ({ ok: true }) };
+        }
+        return { ok: true, status: 200, json: async () => ({ items: list }) };
+      }),
+    );
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    const inputs = container.querySelectorAll("input");
+    expect(inputs).toHaveLength(2);
+    const setValue = async (el: HTMLInputElement, v: string) => {
+      await act(async () => {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
+        setter.call(el, v);
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    };
+    await setValue(inputs[0] as HTMLInputElement, "p");
+    await setValue(inputs[1] as HTMLInputElement, "q;b=r");
+
+    // Both knobs differ from the service, so Apply must be enabled.
+    const applyBtn = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "应用");
+    expect((applyBtn as HTMLButtonElement).disabled).toBe(false);
+    await act(async () => {
+      (applyBtn as HTMLElement).click();
+    });
+    await act(async () => {});
+    expect(patches[0]?.overrides).toEqual({ a: "p", b: "q;b=r" });
 
     act(() => root.unmount());
   });
@@ -203,6 +352,7 @@ const OPTIONS = {
       models: ["MXC500"],
       architectures: ["deepseek_v4"],
       quantizations: ["w8a8"],
+      servingMode: "pd-separation",
       gpuPerPod: 8,
       overrides: [
         { name: "decodeReplicas", type: "integer", min: 1, max: 16, enum: null, default: 1, description: null },
@@ -228,13 +378,13 @@ describe("deploy wizard", () => {
     document.body.innerHTML = "";
   });
 
-  function renderWithBoth() {
+  function renderWithBoth(opts: object = OPTIONS) {
     vi.stubGlobal(
       "fetch",
       vi.fn((input: RequestInfo | URL) => {
         const url = String(input);
         if (url.includes("/options")) {
-          return Promise.resolve({ ok: true, status: 200, json: async () => OPTIONS });
+          return Promise.resolve({ ok: true, status: 200, json: async () => opts });
         }
         return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: inferenceServiceList() }) });
       }),
@@ -286,6 +436,71 @@ describe("deploy wizard", () => {
     expect(document.body.textContent).toContain("引擎与资源");
     expect(document.body.textContent).toContain("decodeReplicas");
     expect(document.body.textContent).toContain("prefillReplicas");
+
+    act(() => root.unmount());
+  });
+
+  // MUI Select renders a zero-width space span inside the display div.
+  const selectText = (el: Element | null): string => (el?.textContent ?? "").replace(/\u200b/g, "").trim();
+
+  async function fillNameAndGoToStep2() {
+    const input = document.body.querySelector('input[placeholder="e.g. dsv4-flash-serve"]') as HTMLInputElement;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
+      setter.call(input, "my-serve");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {});
+    const nextBtn = Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent === "下一步") as HTMLElement;
+    await act(async () => {
+      nextBtn.click();
+    });
+    await act(async () => {});
+  }
+
+  it("renders per-role GPU type selects for a pd-separation profile", async () => {
+    const { container, root } = renderWithBoth();
+    await act(async () => {});
+    const deployBtn = container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement;
+    await act(async () => {
+      deployBtn.click();
+    });
+    await act(async () => {});
+    await fillNameAndGoToStep2();
+
+    // pd-separation: one reserved GPU select per role (prefill / decode), both
+    // fixed to the profile's vendor until the operator API supports it.
+    const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
+    expect(step2.textContent).toContain("GPU 类型");
+    const prefillGpu = step2.querySelector('[data-od-id="wizard-gpu-prefill"]');
+    const decodeGpu = step2.querySelector('[data-od-id="wizard-gpu-decode"]');
+    expect(selectText(prefillGpu)).toBe("metax");
+    expect(selectText(decodeGpu)).toBe("metax");
+    expect(step2.textContent).toContain("预留能力");
+
+    act(() => root.unmount());
+  });
+
+  it("renders a single GPU type select for a standard profile", async () => {
+    const standardOptions = {
+      ...OPTIONS,
+      profiles: OPTIONS.profiles.map((p) => ({ ...p, servingMode: "standard" })),
+    };
+    const { container, root } = renderWithBoth(standardOptions);
+    await act(async () => {});
+    const deployBtn = container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement;
+    await act(async () => {
+      deployBtn.click();
+    });
+    await act(async () => {});
+    await fillNameAndGoToStep2();
+
+    // standard: a single GPU select, no per-role selects.
+    const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
+    expect(step2.textContent).toContain("GPU 类型");
+    expect(selectText(step2.querySelector('[data-od-id="wizard-gpu"]'))).toBe("metax");
+    expect(step2.querySelector('[data-od-id="wizard-gpu-prefill"]')).toBeNull();
+    expect(step2.querySelector('[data-od-id="wizard-gpu-decode"]')).toBeNull();
 
     act(() => root.unmount());
   });

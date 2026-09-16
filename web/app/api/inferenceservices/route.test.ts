@@ -92,7 +92,7 @@ function stubCluster() {
             overrides: [
               { name: "prefillReplicas", type: "integer", default: 1, min: 1, max: 8 },
               { name: "decodeReplicas", type: "integer", default: 1, min: 1, max: 16 },
-              { name: "groupSize", type: "integer", enum: [1, 2, 4] },
+              { name: "groupSize", type: "integer", default: 1, enum: [1, 2, 4] },
             ],
             roles: [
               { name: "router", workload: { kind: "Deployment" } },
@@ -164,10 +164,12 @@ describe("inference services route", () => {
       vendor: "metax",
       gpuModel: "MXC500",
       gpuPerPod: 8,
-      // override knobs + bounds from the profile
-      decode: { current: 2, min: 1, max: 16 },
-      prefill: { current: 1, min: 1, max: 8 },
-      groupSize: { current: 1, enum: [1, 2, 4] },
+      // override knobs declared by the profile; effective value = user value, else default
+      overrides: [
+        { name: "prefillReplicas", type: "integer", min: 1, max: 8, enum: null, current: 1 },
+        { name: "decodeReplicas", type: "integer", min: 1, max: 16, enum: null, current: 2 },
+        { name: "groupSize", type: "integer", min: null, max: null, enum: [1, 2, 4], current: 1 },
+      ],
       // no status yet -> pending
       ready: null,
       progressing: false,

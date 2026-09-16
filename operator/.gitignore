@@ -1,4 +1,4 @@
 # Packaged helm chart archives (make helm-package) — never commit the tgz
 *.tgz
 # CRDs synced into the chart at use time (make helm-crds-sync) — not committed
-helm/cubestack-operator-chart/crds/
+helm/cubestack-controller-manager-chart/crds/

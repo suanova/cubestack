@@ -57,6 +57,7 @@ var _ = Describe("desired resources", func() {
 		Expect(svc.Namespace).To(Equal(testNamespace))
 		Expect(svc.Spec.Selector).To(Equal(map[string]string{
 			inferenceServiceLabelKey: testIsvcName, roleLabelKey: testRolePrefill,
+			leaderworkersetv1.WorkerIndexLabelKey: "0",
 		}))
 		Expect(svc.Spec.Ports).To(Equal([]corev1.ServicePort{
 			{Name: testPortName, Port: 8001, TargetPort: intstr.FromString(testPortName)},
@@ -72,6 +73,25 @@ var _ = Describe("desired resources", func() {
 		svc := desiredHeadlessService(isvc(), r, testSchemeForResources())
 		Expect(svc.Name).To(Equal("svc-prefill-hl"))
 		Expect(svc.Spec.ClusterIP).To(Equal(corev1.ClusterIPNone))
+	})
+
+	It("pins a LeaderWorkerSet role Service to the group leader", func() {
+		svc := desiredService(isvc(), role(), testSchemeForResources())
+		Expect(svc.Spec.Selector).To(HaveKeyWithValue(leaderworkersetv1.WorkerIndexLabelKey, "0"))
+	})
+
+	It("does not pin a Deployment role Service to a leader index", func() {
+		r := role()
+		r.Workload = aiv1alpha1.Workload{Kind: aiv1alpha1.WorkloadKindDeployment}
+		svc := desiredService(isvc(), r, testSchemeForResources())
+		Expect(svc.Spec.Selector).NotTo(HaveKey(leaderworkersetv1.WorkerIndexLabelKey))
+	})
+
+	It("keeps the headless Service selecting every pod of the group", func() {
+		r := role()
+		r.Service.Headless = ptrTo(true)
+		svc := desiredHeadlessService(isvc(), r, testSchemeForResources())
+		Expect(svc.Spec.Selector).NotTo(HaveKey(leaderworkersetv1.WorkerIndexLabelKey))
 	})
 
 	It("builds a LeaderWorkerSet per the mapping table", func() {

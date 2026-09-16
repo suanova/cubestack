@@ -63,6 +63,16 @@ spec:
         args:
           - --leader-elect
           - --health-probe-bind-address=:8081
+          # Platform Gateway InferenceService routes are published to
+          # (spec.route.publish) — same convention as the DevEnvironment
+          # controller (cubestack-gateway in cubestack-system). The helm chart
+          # renders these three flags from its gateway.* values instead.
+          # --gateway-domain is intentionally not set: publishing stays off
+          # (RouteReady=False, GatewayNotConfigured) until a domain is added
+          # via your overlay, e.g.:
+          #   - --gateway-domain=example.com
+          - --gateway-name=cubestack-gateway
+          - --gateway-namespace=cubestack-system
         image: controller:latest
         imagePullPolicy: IfNotPresent
         name: manager

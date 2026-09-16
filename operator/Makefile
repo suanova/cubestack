@@ -1,5 +1,5 @@
 # Image URL to use all building/pushing image targets
-IMG ?= harbor.isuanova.com/suanova/cubestack-operator:latest
+IMG ?= harbor.isuanova.com/suanova/cubestack-controller-manager:latest
 # YEAR defines the year value used for substituting the YEAR placeholder in the boilerplate header.
 YEAR ?= $(shell date +%Y)
 
@@ -103,7 +103,7 @@ KIND_CLUSTER_HELM ?= cubestack-helm-e2e
 HELM_E2E_KUBECTL = $(KUBECTL) --context kind-$(KIND_CLUSTER_HELM)
 HELM_E2E_HELM = $(HELM) --kube-context kind-$(KIND_CLUSTER_HELM)
 HELM_NAMESPACE ?= cubestack-system
-HELM_CHART_DIR ?= helm/cubestack-operator-chart
+HELM_CHART_DIR ?= helm/cubestack-controller-manager-chart
 ECHO_IMG ?= example.com/cubestack-e2e-echo:v0.0.1
 HELM_RELEASE ?= cubestack
 # Manager image for the helm e2e flow. Defaults to the same registry image as
@@ -112,7 +112,7 @@ HELM_RELEASE ?= cubestack
 # registry even for the :latest tag. Derives from IMG when the caller sets
 # IMG explicitly (command line or environment).
 ifeq ($(origin IMG),file)
-HELM_E2E_IMG ?= harbor.isuanova.com/suanova/cubestack-operator:latest
+HELM_E2E_IMG ?= harbor.isuanova.com/suanova/cubestack-controller-manager:latest
 else
 HELM_E2E_IMG ?= $(IMG)
 endif
@@ -173,6 +173,9 @@ helm-e2e-crd-check: ## Verify chart CRDs plus the prerequisite lws/gateway CRDs,
 	$(HELM_E2E_KUBECTL) get clusterrole cubestack-metrics-reader >/dev/null; \
 	$(HELM_E2E_KUBECTL) get clusterrolebinding cubestack-manager-rolebinding >/dev/null; \
 	$(HELM_E2E_KUBECTL) get sa cubestack-controller-manager -n $(HELM_NAMESPACE) >/dev/null; \
+	$(HELM_E2E_KUBECTL) auth can-i update devenvironments.ai.cubestack.io \
+		--as=system:serviceaccount:$(HELM_NAMESPACE):cubestack-controller-manager -n $(HELM_NAMESPACE) | grep -qx yes \
+		|| { echo "manager SA cannot update DevEnvironments (the controller adds and removes its finalizer with Update)"; exit 1; }; \
 	echo "schema validation (invalid MV must be rejected):"; \
 	if printf '%s\n' 'apiVersion: ai.cubestack.io/v1alpha1' 'kind: ModelVersion' 'metadata:' '  name: e2e-invalid-should-fail' 'spec:' '  model: x' | $(HELM_E2E_KUBECTL) apply -f -; then \
 		echo "ERROR: invalid ModelVersion was accepted — CRD schema not enforced"; \

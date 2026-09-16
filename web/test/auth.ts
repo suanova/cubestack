@@ -45,6 +45,7 @@ function buildRequest(init?: RequestInit, url = "http://localhost", cookie?: str
     headers,
     cookies: { get: valueFor },
     body: bodyStr ?? null,
+    text: async () => bodyStr ?? "",
     json: async () => {
       // Mirror NextRequest.json(): an absent/empty body rejects with a
       // SyntaxError instead of resolving undefined.
@@ -89,8 +90,14 @@ export function plainRequest(init?: RequestInit, url = "http://localhost"): Next
 export async function tamperedRequest(init?: RequestInit, url = "http://localhost"): Promise<NextRequest> {
   setTestSessionSecret();
   const token = await signSession("tester");
-  // Flip the last character of the JWT signature to break the HMAC.
-  const broken = token.slice(0, -1) + (token.endsWith("A") ? "B" : "A");
+  // Corrupt the last character of the JWT signature so the HMAC no longer
+  // matches. The final base64url char's top bit carries the final signature
+  // byte's high bit, so flipping that bit always changes the decoded bytes.
+  // (A naive flip to "A" can land in the same 4-bit group and decode to
+  // identical bytes, leaving the token accidentally valid.)
+  const B64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  const idx = B64URL.indexOf(token.charAt(token.length - 1));
+  const broken = token.slice(0, -1) + B64URL[(idx + 32) % 64];
   return buildRequest(init, url, `${sessionCookieName()}=${broken}`);
 }
 

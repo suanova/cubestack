@@ -323,7 +323,9 @@ type ObjectFieldSelector struct {
 	FieldPath string `json:"fieldPath"`
 }
 
-// PodResources specifies CPU, memory and per-Pod GPU requests.
+// PodResources specifies CPU, memory and per-Pod GPU requests. The
+// extendedResources key/value constraints are L1 rules, enforced by the VAP
+// (cross-field map iteration is not expressible within the CRD CEL budget).
 type PodResources struct {
 	// CPU is written to requests.cpu.
 	// +optional
@@ -338,6 +340,13 @@ type PodResources struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	GPUPerPod *int64 `json:"gpuPerPod,omitempty"`
+
+	// ExtendedResources lists additional extended resources, e.g.
+	// rdma/hca_shared_devices, written to both requests and limits like
+	// gpuPerPod. Keys must not collide with cpu, memory or the GPU extended
+	// resource of either supported vendor (handled by the fields above; L1 VAP).
+	// +optional
+	ExtendedResources map[string]int64 `json:"extendedResources,omitempty"`
 }
 
 // PodSecurityContext is the supported subset of a Pod security context.
@@ -373,13 +382,18 @@ type ModelMount struct {
 }
 
 // Volume is a supported subset of Kubernetes Volumes: emptyDir and hostPath.
+// Each volume is mounted into the container at its At path.
 // +kubebuilder:validation:XValidation:rule="(has(self.emptyDir) ? 1 : 0) + (has(self.hostPath) ? 1 : 0) == 1",message="exactly one of emptyDir or hostPath must be set"
 type Volume struct {
 	// Name is the volume name.
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 
-	// EmptyDir is an empty directory volume, e.g. for /dev/shm.
+	// At is the in-container mount path of the volume.
+	// +kubebuilder:validation:Pattern="^/"
+	At string `json:"at"`
+
+	// EmptyDir is an empty directory volume, e.g. a Memory-backed /dev/shm.
 	// +optional
 	EmptyDir *EmptyDirVolume `json:"emptyDir,omitempty"`
 
@@ -389,7 +403,29 @@ type Volume struct {
 }
 
 // EmptyDirVolume is an emptyDir volume.
-type EmptyDirVolume struct{}
+type EmptyDirVolume struct {
+	// Medium is the storage medium: "" is the node default (disk), Memory is
+	// tmpfs. An 8Gi Memory-backed /dev/shm fits the vLLM TP>1 SHM transport.
+	// +optional
+	// +kubebuilder:validation:Enum="";Memory
+	Medium string `json:"medium,omitempty"`
+
+	// SizeLimit is the maximum size of the volume.
+	// +optional
+	SizeLimit *resource.Quantity `json:"sizeLimit,omitempty"`
+}
+
+// PodAntiAffinity is the supported pod anti-affinity subset: one required
+// term spreading this service's pods across the given topology domains.
+// Declaring it gives the scheduler a hard constraint: no two pods carrying
+// the service label may share a topology domain.
+type PodAntiAffinity struct {
+	// TopologyKey is the domain across which the service's pods must be
+	// spread, e.g. kubernetes.io/hostname. Must be a valid Kubernetes label
+	// key: an optional lowercase DNS prefix followed by a lowercase name.
+	// +kubebuilder:validation:Pattern="^([a-z0-9]([-a-z0-9]*[a-z0-9])?([.][a-z0-9]([-a-z0-9]*[a-z0-9])?)*[/])?[a-z0-9]([-a-z0-9_.]*[a-z0-9])?$"
+	TopologyKey string `json:"topologyKey"`
+}
 
 // HostPathVolume is a hostPath volume.
 type HostPathVolume struct {
@@ -425,8 +461,8 @@ type Probes struct {
 	Liveness *Probe `json:"liveness,omitempty"`
 }
 
-// Probe is a probe with either httpGet or tcpSocket.
-// +kubebuilder:validation:XValidation:rule="(has(self.httpGet) ? 1 : 0) + (has(self.tcpSocket) ? 1 : 0) == 1",message="exactly one of httpGet or tcpSocket must be set"
+// Probe is a probe with exactly one of httpGet, tcpSocket or exec.
+// +kubebuilder:validation:XValidation:rule="(has(self.httpGet) ? 1 : 0) + (has(self.tcpSocket) ? 1 : 0) + (has(self.exec) ? 1 : 0) == 1",message="exactly one of httpGet, tcpSocket or exec must be set"
 type Probe struct {
 	// HTTPGet performs an HTTP GET probe.
 	// +optional
@@ -435,6 +471,10 @@ type Probe struct {
 	// TCPSocket performs a TCP connect probe.
 	// +optional
 	TCPSocket *TCPSocketAction `json:"tcpSocket,omitempty"`
+
+	// Exec runs a command inside the container.
+	// +optional
+	Exec *ExecAction `json:"exec,omitempty"`
 
 	// InitialDelaySeconds is the delay before the first probe.
 	// +optional
@@ -467,6 +507,16 @@ type HTTPGetAction struct {
 type TCPSocketAction struct {
 	// Port is the port to probe, either a number or a container port name.
 	Port intstr.IntOrString `json:"port"`
+}
+
+// ExecAction runs a command inside the container: the probe succeeds when the
+// command exits 0. It is the only probe type that can tell apart pods whose
+// runtime role differs within one workload — e.g. a LeaderWorkerSet group in
+// which the workers run the engine's headless side and serve no HTTP port.
+type ExecAction struct {
+	// Command is the command line run inside the container.
+	// +kubebuilder:validation:MinItems=1
+	Command []string `json:"command"`
 }
 
 // RoleService defines the Kubernetes Service of a role.
@@ -571,6 +621,12 @@ type InferenceRuntimeProfileSpec struct {
 
 	// Endpoint selects the role serving as the service endpoint.
 	Endpoint EndpointSpec `json:"endpoint"`
+
+	// PodAntiAffinity spreads this service's pods (of every role) across the
+	// given topology domains: no two pods of the service may share a domain.
+	// The label selector is fixed by the platform to the service itself.
+	// +optional
+	PodAntiAffinity *PodAntiAffinity `json:"podAntiAffinity,omitempty"`
 
 	// ReadinessPolicy aggregates the service readiness condition.
 	// +optional

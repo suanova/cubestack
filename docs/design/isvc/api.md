@@ -328,7 +328,7 @@ VAP 校验无法防止 DELETE+CREATE 组合操作，平台允许该组合操作�
 | 字段 | 类型 | 校验规则 | 说明 |
 |---|---|---|---|
 | `vendor` | enum | L0：必填、枚举 | GPU 资源名映射，根据厂商映射为 Kubernetes GPU 扩展资源名。例如 `metax` → `metax-tech.com/gpu`，`nvidia` → `nvidia.com/gpu`。Controller 使用该资源名，根据 `gpuPerPod` 为 Pod 设置 GPU `requests` 和 `limits`。                          |
-| `models` | list | L0：必填、string 列表 | 限制可调度的 GPU 型号，Controller 根据声明的 GPU 型号自动注入节点选择约束。单个型号使用 `nodeSelector`；多个型号使用 `nodeAffinity` 的 `In` 表达式，因为 `nodeSelector` 无法表示多个型号之间的“或”关系。GPU 型号使用平台约定的节点 label：`ai.cubestack.io/accelerator-model`。 |
+| `models` | list | L0：必填、string 列表 | 限制可调度的 GPU 型号，Controller 根据声明的 GPU 型号自动注入节点选择约束。单个型号使用 `nodeSelector`；多个型号使用 `nodeAffinity` 的 `In` 表达式，因为 `nodeSelector` 无法表示多个型号之间的“或”关系。型号值须与厂商设备插件写入的节点 label 值一致（见「节点 GPU 型号信息」）。约束只注入**声明了 GPU**（`resources.gpuPerPod`）的 role；CPU-only 辅助 role（如 router）不受 GPU 型号限制、可调度到任意节点。 |
 
 **GPU 型号约束的目的**
 
@@ -349,13 +349,17 @@ GPU 扩展资源通常只区分厂商，不区分具体 GPU 型号。例如，�
 
 不需要定义额外的字段合并规则。最终只有同时满足所有约束的节点才能被调度。
 
+唯一的实现注意点：多型号的 `nodeAffinity` 以 `In` 表达式形式并入 `nodeAffinity` 的**每一个**已有 `NodeSelectorTerm`（terms 之间是 Kubernetes OR 语义）——不能作为新的替代 term 追加，否则仅匹配旧 term 的节点会绕过型号约束。未来若平台自身需要 AND 型 term（而非替代型），也按此规则与型号约束同 term 合并。
+
+唯一需要显式处理的冲突：管理员把注入用的厂商型号 label key 写进了 `podTemplate.nodeSelector`，但值不在 `accelerator.models` 中——这种声明无论怎么调度都永不满足（同 key 不同值，K8s 对 nodeSelector 的 key 不做合并）。Controller 在渲染阶段将其判为 `Rendered=False, reason=ModelSchedulingConflict`（Profile spec 不可变，不能等部署后才发现）。值属于 `models` 的等价声明（如 `metax-tech.com/gpu.product: MXC500`）则与注入一致，不报错。
+
 **与多节点 HostPath 的关系** 
 
 对于使用 HostPath 的模型存储，模型通常需要预先分发到对应的 GPU 节点。当 `accelerator.models` 限制服务只能调度到指定 GPU 型号的节点时，模型预分发的范围也可以按照对应的 GPU 型号节点池进行管理。因此，管理员需要保证：服务允许调度到的 GPU 型号的所有节点，均已完成对应模型的预分发。这样，模型预分发范围与服务的实际调度范围保持一致。
 
 **节点 GPU 型号信息** 
 
-自动注入 GPU 型号约束的前提是，节点上存在可信的 GPU 型号 label：`ai.cubestack.io/accelerator-model` 该 label 可以由 GPU 设备发现机制或平台 Agent 负责写入。具体的事实来源和打标方式需要在实现阶段确认。在 GPU 型号 label 的来源尚未确定之前，Controller 不启用自动注入逻辑。管理员仍可以通过 `podTemplate.nodeSelector` 手动添加等价的节点约束。这不会改变 `accelerator.models` 的字段语义；后续启用自动注入仅属于 Controller 行为的增强，API 字段本身无需调整。
+自动注入的型号 label 以**厂商设备插件原生写入的节点 label** 为事实来源，不再约定平台自有 label：MetaX 插件写入 `metax-tech.com/gpu.product`（如 `MXC500`），NVIDIA 栈（GPU Feature Discovery）写入 `nvidia.com/gpu.product`。型号 label 与扩展资源名（`metax-tech.com/gpu` / `nvidia.com/gpu`）同属设备插件写入的同一信任域。vendor→label 映射固定为：`metax` → `metax-tech.com/gpu.product`，`nvidia` → `nvidia.com/gpu.product`。`accelerator.models` 的值必须与节点 label 值完全一致（如 `MXC500`）。
 
 ##### modelRequirements
 
@@ -431,14 +435,14 @@ Controller 将此模板按 `workload.kind` 写入对应位置：`LeaderWorkerSet
 | `command` / `args` | list | — | 支持 `{{ }}` 渲染，也支持运行期的 `$()` 和 `${}` 变量。 |
 | `env[]` | list | L0：`value` 与 `fieldRef` 二选一 | `{name, value}` 或 `{name, fieldRef}`。`value` 支持 `{{ }}` 和 `$()`；后者可引用通过 `envFrom` 注入的环境变量。 |
 | `envFromAssets[]` | list[asset 别名] | — | 将渲染后的指定 ConfigMap 以 `envFrom` 方式注入 Pod。 |
-| `resources` | object | — | `{cpu, memory, gpuPerPod}`。`cpu` 和 `memory` 写入 requests；`gpuPerPod` 按 GPU 厂商映射为扩展资源，并同时写入 requests 和 limits。 |
+| `resources` | object | L1：`extendedResources` 的 key 不得与 `cpu`/`memory`/两厂商 GPU 扩展资源名冲突、须为域限定扩展资源名（`domain/name`），值 ≥1（VAP） | `{cpu, memory, gpuPerPod, extendedResources?}`。`cpu` 和 `memory` 写入 requests；`gpuPerPod` 按 GPU 厂商映射为扩展资源，并同时写入 requests 和 limits；`extendedResources`（map[string]int64）的每项按 key 同时写入 requests 和 limits（与 `gpuPerPod` 语义一致），用于 RDMA 等附加扩展资源。 |
 | `securityContext` | object | — | `{privileged?, runAsUser?, runAsGroup?}`。三个字段可分别设置。 |
 | `terminationGracePeriodSeconds` | int | L0：可选，默认 30 | 需要等待连接摘流或 checkpoint 写入时可适当增大。 |
 | `mounts[]` | list | L0：`model` 固定 `main`、`readOnly` 固定 `true` | 模型挂载声明：`{model: main, at: <容器内路径>, readOnly: true}`。Profile 指定容器内挂载位置，ModelVersion 指定模型的存储方式。仅卷类策略（`HostPath`/`Dynamic`/`Static`）声明；`S3` 策略以 URI 消费模型，不声明 `mounts[]`（§4.5）。 |
-| `volumes[]` | list | L0：仅支持 Kubernetes Volume 的受控子集 | 附加卷，例如 shm `emptyDir` 或 InfiniBand `hostPath`。 |
+| `volumes[]` | list | L0：仅支持 Kubernetes Volume 的受控子集；每项 `at` 必填（`^/`），`emptyDir`/`hostPath` 二选一；`emptyDir.medium` 枚举 `""`\|`Memory`。L1：同一 role 内 `at` 唯一（VAP） | 附加卷，每项 `{name, at, emptyDir{medium?, sizeLimit?} \| hostPath{path}}`。Controller 为每项生成一个 volume 和一个**可写** volumeMount（挂到 `at`，与只读的模型/资产卷不同）。典型用途：`emptyDir{medium: Memory, sizeLimit: 8Gi}` 提供 `/dev/shm`（vLLM TP>1 的 SHM transport 需大于容器默认 64Mi），`hostPath` 挂 InfiniBand 设备。负 `sizeLimit` 由 K8s 原生 Pod 校验拒绝（工作负载创建时浮出）。 |
 | `nodeSelector` | map | L0：可选 | 多机使用 HostPath 时，用于限定到已预分发模型的节点池。多个 role 共用的约束可引用 `{{ profile.vars.* }}`。只有管理员明确希望用户决定调度位置时，才应引用 `{{ overrides.* }}`。 |
 | `ports[]` | list | — | 容器端口：`{name, containerPort}`。 |
-| `probes` | object | L0：仅支持 `httpGet` / `tcpSocket` | `startup`、`readiness`、`liveness` 探针，以及 `path`、`port`、`periodSeconds`、`timeoutSeconds`、`failureThreshold`、`initialDelaySeconds`。大模型启动较慢时，应设置足够大的 `failureThreshold`，例如 180。 |
+| `probes` | object | L0：仅支持 `httpGet` / `tcpSocket` / `exec`（三者取一） | `startup`、`readiness`、`liveness` 探针，以及 `path`、`port`、`command`、`periodSeconds`、`timeoutSeconds`、`failureThreshold`、`initialDelaySeconds`。大模型启动较慢时，应设置足够大的 `failureThreshold`，例如 180。`exec` 在容器内运行命令、退出码 0 为通过，是唯一能在组内按运行期角色分流的探针类型：`LeaderWorkerSet` 组里 worker 跑引擎的 headless 侧、不监听任何固定端口，唯有 `exec`（配合 `$(LWS_WORKER_INDEX)` 这类运行期变量）能表达它的就绪——用 `httpGet` 会让 worker 永远不就绪，而组就绪要求 leader 与 worker 都就绪。 |
 | `hostNetwork` / `dnsPolicy` | - | L1：启用 `hostNetwork` 时，`dnsPolicy` 必须为 `ClusterFirstWithHostNet` | 与 Kubernetes 含义相同。典型动机是 GPU role 的 RDMA/bootstrap 数据面（如 PD 分离的 prefill/decode，见部署基线）；纯 HTTP 入口 role（如 router）不应使用——其流量经 Service 与网关转发，不依赖节点 IP。启用 `hostNetwork` 时 Controller 自动把 `ports[].containerPort` 回填为 `hostPort`，使调度器能对 host 端口记账；注意固定端口意味着同节点端口独占：绑定相同端口的两个实例（即使属于不同 InferenceService）不能调度到同一节点。 |
 | `labels` | map | L0：可选；L1：禁止 `ai.cubestack.io/*` 前缀 | 原样传递给 Pod。可供 NetworkPolicy、admission webhook、Kyverno 或计费系统按标签选择 Pod；若与 Controller 生成的 selector 标签冲突，以 Controller 的值为准。 |
 | `annotations` | map | L0：可选 | 原样传递给 Pod。Profile 可在此定义 Prometheus 注解和端口，也可填写外部平台所需的注解。 |
@@ -485,6 +489,7 @@ Controller 将此模板按 `workload.kind` 写入对应位置：`LeaderWorkerSet
 | `endpoint.role` | string | L0：必填；L1：必须存在于 `roles`，且该 role 须定义 `service` | 作为服务对外端点的 role 名称。Controller 以该 role 的 Service 作为内部端点（InferenceService 的 `status.endpoint.internal`）；`publish: true` 时，它同时作为 HTTPRoute 的后端。渲染后 Service 的可解析性由 `EndpointReady` 校验（见 §3.3）。 |
 | `endpoint.portName` | string | L0：可选，默认 `http`；L2：渲染后须存在于端点 Service 的端口中（`EndpointReady`） | 对外端点使用的 Service 端口名，与 `endpoint.role` 一起确定 HTTPRoute 的后端端口。 |
 | `readinessPolicy.requireAllRoles` | bool | L0：v1alpha1 固定 `true` | 服务就绪条件的聚合方式：所有 role 的工作负载和 Pod 都就绪后，InferenceService 才会标记为 Ready。 |
+| `podAntiAffinity` | object | L0：可选；`topologyKey` 必填且为合法 K8s label key | 同服务 Pod 反亲和：`{topologyKey}`。本服务**全部 role** 的 Pod（leader/worker、跨组、跨 role）在声明的拓扑域内互不共置（`requiredDuringSchedulingIgnoredDuringExecution`）——声明一次，Controller 将其注入每个 role 的 PodSpec，保证是互斥的双向约束。labelSelector 由平台固定为本服务（`ai.cubestack.io/inference-service`），不可自定义——用于多副本组异机/异域散布；单副本无效果。与 `accelerator.models` 的 nodeSelector/nodeAffinity（§3.2）按 K8s AND 语义叠加。 |
 
 #### Status
 
@@ -768,7 +773,7 @@ env:
 | —（固定值，不开放） | `strategy: RollingUpdate{maxSurge: 0, maxUnavailable: 1}` | 与 LWS 同一策略：先杀后建不产生并发端口绑定；`replicas=1` 时等价 Recreate |
 | 调度约束 | 同 LWS 的合并规则 | — |
 
-**Service 映射**：`service.ports[]`（targetPort 可取容器端口名）；`service.headless: true` 额外生成 `<isvc>-<role>-hl`（ClusterIP: None）。Service 名即 `roles.<name>.serviceName` 上下文值，供跨 role 发现：`http://{{ roles.prefill.serviceName }}:30000`。未声明 `service` 的 role 没有 Service，`roles.<name>.serviceName` 指向不存在的对象——引用方应只依赖声明了 `service` 的 role。
+**Service 映射**：`service.ports[]`（targetPort 可取容器端口名）；`service.headless: true` 额外生成 `<isvc>-<role>-hl`（ClusterIP: None）。**selector 按 workload 类型区分**：`LeaderWorkerSet` role 的 Service 只选组长——selector 在 Controller 标签之外追加 `leaderworkerset.sigs.k8s.io/worker-index: "0"`。组内只有 leader 提供该 role 的端点，worker 跑引擎的 headless 侧（如 vLLM 多机 PP/TP 的 `--headless`），把流量分摊给整组会打到不接请求的 Pod；反过来若让 worker 探针失败以躲开流量，则组永不就绪（LWS 组就绪 = leader 就绪 ∧ worker 就绪）。headless Service **保持不过滤**，按 Pod 发现正是它的用途。`Deployment` role 与 `group.size=1` 的 LWS role 行为不变（后者唯一 Pod 的 worker-index 同样是 0）。Service 名即 `roles.<name>.serviceName` 上下文值，供跨 role 发现：`http://{{ roles.prefill.serviceName }}:30000`。未声明 `service` 的 role 没有 Service，`roles.<name>.serviceName` 指向不存在的对象——引用方应只依赖声明了 `service` 的 role。
 
 **资源映射**：`gpuPerPod` → `accelerator.vendor` 映射的资源名（metax → `metax-tech.com/gpu`，nvidia → `nvidia.com/gpu`）的 requests+limits；`cpu`/`memory` → requests。
 
@@ -778,7 +783,7 @@ env:
 
 - Controller 只读取 `cubestack-system` 中版本化且不可变的源 ConfigMap，不会修改它。渲染 data 后，在服务所在 namespace 创建副本 `<isvc>-<asset 别名>`。
 - 副本的 ownerReference 指向 InferenceService；annotation 记录源名称和 data hash，并在 `status.assets` 中回显。
-- `mount` 类型的副本以 `defaultMode: <mode>` 挂载到声明的路径，对所有 role 生效。
+- `mount` 类型的副本以 `defaultMode: <mode>` 只读挂载到声明的路径，对所有 role 生效。生成的卷名固定为 `asset-<asset 别名>`：`asset-`、`model-` 是平台保留卷名前缀（模型卷 `model-<key>` 与 S3 凭据卷固定名同理），`podTemplate.volumes` 不得声明以它们开头或与平台固定卷名同名的卷名（同名卷会在工作负载创建时被 apiserver 拒绝，报错浮现在工作负载 reconcile 失败中）。
 - `envFrom` 类型的副本作为环境变量注入所有 role 的 Pod。
 - 如果源 ConfigMap 被删除，Controller 会在下一次 reconcile 时设置 `Resolved=False, reason=AssetNotFound`。
 

@@ -18,6 +18,7 @@ const OPTIONS = {
       models: ["MXC500"],
       architectures: ["deepseek_v4"],
       quantizations: ["w8a8"],
+      servingMode: "pd-separation",
       gpuPerPod: 8,
       overrides: [
         { name: "decodeReplicas", type: "integer", min: 1, max: 16, enum: null, default: 2, description: null },
@@ -67,10 +68,10 @@ test.describe("inference services landing (mocked data)", () => {
     await expect(pro).toContainText("Pending");
     await expect(pro).toContainText("sglang");
     await expect(pro).toContainText("8 × MXC500");
-    // Replicas render multi-line (decode / prefill / group on separate rows).
-    await expect(pro).toContainText("decode 2");
-    await expect(pro).toContainText("prefill 1");
-    await expect(pro).toContainText("group 1");
+    // Replicas render multi-line, one row per integer override the profile declares.
+    await expect(pro).toContainText("decodeReplicas 2");
+    await expect(pro).toContainText("prefillReplicas 1");
+    await expect(pro).toContainText("groupSize 1");
     // No engine metrics -> QPS and P95 columns fall back to a dash.
     await expect(pro).toContainText("—");
     await expect(pro).toContainText("deepseek-v4-pro-w8a8-v1");
@@ -151,6 +152,12 @@ test.describe("inference services landing (mocked data)", () => {
     await page.getByPlaceholder("e.g. dsv4-flash-serve").fill("my-serve");
     await page.getByRole("button", { name: "下一步" }).click();
     await expect(page.locator('[data-step="2"]')).toBeVisible();
+
+    // Step 2: the pd-separation profile shows the reserved per-role GPU type
+    // selects, both fixed to the profile vendor until heterogeneous GPUs land.
+    await expect(page.locator('[data-step="2"]')).toContainText("GPU 类型");
+    await expect(page.locator('[data-od-id="wizard-gpu-prefill"]')).toContainText("metax");
+    await expect(page.locator('[data-od-id="wizard-gpu-decode"]')).toContainText("metax");
 
     // Step 2: select the compatible model version.
     await page.getByText("选择模型版本…").click();

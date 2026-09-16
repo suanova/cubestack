@@ -106,11 +106,12 @@ var _ = BeforeSuite(func() {
 		Client: testMgr.GetClient(),
 		Scheme: testMgr.GetScheme(),
 		Config: DevEnvironmentControllerConfig{
-			GatewayName:       "test-gw",
-			GatewayNamespace:  testNamespace,
-			HTTPPort:          80,
-			SSHPortRangeStart: 20000,
-			SSHPortRangeEnd:   20100,
+			GatewayName:               "test-gw",
+			GatewayNamespace:          testNamespace,
+			GatewayDataplaneNamespace: testGatewayDataplaneNamespace,
+			HTTPPort:                  80,
+			SSHPortRangeStart:         20000,
+			SSHPortRangeEnd:           20100,
 		},
 	}).SetupWithManager(testMgr)
 	Expect(err).NotTo(HaveOccurred())

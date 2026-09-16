@@ -1,0 +1,30 @@
+image:
+  repository: harbor.isuanova.com/suanova/cubestack-controller-manager
+  tag: latest
+
+# Platform Gateway the operator publishes InferenceService routes to
+# (spec.route.publish: true). Each key maps to one manager flag; an empty
+# value omits the flag, keeping the manager default (an empty name or domain
+# leaves publishing off — RouteReady=False, GatewayNotConfigured). Set
+# gateway.domain to enable publishing:
+#   helm install ... --set gateway.domain=example.com
+gateway:
+  name: cubestack-gateway       # --gateway-name
+  namespace: cubestack-system   # --gateway-namespace
+  domain: ""                    # --gateway-domain
+  # Namespace the Gateway's dataplane (proxy) pods run in — not the namespace
+  # of the Gateway object itself. Read by the DevEnvironment controller: it is
+  # where each environment's NetworkPolicy admits ingress from, so a route
+  # through the Gateway can reach the environment pod. Empty keeps environment
+  # pods default-deny inbound.
+  dataplaneNamespace: envoy-gateway-system  # --gateway-dataplane-namespace
+
+replicaCount: 1
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 128Mi
+  requests:
+    cpu: 10m
+    memory: 64Mi

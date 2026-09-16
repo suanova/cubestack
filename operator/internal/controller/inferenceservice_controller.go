@@ -236,6 +236,10 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			return ctrl.Result{}, err
 		}
 		setRouteReadyCondition(&desired.Status.Conditions, route)
+		// status.endpoint.public is the canonical public address of the
+		// published route: the platform's public entry point terminates TLS,
+		// so the scheme is fixed to https regardless of the Gateway listener
+		// protocol. Derived from the route, never from the listener.
 		if hostname != "" && route.Reason == "" {
 			desired.Status.Endpoint.Public = "https://" + hostname
 		}
