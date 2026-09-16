@@ -261,8 +261,8 @@ spec:
 
 ### 7.2 BMC 带外监控（bmc-oem-exporter + idrac-exporter）
 
-**交付形态**：Helm chart `cubestack-bmc-exporter`（Deployment×2 + Service×2 + ScrapeConfig×2，
-BMC 凭据经 values 传入）。chart（OCI: `harbor.isuanova.com/suanova/cubestack-bmc-exporter`）
+**交付形态**：Helm chart `cubestack-bmc-exporter-chart`（Deployment×2 + Service×2 + ScrapeConfig×2，
+BMC 凭据经 values 传入）。chart（OCI: `harbor.isuanova.com/suanova/cubestack-bmc-exporter-chart`）
 与两个 exporter 镜像（`harbor.isuanova.com/suanova/bmc-oem-exporter`、
 `harbor.isuanova.com/suanova/idrac-exporter`）均由 CI 在 main 合入后发布，
 **部署只需 helm install**。
@@ -278,7 +278,7 @@ BMC 凭据经 values 传入）。chart（OCI: `harbor.isuanova.com/suanova/cubes
 
 ```bash
 helm upgrade --install cubestack-bmc-exporter \
-  oci://harbor.isuanova.com/suanova/cubestack-bmc-exporter \
+  oci://harbor.isuanova.com/suanova/cubestack-bmc-exporter-chart \
   -n monitoring \
   --set bmc.username=root \
   --set bmc.password='<BMC 密码>' \
@@ -298,9 +298,11 @@ helm upgrade --install cubestack-bmc-exporter \
 --set 'bmcOemExporter.tolerations[0].effect=NoSchedule'
 ```
 
-- 离线环境无法访问 harbor 时：镜像需在节点本地构建导入（Go 静态编译 + buildah scratch 镜像
-  + `ctr -n k8s.io images import`，参考 `deploy/bmc/deploy-bmc.sh`），安装时用
-  `--set bmcOemExporter.image.repository=...` 指向本地导入的镜像名。
+- 离线环境无法访问 harbor 时：镜像需在节点本地构建导入（bmc-oem-exporter 用仓库 Dockerfile
+  多阶段构建，需本机 buildah store 先有 `golang:1.26` 基础镜像；idrac-exporter 为 Go 静态编译
+  + buildah scratch 镜像；均需 `ctr -n k8s.io images import`，参考
+  `deploy/bmc/deploy-bmc.sh`），安装时用 `--set bmcOemExporter.image.repository=...`
+  指向本地导入的镜像名。
 
 **验证**：
 

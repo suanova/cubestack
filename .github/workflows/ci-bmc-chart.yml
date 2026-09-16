@@ -69,12 +69,12 @@ jobs:
         run: |
           set -euo pipefail
           # Package next to the chart dir and push as an OCI artifact. The OCI
-          # repository is the chart name (cubestack-bmc-exporter); Harbor serves
-          # chart-OCI and image artifacts under the same project, and this name
-          # does not collide with the exporter image repos.
+          # repository is the chart name (cubestack-bmc-exporter-chart); Harbor
+          # serves chart-OCI and image artifacts under the same project, and
+          # this name does not collide with the exporter image repos.
           helm package .
           # The OCI version tag is the Chart.yaml version — derive the tgz
           # name from it so a version bump needs no workflow edit.
           CHART_VERSION="$(helm show chart . | awk '/^version:/{print $2}')"
-          helm push "cubestack-bmc-exporter-${CHART_VERSION}.tgz" \
+          helm push "cubestack-bmc-exporter-chart-${CHART_VERSION}.tgz" \
             oci://harbor.isuanova.com/suanova

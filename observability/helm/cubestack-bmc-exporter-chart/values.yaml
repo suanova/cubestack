@@ -10,9 +10,7 @@ bmc:
   password: ""
   # Redfish endpoint IPs. Host<->BMC IP mapping must be confirmed per
   # environment (see docs/bmc-progress.md: the mapping is not by last octet).
-  hosts:
-    - 10.6.2.14
-    - 10.6.2.18
+  hosts: []
 
 bmcOemExporter:
   image:

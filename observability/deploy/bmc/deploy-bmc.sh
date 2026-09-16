@@ -1,7 +1,8 @@
 #!/bin/bash
 # deploy-bmc.sh: sync BMC exporter sources to the test machine, build static
 # binaries + scratch images remotely (buildah), import them into containerd and
-# install via the cubestack-bmc-exporter Helm chart.
+# install via the cubestack-bmc-exporter-chart Helm chart (release name
+# cubestack-bmc-exporter).
 # 用法：bash deploy-bmc.sh
 # 前提：本机到测试机 vm1-weina:22 的隧道已建立（端口 12201，见 docs/bmc-progress.md），
 #       已安装 sshpass；测试机已装 Go 工具链、buildah 和 helm。
@@ -28,10 +29,9 @@ $SCPT -r "$ROOT_DIR/bmc-oem-exporter" $TEST_USER@127.0.0.1:/tmp/bmc-deploy/
 $SCPT -r "$ROOT_DIR/deploy/bmc" $TEST_USER@127.0.0.1:/tmp/bmc-deploy/
 $SCPT -r "$CHART_DIR" $TEST_USER@127.0.0.1:/tmp/bmc-deploy/
 
-echo "=== 2. 远程编译两个 exporter（静态二进制） ==="
+echo "=== 2. 远程编译 idrac-exporter（静态二进制） ==="
+# bmc-oem-exporter 不用在此编译: 其 Dockerfile 已改为多阶段构建(见步骤 3)
 $SSHT "set -e; export PATH=\$PATH:/usr/local/go/bin GOPROXY=https://goproxy.cn,direct; \
-  cd /tmp/bmc-deploy/bmc-oem-exporter && \
-  CGO_ENABLED=0 go build -o /tmp/bmc-deploy/bmc-oem-bin ./cmd/bmc-oem-exporter; \
   IDRAC_SRC=\"\$(go env GOMODCACHE)/github.com/mrlhansen/idrac_exporter@v1.6.2\"; \
   if [ -d \"\$IDRAC_SRC\" ]; then \
     (cd \"\$IDRAC_SRC\" && GOPROXY=off CGO_ENABLED=0 go build -o /tmp/bmc-deploy/idrac_exporter ./cmd/idrac_exporter) \
@@ -41,13 +41,14 @@ $SSHT "set -e; export PATH=\$PATH:/usr/local/go/bin GOPROXY=https://goproxy.cn,d
   fi"
 
 echo "=== 3. buildah 构建 scratch 镜像 ==="
+# bmc-oem-exporter: 用仓库 Dockerfile 多阶段构建(源码目录作 context)。
+# 前提: 本机 buildah store 已有 golang:1.26 基础镜像(离线环境先
+# 'sudo buildah pull golang:1.26' 或从 tar 导入一次)。
 $SSHT "set -e; \
-  mkdir -p /tmp/bmc-deploy/ctx/oem /tmp/bmc-deploy/ctx/idrac; \
-  cp /tmp/bmc-deploy/bmc-oem-bin /tmp/bmc-deploy/ctx/oem/bmc-oem-exporter; \
+  mkdir -p /tmp/bmc-deploy/ctx/idrac; \
   cp /tmp/bmc-deploy/idrac_exporter /tmp/bmc-deploy/ctx/idrac/; \
-  cp /tmp/bmc-deploy/bmc-oem-exporter/Dockerfile /tmp/bmc-deploy/ctx/oem/; \
   cp /tmp/bmc-deploy/bmc/Dockerfile.idrac-exporter /tmp/bmc-deploy/ctx/idrac/Dockerfile; \
-  sudo buildah bud -t docker.io/library/bmc-oem-exporter:latest /tmp/bmc-deploy/ctx/oem && \
+  sudo buildah bud -t docker.io/library/bmc-oem-exporter:latest /tmp/bmc-deploy/bmc-oem-exporter && \
   sudo buildah bud -t docker.io/library/idrac-exporter:latest /tmp/bmc-deploy/ctx/idrac && \
   sudo buildah push docker.io/library/bmc-oem-exporter:latest docker-archive:/tmp/bmc-deploy/bmc-oem.tar && \
   sudo buildah push docker.io/library/idrac-exporter:latest docker-archive:/tmp/bmc-deploy/idrac.tar"
