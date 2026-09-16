@@ -51,7 +51,7 @@ max(ceph_health_status) or vector(0)
 
 ### RDMA 异常节点数
 ```
-count(count by (node)(infiniband_port_state != 4)) or vector(0)
+count(count by (node)(node_infiniband_state_id != 4)) or vector(0)
 ```
 - 0 时绿色 Healthy，>0 时红色
 

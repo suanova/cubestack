@@ -101,14 +101,25 @@ extraArgs:
 
 ### 3.2 Prometheus Operator 配置
 
-需要在 Prometheus CR 或 `additionalScrapeConfigs` 中配置，使其能发现 `monitoring` namespace 下的 ServiceMonitor：
+需要在 Prometheus CR 中配置，使其能发现所有 namespace 的 ServiceMonitor / PrometheusRule / ScrapeConfig：
 
 ```yaml
-serviceMonitorNamespaceSelector: {}   # 或指定 namespace
-serviceMonitorSelector:
+serviceMonitorNamespaceSelector: {}   # 不过滤 namespace
+serviceMonitorSelector: {}            # 不过滤 —— ⚠ 不能按 part-of 过滤, 否则 kube-prometheus-stack 自带 SM 全部丢失
+ruleNamespaceSelector: {}
+ruleSelector:
+  matchLabels:
+    app.kubernetes.io/part-of: cubestack-observability
+scrapeConfigNamespaceSelector: {}
+scrapeConfigSelector:
   matchLabels:
     app.kubernetes.io/part-of: cubestack-observability
 ```
+
+> 完整 installer 要求（含 node-exporter IB 采集/`node` label、mx-exporter、BMC exporter、Grafana
+> 密码等）见 `docs/installer-requirements.md`（2026-09-14 真实环境校准版）。
+> 注意：CubeStack 的 PrometheusRule / ScrapeConfig 只带 `part-of` label，
+> **不要**依赖 `release` label 匹配（installer 的 helm release 名可能不同，见实测校准记录）。
 
 ### 3.3 PrometheusRule 部署 namespace
 

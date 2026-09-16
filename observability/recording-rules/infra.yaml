@@ -5,7 +5,6 @@ metadata:
   namespace: monitoring
   labels:
     app.kubernetes.io/part-of: cubestack-observability
-    release: kube-prometheus-stack
 spec:
   groups:
     - name: cubestack.node
@@ -59,7 +58,7 @@ spec:
         - record: cluster_node:cubestack_network_rdma_port_up:min
           expr: |
             min by (node) (
-              infiniband_port_state == bool 4
+              node_infiniband_state_id == bool 4
             )
 
         # Per-node network receive bytes rate (excluding loopback and veth)
