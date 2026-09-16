@@ -12,12 +12,16 @@ import {
   agentInstanceName,
   baselineSkillNames,
   getOwnedAgentInstanceCr,
+  platformProviderOps,
+  providerRefs,
   sanitizeIdentity,
   skillEnabled,
   skillInBaseline,
+  templateProviders,
   withSkillDisabled,
   withSkillEnabled,
   type AgentInstanceCr,
+  type AgentTemplateCr,
   type SkillCr,
 } from "./agentcrd";
 
@@ -136,5 +140,89 @@ describe("getOwnedAgentInstanceCr", () => {
     e.statusCode = 404;
     getNamespacedCustomObject.mockRejectedValue(e);
     expect(await getOwnedAgentInstanceCr("alice")).toBeNull();
+  });
+});
+
+const template = (spec: AgentTemplateCr["spec"]): AgentTemplateCr => ({ metadata: { name: "cubepilot" }, spec });
+
+describe("templateProviders", () => {
+  it("maps the provider list, marking the platform entry as system", () => {
+    expect(
+      templateProviders(
+        template({
+          providers: [
+            { name: "cubestack", endpoint: "http://gw:8080/v1", models: ["qwen38-27b"] },
+            { name: "deepseek", endpoint: "https://api.deepseek.com/v1", models: ["deepseek-chat"], credentialRef: { name: "llm-deepseek" } },
+          ],
+        }),
+      ),
+    ).toEqual([
+      { name: "cubestack", endpoint: "http://gw:8080/v1", models: ["qwen38-27b"], keyed: false, origin: "system" },
+      {
+        name: "deepseek",
+        endpoint: "https://api.deepseek.com/v1",
+        models: ["deepseek-chat"],
+        keyed: true,
+        origin: "external",
+      },
+    ]);
+  });
+
+  it("drops entries without a name (they define no selectable ref)", () => {
+    expect(templateProviders(template({ providers: [{ endpoint: "https://x/v1", models: ["m"] }] }))).toEqual([]);
+    expect(templateProviders(null)).toEqual([]);
+  });
+});
+
+describe("providerRefs", () => {
+  it("is one <provider>/<modelId> ref per served model", () => {
+    expect(providerRefs({ name: "deepseek", models: ["deepseek-chat", "deepseek-reasoner"] })).toEqual([
+      "deepseek/deepseek-chat",
+      "deepseek/deepseek-reasoner",
+    ]);
+  });
+
+  it("leaves an id that already carries the prefix alone", () => {
+    expect(providerRefs({ name: "vllm", models: ["vllm/qwen3-32b"] })).toEqual(["vllm/qwen3-32b"]);
+  });
+});
+
+describe("platformProviderOps", () => {
+  const ENDPOINT = "http://gw:8080/v1";
+
+  it("adds the provider to an empty list", () => {
+    expect(platformProviderOps(undefined, ENDPOINT, ["a"])).toEqual([
+      { op: "add", path: "/spec/providers", value: [{ name: "cubestack", endpoint: ENDPOINT, models: ["a"] }] },
+    ]);
+  });
+
+  it("appends it when the template has other providers", () => {
+    expect(platformProviderOps([{ name: "deepseek" }], ENDPOINT, ["a"])).toEqual([
+      { op: "add", path: "/spec/providers/-", value: { name: "cubestack", endpoint: ENDPOINT, models: ["a"] } },
+    ]);
+  });
+
+  it("rewrites only what moved, and never keeps a foreign credential", () => {
+    expect(
+      platformProviderOps(
+        [{ name: "x" }, { name: "cubestack", endpoint: "http://old:8080/v1", models: ["old"], credentialRef: { name: "someone-elses" } }],
+        ENDPOINT,
+        ["a"],
+      ),
+    ).toEqual([
+      { op: "replace", path: "/spec/providers/1/endpoint", value: ENDPOINT },
+      { op: "replace", path: "/spec/providers/1/models", value: ["a"] },
+      { op: "remove", path: "/spec/providers/1/credentialRef" },
+    ]);
+  });
+
+  it("is a no-op when the provider is already current", () => {
+    expect(platformProviderOps([{ name: "cubestack", endpoint: ENDPOINT, models: ["a", "b"] }], ENDPOINT, ["a", "b"])).toEqual([]);
+  });
+
+  it("rewrites the list when the ids or their order changed", () => {
+    expect(platformProviderOps([{ name: "cubestack", endpoint: ENDPOINT, models: ["b", "a"] }], ENDPOINT, ["a", "b"])).toEqual([
+      { op: "replace", path: "/spec/providers/0/models", value: ["a", "b"] },
+    ]);
   });
 });

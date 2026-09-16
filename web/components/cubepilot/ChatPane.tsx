@@ -23,7 +23,7 @@
 import { Box, SxProps, Theme } from "@mui/material";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { PLATFORM_MODEL_NAME } from "@/lib/cubepilot/types";
+import { PLATFORM_MODEL_NAME, displayModelName } from "@/lib/cubepilot/types";
 import type {
   AgentConfig,
   AgentQuestionItem,
@@ -359,7 +359,7 @@ export function ChatPane() {
       newAgentMsg(nextId(), {
         text: t("cubepilot.chat.greeting", {
           tools: String(skills.length),
-          model: config?.selectedModel || PLATFORM_MODEL_NAME,
+          model: displayModelName(config?.selectedModel || PLATFORM_MODEL_NAME),
         }),
         meta: t("cubepilot.chat.greetingMeta"),
       }),
@@ -1420,7 +1420,7 @@ export function ChatPane() {
                 <Box sx={{ p: "12px 18px", borderTop: 1, borderColor: "divider", borderRight: 1, minWidth: 0 }}>
                   <Box sx={{ fontSize: 11, color: "text.secondary" }}>{t("cubepilot.chat.railModel")}</Box>
                   <Box sx={{ ...monoSx, fontSize: 12, fontWeight: 650, mt: "3px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {agentConfig?.selectedModel || PLATFORM_MODEL_NAME}
+                    {displayModelName(agentConfig?.selectedModel || PLATFORM_MODEL_NAME)}
                   </Box>
                 </Box>
                 <Box sx={{ p: "12px 18px", borderTop: 1, borderColor: "divider" }}>

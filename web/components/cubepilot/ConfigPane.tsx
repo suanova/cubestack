@@ -2,21 +2,23 @@
 
 // 配置 tab — model selection, system prompt, LLM catalog, instance status,
 // confirmation policy + allowlist. Model / prompt / policy persist to the
-// caller's AgentInstance CR (the first save provisions it); the model catalog,
-// the LLM catalog and the runtime come from the AgentTemplate inlined in
-// GET /agent/config (reference AgentView: "models are inlined in the
-// AgentTemplate"), so the page needs no AI Gateway round trip.
+// caller's AgentInstance CR (the first save provisions it); the LLM catalog
+// comes from the AgentTemplate's provider list inlined in GET /agent/config
+// (reference AgentView: "models are inlined in the AgentTemplate"), so the page
+// needs no AI Gateway round trip for it.
 
 import { Box } from "@mui/material";
 import { ReactNode, useCallback, useEffect, useState } from "react";
 
+import { modelKey } from "@/lib/cubepilot/llm";
 import {
   PLATFORM_MODEL_NAME,
+  displayModelName,
   type AgentConfig,
   type AgentStatus,
   type AllowlistRule,
   type ConfirmView,
-  type TemplateModelOption,
+  type TemplateProviderOption,
 } from "@/lib/cubepilot/types";
 import { useI18n } from "@/lib/i18n";
 
@@ -34,6 +36,14 @@ function supportedPolicy(v: Pick<ConfirmView, "override" | "confirmPolicy">): st
   return "Allowlist";
 }
 
+/** Parse the comma/newline separated model ids of the form field. */
+function parseModels(raw: string): string[] {
+  return raw
+    .split(/[,\n]/)
+    .map((s) => s.trim())
+    .filter((s) => s !== "");
+}
+
 export function ConfigPane() {
   const { t } = useI18n();
   const { showToast, toastView } = useToast();
@@ -42,22 +52,26 @@ export function ConfigPane() {
   const [status, setStatus] = useState<AgentStatus | null>(null);
   const [confirm, setConfirm] = useState<ConfirmView | null>(null);
   const [policySel, setPolicySel] = useState("");
-  const models: TemplateModelOption[] = config.models ?? [];
-  const systemModels = models.filter((m) => m.origin === "system");
-  /** The platform model the agent runs (the template's cubestack entry). */
-  const platformModel = config.selectedModel || PLATFORM_MODEL_NAME;
-  const platformModelEndpoint = models.find((m) => m.name === PLATFORM_MODEL_NAME)?.endpoint ?? "";
-  /** The catalog name the instance's selection points at: a save writes the
-   *  platform alias with the served model id appended ("cubestack/<id>"), so
-   *  the segment before the "/" is the template entry's name. */
-  const selectedName = config.selectedModel.split("/")[0];
-  const externalModels = models.filter((m) => m.origin !== "system");
+  const providers: TemplateProviderOption[] = config.providers ?? [];
+  const gatewayModels = config.gatewayModels ?? [];
+  /** The platform's own provider — the builtin entry pointing at the gateway. */
+  const platformProvider = providers.find((p) => p.name === PLATFORM_MODEL_NAME);
+  /** The system catalog: what the gateway serves, or (gateway down) the ids the
+   *  platform provider was last written with. */
+  const systemModels = gatewayModels.length > 0 ? gatewayModels : (platformProvider?.models ?? []);
+  /** The model the agent runs, as the user reads it: the platform provider's
+   *  prefix is internal plumbing, an external provider's is part of the ref. */
+  const selectedLabel = config.selectedModel
+    ? displayModelName(config.selectedModel)
+    : (systemModels[0] ?? "—");
+  const selectedId = displayModelName(config.selectedModel);
+  const externalProviders = providers.filter((p) => p.origin !== "system");
   const [confirmBusy, setConfirmBusy] = useState(false);
   const [ruleForm, setRuleForm] = useState({ pattern: "", argPattern: "" });
   /** Which LLM source the card shows: the platform's catalog or your own. */
   const [llmSource, setLlmSource] = useState<"system" | "external">("system");
-  const [llmForm, setLlmForm] = useState({ name: "", endpoint: "", apiKey: "", public: false });
-  const [editingModel, setEditingModel] = useState("");
+  const [llmForm, setLlmForm] = useState({ name: "", endpoint: "", models: "", apiKey: "", public: false });
+  const [editingProvider, setEditingProvider] = useState("");
   const [llmBusy, setLlmBusy] = useState(false);
   const [saving, setSaving] = useState(false);
   /** The last load failure: kept on screen (a toast disappears before it can be
@@ -103,8 +117,8 @@ export function ConfigPane() {
       const res = await fetch("/api/cubepilot/agent/config", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        // selectedModel is the platform alias: the route points the template's
-        // cubestack entry at the model API and then selects it on the instance.
+        // selectedModel is the platform ref: the route points the template's
+        // cubestack provider at the model API and then selects it on the instance.
         body: JSON.stringify({ config: { userInstructions: config.userInstructions } }),
       });
       if (!res.ok) {
@@ -180,29 +194,30 @@ export function ConfigPane() {
     showToast(t("cubepilot.config.ruleRemoved"));
   }
 
-  // ── external models (AgentTemplate.spec.models; keys live in Secrets) ──
+  // ── external providers (AgentTemplate.spec.providers; keys live in Secrets) ──
 
   function resetLlmForm() {
-    setLlmForm({ name: "", endpoint: "", apiKey: "", public: false });
-    setEditingModel("");
+    setLlmForm({ name: "", endpoint: "", models: "", apiKey: "", public: false });
+    setEditingProvider("");
   }
 
-  function startEditLlm(m: TemplateModelOption) {
-    setEditingModel(m.name);
-    setLlmForm({ name: m.name, endpoint: m.endpoint ?? "", apiKey: "", public: !m.keyed });
+  function startEditLlm(p: TemplateProviderOption) {
+    setEditingProvider(p.name);
+    setLlmForm({ name: p.name, endpoint: p.endpoint ?? "", models: p.models.join(", "), apiKey: "", public: !p.keyed });
   }
 
   function cancelEditLlm() {
     resetLlmForm();
   }
 
-  /** Both routes answer with the affected model; reloading the config keeps the
-   *  model dropdown, the catalog and the source lists in step. */
+  /** Both routes answer with the affected provider; reloading the config keeps
+   *  the model card, the catalog and the source lists in step. */
   async function submitLlm() {
     if (llmBusy) return;
     const name = llmForm.name.trim();
     const endpoint = llmForm.endpoint.trim();
-    if (!editingModel && !name) {
+    const models = parseModels(llmForm.models);
+    if (!editingProvider && !name) {
       showToast(t("cubepilot.config.llmErrName"));
       return;
     }
@@ -210,27 +225,33 @@ export function ConfigPane() {
       showToast(t("cubepilot.config.llmErrEndpoint"));
       return;
     }
-    if (!llmForm.public && !editingModel && !llmForm.apiKey) {
+    if (models.length === 0) {
+      showToast(t("cubepilot.config.llmErrModels"));
+      return;
+    }
+    if (!llmForm.public && !editingProvider && !llmForm.apiKey) {
       showToast(t("cubepilot.config.llmErrKey"));
       return;
     }
     setLlmBusy(true);
     try {
-      const res = editingModel
-        ? await fetch(`/api/cubepilot/agent/llms/${encodeURIComponent(editingModel)}`, {
+      const res = editingProvider
+        ? await fetch(`/api/cubepilot/agent/llms/${encodeURIComponent(editingProvider)}`, {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ endpoint, apiKey: llmForm.apiKey || undefined, public: llmForm.public }),
+            body: JSON.stringify({ endpoint, models, apiKey: llmForm.apiKey || undefined, public: llmForm.public }),
           })
         : await fetch("/api/cubepilot/agent/llms", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ name, endpoint, apiKey: llmForm.apiKey || undefined, public: llmForm.public }),
+            body: JSON.stringify({ name, endpoint, models, apiKey: llmForm.apiKey || undefined, public: llmForm.public }),
           });
       const body = (await res.json().catch(() => ({}))) as { error?: string; warning?: string };
       if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
       showToast(
-        editingModel ? t("cubepilot.config.llmUpdated", { name: editingModel }) : t("cubepilot.config.llmAdded", { name }),
+        editingProvider
+          ? t("cubepilot.config.llmUpdated", { name: editingProvider })
+          : t("cubepilot.config.llmAdded", { name }),
       );
       if (body.warning) showToast(body.warning);
       resetLlmForm();
@@ -252,7 +273,7 @@ export function ConfigPane() {
       if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
       showToast(t("cubepilot.config.llmRemoved", { name }));
       if (body.warning) showToast(body.warning);
-      if (editingModel === name) resetLlmForm();
+      if (editingProvider === name) resetLlmForm();
       await loadAll();
     } catch (e) {
       showToast(t("cubepilot.failed", { error: String(e) }), "error");
@@ -316,17 +337,18 @@ export function ConfigPane() {
             <Box sx={{ p: "16px", display: "flex", flexDirection: "column", gap: "14px" }}>
               <Box sx={{ display: "flex", flexDirection: "column", gap: "6px" }}>
                 <Box component="label" sx={{ fontSize: 12.5, color: "text.secondary", fontWeight: 550 }}>{t("cubepilot.config.model")}</Box>
-                {/* The agent runs the platform model: saving points the template's
-                    cubestack entry at the model API and selects it here. */}
-                <Box component="select" aria-label={t("cubepilot.config.model")} value={platformModel} disabled sx={inputSx} data-od-id="cp-config-model-select">
-                  <Box component="option" value={platformModel}>
-                    {platformModel}
+                {/* The agent runs the platform provider: saving points it at the
+                    model API and selects one of its refs here. The select shows
+                    the model id alone — the platform prefix is internal. */}
+                <Box component="select" aria-label={t("cubepilot.config.model")} value={config.selectedModel} disabled sx={inputSx} data-od-id="cp-config-model-select">
+                  <Box component="option" value={config.selectedModel}>
+                    {selectedLabel}
                   </Box>
                 </Box>
                 <Box sx={{ fontSize: 11.5, color: "text.secondary", lineHeight: 1.6 }} data-od-id="cp-config-model-note">
-                  {t("cubepilot.config.modelPlatformNote", { model: platformModel, endpoint: platformModelEndpoint || "—" })}
+                  {t("cubepilot.config.modelPlatformNote", { model: selectedLabel, endpoint: platformProvider?.endpoint || "—" })}
                 </Box>
-                {models.length === 0 ? (
+                {providers.length === 0 && systemModels.length === 0 ? (
                   <Box sx={{ fontSize: 12, color: "#e15c5c" }} data-od-id="cp-config-model-empty">
                     {t("cubepilot.config.noModels")}
                   </Box>
@@ -336,8 +358,8 @@ export function ConfigPane() {
           </Card>
 
           {/* LLM 配置:两个来源 —— 系统默认(平台 AI Gateway,与聊天 tab 同源,
-              只读)或外部模型(自建 OpenAI 兼容端点,写进 AgentTemplate 的
-              models;密钥存平台管理的 Secret,CR 里只有引用)。 */}
+              只读)或外部 provider(自建 OpenAI 兼容端点 + 模型 id,写进
+              AgentTemplate 的 providers;密钥存平台管理的 Secret,CR 里只有引用)。 */}
           <Card data-od-id="cp-config-llm">
             <CardHead
               title={t("cubepilot.config.llmTitle")}
@@ -376,45 +398,60 @@ export function ConfigPane() {
                 {systemModels.length === 0 ? (
                   <Box sx={{ fontSize: 12.5, color: "text.secondary" }}>{t("cubepilot.config.llmSystemNone")}</Box>
                 ) : null}
-                {systemModels.map((m) => (
-                  <Box key={m.name} sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px", fontSize: 13 }}>
-                    <Box sx={{ ...monoSx, fontSize: 12.5 }}>{m.name}</Box>
-                    <Pill variant="neutral">{m.name === selectedName ? t("cubepilot.config.llmSelected") : t("cubepilot.config.llmGatewayPill")}</Pill>
+                {systemModels.map((id) => (
+                  <Box key={id} sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px", fontSize: 13 }}>
+                    <Box sx={{ ...monoSx, fontSize: 12.5 }}>{id}</Box>
+                    <Pill variant="neutral">{id === selectedId ? t("cubepilot.config.llmSelected") : t("cubepilot.config.llmGatewayPill")}</Pill>
                   </Box>
                 ))}
               </Box>
             ) : (
               <Box sx={{ p: "12px 16px 16px", display: "flex", flexDirection: "column", gap: "10px" }} data-od-id="cp-config-llm-external">
-                {externalModels.length === 0 ? (
+                {externalProviders.length === 0 ? (
                   <Box sx={{ fontSize: 12.5, color: "text.secondary" }}>{t("cubepilot.config.llmNone")}</Box>
                 ) : null}
-                {externalModels.map((m) => (
-                  <Box key={m.name} data-od-id="cp-config-llm-row" sx={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                    <Box sx={{ minWidth: 0, flex: 1 }}>
-                      <Box sx={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                        <Box sx={{ ...monoSx, fontSize: 12.5 }}>{m.name}</Box>
-                        {m.name === selectedName ? <Pill variant="neutral">{t("cubepilot.config.llmSelected")}</Pill> : null}
-                        <Pill variant="neutral">{m.keyed ? t("cubepilot.config.llmKeyed") : t("cubepilot.config.llmPublic")}</Pill>
+                {externalProviders.map((p) => {
+                  const refs = p.models.map((id) => modelKey(p.name, id));
+                  return (
+                    <Box key={p.name} data-od-id="cp-config-llm-row" sx={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                      <Box sx={{ minWidth: 0, flex: 1 }}>
+                        <Box sx={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                          {/* The provider key is the ref prefix, so the row reads
+                              "provider/modelId" — the name an externally hosted
+                              model is known by. */}
+                          <Box sx={{ ...monoSx, fontSize: 12.5 }}>{p.name}</Box>
+                          {refs.includes(config.selectedModel) ? <Pill variant="neutral">{t("cubepilot.config.llmSelected")}</Pill> : null}
+                          <Pill variant="neutral">{p.keyed ? t("cubepilot.config.llmKeyed") : t("cubepilot.config.llmPublic")}</Pill>
+                        </Box>
+                        <Box
+                          sx={{ ...monoSx, fontSize: 10.5, color: "text.secondary", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                          title={refs.join(", ")}
+                        >
+                          {refs.join(", ")}
+                        </Box>
+                        <Box
+                          sx={{ ...monoSx, fontSize: 10.5, color: "text.secondary", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                          title={p.endpoint}
+                        >
+                          {p.endpoint}
+                        </Box>
                       </Box>
-                      <Box sx={{ ...monoSx, fontSize: 10.5, color: "text.secondary", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={m.endpoint}>
-                        {m.endpoint}
-                      </Box>
+                      <Btn small variant="ghost" disabled={llmBusy} onClick={() => startEditLlm(p)} data-od-id="cp-config-llm-edit">
+                        {t("cubepilot.config.llmEdit")}
+                      </Btn>
+                      <Btn small variant="ghost" disabled={llmBusy} onClick={() => void removeLlm(p.name)} data-od-id="cp-config-llm-remove">
+                        {t("cubepilot.config.llmRemove")}
+                      </Btn>
                     </Box>
-                    <Btn small variant="ghost" disabled={llmBusy} onClick={() => startEditLlm(m)} data-od-id="cp-config-llm-edit">
-                      {t("cubepilot.config.llmEdit")}
-                    </Btn>
-                    <Btn small variant="ghost" disabled={llmBusy} onClick={() => void removeLlm(m.name)} data-od-id="cp-config-llm-remove">
-                      {t("cubepilot.config.llmRemove")}
-                    </Btn>
-                  </Box>
-                ))}
+                  );
+                })}
 
                 <Box sx={{ display: "flex", flexDirection: "column", gap: "6px", pt: "2px" }}>
                   <CpInput
                     placeholder={t("cubepilot.config.llmNamePh")}
                     aria-label={t("cubepilot.config.llmNamePh")}
                     value={llmForm.name}
-                    disabled={editingModel !== ""}
+                    disabled={editingProvider !== ""}
                     onChange={(e) => setLlmForm((f) => ({ ...f, name: e.target.value }))}
                     sx={{ ...monoSx, fontSize: 12.5 }}
                     data-od-id="cp-config-llm-name"
@@ -428,8 +465,16 @@ export function ConfigPane() {
                     data-od-id="cp-config-llm-endpoint"
                   />
                   <CpInput
+                    placeholder={t("cubepilot.config.llmModelsPh")}
+                    aria-label={t("cubepilot.config.llmModelsPh")}
+                    value={llmForm.models}
+                    onChange={(e) => setLlmForm((f) => ({ ...f, models: e.target.value }))}
+                    sx={{ ...monoSx, fontSize: 12.5 }}
+                    data-od-id="cp-config-llm-models"
+                  />
+                  <CpInput
                     type="password"
-                    placeholder={editingModel ? t("cubepilot.config.llmKeyPhEdit") : t("cubepilot.config.llmKeyPh")}
+                    placeholder={editingProvider ? t("cubepilot.config.llmKeyPhEdit") : t("cubepilot.config.llmKeyPh")}
                     aria-label={t("cubepilot.config.llmKeyPh")}
                     value={llmForm.apiKey}
                     disabled={llmForm.public}
@@ -451,7 +496,7 @@ export function ConfigPane() {
                       {t("cubepilot.config.llmPublicLabel")}
                     </Box>
                     <Box sx={{ flex: 1 }} />
-                    {editingModel ? (
+                    {editingProvider ? (
                       <Btn small disabled={llmBusy} onClick={cancelEditLlm} data-od-id="cp-config-llm-cancel">
                         {t("cubepilot.config.llmCancel")}
                       </Btn>
@@ -459,7 +504,7 @@ export function ConfigPane() {
                     <Btn small variant="primary" disabled={llmBusy} onClick={() => void submitLlm()} data-od-id="cp-config-llm-save">
                       {llmBusy
                         ? t("cubepilot.config.llmSaving")
-                        : editingModel
+                        : editingProvider
                           ? t("cubepilot.config.llmSaveEdit")
                           : t("cubepilot.config.llmAdd")}
                     </Btn>
@@ -506,6 +551,15 @@ export function ConfigPane() {
                 <InstRow k={t("cubepilot.config.instVolume")} v={<Box component="span" sx={{ ...monoSx, fontSize: 11.5 }}>{status.pvcName || "-"}</Box>} />
                 {status.message ? (
                   <InstRow k={t("cubepilot.config.instMessage")} v={<Box sx={{ fontSize: 12 }}>{status.message}</Box>} />
+                ) : null}
+                {/* Ready is not enough: without a usable provider every turn
+                    fails, and the operator says so in the ModelConfigured
+                    condition. Saving the config writes one. */}
+                {status.modelConfigured === false ? (
+                  <InstRow
+                    k={t("cubepilot.config.instModel")}
+                    v={<Box sx={{ fontSize: 12, color: "#e0a13a" }} data-od-id="cp-config-model-condition">{status.modelMessage || "—"}</Box>}
+                  />
                 ) : null}
               </>
             ) : null}

@@ -17,6 +17,10 @@ export const GET = withAuth(async (_req, session) => {
     }
     const phase = cr.status?.phase ?? "";
     const startedAt = cr.metadata?.creationTimestamp;
+    // The operator reports whether the template offers a usable provider
+    // (endpoint + model ids + an existing credential Secret); false means every
+    // turn fails, so the config page surfaces it instead of a silent Ready.
+    const modelCondition = (cr.status?.conditions ?? []).find((c) => c.type === "ModelConfigured");
     const uptimeSeconds =
       phase === "Ready" && startedAt
         ? Math.max(0, Math.floor((Date.now() - new Date(startedAt).getTime()) / 1000))
@@ -30,6 +34,8 @@ export const GET = withAuth(async (_req, session) => {
       user: cr.spec?.owner ?? session.user,
       lastActivity: cr.status?.lastActivity,
       message: cr.status?.message,
+      modelConfigured: modelCondition ? modelCondition.status === "True" : undefined,
+      modelMessage: modelCondition?.message,
       podName: cr.status?.podName,
       pvcName: cr.status?.pvcName,
     } satisfies AgentStatus);

@@ -25,7 +25,7 @@ const INSTANCE_CR = {
   metadata: { name: "tester-cubepilot" },
   spec: {
     owner: "tester",
-    confirmPolicy: "AlwaysAsk",
+    approvalPolicy: "AlwaysAsk",
     allowlist: [{ pattern: "kubectl get" }],
   },
 };
@@ -122,7 +122,7 @@ describe("/api/cubepilot/agent/confirm", () => {
     // The view after the patch re-reads the instance; return the patched CR.
     mockK8s(INSTANCE_CR, {
       metadata: { name: "tester-cubepilot" },
-      spec: { owner: "tester", confirmPolicy: "", allowlist: [{ pattern: "helm ls" }] },
+      spec: { owner: "tester", approvalPolicy: "", allowlist: [{ pattern: "helm ls" }] },
     });    const res = await PUT(
       await authedRequest({ method: "PUT", body: JSON.stringify({ confirmPolicy: "", allowlist: [{ pattern: " helm ls " }] }) }),
       undefined,
@@ -133,7 +133,7 @@ describe("/api/cubepilot/agent/confirm", () => {
     // "" = follow the template: the enum-validated field is removed, not set to
     // an empty string (the CRD rejects "").
     expect(init.body).toEqual([
-      { op: "remove", path: "/spec/confirmPolicy" },
+      { op: "remove", path: "/spec/approvalPolicy" },
       { op: "add", path: "/spec/allowlist", value: [{ pattern: "helm ls" }] },
     ]);
     // Back to the default policy after the reset; the hardcoded defaults are
@@ -168,7 +168,7 @@ describe("/api/cubepilot/agent/confirm", () => {
     mockK8s({
       metadata: { name: "tester-cubepilot" },
       // "Tester" is another identity that sanitizes to the same CR name.
-      spec: { owner: "Tester", confirmPolicy: "None", allowlist: [{ pattern: "kubectl get" }] },
+      spec: { owner: "Tester", approvalPolicy: "None", allowlist: [{ pattern: "kubectl get" }] },
     });
     const res = await GET(await authedGet(), undefined);
     const body = (await res.json()) as confirmViewBody;
@@ -190,7 +190,7 @@ describe("/api/cubepilot/agent/confirm", () => {
     const res = await PUT(await authedRequest({ method: "PUT", body: JSON.stringify({ confirmPolicy: "None" }) }), undefined);
     expect(res.status).toBe(200);
     const [init] = patchNamespacedCustomObject.mock.calls[0] as [{ body?: unknown[] }];
-    expect(init.body).toEqual([{ op: "add", path: "/spec/confirmPolicy", value: "None" }]);
+    expect(init.body).toEqual([{ op: "add", path: "/spec/approvalPolicy", value: "None" }]);
   });
 
   it("PUT: instance owned by someone else → 409", async () => {

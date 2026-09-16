@@ -1,5 +1,5 @@
 // /api/cubepilot/agent/confirm — confirmation policy + allowlist (GET/PUT),
-// backed by the AgentInstance CR (spec.confirmPolicy = the policy override,
+// backed by the AgentInstance CR (spec.approvalPolicy = the policy override,
 // spec.allowlist = the caller's OWN rules). The platform defaults are hardcoded
 // in lib/cubepilot/allowlist.ts (reference: internal/allowlist), never stored on
 // an instance: the view returns the effective list (defaults first, then the
@@ -44,8 +44,8 @@ function toOwnedRule(r: AllowlistRuleCr): AllowlistRule {
 
 async function confirmView(user: string): Promise<ConfirmView> {
   const [cr, tmpl] = await Promise.all([getOwnedAgentInstanceCr(user), getAgentTemplateCr(DEFAULT_AGENT_NAME)]);
-  const override = cr?.spec?.confirmPolicy ?? "";
-  const templatePolicy = tmpl?.spec?.confirmPolicy || TEMPLATE_DEFAULT_POLICY;
+  const override = cr?.spec?.approvalPolicy ?? "";
+  const templatePolicy = tmpl?.spec?.approvalPolicy || TEMPLATE_DEFAULT_POLICY;
   return {
     exists: Boolean(cr),
     confirmPolicy: override || templatePolicy,
@@ -101,17 +101,17 @@ export const PUT = withAuth(async (req, session) => {
       return Response.json({ error: "agent instance name already taken by another user" }, { status: 409 });
     }
     const ops: JsonPatchOp[] = [
-      // "" = "follow the template": the CRD's confirmPolicy is enum-validated
+      // "" = "follow the template": the CRD's approvalPolicy is enum-validated
       // (None | Allowlist | AlwaysAsk) and has no empty value, so the override is
       // cleared by REMOVING the field — the reference does the same through Go's
       // `omitempty`, which makes the field absent on update.
       ...(body.confirmPolicy === undefined
         ? []
         : body.confirmPolicy === ""
-          ? cr.spec?.confirmPolicy !== undefined
-            ? [{ op: "remove" as const, path: "/spec/confirmPolicy" }]
+          ? cr.spec?.approvalPolicy !== undefined
+            ? [{ op: "remove" as const, path: "/spec/approvalPolicy" }]
             : []
-          : [{ op: "add" as const, path: "/spec/confirmPolicy", value: body.confirmPolicy }]),
+          : [{ op: "add" as const, path: "/spec/approvalPolicy", value: body.confirmPolicy }]),
       // Only the caller's own rules are persisted (sanitized: trimmed, deduped).
       ...(body.allowlist !== undefined
         ? [{ op: "add" as const, path: "/spec/allowlist", value: ownedRules(body.allowlist) }]

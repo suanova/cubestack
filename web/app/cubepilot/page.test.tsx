@@ -9,8 +9,9 @@ import CubepilotPage from "./page";
 // The test file avoids JSX because tsconfig sets jsx: "preserve" (for Next),
 // which vitest's import-analysis can't transform.
 
-/** Stub every endpoint the three panes fetch on mount + the agent flow. */
-function stubApi() {
+/** Stub every endpoint the three panes fetch on mount + the agent flow.
+ *  `config` replaces the agent config body when a test needs its own catalog. */
+function stubApi(config?: Record<string, unknown>) {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL) => {
@@ -21,7 +22,7 @@ function stubApi() {
       if (url.includes("/api/cubepilot/tasks")) return json({ tasks: [], reports: [] });
       if (url.includes("/api/cubepilot/agent/config"))
         return json({
-          config: {
+          config: config ?? {
             exists: true,
             selectedModel: "glm-5.2-chat",
             userInstructions: "演示提示词",
@@ -341,6 +342,34 @@ describe("cubepilot page", () => {
     expect(container.textContent).toContain("已切换到 glm-5.2-chat");
     act(() => root.unmount());
   }, 15000);
+
+  it("shows the platform model without its internal alias, external providers with their name", async () => {
+    stubApi({
+      exists: true,
+      selectedModel: "cubestack/qwen38-27b",
+      userInstructions: "",
+      providers: [
+        { name: "cubestack", endpoint: "http://gw.test:8080/v1", models: ["qwen38-27b"], origin: "system" },
+        { name: "deepseek", endpoint: "https://api.deepseek.com/v1", models: ["deepseek-chat"], keyed: true, origin: "external" },
+      ],
+      gatewayModels: ["qwen38-27b", "deepseek-v4-flash"],
+    });
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    // "cubestack/" is internal plumbing the user never chose.
+    const model = container.querySelector('[data-od-id="cp-config-model-select"]') as HTMLSelectElement;
+    expect(model.textContent).toContain("qwen38-27b");
+    expect(model.textContent).not.toContain("cubestack/");
+
+    const external = container.querySelector('[data-od-id="cp-config-llm-src-external"]') as HTMLElement;
+    act(() => external.click());
+    const row = container.querySelector('[data-od-id="cp-config-llm-row"]') as HTMLElement;
+    // The provider key is the ref prefix, so the row reads provider/modelId.
+    expect(row.textContent).toContain("deepseek");
+    expect(row.textContent).toContain("deepseek/deepseek-chat");
+    act(() => root.unmount());
+  });
 
   it("restores the persisted tab on mount", async () => {
     localStorage.setItem("cubestack.cubepilot.tab", "config");

@@ -12,8 +12,9 @@ import { getCoreClient, getCustomObjectsClient } from "@/lib/kubernetes";
 import { logger } from "@/lib/log";
 
 import { k8sErrorCode, k8sErrorResponse, tasksNamespace } from "./taskcrd";
-import type { TemplateModelCr } from "./llm";
-import { PLATFORM_MODEL_NAME, type TemplateModelOption } from "./types";
+import type { TemplateProviderCr } from "./llm";
+import { modelKey } from "./llm";
+import { PLATFORM_MODEL_NAME, type TemplateProviderOption } from "./types";
 
 const GROUP = "ai.cubestack.io";
 const VERSION = "v1alpha1";
@@ -36,14 +37,10 @@ export interface AgentInstanceCr {
   spec?: {
     templateRef?: string;
     owner?: string;
-    identity?: {
-      mode?: string;
-      principalRef?: { userRef?: string; serviceRef?: string };
-    };
     selectedModel?: string;
     userInstructions?: string;
     /** "" / absent = inherit the template policy. */
-    confirmPolicy?: string;
+    approvalPolicy?: string;
     /** The instance's own allowlist rules ("owned"); template rules are inherited. */
     allowlist?: AllowlistRuleCr[];
     /** Skills enabled for this instance; empty = the all-enabled baseline. */
@@ -72,10 +69,14 @@ export interface AgentTemplateCr {
     description?: string;
     /** OpenClaw | Hermes — the agent runtime (template-level, not per-instance). */
     runtime?: string;
+    /** The "<provider>/<modelId>" ref an instance without its own selection
+     *  runs ("" = none). */
     defaultModel?: string;
-    models?: TemplateModelCr[];
+    /** The inline provider list: each provider owns an endpoint, an optional
+     *  credential Secret and the model ids it serves. */
+    providers?: TemplateProviderCr[];
     instructions?: string;
-    confirmPolicy?: string;
+    approvalPolicy?: string;
     allowlist?: AllowlistRuleCr[];
     skills?: string[];
   };
@@ -223,46 +224,73 @@ export function getAgentTemplateCr(name: string): Promise<AgentTemplateCr | null
   return getCr<AgentTemplateCr>("agenttemplates", name);
 }
 
+/** Whether two model-id lists hold the same ids in the same order. */
+function sameModels(a: string[] | undefined, b: string[]): boolean {
+  const current = a ?? [];
+  return current.length === b.length && current.every((id, i) => id === b[i]);
+}
+
 /**
- * Make sure the template has exactly one platform-model entry with the resolved
- * endpoint: the entry is updated in place when the endpoint moved, appended when
- * missing (the rest of the catalog is left alone), and left untouched when it is
- * already current. Returns the ops to send (empty = nothing to do).
+ * Make sure the template has exactly one platform provider with the resolved
+ * endpoint and model list: the provider is updated in place when either moved,
+ * appended when missing (the rest of the catalog is left alone), and left
+ * untouched when it is already current. Returns the ops to send (empty =
+ * nothing to do).
  */
-export function platformModelOps(models: TemplateModelCr[] | undefined, endpoint: string): JsonPatchOp[] {
-  const list = models ?? [];
-  const index = list.findIndex((m) => m.name === PLATFORM_MODEL_NAME);
-  const entry = { name: PLATFORM_MODEL_NAME, endpoint };
+export function platformProviderOps(
+  providers: TemplateProviderCr[] | undefined,
+  endpoint: string,
+  modelIds: string[],
+): JsonPatchOp[] {
+  const list = providers ?? [];
+  const entry = { name: PLATFORM_MODEL_NAME, endpoint, models: modelIds };
+  const index = list.findIndex((p) => p.name === PLATFORM_MODEL_NAME);
   if (index < 0) {
-    return list.length > 0 ? [{ op: "add", path: "/spec/models/-", value: entry }] : [{ op: "add", path: "/spec/models", value: [entry] }];
+    return list.length > 0
+      ? [{ op: "add", path: "/spec/providers/-", value: entry }]
+      : [{ op: "add", path: "/spec/providers", value: [entry] }];
   }
   const current = list[index];
   const ops: JsonPatchOp[] = [];
-  if (current.endpoint !== endpoint) ops.push({ op: "replace", path: `/spec/models/${index}/endpoint`, value: endpoint });
-  // Never leave the platform entry bound to someone else's credential Secret:
-  // the gateway entry carries no credentialRef.
-  if (current.credentialRef) ops.push({ op: "remove", path: `/spec/models/${index}/credentialRef` });
+  if (current.endpoint !== endpoint) {
+    ops.push({ op: "replace", path: `/spec/providers/${index}/endpoint`, value: endpoint });
+  }
+  if (!sameModels(current.models, modelIds)) {
+    ops.push({ op: "replace", path: `/spec/providers/${index}/models`, value: modelIds });
+  }
+  // Never leave the platform provider bound to someone else's credential
+  // Secret: the gateway entry needs none.
+  if (current.credentialRef) ops.push({ op: "remove", path: `/spec/providers/${index}/credentialRef` });
   return ops;
 }
 
-/** The models the template inlines (the instance's model catalog, in list
- *  order). Entries without a name are dropped: they cannot be selected. */
-export function templateModels(tmpl: AgentTemplateCr | null): TemplateModelOption[] {
-  return (tmpl?.spec?.models ?? [])
-    .filter((m): m is TemplateModelCr & { name: string } => typeof m.name === "string" && m.name.length > 0)
-    .map((m) => ({
-      name: m.name,
-      endpoint: m.endpoint,
-      // The platform alias points at the AI Gateway, so it is presented as a
-      // system model (and stays out of the external-model editor).
-      origin: m.name === PLATFORM_MODEL_NAME ? ("system" as const) : ("external" as const),
-      keyed: Boolean(m.credentialRef?.name),
+/** The template's provider catalog, in list order. Entries without a name are
+ *  dropped: they define no ref an instance could select. */
+export function templateProviders(tmpl: AgentTemplateCr | null): TemplateProviderOption[] {
+  return (tmpl?.spec?.providers ?? [])
+    .filter((p): p is TemplateProviderCr & { name: string } => typeof p.name === "string" && p.name.length > 0)
+    .map((p) => ({
+      name: p.name,
+      endpoint: p.endpoint,
+      models: p.models ?? [],
+      keyed: Boolean(p.credentialRef?.name),
+      // The platform provider points at the AI Gateway, so it is presented as a
+      // system provider (and stays out of the external-provider editor).
+      origin: p.name === PLATFORM_MODEL_NAME ? ("system" as const) : ("external" as const),
     }));
 }
 
-/** The caller's agent instances that explicitly select a model — the delete
- *  guard for a model edit (reference instancesSelecting). */
-export async function instancesSelectingModel(model: string): Promise<Array<{ name: string; owner: string }>> {
+/** The refs a provider defines: "<name>/<modelId>" for each model it serves. */
+export function providerRefs(provider: TemplateProviderCr): string[] {
+  const name = provider.name ?? "";
+  return (provider.models ?? []).map((id) => modelKey(name, id));
+}
+
+/** The caller's agent instances that select one of the given refs — the delete
+ *  guard for a provider edit (reference instancesSelecting). */
+export async function instancesSelectingRefs(refs: string[]): Promise<Array<{ name: string; owner: string }>> {
+  const wanted = new Set(refs);
+  if (wanted.size === 0) return [];
   const co = getCustomObjectsClient();
   const res = (await co.listNamespacedCustomObject({
     group: GROUP,
@@ -271,7 +299,14 @@ export async function instancesSelectingModel(model: string): Promise<Array<{ na
     plural: "agentinstances",
   })) as { items?: Array<{ metadata?: { name?: string }; spec?: { selectedModel?: string; templateRef?: string } }> };
   return (res.items ?? [])
-    .filter((i) => i.spec?.selectedModel === model && (i.spec?.templateRef ?? DEFAULT_AGENT_NAME) === DEFAULT_AGENT_NAME)
+    .filter((i) => {
+      const selected = i.spec?.selectedModel;
+      return (
+        selected !== undefined &&
+        wanted.has(selected) &&
+        (i.spec?.templateRef ?? DEFAULT_AGENT_NAME) === DEFAULT_AGENT_NAME
+      );
+    })
     .map((i) => ({ name: i.metadata?.name ?? "", owner: (i.spec as { owner?: string } | undefined)?.owner ?? "" }));
 }
 
@@ -318,7 +353,6 @@ export async function ensureAgentInstance(input: CreateAgentInstanceInput): Prom
   const spec: Record<string, unknown> = {
     templateRef: DEFAULT_AGENT_NAME,
     owner: input.user,
-    identity: { mode: "user", principalRef: { userRef: input.user } },
   };
   if (input.selectedModel) spec.selectedModel = input.selectedModel;
   if (input.userInstructions) spec.userInstructions = input.userInstructions;

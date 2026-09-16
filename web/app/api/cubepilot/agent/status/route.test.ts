@@ -70,8 +70,25 @@ describe("/api/cubepilot/agent/status", () => {
     expect(Number(body.uptimeSeconds)).toBeLessThan(200);
   });
 
-  it("an instance held by another owner reads as absent", async () => {
+  it("reports the operator's ModelConfigured condition", async () => {
     getNamespacedCustomObject.mockResolvedValue({
+      metadata: { name: "tester-cubepilot", creationTimestamp: new Date().toISOString() },
+      spec: { owner: "tester" },
+      status: {
+        phase: "Ready",
+        message: "instance ready",
+        conditions: [
+          { type: "Ready", status: "True" },
+          { type: "ModelConfigured", status: "False", message: "no LLM configured - add one in Portal (Agent Config -> LLM Config)" },
+        ],
+      },
+    });
+    const body = (await (await GET(await authedGet(), undefined)).json()) as Record<string, unknown>;
+    expect(body.modelConfigured).toBe(false);
+    expect(String(body.modelMessage)).toContain("no LLM configured");
+  });
+
+  it("an instance held by another owner reads as absent", async () => {    getNamespacedCustomObject.mockResolvedValue({
       metadata: { name: "tester-cubepilot", creationTimestamp: new Date().toISOString() },
       // "Tester" is another identity that sanitizes to the same CR name.
       spec: { owner: "Tester" },

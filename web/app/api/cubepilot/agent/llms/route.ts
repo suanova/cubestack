@@ -1,9 +1,10 @@
-// /api/cubepilot/agent/llms — add an external model to the builtin
-// AgentTemplate (reference: POST /api/v1/llms, handleAddLLM). A model is a
-// name, an OpenAI-compatible endpoint and either an apiKey (stored in a
-// platform-managed Secret named llm-<name>) or public=true (no credential).
-// Credentials are never written to the CR: the model carries credentialRef
-// only, and the operator renders the model into the AI Gateway.
+// /api/cubepilot/agent/llms — add an external provider to the builtin
+// AgentTemplate (reference: POST /api/llms, handleAddLLM). A provider is a
+// name, an OpenAI-compatible endpoint, the model ids it serves and either an
+// apiKey (stored in a platform-managed Secret named llm-<name>) or public=true
+// (no credential). Credentials are never written to the CR: the provider
+// carries credentialRef only, and the operator renders it into the agent's
+// OpenClaw config.
 
 import {
   DEFAULT_AGENT_NAME,
@@ -15,10 +16,12 @@ import {
 import {
   credentialChoiceError,
   llmCredentialName,
-  modelIndex,
-  modelNameError,
+  modelIdsError,
   normalizeEndpoint,
-  sanitizeModelName,
+  normalizeModelIds,
+  providerIndex,
+  providerNameError,
+  sanitizeProviderName,
   type LlmRequest,
 } from "@/lib/cubepilot/llm";
 import { withAuth } from "@/lib/auth/guard";
@@ -26,22 +29,25 @@ import { withAuth } from "@/lib/auth/guard";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+/** The CRD's cap on spec.providers (MaxItems). */
+const MAX_PROVIDERS = 32;
+
 /**
- * Undo a model whose credential could not be written: an entry pointing at a
+ * Undo a provider whose credential could not be written: an entry pointing at a
  * Secret that does not exist is selectable and then fails every turn. The
  * `test` on resourceVersion limits the undo to the state this request created —
- * without it a concurrent POST of the same model would be rolled back by the
+ * without it a concurrent POST of the same provider would be rolled back by the
  * other request's failure. Best effort — the credential error is the one the
  * caller needs to see.
  */
-async function rollbackAddedModel(name: string, resourceVersion: string): Promise<void> {
+async function rollbackAddedProvider(name: string, resourceVersion: string): Promise<void> {
   try {
     const tmpl = await getAgentTemplateCr(DEFAULT_AGENT_NAME);
-    const index = modelIndex(tmpl?.spec?.models, name);
+    const index = providerIndex(tmpl?.spec?.providers, name);
     if (index >= 0) {
       await patchAgentTemplateCr(DEFAULT_AGENT_NAME, [
         { op: "test", path: "/metadata/resourceVersion", value: resourceVersion },
-        { op: "remove", path: `/spec/models/${index}` },
+        { op: "remove", path: `/spec/providers/${index}` },
       ]);
     }
   } catch {
@@ -56,9 +62,9 @@ export const POST = withAuth(async (req) => {
   } catch {
     return Response.json({ error: "bad JSON body" }, { status: 400 });
   }
-  const name = sanitizeModelName(body.name ?? "");
+  const name = sanitizeProviderName(body.name ?? "");
   if (!name) return Response.json({ error: "name is required" }, { status: 400 });
-  const nameError = modelNameError(name);
+  const nameError = providerNameError(name);
   if (nameError) return Response.json({ error: nameError }, { status: 400 });
   let endpoint: string;
   try {
@@ -66,6 +72,9 @@ export const POST = withAuth(async (req) => {
   } catch (e) {
     return Response.json({ error: e instanceof Error ? e.message : String(e) }, { status: 400 });
   }
+  const models = normalizeModelIds(body.models ?? []);
+  const modelsError = modelIdsError(models);
+  if (modelsError) return Response.json({ error: modelsError }, { status: 400 });
   const apiKey = (body.apiKey ?? "").trim();
   const isPublic = body.public === true;
   const choiceError = credentialChoiceError(apiKey, isPublic);
@@ -74,29 +83,35 @@ export const POST = withAuth(async (req) => {
   try {
     const tmpl = await getAgentTemplateCr(DEFAULT_AGENT_NAME);
     if (!tmpl) return Response.json({ error: `builtin agent template "${DEFAULT_AGENT_NAME}" not found` }, { status: 503 });
-    const models = tmpl.spec?.models ?? [];
-    if (models.some((m) => m.name === name)) {
-      return Response.json({ error: `model "${name}" already exists` }, { status: 409 });
+    const providers = tmpl.spec?.providers ?? [];
+    if (providerIndex(providers, name) >= 0) {
+      return Response.json({ error: `provider "${name}" already exists` }, { status: 409 });
     }
-    const model = {
+    if (providers.length >= MAX_PROVIDERS) {
+      return Response.json({ error: `the template must carry at most ${MAX_PROVIDERS} providers` }, { status: 400 });
+    }
+    const provider = {
       name,
       endpoint,
+      models,
       ...(isPublic ? {} : { credentialRef: { name: llmCredentialName(name) } }),
     };
-    // Commit the model to the template BEFORE creating the credential Secret: a
-    // failed template update leaves no orphaned key Secret.
+    // Commit the provider to the template BEFORE creating the credential
+    // Secret: a failed template update leaves no orphaned key Secret.
     const patched = await patchAgentTemplateCr(DEFAULT_AGENT_NAME, [
-      models.length > 0 ? { op: "add", path: "/spec/models/-", value: model } : { op: "add", path: "/spec/models", value: [model] },
+      providers.length > 0
+        ? { op: "add", path: "/spec/providers/-", value: provider }
+        : { op: "add", path: "/spec/providers", value: [provider] },
     ]);
     if (!isPublic) {
       try {
         await upsertLlmCredential(llmCredentialName(name), apiKey);
       } catch (e) {
-        await rollbackAddedModel(name, patched.metadata?.resourceVersion ?? "");
+        await rollbackAddedProvider(name, patched.metadata?.resourceVersion ?? "");
         throw e;
       }
     }
-    return Response.json({ model });
+    return Response.json({ provider });
   } catch (e) {
     return k8sErrorResponse(e);
   }

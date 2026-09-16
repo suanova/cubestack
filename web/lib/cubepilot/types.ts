@@ -83,40 +83,56 @@ export interface Report {
 }
 
 /**
- * The model name the platform exposes to agents: the AgentTemplate always
- * carries an entry with this name pointing at the AI Gateway, and the config
- * save selects it on the caller's instance, so the agent sees one stable model
- * name in front of the gateway. (Here rather than in agentcrd.ts because client
+ * The provider name the platform owns: the AgentTemplate always carries an
+ * entry with this name pointing at the AI Gateway, and the config save selects
+ * a ref through it, so the agent sees one stable provider in front of the
+ * gateway. Its prefix is internal plumbing users never chose (see
+ * displayModelName). (Here rather than in agentcrd.ts because client
  * components use it and agentcrd pulls in the Kubernetes client.)
  */
 export const PLATFORM_MODEL_NAME = "cubestack";
 
-/** One model the AgentTemplate inlines (reference TemplateModel); the config
- *  page lists these and selectedModel must be one of them. The operator wires
- *  them into the AI Gateway. */
-export interface TemplateModelOption {
+/** The model name users see for the agent's selection: the platform provider
+ *  prefix ("cubestack/<id>") is internal plumbing users never chose, so only
+ *  the model id after the "/" is shown; any other ref (an external provider's)
+ *  is shown whole, as "<provider>/<modelId>". */
+export function displayModelName(selectedModel: string): string {
+  const prefix = `${PLATFORM_MODEL_NAME}/`;
+  return selectedModel.startsWith(prefix) ? selectedModel.slice(prefix.length) : selectedModel;
+}
+
+/** One provider of the AgentTemplate (reference TemplateProviderSpec): an
+ *  endpoint, an optional credential and the model ids it serves. The config
+ *  page lists these; an instance selects a "<name>/<modelId>" ref among them. */
+export interface TemplateProviderOption {
+  /** The provider key — the ref prefix and the OpenClaw provider key. */
   name: string;
   endpoint?: string;
-  /** "system" = served by the platform (the AI Gateway, the chat tab's source);
-   *  "external" = declared on the AgentTemplate (added here or by the platform)
-   *  and rendered into the gateway by the operator. */
-  origin?: "system" | "external";
-  /** external models only: the model binds a platform-managed credential
-   *  Secret (a public model has none). */
+  /** The model ids this provider serves, in CR order. */
+  models: string[];
+  /** The provider binds a platform-managed credential Secret (a public
+   *  provider has none). */
   keyed?: boolean;
+  /** "system" = the platform's own provider (the builtin "cubestack" entry,
+   *  pointing at the AI Gateway); "external" = declared on the AgentTemplate
+   *  by the platform admin. */
+  origin?: "system" | "external";
 }
 
 /** The caller's own assistant selections (reference /api/v1/agent/config:
  *  {exists, selectedModel, userInstructions}). Field names are the
  *  AgentInstance CRD's: exists = the instance is provisioned; selectedModel
- *  "" = unset (a legacy CR; the UI shows the platform model); userInstructions "" = template
- *  instructions only. models is the AgentTemplate's catalog (template-level,
- *  read-only here). */
+ *  is the "<provider>/<modelId>" ref the agent runs ("" = unset; the UI shows
+ *  the platform model); userInstructions "" = template instructions only. */
 export interface AgentConfig {
   exists: boolean;
   selectedModel: string;
   userInstructions: string;
-  models?: TemplateModelOption[];
+  /** The AgentTemplate's provider list (template-level, read-only here). */
+  providers?: TemplateProviderOption[];
+  /** The model ids the AI Gateway serves (the chat tab's source): what the
+   *  platform provider's entry gets written with. */
+  gatewayModels?: string[];
   /** true when the builtin AgentTemplate is missing from the operator
    *  namespace — the operator is not installed, or CUBESTACK_TASKS_NAMESPACE
    *  points somewhere else. The page then has no catalog and no runtime. */
@@ -137,6 +153,12 @@ export interface AgentStatus {
   user: string;
   lastActivity?: string;
   message?: string;
+  /** The operator's ModelConfigured condition: false = the AgentTemplate
+   *  offers no usable provider (no endpoint, no model ids, or a missing
+   *  credential Secret), so every turn would fail. Undefined = not observed. */
+  modelConfigured?: boolean;
+  /** The operator's reason when modelConfigured is false. */
+  modelMessage?: string;
   podName?: string;
   pvcName?: string;
 }
