@@ -207,6 +207,21 @@ function apiServerFetch(url: string, init: RequestInit): Promise<Response> {
  * fetch() against the AI Gateway. `path` is appended to the resolved base
  * (service-proxy bases end in /proxy, so /v1/models lands after the marker).
  */
+/**
+ * The OpenAI-compatible base of the model API (the endpoint the agent runtime
+ * must call): the resolved gateway base with `/v1` appended — a full request
+ * URL or an existing `/v1` is normalised, never doubled. Null when no gateway
+ * base can be resolved (nothing to write into a CR then).
+ */
+export async function gatewayOpenAiBase(): Promise<string | null> {
+  const base = await resolveGatewayBase();
+  if (!base) return null;
+  let url = base.url.trim().replace(/\/+$/, "");
+  const suffix = "/chat/completions";
+  if (url.toLowerCase().endsWith(suffix)) url = url.slice(0, -suffix.length).replace(/\/+$/, "");
+  return url.toLowerCase().endsWith("/v1") ? url : `${url}/v1`;
+}
+
 export async function gatewayFetch(path: string, init: RequestInit = {}): Promise<Response> {
   const base = await resolveGatewayBase();
   if (!base) {

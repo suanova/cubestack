@@ -23,6 +23,7 @@
 import { Box, SxProps, Theme } from "@mui/material";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { PLATFORM_MODEL_NAME } from "@/lib/cubepilot/types";
 import type {
   AgentConfig,
   AgentQuestionItem,
@@ -38,13 +39,7 @@ import { ruleKey } from "@/lib/cubepilot/allowlist";
 import { useI18n } from "@/lib/i18n";
 
 import { fmtTime } from "./format";
-import {
-  ApiCard,
-  CopyBtn,
-  gatewayCurl,
-  ParamsCard,
-  SampleParams,
-} from "./Playground";
+import { CopyBtn, ParamsCard, SampleParams } from "./Playground";
 import { setStoredTab } from "./tabStore";
 import { Btn, Card, CardHead, CpInput, CpTextArea, Icons, Pill, monoSx, STATUS_WARN, useToast } from "./ui";
 
@@ -246,7 +241,7 @@ export function ChatPane() {
   const [thinkingText, setThinkingText] = useState<string | null>(null);
   /** Partial reply text while the model SSE stream is in flight; null = idle. */
   const [streaming, setStreaming] = useState<string | null>(null);
-  const [copied, setCopied] = useState<"endpoint" | "curl" | null>(null);
+  const [copied, setCopied] = useState<"endpoint" | null>(null);
   const [params, setParams] = useState<SampleParams>({ temperature: 0.7, topP: 0.9, maxTokens: 1024 });
 
   // Agent (CubePilot) state — real data from the agent CRs + agent API.
@@ -364,7 +359,7 @@ export function ChatPane() {
       newAgentMsg(nextId(), {
         text: t("cubepilot.chat.greeting", {
           tools: String(skills.length),
-          model: config?.selectedModel || t("cubepilot.chat.modelDefault"),
+          model: config?.selectedModel || PLATFORM_MODEL_NAME,
         }),
         meta: t("cubepilot.chat.greetingMeta"),
       }),
@@ -573,7 +568,7 @@ export function ChatPane() {
     }
   }
 
-  function copyText(text: string, which: "endpoint" | "curl"): void {
+  function copyText(text: string, which: "endpoint"): void {
     const done = () => {
       setCopied(which);
       setTimeout(() => setCopied((c) => (c === which ? null : c)), 1400);
@@ -1425,7 +1420,7 @@ export function ChatPane() {
                 <Box sx={{ p: "12px 18px", borderTop: 1, borderColor: "divider", borderRight: 1, minWidth: 0 }}>
                   <Box sx={{ fontSize: 11, color: "text.secondary" }}>{t("cubepilot.chat.railModel")}</Box>
                   <Box sx={{ ...monoSx, fontSize: 12, fontWeight: 650, mt: "3px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {agentConfig?.selectedModel || t("cubepilot.chat.modelDefault")}
+                    {agentConfig?.selectedModel || PLATFORM_MODEL_NAME}
                   </Box>
                 </Box>
                 <Box sx={{ p: "12px 18px", borderTop: 1, borderColor: "divider" }}>
@@ -1542,21 +1537,10 @@ export function ChatPane() {
             </Card>
           </Box>
         ) : (
-          <Box sx={{ display: "flex", flexDirection: "column", gap: "14px" }}>
-            <ParamsCard
-              params={params}
-              onChange={(patch) => setParams((p) => ({ ...p, ...patch }))}
-            />
-            {endpoint && svc ? (
-              <ApiCard
-                endpoint={endpoint}
-                model={svc.id}
-                params={params}
-                copied={copied === "curl"}
-                onCopy={() => copyText(gatewayCurl(endpoint, svc.id, params), "curl")}
-              />
-            ) : null}
-          </Box>
+          <ParamsCard
+            params={params}
+            onChange={(patch) => setParams((p) => ({ ...p, ...patch }))}
+          />
         )}
       </Box>
     </Box>

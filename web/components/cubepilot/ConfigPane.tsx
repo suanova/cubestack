@@ -10,7 +10,14 @@
 import { Box } from "@mui/material";
 import { ReactNode, useCallback, useEffect, useState } from "react";
 
-import type { AgentConfig, AgentStatus, AllowlistRule, ConfirmView, TemplateModelOption } from "@/lib/cubepilot/types";
+import {
+  PLATFORM_MODEL_NAME,
+  type AgentConfig,
+  type AgentStatus,
+  type AllowlistRule,
+  type ConfirmView,
+  type TemplateModelOption,
+} from "@/lib/cubepilot/types";
 import { useI18n } from "@/lib/i18n";
 
 import { ruleKey } from "@/lib/cubepilot/allowlist";
@@ -37,6 +44,13 @@ export function ConfigPane() {
   const [policySel, setPolicySel] = useState("");
   const models: TemplateModelOption[] = config.models ?? [];
   const systemModels = models.filter((m) => m.origin === "system");
+  /** The platform model the agent runs (the template's cubestack entry). */
+  const platformModel = config.selectedModel || PLATFORM_MODEL_NAME;
+  const platformModelEndpoint = models.find((m) => m.name === PLATFORM_MODEL_NAME)?.endpoint ?? "";
+  /** The catalog name the instance's selection points at: a save writes the
+   *  platform alias with the served model id appended ("cubestack/<id>"), so
+   *  the segment before the "/" is the template entry's name. */
+  const selectedName = config.selectedModel.split("/")[0];
   const externalModels = models.filter((m) => m.origin !== "system");
   const [confirmBusy, setConfirmBusy] = useState(false);
   const [ruleForm, setRuleForm] = useState({ pattern: "", argPattern: "" });
@@ -89,9 +103,9 @@ export function ConfigPane() {
       const res = await fetch("/api/cubepilot/agent/config", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          config: { selectedModel: config.selectedModel, userInstructions: config.userInstructions },
-        }),
+        // selectedModel is the platform alias: the route points the template's
+        // cubestack entry at the model API and then selects it on the instance.
+        body: JSON.stringify({ config: { userInstructions: config.userInstructions } }),
       });
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string };
@@ -302,25 +316,20 @@ export function ConfigPane() {
             <Box sx={{ p: "16px", display: "flex", flexDirection: "column", gap: "14px" }}>
               <Box sx={{ display: "flex", flexDirection: "column", gap: "6px" }}>
                 <Box component="label" sx={{ fontSize: 12.5, color: "text.secondary", fontWeight: 550 }}>{t("cubepilot.config.model")}</Box>
-                <Box
-                  component="select"
-                  aria-label={t("cubepilot.config.model")}
-                  value={config.selectedModel || ""}
-                  onChange={(e) => setConfig((c) => ({ ...c, selectedModel: e.target.value }))}
-                  sx={inputSx}
-                  data-od-id="cp-config-model-select"
-                >
-                  <Box component="option" value="">
-                    {t("cubepilot.config.modelDefault")}
+                {/* The agent runs the platform model: saving points the template's
+                    cubestack entry at the model API and selects it here. */}
+                <Box component="select" aria-label={t("cubepilot.config.model")} value={platformModel} disabled sx={inputSx} data-od-id="cp-config-model-select">
+                  <Box component="option" value={platformModel}>
+                    {platformModel}
                   </Box>
-                  {models.map((m) => (
-                    <Box key={m.name} component="option" value={m.name}>
-                      {m.name}
-                    </Box>
-                  ))}
+                </Box>
+                <Box sx={{ fontSize: 11.5, color: "text.secondary", lineHeight: 1.6 }} data-od-id="cp-config-model-note">
+                  {t("cubepilot.config.modelPlatformNote", { model: platformModel, endpoint: platformModelEndpoint || "—" })}
                 </Box>
                 {models.length === 0 ? (
-                  <Box sx={{ fontSize: 12, color: "#e15c5c" }}>{t("cubepilot.config.noModels")}</Box>
+                  <Box sx={{ fontSize: 12, color: "#e15c5c" }} data-od-id="cp-config-model-empty">
+                    {t("cubepilot.config.noModels")}
+                  </Box>
                 ) : null}
               </Box>
             </Box>
@@ -370,7 +379,7 @@ export function ConfigPane() {
                 {systemModels.map((m) => (
                   <Box key={m.name} sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px", fontSize: 13 }}>
                     <Box sx={{ ...monoSx, fontSize: 12.5 }}>{m.name}</Box>
-                    <Pill variant="neutral">{m.name === config.selectedModel ? t("cubepilot.config.llmSelected") : t("cubepilot.config.llmGatewayPill")}</Pill>
+                    <Pill variant="neutral">{m.name === selectedName ? t("cubepilot.config.llmSelected") : t("cubepilot.config.llmGatewayPill")}</Pill>
                   </Box>
                 ))}
               </Box>
@@ -384,7 +393,7 @@ export function ConfigPane() {
                     <Box sx={{ minWidth: 0, flex: 1 }}>
                       <Box sx={{ display: "flex", alignItems: "center", gap: "6px" }}>
                         <Box sx={{ ...monoSx, fontSize: 12.5 }}>{m.name}</Box>
-                        {m.name === config.selectedModel ? <Pill variant="neutral">{t("cubepilot.config.llmSelected")}</Pill> : null}
+                        {m.name === selectedName ? <Pill variant="neutral">{t("cubepilot.config.llmSelected")}</Pill> : null}
                         <Pill variant="neutral">{m.keyed ? t("cubepilot.config.llmKeyed") : t("cubepilot.config.llmPublic")}</Pill>
                       </Box>
                       <Box sx={{ ...monoSx, fontSize: 10.5, color: "text.secondary", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={m.endpoint}>

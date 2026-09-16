@@ -82,6 +82,15 @@ export interface Report {
   p2: number;
 }
 
+/**
+ * The model name the platform exposes to agents: the AgentTemplate always
+ * carries an entry with this name pointing at the AI Gateway, and the config
+ * save selects it on the caller's instance, so the agent sees one stable model
+ * name in front of the gateway. (Here rather than in agentcrd.ts because client
+ * components use it and agentcrd pulls in the Kubernetes client.)
+ */
+export const PLATFORM_MODEL_NAME = "cubestack";
+
 /** One model the AgentTemplate inlines (reference TemplateModel); the config
  *  page lists these and selectedModel must be one of them. The operator wires
  *  them into the AI Gateway. */
@@ -100,7 +109,7 @@ export interface TemplateModelOption {
 /** The caller's own assistant selections (reference /api/v1/agent/config:
  *  {exists, selectedModel, userInstructions}). Field names are the
  *  AgentInstance CRD's: exists = the instance is provisioned; selectedModel
- *  "" = "Runtime Default" (clear the override); userInstructions "" = template
+ *  "" = unset (a legacy CR; the UI shows the platform model); userInstructions "" = template
  *  instructions only. models is the AgentTemplate's catalog (template-level,
  *  read-only here). */
 export interface AgentConfig {

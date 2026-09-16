@@ -21,8 +21,15 @@ vi.mock("@/lib/kubernetes", () => ({
   }),
 }));
 
-const { gatewayFetch } = vi.hoisted(() => ({ gatewayFetch: vi.fn() }));
-vi.mock("@/lib/cubepilot/gateway", () => ({ gatewayFetch }));
+const { gatewayFetch, gatewayOpenAiBase } = vi.hoisted(() => ({ gatewayFetch: vi.fn(), gatewayOpenAiBase: vi.fn() }));
+vi.mock("@/lib/cubepilot/gateway", () => ({ gatewayFetch, gatewayOpenAiBase }));
+
+/** The model API a save writes into the template. */
+const MODEL_API = "http://ai-gateway.envoy-gateway-system.svc:18080/v1";
+
+/** The selection a save writes on the instance: the platform alias plus the
+ *  first model the gateway serves. */
+const SELECTED_MODEL = "cubestack/qwen38-27b";
 
 const { GET, PUT } = await import("./route");
 
@@ -62,9 +69,10 @@ describe("/api/cubepilot/agent/config", () => {
   beforeEach(() => {
     process.env.CUBESTACK_TASKS_NAMESPACE = "cubestack-system";
     vi.clearAllMocks();
-    // No system catalog by default: an unreachable gateway must never break
-    // the page (the template's own models still resolve).
-    gatewayFetch.mockResolvedValue(new Response(JSON.stringify({ data: [] }), { status: 200 }));
+    // The gateway serves one model by default: a save selects it under the
+    // platform alias, and the catalog lists it as a system entry.
+    gatewayFetch.mockResolvedValue(new Response(JSON.stringify({ data: [{ id: "qwen38-27b" }] }), { status: 200 }));
+    gatewayOpenAiBase.mockResolvedValue(MODEL_API);
   });
 
   afterEach(() => {
@@ -88,6 +96,7 @@ describe("/api/cubepilot/agent/config", () => {
       models: [
         { name: "glm-5.2-chat", endpoint: "http://ai-gateway.envoy-gateway-system.svc:18080", origin: "external", keyed: false },
         { name: "deepseek-v4-flash", endpoint: "http://ai-gateway.envoy-gateway-system.svc:18080", origin: "external", keyed: false },
+        { name: "qwen38-27b", origin: "system" },
       ],
       templateMissing: false,
     });
@@ -114,21 +123,27 @@ describe("/api/cubepilot/agent/config", () => {
     expect(body.config.userInstructions).toBe("");
   });
 
-  it("PUT: first save creates the instance (owner + identity + templateRef)", async () => {
+  it("PUT: first save points the template at the model API, then creates the instance", async () => {
     mockK8s(null);
     const created = {
       metadata: { name: "tester-cubepilot" },
-      spec: { owner: "tester", selectedModel: "glm-5.2-chat" },
+      spec: { owner: "tester", selectedModel: SELECTED_MODEL },
     };
     createNamespacedCustomObject.mockResolvedValue(created);
     const res = await PUT(
-      await authedRequest({ method: "PUT", body: JSON.stringify({ config: { selectedModel: "glm-5.2-chat" } }) }),
+      await authedRequest({ method: "PUT", body: JSON.stringify({ config: { userInstructions: "be terse" } }) }),
       undefined,
     );
     expect(res.status).toBe(200);
     const body = (await res.json()) as { config: { exists: boolean; selectedModel: string } };
     expect(body.config.exists).toBe(true);
-    expect(body.config.selectedModel).toBe("glm-5.2-chat");
+    expect(body.config.selectedModel).toBe(SELECTED_MODEL);
+    // 1) the template gained the platform model entry pointing at the model API
+    const [tplPatch] = patchNamespacedCustomObject.mock.calls[0] as [{ plural?: string; body?: unknown[] }];
+    expect(tplPatch.plural).toBe("agenttemplates");
+    expect(tplPatch.body).toEqual([
+      { op: "add", path: "/spec/models/-", value: { name: "cubestack", endpoint: MODEL_API } },
+    ]);
     const [init] = createNamespacedCustomObject.mock.calls[0] as [
       { body?: { metadata?: { name?: string }; spec?: Record<string, unknown> } },
     ];
@@ -137,27 +152,88 @@ describe("/api/cubepilot/agent/config", () => {
     expect(spec?.owner).toBe("tester");
     expect(spec?.templateRef).toBe("cubepilot");
     expect(spec?.identity).toEqual({ mode: "user", principalRef: { userRef: "tester" } });
+    expect(spec?.selectedModel).toBe(SELECTED_MODEL);
   });
 
-  it("PUT: existing instance → JSON-Patch add on the changed fields", async () => {
+  it("PUT: the template is refreshed and the instance forced onto the platform model", async () => {
     mockK8s(INSTANCE_CR);
     patchNamespacedCustomObject.mockResolvedValue(INSTANCE_CR);
     const res = await PUT(
-      await authedRequest({ method: "PUT", body: JSON.stringify({ config: { selectedModel: "glm-5.2-chat", userInstructions: "" } }) }),
+      await authedRequest({ method: "PUT", body: JSON.stringify({ config: { selectedModel: "deepseek-v4-flash", userInstructions: "" } }) }),
       undefined,
     );
     expect(res.status).toBe(200);
-    expect(patchNamespacedCustomObject).toHaveBeenCalledTimes(1);
-    const [init] = patchNamespacedCustomObject.mock.calls[0] as [{ name?: string; body?: unknown[] }];
-    expect(init.name).toBe("tester-cubepilot");
-    expect(init.body).toEqual([
-      { op: "add", path: "/spec/selectedModel", value: "glm-5.2-chat" },
+    // 1) template: the platform entry is appended (the catalog keeps its own
+    //    entries), 2) instance: the alias replaces whatever the body asked for.
+    const calls = patchNamespacedCustomObject.mock.calls as Array<[{ plural?: string; name?: string; body?: unknown[] }]>;
+    expect(calls[0][0].plural).toBe("agenttemplates");
+    expect(calls[0][0].body).toEqual([
+      { op: "add", path: "/spec/models/-", value: { name: "cubestack", endpoint: MODEL_API } },
+    ]);
+    expect(calls[1][0].plural).toBe("agentinstances");
+    expect(calls[1][0].name).toBe("tester-cubepilot");
+    expect(calls[1][0].body).toEqual([
+      { op: "add", path: "/spec/selectedModel", value: SELECTED_MODEL },
       // "" clears: the field is removed, not written as an empty string.
       { op: "remove", path: "/spec/userInstructions" },
     ]);
   });
 
+  it("PUT: nothing is written when the model API serves no models", async () => {
+    gatewayFetch.mockResolvedValue(new Response(JSON.stringify({ data: [] }), { status: 200 }));
+    mockK8s(INSTANCE_CR);
+    const res = await PUT(await authedRequest({ method: "PUT", body: JSON.stringify({ config: { userInstructions: "x" } }) }), undefined);
+    expect(res.status).toBe(503);
+    expect(((await res.json()) as { error: string }).error).toContain("serves no models");
+    expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
+  it("PUT: an up-to-date platform entry is not rewritten", async () => {
+    mockK8s(INSTANCE_CR, {
+      metadata: { name: "cubepilot" },
+      spec: { models: [{ name: "cubestack", endpoint: MODEL_API }] },
+    });
+    patchNamespacedCustomObject.mockResolvedValue(INSTANCE_CR);
+    const res = await PUT(await authedRequest({ method: "PUT", body: JSON.stringify({ config: { userInstructions: "x" } }) }), undefined);
+    expect(res.status).toBe(200);
+    const calls = patchNamespacedCustomObject.mock.calls as Array<[{ plural?: string }]>;
+    expect(calls.map((c) => c[0].plural)).toEqual(["agentinstances"]);
+  });
+
+  it("PUT: a moved model API rewrites the endpoint and drops a foreign credential", async () => {
+    mockK8s(INSTANCE_CR, {
+      metadata: { name: "cubepilot" },
+      spec: { models: [{ name: "cubestack", endpoint: "http://old:8080/v1", credentialRef: { name: "someone-elses" } }] },
+    });
+    patchNamespacedCustomObject.mockResolvedValue(INSTANCE_CR);
+    await PUT(await authedRequest({ method: "PUT", body: JSON.stringify({ config: { userInstructions: "x" } }) }), undefined);
+    const calls = patchNamespacedCustomObject.mock.calls as Array<[{ plural?: string; body?: unknown[] }]>;
+    expect(calls[0][0].body).toEqual([
+      { op: "replace", path: "/spec/models/0/endpoint", value: MODEL_API },
+      { op: "remove", path: "/spec/models/0/credentialRef" },
+    ]);
+  });
+
+  it("PUT: nothing is written when the model API cannot be resolved", async () => {
+    gatewayOpenAiBase.mockResolvedValue(null);
+    mockK8s(INSTANCE_CR);
+    const res = await PUT(await authedRequest({ method: "PUT", body: JSON.stringify({ config: { userInstructions: "x" } }) }), undefined);
+    expect(res.status).toBe(503);
+    expect(((await res.json()) as { error: string }).error).toContain("model API");
+    expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
+  it("PUT: nothing is written when the builtin template is missing", async () => {
+    mockK8s(INSTANCE_CR, null);
+    const res = await PUT(await authedRequest({ method: "PUT", body: JSON.stringify({ config: { userInstructions: "x" } }) }), undefined);
+    expect(res.status).toBe(503);
+    expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
   it("GET: a missing builtin template is reported, not silently empty", async () => {
+    // No gateway models either: the assertion is about the template, and
+    // catalog merging is covered by its own test.
+    gatewayFetch.mockResolvedValue(new Response(JSON.stringify({ data: [] }), { status: 200 }));
     mockK8s(null, null);
     const body = (await (await GET(await authedGet(), undefined)).json()) as { config: { models: unknown[]; templateMissing?: boolean } };
     expect(body.config.templateMissing).toBe(true);
@@ -178,45 +254,8 @@ describe("/api/cubepilot/agent/config", () => {
     ]);
   });
 
-  it("PUT: a system-catalog model is accepted", async () => {
-    gatewayFetch.mockResolvedValue(new Response(JSON.stringify({ data: [{ id: "system-only" }] }), { status: 200 }));
-    mockK8s(INSTANCE_CR);
-    patchNamespacedCustomObject.mockResolvedValue(INSTANCE_CR);
-    const res = await PUT(
-      await authedRequest({ method: "PUT", body: JSON.stringify({ config: { selectedModel: "system-only" } }) }),
-      undefined,
-    );
-    expect(res.status).toBe(200);
-  });
 
-  it("PUT: a model the template does not declare → 400", async () => {
-    mockK8s(INSTANCE_CR);
-    const res = await PUT(
-      await authedRequest({ method: "PUT", body: JSON.stringify({ config: { selectedModel: "nope" } }) }),
-      undefined,
-    );
-    expect(res.status).toBe(400);
-    expect(((await res.json()) as { error: string }).error).toContain('model "nope" is not in the cubepilot template');
-    expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
-  });
 
-  it("PUT: a template without models accepts only the runtime default", async () => {
-    mockK8s(INSTANCE_CR, { metadata: { name: "cubepilot" }, spec: {} });
-    const rejected = await PUT(
-      await authedRequest({ method: "PUT", body: JSON.stringify({ config: { selectedModel: "glm-5.2-chat" } }) }),
-      undefined,
-    );
-    expect(rejected.status).toBe(400);
-    patchNamespacedCustomObject.mockResolvedValue(INSTANCE_CR);
-    const cleared = await PUT(
-      await authedRequest({ method: "PUT", body: JSON.stringify({ config: { selectedModel: "" } }) }),
-      undefined,
-    );
-    expect(cleared.status).toBe(200);
-    expect(patchNamespacedCustomObject.mock.calls[0][0]).toMatchObject({
-      body: [{ op: "remove", path: "/spec/selectedModel" }],
-    });
-  });
 
   it("PUT: non-string fields → 400", async () => {
     const res = await PUT(

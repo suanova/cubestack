@@ -212,9 +212,9 @@ describe("cubepilot page", () => {
       (container.querySelector('[data-od-id="obj-glm-5.2-chat"]') as HTMLElement).getAttribute("aria-pressed"),
     ).toBe("true");
     expect(container.querySelector('[data-od-id="params-card"]')).not.toBeNull();
-    // No fake metrics card: the rail is params + the real cURL card.
+    // No fake metrics card: the rail is the params card only (the cURL card is gone).
     expect(container.querySelector('[data-od-id="metrics-card"]')).toBeNull();
-    expect(container.querySelector('[data-od-id="api-card"]')).not.toBeNull();
+    expect(container.querySelector('[data-od-id="api-card"]')).toBeNull();
     expect(container.querySelector('[data-od-id="pg-endpoint"]')?.textContent).toContain("/v1/chat/completions");
     // The object meta line shows the gateway owner.
     expect(container.textContent).toContain("cubestack");

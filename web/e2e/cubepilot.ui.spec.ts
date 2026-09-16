@@ -20,10 +20,12 @@ const ENC_KEY = encodeURIComponent(SESSION_KEY);
 /** The instance's real state, as the CR-projected endpoints report it. */
 const CONFIG_READY = {
   exists: true,
-  selectedModel: "glm-5.2-chat",
+  // The agent always runs the platform model: the save writes it in the
+  // <alias>/<model id> form the operator expects.
+  selectedModel: "cubestack/qwen38-27b",
   userInstructions: "巡检优先,写操作全部走审批",
-  // The AgentTemplate's inlined models: the page lists these (no gateway call).
   models: [
+    { name: "cubestack", endpoint: "http://ai-gateway.test:8080/v1", origin: "system" },
     { name: "glm-5.2-chat", endpoint: "http://ai-gateway.test:8080", origin: "external", keyed: true },
     { name: "system-only", origin: "system" },
   ],
@@ -290,7 +292,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     await obj.click();
 
     const thread = page.locator('[data-od-id="chat-thread"]');
-    await expect(thread).toContainText("技能 2 项,当前模型 glm-5.2-chat");
+    await expect(thread).toContainText("技能 2 项,当前模型 cubestack/qwen38-27b");
     await expect(thread).toContainText("会话审计已开启");
 
     // The rail lists the confirmation allowlist as tags: the hardcoded platform
@@ -317,7 +319,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     const rail = page.locator('[data-od-id="agent-status-card"]');
     await expect(rail).toContainText("最近活动");
     await expect(rail).toContainText("当前模型");
-    await expect(rail).toContainText("glm-5.2-chat");
+    await expect(rail).toContainText("cubestack/qwen38-27b");
     await expect(rail).toContainText("阶段");
     await expect(rail).toContainText("Ready");
 
@@ -355,7 +357,8 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     // baseline still lists the registered skills.
     const rail = page.locator('[data-od-id="agent-status-card"]');
     await expect(rail).toContainText("状态 · —");
-    await expect(rail).toContainText("运行时默认");
+    // No instance yet → the rail shows the platform model the save would use.
+    await expect(rail).toContainText("cubestack");
     await expect(page.locator('[data-od-id="tool-whitelist-card"]')).toContainText("集群巡检");
   });
 
@@ -463,11 +466,12 @@ test.describe("cubepilot config (AgentInstance CR + AgentTemplate catalog)", () 
 
     // Model from the CR; the dropdown lists the template's own models plus the
     // system catalog (+ the runtime default).
+    // The agent runs the platform model: the field is fixed, and the note says
+    // where it points.
     const modelSelect = page.locator('[data-od-id="cp-config-model-select"]');
-    await expect(modelSelect).toHaveValue("glm-5.2-chat");
-    await expect(modelSelect.locator("option")).toHaveCount(3);
-    await expect(modelSelect).toContainText("运行时默认");
-    await expect(modelSelect).toContainText("system-only");
+    await expect(modelSelect).toBeDisabled();
+    await expect(modelSelect).toHaveValue("cubestack/qwen38-27b");
+    await expect(page.locator('[data-od-id="cp-config-model-note"]')).toContainText("http://ai-gateway.test:8080/v1");
 
     await expect(page.locator('[data-od-id="cp-config-prompt-input"]')).toHaveValue("巡检优先,写操作全部走审批");
 
@@ -561,7 +565,9 @@ test.describe("cubepilot config (AgentInstance CR + AgentTemplate catalog)", () 
     // Saving the model/prompt hits the config route and confirms with a toast.
     await page.locator('[data-od-id="cp-config-save"]').click();
     await expect(page.getByText("配置已保存,模型与系统提示词下轮生效")).toBeVisible();
-    expect(captured.configPuts.at(-1)).toEqual({ selectedModel: "glm-5.2-chat", userInstructions: "巡检优先,写操作全部走审批" });
+    // Saving sends only the prompt: the route writes the platform model into the
+    // template and selects it on the instance.
+    expect(captured.configPuts.at(-1)).toEqual({ userInstructions: "巡检优先,写操作全部走审批" });
   });
 
   test("switching the policy to None persists the override and hides the allowlist", async ({ page }) => {

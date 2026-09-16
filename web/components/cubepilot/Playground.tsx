@@ -1,7 +1,7 @@
 "use client";
 
 // Context cards for the model side of the unified chat rail, adapted from
-// public/chat.html (sampling params / cURL). Rendered by ChatPane while a
+// public/chat.html (sampling params). Rendered by ChatPane while a
 // gateway model is selected.
 
 import { Box } from "@mui/material";
@@ -15,19 +15,6 @@ export interface SampleParams {
   temperature: number;
   topP: number;
   maxTokens: number;
-}
-
-/** cURL snippet for the real gateway endpoint + selected model + params. */
-export function gatewayCurl(endpoint: string, model: string, p: SampleParams): string {
-  return (
-    `curl -X POST \\\n  ${endpoint}/v1/chat/completions \\\n` +
-    `  -H "Content-Type: application/json" \\\n` +
-    `  -d '{\n    "model": "${model}",\n` +
-    `    "messages": [{"role": "user", "content": "你好"}],\n` +
-    `    "temperature": ${p.temperature},\n` +
-    `    "max_tokens": ${p.maxTokens},\n` +
-    `    "stream": true\n  }'`
-  );
 }
 
 /** One sampling-parameter slider row in the params card. */
@@ -76,7 +63,7 @@ function SliderRow({
   );
 }
 
-/** Small text button used inside the endpoint chip and the cURL card head. */
+/** Small text button used inside the endpoint chip. */
 export function CopyBtn({ text, onClick }: { text: string; onClick: () => void }) {
   return (
     <Box
@@ -140,59 +127,6 @@ export function ParamsCard({
         value={params.maxTokens}
         onChange={(v) => onChange({ maxTokens: v })}
       />
-    </Card>
-  );
-}
-
-/** API 调用 card: live cURL snippet with a copy button. */
-export function ApiCard({
-  endpoint,
-  model,
-  params,
-  copied,
-  onCopy,
-}: {
-  endpoint: string;
-  model: string;
-  params: SampleParams;
-  copied: boolean;
-  onCopy: () => void;
-}) {
-  const { t } = useI18n();
-  const curl = gatewayCurl(endpoint, model, params);
-  return (
-    <Card data-od-id="api-card">
-      <Box
-        sx={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          px: "18px",
-          py: "10px",
-          borderBottom: 1,
-          borderColor: "divider",
-        }}
-      >
-        <Box sx={{ fontSize: 12.5, fontWeight: 600 }}>{t("cubepilot.playground.apiTitle")}</Box>
-        <CopyBtn text={copied ? t("cubepilot.playground.copied") : t("cubepilot.playground.apiCopy")} onClick={onCopy} />
-      </Box>
-      <Box
-        data-od-id="pg-curl"
-        sx={{
-          m: 0,
-          bg: "text.primary",
-          color: "background.default",
-          px: "18px",
-          py: "14px",
-          ...monoSx,
-          fontSize: 11.5,
-          lineHeight: 1.7,
-          overflowX: "auto",
-          whiteSpace: "pre",
-        }}
-      >
-        {curl}
-      </Box>
     </Card>
   );
 }

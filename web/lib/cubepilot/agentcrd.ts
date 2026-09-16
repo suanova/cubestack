@@ -13,7 +13,7 @@ import { logger } from "@/lib/log";
 
 import { k8sErrorCode, k8sErrorResponse, tasksNamespace } from "./taskcrd";
 import type { TemplateModelCr } from "./llm";
-import type { TemplateModelOption } from "./types";
+import { PLATFORM_MODEL_NAME, type TemplateModelOption } from "./types";
 
 const GROUP = "ai.cubestack.io";
 const VERSION = "v1alpha1";
@@ -96,6 +96,8 @@ export interface SkillCr {
     phase?: string;
   };
 }
+
+export { PLATFORM_MODEL_NAME } from "./types";
 
 /** One JSON-Patch op (client-node sends custom-object patches as
  *  application/json-patch+json; an "add" op replaces an existing member).
@@ -221,6 +223,28 @@ export function getAgentTemplateCr(name: string): Promise<AgentTemplateCr | null
   return getCr<AgentTemplateCr>("agenttemplates", name);
 }
 
+/**
+ * Make sure the template has exactly one platform-model entry with the resolved
+ * endpoint: the entry is updated in place when the endpoint moved, appended when
+ * missing (the rest of the catalog is left alone), and left untouched when it is
+ * already current. Returns the ops to send (empty = nothing to do).
+ */
+export function platformModelOps(models: TemplateModelCr[] | undefined, endpoint: string): JsonPatchOp[] {
+  const list = models ?? [];
+  const index = list.findIndex((m) => m.name === PLATFORM_MODEL_NAME);
+  const entry = { name: PLATFORM_MODEL_NAME, endpoint };
+  if (index < 0) {
+    return list.length > 0 ? [{ op: "add", path: "/spec/models/-", value: entry }] : [{ op: "add", path: "/spec/models", value: [entry] }];
+  }
+  const current = list[index];
+  const ops: JsonPatchOp[] = [];
+  if (current.endpoint !== endpoint) ops.push({ op: "replace", path: `/spec/models/${index}/endpoint`, value: endpoint });
+  // Never leave the platform entry bound to someone else's credential Secret:
+  // the gateway entry carries no credentialRef.
+  if (current.credentialRef) ops.push({ op: "remove", path: `/spec/models/${index}/credentialRef` });
+  return ops;
+}
+
 /** The models the template inlines (the instance's model catalog, in list
  *  order). Entries without a name are dropped: they cannot be selected. */
 export function templateModels(tmpl: AgentTemplateCr | null): TemplateModelOption[] {
@@ -229,7 +253,9 @@ export function templateModels(tmpl: AgentTemplateCr | null): TemplateModelOptio
     .map((m) => ({
       name: m.name,
       endpoint: m.endpoint,
-      origin: "external" as const,
+      // The platform alias points at the AI Gateway, so it is presented as a
+      // system model (and stays out of the external-model editor).
+      origin: m.name === PLATFORM_MODEL_NAME ? ("system" as const) : ("external" as const),
       keyed: Boolean(m.credentialRef?.name),
     }));
 }
