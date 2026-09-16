@@ -5,12 +5,11 @@ metadata:
   namespace: monitoring
   labels:
     app.kubernetes.io/part-of: cubestack-observability
-    release: kube-prometheus-stack
 spec:
   groups:
     # -------------------------------------------------------------------------
     # 注意：node 级 GPU 容量/分配/利用率规则（cluster_node:cubestack_gpu_*）
-    # 统一由 gpu.yaml 维护，使用 resource=~"nvidia.com/gpu|metax-tech.com/gpu"
+    # 统一由 gpu.yaml 维护，使用 resource=~"nvidia.com/gpu|nvidia_com_gpu|metax-tech.com/gpu|metax_tech_com_gpu"
     # 覆盖所有厂商，此文件不重复定义。
     # 此文件只负责 NVIDIA DCGM 专有的 per-card 和 workload GPU 指标。
     # -------------------------------------------------------------------------
@@ -75,8 +74,8 @@ spec:
                 ),
                 "pod", "$1", "exported_pod", "(.*)"
               )
-              * on(namespace, pod) group_left(label_cubestack_io_inference_service)
-              kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-inference"}
+              * on(namespace, pod) group_left(label_ai_cubestack_io_inference_service)
+              kube_pod_labels{label_ai_cubestack_io_inference_service!=""}
             )
             or
             max by (namespace, devenv, uuid) (
@@ -102,8 +101,8 @@ spec:
                 ),
                 "pod", "$1", "exported_pod", "(.*)"
               )
-              * on(namespace, pod) group_left(label_cubestack_io_inference_service)
-              kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-inference"}
+              * on(namespace, pod) group_left(label_ai_cubestack_io_inference_service)
+              kube_pod_labels{label_ai_cubestack_io_inference_service!=""}
             )
             or
             max by (namespace, devenv, uuid) (

@@ -27,14 +27,14 @@ Controller 创建 LWS / Deployment 等 workload 时，**pod template** 的 label
 ```yaml
 labels:
   app.kubernetes.io/part-of: cubestack-inference   # 固定值
-  cubestack.io/inference-service: <CR name>         # InferenceService CR 的 .metadata.name
-  cubestack.io/role: prefill | decode | router       # 对应 workload 的角色
+  ai.cubestack.io/inference-service: <CR name>         # InferenceService CR 的 .metadata.name
+  ai.cubestack.io/role: prefill | decode | router       # 对应 workload 的角色
 ```
 
 **为什么需要这些 label：**
-- `app.kubernetes.io/part-of`：Recording Rule 用此过滤，避免误计算其他 pod 的 GPU 请求
-- `cubestack.io/inference-service`：KSM 通过 `kube_pod_labels` 透传此 label，Recording Rule 用 `* on(namespace,pod) group_left(label_cubestack_io_inference_service)` 将 SGLang/GPU pod 指标关联回 InferenceService
-- `cubestack.io/role`：PD 分离面板按 role 拆分 prefill/decode 指标
+- `app.kubernetes.io/part-of`：平台统一标识（保持现有约定）；指标归属过滤由 `ai.cubestack.io/inference-service` 承担，避免误计算其他 pod 的 GPU 请求
+- `ai.cubestack.io/inference-service`：KSM 通过 `kube_pod_labels` 透传此 label，Recording Rule 用 `* on(namespace,pod) group_left(label_ai_cubestack_io_inference_service)` 将 SGLang/GPU pod 指标关联回 InferenceService
+- `ai.cubestack.io/role`：PD 分离面板按 role 拆分 prefill/decode 指标
 
 ### 1.3 对 Envoy AI Gateway 的要求（待确认）
 
@@ -91,7 +91,7 @@ KSM 默认**不透传**自定义 pod/statefulset labels。必须通过以下配�
 ```yaml
 # kube-state-metrics values（Helm）
 extraArgs:
-  - --metric-labels-allowlist=pods=[app.kubernetes.io/part-of,cubestack.io/inference-service,cubestack.io/role,ai.cubestack.io/dev-environment],statefulsets=[ai.cubestack.io/dev-environment]
+  - --metric-labels-allowlist=pods=[app.kubernetes.io/part-of,ai.cubestack.io/inference-service,ai.cubestack.io/role,ai.cubestack.io/dev-environment],statefulsets=[ai.cubestack.io/dev-environment]
 ```
 
 - `pods=[...]`：使 `kube_pod_labels` 透传 pod label，供 Recording Rule join

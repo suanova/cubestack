@@ -15,7 +15,7 @@
 ```yaml
 kube-state-metrics:
   extraArgs:
-    - --metric-labels-allowlist=pods=[app.kubernetes.io/part-of,cubestack.io/inference-service,cubestack.io/role,ai.cubestack.io/dev-environment],statefulsets=[ai.cubestack.io/dev-environment]
+    - --metric-labels-allowlist=pods=[app.kubernetes.io/part-of,ai.cubestack.io/inference-service,ai.cubestack.io/role,ai.cubestack.io/dev-environment],statefulsets=[ai.cubestack.io/dev-environment]
 ```
 
 **为什么需要：**

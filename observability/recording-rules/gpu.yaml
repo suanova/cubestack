@@ -5,7 +5,6 @@ metadata:
   namespace: monitoring
   labels:
     app.kubernetes.io/part-of: cubestack-observability
-    release: kube-prometheus-stack
 spec:
   groups:
     - name: cubestack.node.gpu
@@ -15,7 +14,7 @@ spec:
         - record: cluster_node:cubestack_gpu_capacity:sum
           expr: |
             sum by (node) (
-              kube_node_status_allocatable{resource=~"nvidia.com/gpu|metax-tech.com/gpu"}
+              kube_node_status_allocatable{resource=~"nvidia.com/gpu|nvidia_com_gpu|metax-tech.com/gpu|metax_tech_com_gpu"}
             )
 
         # Per-node GPU allocated
@@ -23,7 +22,7 @@ spec:
           expr: |
             sum by (node) (
               label_replace(
-                kube_pod_container_resource_requests{resource=~"nvidia.com/gpu|metax-tech.com/gpu"},
+                kube_pod_container_resource_requests{resource=~"nvidia.com/gpu|nvidia_com_gpu|metax-tech.com/gpu|metax_tech_com_gpu"},
                 "node", "$1", "node", "(.*)"
               )
               * on(namespace, pod) group_left(node)
@@ -54,8 +53,8 @@ spec:
                 ),
                 "pod", "$1", "exported_pod", "(.*)"
               )
-              * on(namespace, pod) group_left(label_cubestack_io_inference_service)
-              kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-inference"}
+              * on(namespace, pod) group_left(label_ai_cubestack_io_inference_service)
+              kube_pod_labels{label_ai_cubestack_io_inference_service!=""}
             )
             or
             max by (namespace, devenv, uuid) (
@@ -81,8 +80,8 @@ spec:
                 ),
                 "pod", "$1", "exported_pod", "(.*)"
               )
-              * on(namespace, pod) group_left(label_cubestack_io_inference_service)
-              kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-inference"}
+              * on(namespace, pod) group_left(label_ai_cubestack_io_inference_service)
+              kube_pod_labels{label_ai_cubestack_io_inference_service!=""}
             )
             or
             max by (namespace, devenv, uuid) (
