@@ -5,8 +5,7 @@
 // a non-empty list is an explicit allow-set.
 
 import {
-  agentInstanceName,
-  getAgentInstanceCr,
+  getOwnedAgentInstanceCr,
   k8sErrorResponse,
   listSkillCrs,
   skillEnabled,
@@ -21,7 +20,7 @@ export const GET = withAuth(async (_req, session) => {
   try {
     const [skills, instance] = await Promise.all([
       listSkillCrs(),
-      getAgentInstanceCr(agentInstanceName(session.user)),
+      getOwnedAgentInstanceCr(session.user),
     ]);
     const skillsView: SkillInfo[] = skills.map((s) => ({
       name: s.metadata?.name ?? "",

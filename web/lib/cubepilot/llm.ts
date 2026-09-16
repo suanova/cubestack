@@ -35,6 +35,26 @@ export function sanitizeModelName(raw: string): string {
   return out;
 }
 
+/** DNS-1123 subdomain: dot-separated labels of lowercase alphanumerics and
+ *  inner dashes. */
+const DNS_1123_SUBDOMAIN = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$/;
+const MAX_OBJECT_NAME = 253;
+
+/**
+ * Whether a sanitized model name can name a k8s object, or the message to
+ * return. sanitizeModelName keeps "." and "-", so it can still yield an empty
+ * label ("a..b") or an overlong name — every one of those would be rejected by
+ * the API server when the credential Secret is written, leaving the model it
+ * was added for unusable. Returns "" when the name is usable.
+ */
+export function modelNameError(name: string): string {
+  const secret = llmCredentialName(name);
+  if (secret.length > MAX_OBJECT_NAME || !DNS_1123_SUBDOMAIN.test(secret)) {
+    return `model name "${name}" does not yield a valid Secret name: use lowercase letters, digits, "-" and "."`;
+  }
+  return "";
+}
+
 /**
  * Validate an endpoint and reduce it to the API root an OpenAI SDK expects: the
  * SDK appends /chat/completions itself, so an endpoint copied from a working

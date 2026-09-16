@@ -98,6 +98,22 @@ describe("/api/cubepilot/pilot/[...path]", () => {
     expect(pilotFetch).not.toHaveBeenCalled();
   });
 
+  it("404s a session key that would escape the sessions prefix", async () => {
+    // Next.js decodes the segment before the handler runs, so %2E%2E arrives
+    // as ".." and encodeURIComponent would leave it intact.
+    const cases: string[][] = [
+      ["api", "v1", "sessions", "..", "..", "admin", "messages"],
+      ["api", "v1", "sessions", "..", "approval", "pending"],
+      ["api", "v1", "sessions", ".", "messages"],
+      ["api", "v1", "sessions", "..", "turn"],
+    ];
+    for (const path of cases) {
+      const res = await GET(await authedGet(), ctx(path));
+      expect(res.status).toBe(404);
+    }
+    expect(pilotFetch).not.toHaveBeenCalled();
+  });
+
   it("503s when the agent API base cannot be resolved", async () => {
     resolvePilotBase.mockReturnValue(null);
     const res = await GET(await authedGet(), ctx(["api", "v1", "sessions"]));

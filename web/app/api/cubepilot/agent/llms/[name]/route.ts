@@ -16,9 +16,11 @@ import {
   credentialChoiceError,
   llmCredentialName,
   modelIndex,
+  modelNameError,
   normalizeEndpoint,
   sanitizeModelName,
   type LlmRequest,
+  type TemplateModelCr,
 } from "@/lib/cubepilot/llm";
 import { withAuth } from "@/lib/auth/guard";
 
@@ -37,8 +39,24 @@ async function locate(name: string) {
   return { tmpl, models, index };
 }
 
+/**
+ * Undo a model edit whose credential change failed, so the template never keeps
+ * an entry the failed write left inconsistent (for example one naming a Secret
+ * that was never written). Best effort — the original error is the one to
+ * report.
+ */
+async function restoreModel(index: number, previous: TemplateModelCr): Promise<void> {
+  try {
+    await patchAgentTemplateCr(DEFAULT_AGENT_NAME, [{ op: "replace", path: `/spec/models/${index}`, value: previous }]);
+  } catch {
+    // Leave it: the caller still gets the credential failure.
+  }
+}
+
 export const PUT = withAuth<Ctx>(async (req, _session, ctx) => {
   const name = sanitizeModelName((await ctx.params).name);
+  const nameError = modelNameError(name);
+  if (nameError) return Response.json({ error: nameError }, { status: 400 });
   let body: LlmRequest;
   try {
     body = (await req.json()) as LlmRequest;
@@ -83,14 +101,19 @@ export const PUT = withAuth<Ctx>(async (req, _session, ctx) => {
 
     // The old Secret is only deleted when it was the platform-managed one.
     let warning = "";
-    if (isPublic && existing.credentialRef?.name) {
-      if (existing.credentialRef.name === owned) {
-        await deleteLlmCredential(owned);
-      } else {
-        warning = `credential Secret "${existing.credentialRef.name}" is not the platform-managed "${owned}" and was left in place`;
+    try {
+      if (isPublic && existing.credentialRef?.name) {
+        if (existing.credentialRef.name === owned) {
+          await deleteLlmCredential(owned);
+        } else {
+          warning = `credential Secret "${existing.credentialRef.name}" is not the platform-managed "${owned}" and was left in place`;
+        }
       }
+      if (!isPublic && apiKey !== "") await upsertLlmCredential(owned, apiKey);
+    } catch (e) {
+      await restoreModel(index, existing);
+      throw e;
     }
-    if (!isPublic && apiKey !== "") await upsertLlmCredential(owned, apiKey);
     return Response.json({ model: { name, endpoint, ...(credentialRef ? { credentialRef } : {}) }, ...(warning ? { warning } : {}) });
   } catch (e) {
     return k8sErrorResponse(e);
@@ -118,9 +141,17 @@ export const DELETE = withAuth<Ctx>(async (_req, _session, ctx) => {
     // a model at a Secret it shares with another model must not lose it.
     const owned = llmCredentialName(name);
     let warning = "";
-    if (existing?.credentialRef?.name) {
-      if (existing.credentialRef.name === owned) await deleteLlmCredential(owned);
-      else warning = `credential Secret "${existing.credentialRef.name}" is not the platform-managed "${owned}" and was left in place`;
+    const ref = existing?.credentialRef?.name;
+    if (ref && ref !== owned) {
+      warning = `credential Secret "${ref}" is not the platform-managed "${owned}" and was left in place`;
+    } else if (ref) {
+      try {
+        await deleteLlmCredential(owned);
+      } catch (e) {
+        // The model is already gone: a Secret left behind is a cleanup problem,
+        // not a failed delete.
+        warning = `credential Secret "${owned}" could not be removed: ${e instanceof Error ? e.message : String(e)}`;
+      }
     }
     return Response.json({ deleted: name, ...(warning ? { warning } : {}) });
   } catch (e) {

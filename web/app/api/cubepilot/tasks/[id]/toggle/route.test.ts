@@ -55,6 +55,41 @@ describe("/api/cubepilot/tasks/[id]/toggle", () => {
     ]);
   });
 
+  it("applies the state the client asks for", async () => {
+    getNamespacedCustomObject.mockResolvedValue(TASK_CR("Enabled"));
+    patchNamespacedCustomObject.mockResolvedValue(TASK_CR("Paused"));
+    const res = await POST(
+      await authedRequest({ method: "POST", body: JSON.stringify({ state: "Paused" }) }),
+      ctx("tester-task-01"),
+    );
+    expect(res.status).toBe(200);
+    expect((patchNamespacedCustomObject.mock.calls[0][0] as { body: unknown }).body).toEqual([
+      { op: "add", path: "/spec/state", value: "Paused" },
+    ]);
+  });
+
+  it("a retry of the same request does not flip the state back", async () => {
+    // The first call landed (the state is already Paused); the client resent it
+    // after an uncertain response.
+    getNamespacedCustomObject.mockResolvedValue(TASK_CR("Paused"));
+    const res = await POST(
+      await authedRequest({ method: "POST", body: JSON.stringify({ state: "Paused" }) }),
+      ctx("tester-task-01"),
+    );
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { task: { enabled: boolean } }).task.enabled).toBe(false);
+    expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
+  it("400s on a state that is not Enabled/Paused", async () => {
+    const res = await POST(
+      await authedRequest({ method: "POST", body: JSON.stringify({ state: "Flipped" }) }),
+      ctx("tester-task-01"),
+    );
+    expect(res.status).toBe(400);
+    expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
   it("flips Paused back to Enabled", async () => {
     getNamespacedCustomObject.mockResolvedValue(TASK_CR("Paused"));
     patchNamespacedCustomObject.mockResolvedValue(TASK_CR("Enabled"));

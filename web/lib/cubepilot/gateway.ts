@@ -110,6 +110,25 @@ export function gatewayTokenHeader(): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+/** Warn once per process — this is a property of the deployment, not of a call. */
+let warnedPlainHttpToken = false;
+
+/**
+ * Note a bearer token about to cross a plain-HTTP hop. It is not refused: an
+ * in-cluster http://<service> URL is the chart's documented default (the token
+ * stays on the cluster network), and CUBESTACK_GATEWAT_URL may point at a
+ * gateway that terminates TLS itself. Over a network the operator does not
+ * control, the token should travel over https.
+ */
+function warnIfTokenOverPlainHttp(url: string, headers: Record<string, string>): void {
+  if (warnedPlainHttpToken || !headers.Authorization || url.startsWith("https://")) return;
+  warnedPlainHttpToken = true;
+  logger("gateway").warn("CUBESTACK_GATEWAY_TOKEN is sent over a non-HTTPS gateway URL", {
+    url,
+    hint: "serve the gateway over https, or drop the token where the network is trusted",
+  });
+}
+
 /** Decode base64 cert data, or read a PEM file, into a Buffer (or undefined). */
 function readTlsData(data?: string, file?: string): Buffer | undefined {
   if (data) return Buffer.from(data, "base64");
@@ -193,7 +212,9 @@ export async function gatewayFetch(path: string, init: RequestInit = {}): Promis
       `AI gateway not found: set CUBESTACK_GATEWAT_URL or install the gateway in namespace ${GATEWAY_NAMESPACE}`,
     );
   }
-  const headers = { ...gatewayTokenHeader(), ...(init.headers as Record<string, string> | undefined) };
+  const token = gatewayTokenHeader();
+  warnIfTokenOverPlainHttp(base.url, token);
+  const headers = { ...token, ...(init.headers as Record<string, string> | undefined) };
   const url = base.url + path;
   return base.via === "apiserver" ? apiServerFetch(url, { ...init, headers }) : fetch(url, { ...init, headers });
 }

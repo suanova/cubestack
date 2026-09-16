@@ -14,6 +14,7 @@ import {
   agentInstanceName,
   getAgentInstanceCr,
   getAgentTemplateCr,
+  getOwnedAgentInstanceCr,
   k8sErrorResponse,
   patchAgentInstanceCr,
   type AllowlistRuleCr,
@@ -42,7 +43,7 @@ function toOwnedRule(r: AllowlistRuleCr): AllowlistRule {
 }
 
 async function confirmView(user: string): Promise<ConfirmView> {
-  const [cr, tmpl] = await Promise.all([getAgentInstanceCr(agentInstanceName(user)), getAgentTemplateCr(DEFAULT_AGENT_NAME)]);
+  const [cr, tmpl] = await Promise.all([getOwnedAgentInstanceCr(user), getAgentTemplateCr(DEFAULT_AGENT_NAME)]);
   const override = cr?.spec?.confirmPolicy ?? "";
   const templatePolicy = tmpl?.spec?.confirmPolicy || TEMPLATE_DEFAULT_POLICY;
   return {

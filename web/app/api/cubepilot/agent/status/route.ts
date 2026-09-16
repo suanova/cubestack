@@ -2,7 +2,7 @@
 // AgentInstance CR (spec + status). status.phase is filled by the operator as
 // it converges (Creating → Ready / Failed); empty = not observed yet.
 
-import { agentInstanceName, getAgentInstanceCr, k8sErrorResponse } from "@/lib/cubepilot/agentcrd";
+import { getOwnedAgentInstanceCr, k8sErrorResponse } from "@/lib/cubepilot/agentcrd";
 import type { AgentStatus } from "@/lib/cubepilot/types";
 import { withAuth } from "@/lib/auth/guard";
 
@@ -11,7 +11,7 @@ export const dynamic = "force-dynamic";
 
 export const GET = withAuth(async (_req, session) => {
   try {
-    const cr = await getAgentInstanceCr(agentInstanceName(session.user));
+    const cr = await getOwnedAgentInstanceCr(session.user);
     if (!cr) {
       return Response.json({ exists: false, user: session.user } satisfies AgentStatus);
     }

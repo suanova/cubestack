@@ -12,11 +12,36 @@ import {
   patchAgentTemplateCr,
   upsertLlmCredential,
 } from "@/lib/cubepilot/agentcrd";
-import { credentialChoiceError, llmCredentialName, normalizeEndpoint, sanitizeModelName, type LlmRequest } from "@/lib/cubepilot/llm";
+import {
+  credentialChoiceError,
+  llmCredentialName,
+  modelIndex,
+  modelNameError,
+  normalizeEndpoint,
+  sanitizeModelName,
+  type LlmRequest,
+} from "@/lib/cubepilot/llm";
 import { withAuth } from "@/lib/auth/guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+/**
+ * Undo a model whose credential could not be written: an entry pointing at a
+ * Secret that does not exist is selectable and then fails every turn. Best
+ * effort — the credential error is the one the caller needs to see.
+ */
+async function rollbackAddedModel(name: string): Promise<void> {
+  try {
+    const tmpl = await getAgentTemplateCr(DEFAULT_AGENT_NAME);
+    const index = modelIndex(tmpl?.spec?.models, name);
+    if (index >= 0) {
+      await patchAgentTemplateCr(DEFAULT_AGENT_NAME, [{ op: "remove", path: `/spec/models/${index}` }]);
+    }
+  } catch {
+    // Leave it: the caller still gets the credential failure.
+  }
+}
 
 export const POST = withAuth(async (req) => {
   let body: LlmRequest;
@@ -27,6 +52,8 @@ export const POST = withAuth(async (req) => {
   }
   const name = sanitizeModelName(body.name ?? "");
   if (!name) return Response.json({ error: "name is required" }, { status: 400 });
+  const nameError = modelNameError(name);
+  if (nameError) return Response.json({ error: nameError }, { status: 400 });
   let endpoint: string;
   try {
     endpoint = normalizeEndpoint(body.endpoint ?? "");
@@ -55,7 +82,14 @@ export const POST = withAuth(async (req) => {
     await patchAgentTemplateCr(DEFAULT_AGENT_NAME, [
       models.length > 0 ? { op: "add", path: "/spec/models/-", value: model } : { op: "add", path: "/spec/models", value: [model] },
     ]);
-    if (!isPublic) await upsertLlmCredential(llmCredentialName(name), apiKey);
+    if (!isPublic) {
+      try {
+        await upsertLlmCredential(llmCredentialName(name), apiKey);
+      } catch (e) {
+        await rollbackAddedModel(name);
+        throw e;
+      }
+    }
     return Response.json({ model });
   } catch (e) {
     return k8sErrorResponse(e);

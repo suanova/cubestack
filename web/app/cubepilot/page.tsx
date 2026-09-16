@@ -58,12 +58,17 @@ export default function CubepilotPage() {
           return (
             <Box
               key={item.id}
+              component="button"
+              type="button"
               role="tab"
+              id={`tab-${item.id}`}
               aria-selected={active}
               aria-controls={`pane-${item.id}`}
               onClick={() => setStoredTab(item.id)}
               data-od-id={`cp-tab-${item.id}`}
               sx={{
+                border: 0,
+                bgcolor: "transparent",
                 padding: "9px 0",
                 marginRight: "24px",
                 cursor: "pointer",
@@ -92,13 +97,13 @@ export default function CubepilotPage() {
         })}
       </Box>
 
-      <Box hidden={tab !== "chat"} role="tabpanel" id="pane-chat" data-od-id="pane-chat">
+      <Box hidden={tab !== "chat"} role="tabpanel" id="pane-chat" aria-labelledby="tab-chat" data-od-id="pane-chat">
         <ChatPane />
       </Box>
-      <Box hidden={tab !== "tasks"} role="tabpanel" id="pane-tasks" data-od-id="pane-tasks">
+      <Box hidden={tab !== "tasks"} role="tabpanel" id="pane-tasks" aria-labelledby="tab-tasks" data-od-id="pane-tasks">
         <TasksPane />
       </Box>
-      <Box hidden={tab !== "config"} role="tabpanel" id="pane-config" data-od-id="pane-config">
+      <Box hidden={tab !== "config"} role="tabpanel" id="pane-config" aria-labelledby="tab-config" data-od-id="pane-config">
         <ConfigPane />
       </Box>
     </Box>

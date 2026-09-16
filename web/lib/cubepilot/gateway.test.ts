@@ -78,6 +78,34 @@ describe("lib/cubepilot/gateway", () => {
     listNamespacedService.mockResolvedValue({ items: [] });
     expect(await resolveGatewayBase()).toBeNull();
   });
+
+  // The warn is a per-process latch, so these run on a fresh module instance
+  // (earlier tests in this file already sent a token over http).
+  async function freshGatewayFetch(url: string) {
+    vi.stubEnv("CUBESTACK_GATEWAT_URL", url);
+    vi.stubEnv("CUBESTACK_GATEWAY_TOKEN", "tok-123");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 200 })));
+    vi.resetModules();
+    return (await import("./gateway")).gatewayFetch;
+  }
+
+  it("warns once when the token would cross a plain-HTTP URL", async () => {
+    const fn = await freshGatewayFetch("http://gw.test:8080");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await fn("/v1/models");
+    await fn("/v1/models");
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).toContain("non-HTTPS");
+    warn.mockRestore();
+  });
+
+  it("stays quiet when the gateway URL is https", async () => {
+    const fn = await freshGatewayFetch("https://gw.test");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await fn("/v1/models");
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
 });
 
 describe("GATEWAY_NAMESPACE", () => {

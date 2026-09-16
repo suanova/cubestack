@@ -120,6 +120,31 @@ describe("/api/cubepilot/agent/llms", () => {
     expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
+  it("rejects a name that cannot name a Secret, before touching the template", async () => {
+    const res = await POST(await post({ name: "a..b", endpoint: "https://x/v1", public: true }), undefined);
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("does not yield a valid Secret name");
+    expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
+  it("rolls the model back when the credential cannot be written", async () => {
+    // The re-read after the failed write sees the entry the first patch added.
+    const withModel = {
+      metadata: { name: "cubepilot" },
+      spec: {
+        models: [...TEMPLATE_CR.spec.models, { name: "kimi", endpoint: "https://api.moonshot.cn/v1", credentialRef: { name: "llm-kimi" } }],
+      },
+    };
+    getNamespacedCustomObject.mockResolvedValueOnce(TEMPLATE_CR).mockResolvedValue(withModel);
+    createNamespacedSecret.mockRejectedValue(Object.assign(new Error("forbidden"), { statusCode: 403 }));
+    const res = await POST(await post({ name: "kimi", endpoint: "https://api.moonshot.cn/v1", apiKey: "sk-1" }), undefined);
+    expect(res.status).toBe(502);
+    // A model without its Secret is selectable and then fails every turn, so the
+    // entry goes away again.
+    const calls = patchNamespacedCustomObject.mock.calls as Array<[{ body?: unknown[] }]>;
+    expect(calls[calls.length - 1][0].body).toEqual([{ op: "remove", path: "/spec/models/1" }]);
+  });
+
   it("refuses to rename an existing model", async () => {
     const res = await PUT(await put({ name: "other", endpoint: "https://x/v1", public: true }), ctx("glm-5.2-chat"));
     expect(res.status).toBe(400);
@@ -154,6 +179,24 @@ describe("/api/cubepilot/agent/llms", () => {
     expect(secret.body?.data?.apiKey).toBe("c2stMg==");
   });
 
+  it("restores the previous entry when the credential write fails", async () => {
+    // The Secret refresh is refused after the template already changed.
+    createNamespacedSecret.mockRejectedValueOnce(Object.assign(new Error("already exists"), { statusCode: 409 }));
+    patchNamespacedSecret.mockRejectedValue(Object.assign(new Error("forbidden"), { statusCode: 403 }));
+    const res = await PUT(await put({ endpoint: "https://new/v1", apiKey: "sk-2", public: false }), ctx("glm-5.2-chat"));
+    expect(res.status).toBe(502);
+    const calls = patchNamespacedCustomObject.mock.calls as Array<[{ body?: unknown[] }]>;
+    expect(calls[calls.length - 1][0].body).toEqual([
+      { op: "replace", path: "/spec/models/0", value: TEMPLATE_CR.spec.models[0] },
+    ]);
+  });
+
+  it("refuses an edit whose name cannot name a Secret, before patching", async () => {
+    const res = await PUT(await put({ endpoint: "https://x/v1", public: true }), ctx("a..b"));
+    expect(res.status).toBe(400);
+    expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
   it("removes a model and its owned credential Secret", async () => {
     const res = await DELETE(await bareGet(), ctx("glm-5.2-chat"));
     // bareGet carries no session → 401; the authorised path is exercised below.
@@ -175,6 +218,17 @@ describe("/api/cubepilot/agent/llms", () => {
     expect(res.status).toBe(200);
     expect(((await res.json()) as { warning?: string }).warning).toContain("left in place");
     expect(deleteNamespacedSecret).not.toHaveBeenCalled();
+  });
+
+  it("reports the delete even when the Secret cleanup fails", async () => {
+    deleteNamespacedSecret.mockRejectedValue(Object.assign(new Error("forbidden"), { statusCode: 403 }));
+    const res = await DELETE(await authedRequest({ method: "DELETE" }), ctx("glm-5.2-chat"));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { deleted?: string; warning?: string };
+    // The model is gone; a Secret left behind is a cleanup problem, not a
+    // failed delete.
+    expect(body.deleted).toBe("glm-5.2-chat");
+    expect(body.warning).toContain("could not be removed");
   });
 
   it("refuses to delete a model an instance still selects", async () => {

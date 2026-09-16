@@ -70,6 +70,18 @@ describe("/api/cubepilot/agent/status", () => {
     expect(Number(body.uptimeSeconds)).toBeLessThan(200);
   });
 
+  it("an instance held by another owner reads as absent", async () => {
+    getNamespacedCustomObject.mockResolvedValue({
+      metadata: { name: "tester-cubepilot", creationTimestamp: new Date().toISOString() },
+      // "Tester" is another identity that sanitizes to the same CR name.
+      spec: { owner: "Tester" },
+      status: { phase: "Ready", podName: "cubepilot-tester-abc12", pvcName: "pvc-tester" },
+    });
+    const res = await GET(await authedGet(), undefined);
+    expect(res.status).toBe(200);
+    expect((await res.json()) as object).toEqual({ exists: false, user: "tester" });
+  });
+
   it("non-Ready phase → no uptime", async () => {
     getNamespacedCustomObject.mockResolvedValue({
       metadata: { name: "tester-cubepilot", creationTimestamp: new Date().toISOString() },

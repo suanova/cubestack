@@ -173,7 +173,9 @@ async function stubTasks(page: Page, stub: Stub = {}): Promise<Captured> {
     const toggleMatch = path.match(/\/api\/cubepilot\/tasks\/([^/]+)\/toggle$/);
     if (toggleMatch && method === "POST") {
       const id = decodeURIComponent(toggleMatch[1]);
-      tasks = tasks.map((x) => (x.id === id ? { ...x, enabled: !x.enabled } : x));
+      // The route applies the state the client asks for; a body-less call flips.
+      const desired = (body as { state?: string } | null)?.state;
+      tasks = tasks.map((x) => (x.id === id ? { ...x, enabled: desired ? desired === "Enabled" : !x.enabled } : x));
       return json({ task: tasks.find((x) => x.id === id) });
     }
 

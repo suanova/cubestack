@@ -164,6 +164,20 @@ describe("/api/cubepilot/agent/confirm", () => {
     ]);
   });
 
+  it("GET: an instance held by another owner exposes nothing of theirs", async () => {
+    mockK8s({
+      metadata: { name: "tester-cubepilot" },
+      // "Tester" is another identity that sanitizes to the same CR name.
+      spec: { owner: "Tester", confirmPolicy: "None", allowlist: [{ pattern: "kubectl get" }] },
+    });
+    const res = await GET(await authedGet(), undefined);
+    const body = (await res.json()) as confirmViewBody;
+    expect(res.status).toBe(200);
+    expect(body.exists).toBe(false);
+    expect(body.override).toBe("");
+    expect(body.allowlist.some((r) => r.owned)).toBe(false);
+  });
+
   it("PUT: clearing the policy when no override exists patches nothing", async () => {
     mockK8s({ metadata: { name: "tester-cubepilot" }, spec: { owner: "tester" } });
     const res = await PUT(await authedRequest({ method: "PUT", body: JSON.stringify({ confirmPolicy: "" }) }), undefined);

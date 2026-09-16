@@ -69,4 +69,20 @@ describe("/api/cubepilot/skills", () => {
       ["tenant-tool", false],
     ]);
   });
+
+  it("an instance held by another owner does not leak its allow-set", async () => {
+    getNamespacedCustomObject.mockResolvedValue({
+      metadata: { name: "tester-cubepilot" },
+      // "Tester" is another identity that sanitizes to the same CR name.
+      spec: { owner: "Tester", enabledSkills: ["gpu-health"] },
+    });
+    const res = await GET(await authedGet(), undefined);
+    const body = (await res.json()) as { skills: Array<{ name: string; enabled: boolean }> };
+    // The caller sees the baseline, not the other identity's selection.
+    expect(body.skills.map((s) => [s.name, s.enabled])).toEqual([
+      ["cluster-inspect", true],
+      ["gpu-health", false],
+      ["tenant-tool", false],
+    ]);
+  });
 });

@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
 
-import { credentialChoiceError, llmCredentialName, modelIndex, normalizeEndpoint, sanitizeModelName } from "./llm";
+import { credentialChoiceError, llmCredentialName, modelIndex, modelNameError, normalizeEndpoint, sanitizeModelName } from "./llm";
 
 describe("sanitizeModelName", () => {
   it("lowercases and reduces to a DNS-ish key", () => {
@@ -9,6 +9,24 @@ describe("sanitizeModelName", () => {
     expect(sanitizeModelName("My_Model/v1")).toBe("my-model-v1");
     expect(sanitizeModelName("--weird--")).toBe("weird");
     expect(sanitizeModelName("  ")).toBe("");
+  });
+});
+
+describe("modelNameError", () => {
+  it("accepts names that yield a valid Secret name", () => {
+    expect(modelNameError("glm-5.2-chat")).toBe("");
+    expect(modelNameError("a")).toBe("");
+  });
+
+  it("rejects an empty label or a label edge that is not alphanumeric", () => {
+    expect(modelNameError("a..b")).toContain("does not yield a valid Secret name");
+    expect(modelNameError("a.-b")).toContain("does not yield a valid Secret name");
+    expect(modelNameError("a-.b")).toContain("does not yield a valid Secret name");
+  });
+
+  it("rejects a name whose Secret would exceed the 253-character limit", () => {
+    expect(modelNameError("a".repeat(249))).toBe(""); // llm- + 249 = 253
+    expect(modelNameError("a".repeat(250))).toContain("does not yield a valid Secret name");
   });
 });
 

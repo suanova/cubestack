@@ -191,6 +191,24 @@ export function getAgentInstanceCr(name: string): Promise<AgentInstanceCr | null
   return getCr<AgentInstanceCr>("agentinstances", name);
 }
 
+/**
+ * The caller's own AgentInstance, for every read path. The name is derived
+ * from the sanitized identity, which folds case and punctuation, so two
+ * distinct authenticated users can map to one CR name; an instance that exists
+ * under a different owner is therefore reported as absent rather than returned.
+ */
+export async function getOwnedAgentInstanceCr(user: string): Promise<AgentInstanceCr | null> {
+  const cr = await getAgentInstanceCr(agentInstanceName(user));
+  if (cr && cr.spec?.owner !== user) {
+    logger("agent").warn("agent instance name is held by another owner — treated as absent", {
+      name: cr.metadata?.name,
+      owner: cr.spec?.owner,
+    });
+    return null;
+  }
+  return cr;
+}
+
 export function getSkillCr(name: string): Promise<SkillCr | null> {
   return getCr<SkillCr>("skills", name);
 }

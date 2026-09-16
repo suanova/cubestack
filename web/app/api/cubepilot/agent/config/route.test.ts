@@ -103,6 +103,17 @@ describe("/api/cubepilot/agent/config", () => {
     expect(body.config.userInstructions).toBe("be terse");
   });
 
+  it("GET: an instance name held by another owner reads as absent", async () => {
+    // "Tester" is another identity that sanitizes to the same CR name.
+    mockK8s({ metadata: { name: "tester-cubepilot" }, spec: { owner: "Tester", selectedModel: "glm-5.2-chat", userInstructions: "secret prompt" } });
+    const res = await GET(await authedGet(), undefined);
+    const body = (await res.json()) as { config: { exists: boolean; selectedModel: string; userInstructions: string } };
+    expect(res.status).toBe(200);
+    expect(body.config.exists).toBe(false);
+    expect(body.config.selectedModel).toBe("");
+    expect(body.config.userInstructions).toBe("");
+  });
+
   it("PUT: first save creates the instance (owner + identity + templateRef)", async () => {
     mockK8s(null);
     const created = {

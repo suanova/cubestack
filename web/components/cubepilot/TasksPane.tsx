@@ -139,7 +139,13 @@ export function TasksPane() {
 
   async function toggleTask(task: Task) {
     try {
-      const res = await fetch(`/api/cubepilot/tasks/${encodeURIComponent(task.id)}/toggle`, { method: "POST" });
+      // Send the state we want, not "flip": a retry then cannot undo the first
+      // call (the row's own state is the source of truth for the button).
+      const res = await fetch(`/api/cubepilot/tasks/${encodeURIComponent(task.id)}/toggle`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ state: task.enabled ? "Paused" : "Enabled" }),
+      });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       showToast(task.enabled ? t("cubepilot.toggledOff") : t("cubepilot.toggledOn"));
       await loadTasks();

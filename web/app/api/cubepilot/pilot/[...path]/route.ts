@@ -14,7 +14,16 @@ export const dynamic = "force-dynamic";
 
 type Ctx = { params: Promise<{ path: string[] }> };
 
-const enc = (segments: string[]) => segments.map(encodeURIComponent).join("/");
+/**
+ * Encode a session key (its "/"-separated segments) into one upstream path, or
+ * null when it cannot be encoded. encodeURIComponent leaves "." and ".."
+ * untouched, so a decoded request carrying %2e%2e would join into a path the
+ * URL parser resolves away, escaping the /api/v1/sessions prefix.
+ */
+const enc = (segments: string[]): string | null => {
+  if (segments.some((s) => s === "" || s === "." || s === "..")) return null;
+  return segments.map(encodeURIComponent).join("/");
+};
 
 /**
  * Maps an allowed request to its upstream path, or null when the shape is not
@@ -33,7 +42,8 @@ function upstreamPath(method: string, segments: string[]): string | null {
     const action = rest[rest.length - 2];
     // sessions/<key…>/<approval|question>/pending — the key is ≥1 segment.
     if ((action === "approval" || action === "question") && method === "GET" && rest.length >= 4) {
-      return `/api/v1/sessions/${enc(rest.slice(1, -2))}/${action}/pending`;
+      const key = enc(rest.slice(1, -2));
+      return key === null ? null : `/api/v1/sessions/${key}/${action}/pending`;
     }
     return null;
   }
@@ -45,7 +55,8 @@ function upstreamPath(method: string, segments: string[]): string | null {
     question: "POST",
   };
   if (tailMethod[tail] === method) {
-    return `/api/v1/sessions/${enc(rest.slice(1, -1))}/${tail}`;
+    const key = enc(rest.slice(1, -1));
+    return key === null ? null : `/api/v1/sessions/${key}/${tail}`;
   }
   return null;
 }

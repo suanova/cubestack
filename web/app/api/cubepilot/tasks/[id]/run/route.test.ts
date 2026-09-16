@@ -57,11 +57,28 @@ describe("/api/cubepilot/tasks/[id]/run", () => {
       body: Array<{ op: string; path: string; value: Record<string, string> }>;
     };
     expect(call).toMatchObject({ namespace: "cubestack-system", plural: "tasks", name: "tester-task-01" });
-    // JSON-Patch "add" replacing the merged annotations map.
+    // JSON-Patch "add" on the one annotation: the map holds no other key, so
+    // the pointer addresses the map itself.
     expect(call.body).toHaveLength(1);
     expect(call.body[0].path).toBe("/metadata/annotations");
     const stamp = call.body[0].value["cubepilot/manual-run"];
     expect(stamp).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/);
+  });
+
+  it("patches only the manual-run annotation when the CR has others", async () => {
+    getNamespacedCustomObject.mockResolvedValue({
+      ...TASK_CR,
+      metadata: { ...TASK_CR.metadata, annotations: { "cubepilot/display-name": "巡检", "other/annotation": "keep" } },
+    });
+    patchNamespacedCustomObject.mockResolvedValue({});
+    const res = await POST(await authedRequest({ method: "POST" }), ctx("tester-task-01"));
+    expect(res.status).toBe(202);
+    const call = patchNamespacedCustomObject.mock.calls[0][0] as { body: Array<{ op: string; path: string; value: string }> };
+    // A whole-map replace would drop anything the operator added between the
+    // read and this write; the "/" in the key is escaped as "~1".
+    expect(call.body).toHaveLength(1);
+    expect(call.body[0].path).toBe("/metadata/annotations/cubepilot~1manual-run");
+    expect(call.body[0].value).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
   it("403s on another user's task", async () => {

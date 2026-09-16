@@ -1,9 +1,17 @@
 // @vitest-environment node
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const { getNamespacedCustomObject } = vi.hoisted(() => ({ getNamespacedCustomObject: vi.fn() }));
+
+vi.mock("@/lib/kubernetes", () => ({
+  getCustomObjectsClient: () => ({ getNamespacedCustomObject }),
+  getCoreClient: () => ({}),
+}));
 
 import {
   agentInstanceName,
   baselineSkillNames,
+  getOwnedAgentInstanceCr,
   sanitizeIdentity,
   skillEnabled,
   skillInBaseline,
@@ -98,5 +106,35 @@ describe("withSkillDisabled", () => {
 
   it("uninstalling from an explicit list just removes", () => {
     expect(withSkillDisabled(instance(["a", "b"]), "a", ["a", "b", "c"])).toEqual(["b"]);
+  });
+});
+
+describe("getOwnedAgentInstanceCr", () => {
+  beforeEach(() => {
+    process.env.CUBESTACK_TASKS_NAMESPACE = "cubestack-system";
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    delete process.env.CUBESTACK_TASKS_NAMESPACE;
+  });
+
+  it("returns the caller's own instance", async () => {
+    getNamespacedCustomObject.mockResolvedValue(instance());
+    expect(await getOwnedAgentInstanceCr("alice")).toMatchObject({ spec: { owner: "alice" } });
+  });
+
+  it("treats an instance held by another owner as absent", async () => {
+    // "Alice" is a different authenticated identity that sanitizes to the same
+    // CR name — the collision the owner check exists for.
+    getNamespacedCustomObject.mockResolvedValue({ ...instance(), spec: { owner: "Alice" } });
+    expect(await getOwnedAgentInstanceCr("alice")).toBeNull();
+  });
+
+  it("returns null when the instance does not exist", async () => {
+    const e = new Error("not found") as Error & { statusCode: number };
+    e.statusCode = 404;
+    getNamespacedCustomObject.mockRejectedValue(e);
+    expect(await getOwnedAgentInstanceCr("alice")).toBeNull();
   });
 });

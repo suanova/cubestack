@@ -18,6 +18,7 @@ import {
   ensureAgentInstance,
   getAgentInstanceCr,
   getAgentTemplateCr,
+  getOwnedAgentInstanceCr,
   k8sErrorResponse,
   patchAgentInstanceCr,
   templateModels,
@@ -82,7 +83,7 @@ function configFromCr(cr: AgentInstanceCr | null, tmpl: AgentTemplateCr | null, 
 export const GET = withAuth(async (_req, session) => {
   try {
     const [cr, tmpl] = await Promise.all([
-      getAgentInstanceCr(agentInstanceName(session.user)),
+      getOwnedAgentInstanceCr(session.user),
       getAgentTemplateCr(DEFAULT_AGENT_NAME),
     ]);
     if (!tmpl) {

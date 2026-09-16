@@ -313,17 +313,19 @@ export async function patchTaskCrState(name: string, state: "Enabled" | "Paused"
 }
 
 /**
- * Ask the operator's scheduler to fire the task once (manual run). The
- * annotations map is merged from the fetched CR so the op is valid whether or
- * not the CR has other annotations yet.
+ * Ask the operator's scheduler to fire the task once (manual run). Only the one
+ * annotation is patched: rewriting the whole map would drop anything the
+ * operator added between our read and this write. The key carries a "/", which
+ * a JSON Pointer path escapes as "~1" (and "~" itself as "~0").
  */
 export async function markManualRun(task: TaskCr): Promise<void> {
   const co = getCustomObjectsClient();
-  const annotations = {
-    ...(task.metadata?.annotations ?? {}),
-    [MANUAL_RUN_ANNOTATION]: new Date().toISOString(),
-  };
-  const body = [{ op: "add", path: "/metadata/annotations", value: annotations }];
+  const stamp = new Date().toISOString();
+  const pointer = MANUAL_RUN_ANNOTATION.replace(/~/g, "~0").replace(/\//g, "~1");
+  // A CR without any annotations has no map for the pointer to address yet.
+  const body = task.metadata?.annotations
+    ? [{ op: "add", path: `/metadata/annotations/${pointer}`, value: stamp }]
+    : [{ op: "add", path: "/metadata/annotations", value: { [MANUAL_RUN_ANNOTATION]: stamp } }];
   await co.patchNamespacedCustomObject({
     group: GROUP,
     version: VERSION,

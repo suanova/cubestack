@@ -173,6 +173,22 @@ describe("cubepilot page", () => {
     act(() => root.unmount());
   });
 
+  it("renders each tab as a focusable button wired to its pane", async () => {
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    for (const id of ["chat", "tasks", "config"]) {
+      const tab = container.querySelector(`[data-od-id="cp-tab-${id}"]`) as HTMLButtonElement;
+      // A div with role="tab" is neither focusable nor keyboard-activatable.
+      expect(tab.tagName).toBe("BUTTON");
+      expect(tab.type).toBe("button");
+      expect(tab.id).toBe(`tab-${id}`);
+      expect(tab.getAttribute("aria-controls")).toBe(`pane-${id}`);
+      expect(container.querySelector(`#pane-${id}`)?.getAttribute("aria-labelledby")).toBe(`tab-${id}`);
+    }
+    act(() => root.unmount());
+  });
+
   it("switches tabs and persists the selection", async () => {
     const { container, root } = renderPage();
     await act(async () => {});
