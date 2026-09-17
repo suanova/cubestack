@@ -686,6 +686,36 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     await expect(page.locator('[data-od-id="hitl-dock"] [data-od-id="question-item"]')).toHaveCount(0);
     await expect(page.locator('[data-od-id="question-item"]')).not.toContainText("无法刷新该问题");
   });
+
+  test("a re-read that fails outright leaves the question answerable, the failure on the card", async ({ page }) => {
+    // A 5xx is NOT the "gone" signal: the read failed, so whether the question
+    // is still open is simply unknown. This is the conservative branch and the
+    // one that matters most — settling on a transient failure would hide the
+    // controls while the agent is still parked on the question, leaving the user
+    // unable to answer until a reload. So the card stays open with the reason on
+    // it, and the answer form stays live.
+    await stubAgent(page, { sessions: [SESSION], turnEvents: TURN_QUESTION, questionPostStatus: 409, pendingQuestionStatus: 500 });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="obj-cubepilot"]').click();
+    await page.locator('[data-od-id="chat-input"]').fill("巡检");
+    await page.locator('[data-od-id="send-btn"]').click();
+
+    const card = page.locator('[data-od-id="hitl-dock"] [data-od-id="question-item"]');
+    await expect(card).toContainText("等待回答");
+    await card.locator("button").filter({ hasText: "全部节点" }).click();
+    await card.locator('[data-od-id="question-submit"]').click();
+
+    await expect(card).toContainText("无法刷新该问题,请重试。");
+    await expect(card).not.toContainText("已超时");
+    // Still answerable. The pick is load-bearing, not decoration: submit is
+    // disabled until an option is picked, so asserting `toBeEnabled` on its own
+    // proves nothing about a card whose controls were wrongly withdrawn. Clicking
+    // an option only works on a live form (a settled or locked card's options are
+    // disabled), and submit turning enabled afterwards is what proves the answer
+    // can still be sent.
+    await card.locator("button").filter({ hasText: "仅 compute 节点" }).click();
+    await expect(card.locator('[data-od-id="question-submit"]')).toBeEnabled();
+  });
 });
 
 test.describe("cubepilot chat pane (layout)", () => {
