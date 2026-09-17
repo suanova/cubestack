@@ -3,9 +3,9 @@
 // Shared UI kit for the 智能助手 (CubePilot) panes: cards, pills, buttons,
 // fields, switches and icons, styled after the static prototype
 // (public/copilot.html) and the reference views (cubepilot web/src/views).
-// Semantic hues match the tokens the other portal pages use (see
-// dev-environments/page.tsx); everything else derives from the platform
-// CSS variables in globals.css.
+// Semantic hues come from the derived tokens in globals.css (the prototypes'
+// palette); the other portal pages still carry their own hardcoded copies.
+// Everything else derives from the platform CSS variables in globals.css.
 
 import { Alert, Box, Snackbar, SxProps, Theme } from "@mui/material";
 import {
