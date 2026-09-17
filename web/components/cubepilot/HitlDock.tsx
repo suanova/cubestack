@@ -350,7 +350,22 @@ export function HitlDock({
   if (approvals.length === 0 && questions.length === 0) return null;
   const key = (callId: string): string => `${sessionKey ?? ""}-${callId}`;
   return (
-    <Box data-od-id="hitl-dock" sx={{ display: "flex", flexDirection: "column", gap: "8px", mb: "8px" }}>
+    <Box
+      data-od-id="hitl-dock"
+      sx={{
+        display: "flex",
+        flexDirection: "column",
+        gap: "8px",
+        mb: "8px",
+        // The dock caps its own height and scrolls past it. Unstacked, several
+        // cards (a reload can attach a pending approval AND a pending question)
+        // push the composer down until the cards leave the visible area — which
+        // is the one thing the dock exists to prevent: these buttons are the
+        // only way to answer a turn that is parked on the user.
+        maxHeight: "min(50vh, 420px)",
+        overflowY: "auto",
+      }}
+    >
       {approvals.map((a) => (
         <ApprovalCard key={key(a.callId)} approval={a} allowAlwaysOk={allowAlwaysOk} onDecide={onDecide} />
       ))}
