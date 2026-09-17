@@ -263,7 +263,13 @@ function AgentBubble({
   // with no tool in between there is nothing to close out, and boxing every
   // single-paragraph reply would make an ordinary answer look like a report.
   const ranTools = msg.blocks.some((b) => b.kind === "tool");
-  const lastText = msg.blocks.reduce((acc, b, i) => (b.kind === "text" ? i : acc), -1);
+  // The LAST block must be text: "the turn ended with words". Testing only "this
+  // is the last text block" would highlight a turn's *opening* sentence when the
+  // turn ended with a tool — reachable from `historyToMsgs`, whose restored
+  // assistant bubble is [text, tool(done)], and from any stream that stops right
+  // after a tool_result.
+  const endsWithText = msg.blocks[msg.blocks.length - 1]?.kind === "text";
+  const lastTextIndex = msg.blocks.reduce((acc, b, i) => (b.kind === "text" ? i : acc), -1);
   // Only a confirmed, clean end makes the closing text "the answer". A stopped
   // or failed turn is labelled as a reply, so a mid-turn snapshot can never
   // read as the result disappearing.
@@ -293,7 +299,7 @@ function AgentBubble({
             </Box>
           );
         }
-        const panel = ranTools && bi === lastText;
+        const isPanel = ranTools && endsWithText && bi === lastTextIndex;
         return (
           <Box key={bi} data-od-block="text" sx={{ mt: bi > 0 ? "8px" : 0 }}>
             {b.superseded?.length ? (
@@ -308,7 +314,7 @@ function AgentBubble({
                 ))}
               </Box>
             ) : null}
-            {panel ? (
+            {isPanel ? (
               <Box
                 sx={{
                   border: "1px solid",
