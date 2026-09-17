@@ -41,6 +41,7 @@ import {
   type JsonPatchOp,
 } from "@/lib/cubepilot/agentcrd";
 import { gatewayFetch, gatewayOpenAiBase } from "@/lib/cubepilot/gateway";
+import { validateInstructions } from "@/lib/cubepilot/instructions";
 import { modelKey } from "@/lib/cubepilot/llm";
 import { logger } from "@/lib/log";
 import type { AgentConfig } from "@/lib/cubepilot/types";
@@ -122,6 +123,16 @@ export const PUT = withAuth(async (req, session) => {
   }
   if (patch.userInstructions !== undefined && typeof patch.userInstructions !== "string") {
     return Response.json({ error: "userInstructions must be a string" }, { status: 400 });
+  }
+  if (patch.userInstructions !== undefined) {
+    // The reference refuses these before writing; the CRD has no CEL for the
+    // field, so a direct CR write would store instructions the supervisor then
+    // declines to render (it keeps the last good value), i.e. the user's edit
+    // silently never takes effect.
+    const reason = validateInstructions(patch.userInstructions);
+    if (reason) {
+      return Response.json({ error: reason }, { status: 400 });
+    }
   }
   try {
     const name = agentInstanceName(session.user);
