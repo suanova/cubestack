@@ -118,6 +118,24 @@ describe("/api/cubepilot/agent/confirm", () => {
     expect(res.status).toBe(400);
   });
 
+  it("PUT: a pattern containing '|' → 400", async () => {
+    mockK8s(INSTANCE_CR);
+    const res = await PUT(await authedRequest({ method: "PUT", body: JSON.stringify({ allowlist: [{ pattern: "kubectl|rm" }] }) }), undefined);
+    expect(res.status).toBe(400);
+    expect((await res.json()) as { error?: string }).toEqual(expect.objectContaining({ error: expect.stringContaining("must not contain '|'") }));
+    expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
+  it("PUT: an argPattern JavaScript's RegExp cannot compile → 400", async () => {
+    mockK8s(INSTANCE_CR);
+    const res = await PUT(
+      await authedRequest({ method: "PUT", body: JSON.stringify({ allowlist: [{ pattern: "x", argPattern: "(?i)GET" }] }) }),
+      undefined,
+    );
+    expect(res.status).toBe(400);
+    expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
   it("PUT: persists the owned state and returns the new view", async () => {
     // The view after the patch re-reads the instance; return the patched CR.
     mockK8s(INSTANCE_CR, {
@@ -145,13 +163,13 @@ describe("/api/cubepilot/agent/confirm", () => {
     expect(body.allowlist).toHaveLength(13);
   });
 
-  it("PUT: sanitizes the owned rules (trim, dedupe, drop empty)", async () => {
+  it("PUT: sanitizes the owned rules (trim, dedupe)", async () => {
     mockK8s(INSTANCE_CR);
     const res = await PUT(
       await authedRequest({
         method: "PUT",
         body: JSON.stringify({
-          allowlist: [{ pattern: "  helm ls  " }, { pattern: "helm ls" }, { pattern: "   " }, { pattern: "ceph df", argPattern: " -s " }],
+          allowlist: [{ pattern: "  helm ls  " }, { pattern: "helm ls" }, { pattern: "ceph df", argPattern: " -s " }],
         }),
       }),
       undefined,

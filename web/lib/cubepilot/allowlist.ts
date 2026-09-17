@@ -98,3 +98,47 @@ export function ownedRules(rules: AllowlistRule[] | undefined): OwnedRuleCr[] {
   );
   return sanitized.map((r) => ({ pattern: r.pattern, ...(r.argPattern ? { argPattern: r.argPattern } : {}) }));
 }
+
+/** Constructs Go's regexp accepts but JavaScript's RegExp reads differently or
+ *  rejects. The gateway matches with JavaScript's RegExp, so a rule written
+ *  here has to be one it can actually apply — a rule that throws at match time
+ *  is a rule that silently never fires. (reference: internal/allowlist.Validate) */
+const JS_INCOMPATIBLE = [
+  { re: /\(\?[a-zA-Z]/, why: "inline flags like (?i)" },
+  { re: /\(\?P</, why: "named groups spelled (?P<name>) (JavaScript uses (?<name>))" },
+  { re: /\[\[:/, why: "POSIX character classes like [[:alpha:]]" },
+  { re: /\\p\{/, why: "\\p{...} without the u flag" },
+];
+
+/**
+ * Reject a rule the runtime could not enforce, returning the reason or null.
+ *
+ * Mirrors the reference's allowlist.Validate: an empty pattern and a pattern
+ * containing '|' are refused because '|' is the separator the rule identity
+ * joins pattern and argPattern with, so allowing it would let two different
+ * rules collide on one key. argPattern is screened for the constructs Go's
+ * regexp accepts but JavaScript's RegExp reads differently, then compiled, so a
+ * Go-only construct is named as such instead of surfacing as a generic parse
+ * error ("(?i)GET" is an invalid group to JavaScript).
+ */
+export function validateRule(rule: { pattern: string; argPattern?: string }): string | null {
+  if (!rule.pattern || !rule.pattern.trim()) {
+    return "pattern is required";
+  }
+  if (rule.pattern.includes("|")) {
+    return "pattern must not contain '|': it is a command name, and '|' is the separator the allowlist identity joins pattern and argPattern with";
+  }
+  if (rule.argPattern) {
+    for (const { re, why } of JS_INCOMPATIBLE) {
+      if (re.test(rule.argPattern)) {
+        return `argPattern uses ${why}, which JavaScript's new RegExp does not accept`;
+      }
+    }
+    try {
+      new RegExp(rule.argPattern);
+    } catch (e) {
+      return `argPattern is not a valid regular expression: ${e instanceof Error ? e.message : String(e)}`;
+    }
+  }
+  return null;
+}
