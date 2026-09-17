@@ -453,9 +453,9 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
   test("renders a turn's narration and tool calls in the order they arrived", async ({ page }) => {
     await stubAgent(page, { sessions: [SESSION], turnEvents: TURN_TOOL_THEN_TEXT });
     await page.goto("/cubepilot");
-    await page.locator('[data-od-id="object-agent"]').click();
+    await page.locator('[data-od-id="obj-cubepilot"]').click();
     await page.locator('[data-od-id="chat-input"]').fill("看看集群");
-    await page.locator('[data-od-id="chat-send"]').click();
+    await page.locator('[data-od-id="send-btn"]').click();
 
     // The narration that followed the tool must render AFTER the tool card, not
     // above it with every other sentence.
@@ -469,9 +469,9 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
   test("a finished tool card collapses, and the reader's expansion is remembered", async ({ page }) => {
     await stubAgent(page, { sessions: [SESSION], turnEvents: TURN_TOOL_THEN_TEXT });
     await page.goto("/cubepilot");
-    await page.locator('[data-od-id="object-agent"]').click();
+    await page.locator('[data-od-id="obj-cubepilot"]').click();
     await page.locator('[data-od-id="chat-input"]').fill("看看集群");
-    await page.locator('[data-od-id="chat-send"]').click();
+    await page.locator('[data-od-id="send-btn"]').click();
 
     const card = page.locator('[data-od-id="tool-card"]').first();
     await expect(card.locator('[data-od-id="tool-card-head"]')).toHaveAttribute("aria-expanded", "false");
@@ -484,9 +484,9 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
   test("renders the agent's text as Markdown", async ({ page }) => {
     await stubAgent(page, { sessions: [SESSION], turnEvents: TURN_MARKDOWN });
     await page.goto("/cubepilot");
-    await page.locator('[data-od-id="object-agent"]').click();
+    await page.locator('[data-od-id="obj-cubepilot"]').click();
     await page.locator('[data-od-id="chat-input"]').fill("给我一段命令");
-    await page.locator('[data-od-id="chat-send"]').click();
+    await page.locator('[data-od-id="send-btn"]').click();
 
     const bubble = page.locator('[data-od-id="agent-bubble"]').last();
     // A fenced block must become a real code element, not literal backticks.
