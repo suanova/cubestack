@@ -59,11 +59,13 @@ export function ConfigPane() {
   /** The system catalog: what the gateway serves, or (gateway down) the ids the
    *  platform provider was last written with. */
   const systemModels = gatewayModels.length > 0 ? gatewayModels : (platformProvider?.models ?? []);
-  /** The model the agent runs, as the user reads it: the platform provider's
-   *  prefix is internal plumbing, an external provider's is part of the ref. */
-  const selectedLabel = config.selectedModel
-    ? displayModelName(config.selectedModel)
-    : (systemModels[0] ?? "—");
+  /** The ref the select shows and saves: the stored ref when it still names a
+   *  served model, else the first served model (a stale CR value would fail
+   *  the save, which the route checks against the live catalog). */
+  const modelValue =
+    systemModels.length > 0 && !systemModels.some((m) => modelKey(PLATFORM_MODEL_NAME, m) === config.selectedModel)
+      ? modelKey(PLATFORM_MODEL_NAME, systemModels[0])
+      : config.selectedModel;
   const selectedId = displayModelName(config.selectedModel);
   const externalProviders = providers.filter((p) => p.origin !== "system");
   const [confirmBusy, setConfirmBusy] = useState(false);
@@ -117,9 +119,9 @@ export function ConfigPane() {
       const res = await fetch("/api/cubepilot/agent/config", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        // selectedModel is the platform ref: the route points the template's
-        // cubestack provider at the model API and then selects it on the instance.
-        body: JSON.stringify({ config: { userInstructions: config.userInstructions } }),
+        // selectedModel is the platform ref the select offers; the route checks
+        // it against the served catalog and selects it on the instance.
+        body: JSON.stringify({ config: { selectedModel: modelValue, userInstructions: config.userInstructions } }),
       });
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string };
@@ -337,16 +339,27 @@ export function ConfigPane() {
             <Box sx={{ p: "16px", display: "flex", flexDirection: "column", gap: "14px" }}>
               <Box sx={{ display: "flex", flexDirection: "column", gap: "6px" }}>
                 <Box component="label" sx={{ fontSize: 12.5, color: "text.secondary", fontWeight: 550 }}>{t("cubepilot.config.model")}</Box>
-                {/* The agent runs the platform provider: saving points it at the
-                    model API and selects one of its refs here. The select shows
-                    the model id alone — the platform prefix is internal. */}
-                <Box component="select" aria-label={t("cubepilot.config.model")} value={config.selectedModel} disabled sx={inputSx} data-od-id="cp-config-model-select">
-                  <Box component="option" value={config.selectedModel}>
-                    {selectedLabel}
-                  </Box>
+                {/* The agent runs the platform provider: picking a model here
+                    selects one of the gateway's ids as its ref (the platform
+                    prefix stays out of the labels). Disabled only when the
+                    catalog is empty — a save would fail with no served models. */}
+                <Box
+                  component="select"
+                  aria-label={t("cubepilot.config.model")}
+                  value={modelValue}
+                  onChange={(e) => setConfig({ ...config, selectedModel: e.target.value })}
+                  disabled={systemModels.length === 0}
+                  sx={inputSx}
+                  data-od-id="cp-config-model-select"
+                >
+                  {systemModels.map((m) => (
+                    <Box key={m} component="option" value={modelKey(PLATFORM_MODEL_NAME, m)}>
+                      {m}
+                    </Box>
+                  ))}
                 </Box>
                 <Box sx={{ fontSize: 11.5, color: "text.secondary", lineHeight: 1.6 }} data-od-id="cp-config-model-note">
-                  {t("cubepilot.config.modelPlatformNote", { model: selectedLabel, endpoint: platformProvider?.endpoint || "—" })}
+                  {t("cubepilot.config.modelPlatformNote", { model: displayModelName(modelValue) || "—", endpoint: platformProvider?.endpoint || "—" })}
                 </Box>
                 {providers.length === 0 && systemModels.length === 0 ? (
                   <Box sx={{ fontSize: 12, color: "#e15c5c" }} data-od-id="cp-config-model-empty">

@@ -395,8 +395,12 @@ describe("cubepilot page", () => {
 
     // "cubestack/" is internal plumbing the user never chose.
     const model = container.querySelector('[data-od-id="cp-config-model-select"]') as HTMLSelectElement;
+    expect(model.disabled).toBe(false);
     expect(model.textContent).toContain("qwen38-27b");
     expect(model.textContent).not.toContain("cubestack/");
+    // One option per served gateway model, valued as the platform ref.
+    expect(model.options.length).toBe(2);
+    expect(Array.from(model.options).map((o) => o.value)).toEqual(["cubestack/qwen38-27b", "cubestack/deepseek-v4-flash"]);
 
     const external = container.querySelector('[data-od-id="cp-config-llm-src-external"]') as HTMLElement;
     act(() => external.click());

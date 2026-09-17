@@ -107,9 +107,9 @@ export const GET = withAuth(async (_req, session) => {
 });
 
 export const PUT = withAuth(async (req, session) => {
-  // The caller's selectedModel is accepted (older clients still send it) but no
-  // longer authoritative: the agent always runs the platform provider, so the
-  // field is replaced below.
+  // The caller's selectedModel names the model the instance runs, as a bare
+  // gateway model id or the "<provider>/<id>" ref; the agent always runs it
+  // through the platform provider, so the ref is rewritten below.
   let patch: { selectedModel?: string; userInstructions?: string } = {};
   try {
     const body = (await req.json()) as { config?: { selectedModel?: string; userInstructions?: string } };
@@ -145,12 +145,13 @@ export const PUT = withAuth(async (req, session) => {
       );
     }
     // selectedModel is written as the "<provider>/<model id>" ref the operator
-    // resolves against the template's providers. The platform picks the first
-    // model the gateway serves; an empty catalog fails the save, so a CR never
-    // selects a ref the runtime cannot answer.
+    // resolves against the template's providers. The caller's selection wins
+    // when it names a model the gateway serves (accepted as a bare id or the
+    // ref form); anything else is refused, and an absent selection falls back
+    // to the first served model — so a CR never selects a ref the runtime
+    // cannot answer.
     const served = await gatewayModels();
-    const modelId = served[0];
-    if (!modelId) {
+    if (served.length === 0) {
       return Response.json(
         {
           error:
@@ -158,6 +159,19 @@ export const PUT = withAuth(async (req, session) => {
         },
         { status: 503 },
       );
+    }
+    let modelId = served[0];
+    if (patch.selectedModel !== undefined && patch.selectedModel !== "") {
+      const requested = patch.selectedModel.startsWith(`${PLATFORM_MODEL_NAME}/`)
+        ? patch.selectedModel.slice(PLATFORM_MODEL_NAME.length + 1)
+        : patch.selectedModel;
+      if (!served.includes(requested)) {
+        return Response.json(
+          { error: `unknown model "${requested}" — the model API serves: ${served.join(", ")}` },
+          { status: 400 },
+        );
+      }
+      modelId = requested;
     }
     const selectedModel = modelKey(PLATFORM_MODEL_NAME, modelId);
     const templateOps = platformProviderOps(tmpl.spec?.providers, modelApi, served);

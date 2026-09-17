@@ -469,13 +469,15 @@ test.describe("cubepilot config (AgentInstance CR + AgentTemplate catalog)", () 
     const pane = page.locator('[data-od-id="cp-config-pane"]');
     await expect(pane).toBeVisible();
 
-    // Model from the CR; the provider catalog comes from the template.
-    // The agent runs the platform provider: the field is fixed, the note says
-    // where it points, and the platform prefix stays out of the label.
+    // Model from the CR; the options are the models the gateway serves.
+    // The agent runs them through the platform provider, and the platform
+    // prefix stays out of the labels.
     const modelSelect = page.locator('[data-od-id="cp-config-model-select"]');
-    await expect(modelSelect).toBeDisabled();
+    await expect(modelSelect).toBeEnabled();
     await expect(modelSelect).toHaveValue("cubestack/qwen38-27b");
+    await expect(modelSelect.locator("option")).toHaveCount(2);
     await expect(modelSelect).toContainText("qwen38-27b");
+    await expect(modelSelect).toContainText("system-only");
     await expect(page.locator('[data-od-id="cp-config-model-note"]')).toContainText("http://ai-gateway.test:8080/v1");
 
     await expect(page.locator('[data-od-id="cp-config-prompt-input"]')).toHaveValue("巡检优先,写操作全部走审批");
@@ -580,11 +582,14 @@ test.describe("cubepilot config (AgentInstance CR + AgentTemplate catalog)", () 
     await expect(owned).toHaveCount(1);
 
     // Saving the model/prompt hits the config route and confirms with a toast.
+    // Picking another served model first: the save carries the new ref.
+    await modelSelect.selectOption("cubestack/system-only");
     await page.locator('[data-od-id="cp-config-save"]').click();
     await expect(page.getByText("配置已保存,模型与系统提示词下轮生效")).toBeVisible();
-    // Saving sends only the prompt: the route writes the platform model into the
-    // template and selects it on the instance.
-    expect(captured.configPuts.at(-1)).toEqual({ userInstructions: "巡检优先,写操作全部走审批" });
+    expect(captured.configPuts.at(-1)).toEqual({
+      selectedModel: "cubestack/system-only",
+      userInstructions: "巡检优先,写操作全部走审批",
+    });
   });
 
   test("switching the policy to None persists the override and hides the allowlist", async ({ page }) => {
@@ -608,12 +613,14 @@ test.describe("cubepilot config (AgentInstance CR + AgentTemplate catalog)", () 
     await page.locator('[data-od-id="cp-tab-config"]').click();
 
     // No template provider: the page says so instead of failing on a missing
-    // gateway, and the fixed model field still holds the single placeholder.
+    // gateway, and the model field is an empty, disabled select.
     const pane = page.locator('[data-od-id="cp-config-pane"]');
     await expect(pane).toContainText("模板未声明 provider");
     await page.locator('[data-od-id="cp-config-llm-src-external"]').click();
     await expect(page.locator('[data-od-id="cp-config-llm"]')).toContainText("模板暂未声明外部 provider");
-    await expect(page.locator('[data-od-id="cp-config-model-select"]').locator("option")).toHaveCount(1);
+    const modelSelect = page.locator('[data-od-id="cp-config-model-select"]');
+    await expect(modelSelect).toBeDisabled();
+    await expect(modelSelect.locator("option")).toHaveCount(0);
     await expect(page.locator('[data-od-id="cp-config-prompt-input"]')).toHaveValue("巡检优先,写操作全部走审批");
     await expect(page.locator('[data-od-id="cp-config-status"]')).toContainText("admin-cubepilot");
   });

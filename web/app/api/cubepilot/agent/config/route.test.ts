@@ -165,24 +165,62 @@ describe("/api/cubepilot/agent/config", () => {
     expect(spec?.selectedModel).toBe(SELECTED_MODEL);
   });
 
-  it("PUT: a body-selected model is ignored — the instance is forced onto the platform ref", async () => {
-    mockK8s(INSTANCE_CR);
+  it("PUT: a body-selected model is honored when the gateway serves it", async () => {
+    // Two served models; the template is already current for both and defaults
+    // to the one the caller picks, so only the instance is patched.
+    const picked = "cubestack/glm-5.2-chat";
+    const served = [{ id: "qwen38-27b" }, { id: "glm-5.2-chat" }];
+    gatewayFetch.mockResolvedValue(new Response(JSON.stringify({ data: served }), { status: 200 }));
+    const currentTmpl = {
+      ...TEMPLATE_CR,
+      spec: {
+        ...TEMPLATE_CR.spec,
+        defaultModel: picked,
+        providers: [{ name: "cubestack", endpoint: MODEL_API, models: ["qwen38-27b", "glm-5.2-chat"] }, TEMPLATE_CR.spec.providers[1]],
+      },
+    };
+    mockK8s(INSTANCE_CR, currentTmpl);
     patchNamespacedCustomObject.mockResolvedValue(INSTANCE_CR);
     const res = await PUT(
-      await authedRequest({ method: "PUT", body: JSON.stringify({ config: { selectedModel: "deepseek/deepseek-chat", userInstructions: "" } }) }),
+      await authedRequest({ method: "PUT", body: JSON.stringify({ config: { selectedModel: picked, userInstructions: "" } }) }),
       undefined,
     );
     expect(res.status).toBe(200);
-    const calls = patchNamespacedCustomObject.mock.calls as Array<[{ plural?: string; name?: string; body?: unknown[] }]>;
-    // The template is already current, so only the instance is patched.
+    let calls = patchNamespacedCustomObject.mock.calls as Array<[{ plural?: string; name?: string; body?: unknown[] }]>;
     expect(calls).toHaveLength(1);
     expect(calls[0][0].plural).toBe("agentinstances");
     expect(calls[0][0].name).toBe("tester-cubepilot");
     expect(calls[0][0].body).toEqual([
-      { op: "add", path: "/spec/selectedModel", value: SELECTED_MODEL },
+      { op: "add", path: "/spec/selectedModel", value: picked },
       // "" clears: the field is removed, not written as an empty string.
       { op: "remove", path: "/spec/userInstructions" },
     ]);
+
+    // The bare model id (no provider prefix) is accepted too.
+    vi.clearAllMocks();
+    gatewayFetch.mockResolvedValue(new Response(JSON.stringify({ data: served }), { status: 200 }));
+    gatewayOpenAiBase.mockResolvedValue(MODEL_API);
+    mockK8s(INSTANCE_CR, currentTmpl);
+    patchNamespacedCustomObject.mockResolvedValue(INSTANCE_CR);
+    const res2 = await PUT(
+      await authedRequest({ method: "PUT", body: JSON.stringify({ config: { selectedModel: "glm-5.2-chat" } }) }),
+      undefined,
+    );
+    expect(res2.status).toBe(200);
+    calls = patchNamespacedCustomObject.mock.calls as Array<[{ plural?: string; body?: unknown[] }]>;
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0].body).toEqual([{ op: "add", path: "/spec/selectedModel", value: picked }]);
+  });
+
+  it("PUT: a model the gateway does not serve is refused", async () => {
+    mockK8s(INSTANCE_CR);
+    const res = await PUT(
+      await authedRequest({ method: "PUT", body: JSON.stringify({ config: { selectedModel: "deepseek/deepseek-chat" } }) }),
+      undefined,
+    );
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain('unknown model "deepseek/deepseek-chat"');
+    expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
   it("PUT: nothing is written when the model API serves no models", async () => {
@@ -279,7 +317,7 @@ describe("/api/cubepilot/agent/config", () => {
   it("PUT: instance name taken by another user → 409", async () => {
     mockK8s({ metadata: { name: "tester-cubepilot" }, spec: { owner: "other" } });
     const res = await PUT(
-      await authedRequest({ method: "PUT", body: JSON.stringify({ config: { selectedModel: "glm-5.2-chat" } }) }),
+      await authedRequest({ method: "PUT", body: JSON.stringify({ config: { selectedModel: "qwen38-27b" } }) }),
       undefined,
     );
     expect(res.status).toBe(409);
