@@ -1,0 +1,436 @@
+// Pure model + event folding for the CubePilot agent conversation.
+//
+// No React and no fetch live here: every function is a plain transformation of
+// plain data, so the parts most likely to break (the ordering of a streamed
+// turn, the pairing of tool results, the meaning of a missing decision) are the
+// parts under unit test rather than under a rendered component.
+//
+// Contract: cubepilot docs/cubepilot/api.md §4/§5/§7.
+
+import type { AgentQuestionItem, AgentSseEvent, HistoryMessage } from "./types";
+
+export type AgentPhase = "thinking" | "tools" | "streaming" | "done";
+
+/**
+ * One element of an assistant turn. A turn is an ordered list of these rather
+ * than "a text string plus a list of tools": the agent narrates, calls a tool,
+ * narrates again, and flattening that into two arrays renders every tool call
+ * after every sentence it was interleaved with.
+ */
+export type AgentBlock =
+  | { kind: "text"; text: string; superseded?: string[] }
+  | { kind: "tool"; callId?: string; name: string; args?: string; output?: string; done: boolean };
+
+export interface AgentApproval {
+  callId: string;
+  name?: string;
+  command?: string;
+  level?: string;
+  message?: string;
+  /** "pending"/"deciding" are the unresolved states the dock shows. */
+  state: "pending" | "deciding" | "approved" | "rejected" | "stopped";
+  /** Set when the decision POST failed; the card stays answerable. */
+  error?: string;
+}
+
+export type AgentQuestionState = "pending" | "submitting" | "answered" | "cancelled" | "expired";
+
+export interface AgentQuestion {
+  callId: string;
+  questions: AgentQuestionItem[];
+  /** True when the gateway offers free text alongside the options. */
+  isOther?: boolean;
+  state: AgentQuestionState;
+  /** Local deadline in ms, derived from the event's remaining seconds. */
+  deadline?: number;
+  answers?: Record<string, string[]>;
+  /** Set when an answer was refused; the card stays answerable. */
+  error?: string;
+}
+
+export interface AgentMsg {
+  id: number;
+  role: "agent";
+  blocks: AgentBlock[];
+  approvals: AgentApproval[];
+  questions: AgentQuestion[];
+  phase: AgentPhase;
+  /** When the current phase started — drives the status line's seconds. */
+  phaseAt: number;
+  error?: string;
+  stopped?: boolean;
+  /**
+   * Set when the SSE stream ended without a terminal event. This is a transport
+   * failure, not a turn outcome: the run may still be executing and its HITL
+   * cards are still answerable, so nothing may treat the turn as over.
+   */
+  transportLost?: string;
+}
+
+export function newAgentMsg(id: number, now: number = Date.now()): AgentMsg {
+  return { id, role: "agent", blocks: [], approvals: [], questions: [], phase: "thinking", phaseAt: now };
+}
+
+/**
+ * One entry of the thread. A user prompt is its own kind — it has no blocks —
+ * so the thread type has to be a union; typing it as AgentMsg alone cannot
+ * represent the user's own messages.
+ */
+export type ThreadMsg = { id: number; role: "user"; text: string } | AgentMsg;
+
+// ── event folding ────────────────────────────────────────────────────────
+
+/** Fold one SSE event onto a message, returning a new message. */
+export function applyAgentEvent(msg: AgentMsg, evt: AgentSseEvent, now: number = Date.now()): AgentMsg {
+  switch (evt.type) {
+    case "message_start":
+    case "agent_thinking":
+      return setPhase(msg, "thinking", now);
+    case "message_delta":
+      return appendText(setPhase(msg, "streaming", now), evt.delta);
+    case "text_replace":
+      return replaceText(setPhase(msg, "streaming", now), evt.delta);
+    case "tool_call":
+      return setPhase(
+        {
+          ...msg,
+          blocks: [
+            ...msg.blocks,
+            { kind: "tool", callId: evt.callId, name: evt.name, args: fmtToolArgs(evt.arguments), done: false },
+          ],
+        },
+        "tools",
+        now,
+      );
+    case "tool_result":
+      return setPhase({ ...msg, blocks: attachToolResult(msg.blocks, evt.callId, evt.output ?? "") }, "tools", now);
+    case "approval_pending":
+      return setPhase(
+        {
+          ...msg,
+          approvals: [
+            ...msg.approvals,
+            { callId: evt.callId, name: evt.name, command: evt.command, level: evt.level, message: evt.message, state: "pending" },
+          ],
+        },
+        "tools",
+        now,
+      );
+    case "approval_resolved":
+      return {
+        ...msg,
+        approvals: msg.approvals.map((a) =>
+          a.callId === evt.callId
+            ? {
+                ...a,
+                // `approved` absent means nobody decided — the turn was stopped
+                // while the write was parked. Reporting that as a rejection
+                // would attribute a decision the user never made.
+                state: evt.approved === undefined ? "stopped" : evt.approved ? "approved" : "rejected",
+              }
+            : a,
+        ),
+      };
+    case "question_pending":
+      return setPhase(
+        {
+          ...msg,
+          questions: [
+            ...msg.questions,
+            newQuestion(evt.callId, evt.question?.questions ?? [], evt.question?.timeoutSeconds, now),
+          ],
+        },
+        "tools",
+        now,
+      );
+    case "question_resolved":
+      return {
+        ...msg,
+        // Settle only the matching card: another question of this turn may still
+        // be open.
+        questions: msg.questions.map((q) => (q.callId === evt.callId ? { ...q, state: resolveOutcome(evt.message) } : q)),
+      };
+    case "message_done":
+      return {
+        ...msg,
+        phase: "done",
+        error: evt.error || undefined,
+        stopped: evt.stopped === true,
+        // The same outcome the server's own settle publishes, so a card looks
+        // identical whether its resolved event arrived or was lost.
+        questions: msg.questions.map((q) =>
+          q.state === "pending" || q.state === "submitting" ? { ...q, state: "cancelled" as const } : q,
+        ),
+      };
+  }
+}
+
+function setPhase(msg: AgentMsg, phase: AgentPhase, now: number): AgentMsg {
+  return msg.phase === phase ? msg : { ...msg, phase, phaseAt: now };
+}
+
+function appendText(msg: AgentMsg, delta: string): AgentMsg {
+  const blocks = [...msg.blocks];
+  const last = blocks[blocks.length - 1];
+  if (last?.kind === "text") {
+    blocks[blocks.length - 1] = { ...last, text: last.text + delta };
+  } else {
+    blocks.push({ kind: "text", text: delta });
+  }
+  return { ...msg, blocks };
+}
+
+function replaceText(msg: AgentMsg, next: string): AgentMsg {
+  const blocks = [...msg.blocks];
+  const last = blocks[blocks.length - 1];
+  if (last?.kind !== "text") {
+    blocks.push({ kind: "text", text: next });
+    return { ...msg, blocks };
+  }
+  // A replace is a full snapshot, never an append (the gateway rewrites earlier
+  // narration after a tool runs). The text it displaces is kept: it is what the
+  // user was reading when the rewrite landed, and a rewrite is not a reason to
+  // take it away from them. A rewrite that would change nothing is discarded,
+  // so a repeated snapshot cannot pile up copies of the same text.
+  const superseded =
+    last.text && last.text !== next ? [...(last.superseded ?? []), last.text] : last.superseded;
+  blocks[blocks.length - 1] = {
+    kind: "text",
+    text: next,
+    ...(superseded?.length ? { superseded } : {}),
+  };
+  return { ...msg, blocks };
+}
+
+function newQuestion(
+  callId: string,
+  questions: AgentQuestionItem[],
+  timeoutSeconds: number | undefined,
+  now: number,
+): AgentQuestion {
+  return {
+    callId,
+    questions,
+    state: "pending",
+    // Derived from the remainder rather than an absolute deadline: the event
+    // carries what is left, so a countdown does not depend on this browser's
+    // clock agreeing with the API's.
+    ...(timeoutSeconds ? { deadline: now + timeoutSeconds * 1000 } : {}),
+  };
+}
+
+function resolveOutcome(message: string | undefined): AgentQuestionState {
+  if (message === "cancelled") return "cancelled";
+  if (message === "expired") return "expired";
+  return "answered";
+}
+
+/**
+ * Attach a tool result to the call it belongs to.
+ *
+ * Pairing order: an exact `callId` match; otherwise the oldest call that has not
+ * finished, then the oldest call with no output yet. The gateway emits calls and
+ * results in the same order, so arrival order is the fallback key. A second
+ * result on one call is joined rather than overwritten, and a result that
+ * matches nothing is dropped — never attached to the newest call, which would
+ * clobber a result already recorded.
+ */
+export function attachToolResult(blocks: AgentBlock[], callId: string | undefined, output: string): AgentBlock[] {
+  const tools = blocks
+    .map((b, i) => ({ b, i }))
+    .filter((x): x is { b: Extract<AgentBlock, { kind: "tool" }>; i: number } => x.b.kind === "tool");
+  let target = -1;
+  if (callId) {
+    target = tools.find((t) => t.b.callId === callId && !t.b.done)?.i ?? tools.find((t) => t.b.callId === callId)?.i ?? -1;
+  }
+  if (target < 0) {
+    target = tools.find((t) => !t.b.done)?.i ?? tools.find((t) => t.b.output === undefined)?.i ?? -1;
+  }
+  if (target < 0) return blocks;
+  const out = [...blocks];
+  const b = out[target] as Extract<AgentBlock, { kind: "tool" }>;
+  out[target] = { ...b, output: b.output ? `${b.output}\n${output}` : output, done: true };
+  return out;
+}
+
+// ── selectors ────────────────────────────────────────────────────────────
+
+/** Cards still waiting on the user, across the whole transcript. */
+export function openApprovals(msg: AgentMsg): AgentApproval[] {
+  return msg.approvals.filter((a) => a.state === "pending" || a.state === "deciding");
+}
+
+export function openQuestions(msg: AgentMsg): AgentQuestion[] {
+  return msg.questions.filter((q) => q.state === "pending" || q.state === "submitting");
+}
+
+/** Seconds left before the gateway expires the question, or undefined if it
+ *  carries no deadline. */
+export function remainingSeconds(q: AgentQuestion, now: number): number | undefined {
+  if (q.deadline === undefined) return undefined;
+  return Math.max(0, Math.round((q.deadline - now) / 1000));
+}
+
+/**
+ * The local countdown has run out but the gateway has not settled the question
+ * yet — so it is about to, or already has. Controls are withdrawn rather than
+ * letting a click fall into a 409, but this is NOT the same as "expired": only
+ * the gateway can say that.
+ */
+export function isExpiring(q: AgentQuestion, now: number): boolean {
+  if (q.state !== "pending" && q.state !== "submitting") return false;
+  const left = remainingSeconds(q, now);
+  return left === 0;
+}
+
+// ── tool-argument display ────────────────────────────────────────────────
+
+/** Keys whose value must never reach the thread. Matched case-insensitively at
+ *  any nesting depth, so `{headers:{authorization:"Bearer …"}}` cannot leak. */
+const SECRET_KEY = /pass(word|wd)?|token|secret|api[-_]?key|access[-_]?key|authorization|credential|private[-_]?key/i;
+
+function redact(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redact);
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = SECRET_KEY.test(k) ? "••••••" : redact(v);
+    }
+    return out;
+  }
+  return value;
+}
+
+/**
+ * A tool call's arguments as one display line: the command for exec-style
+ * calls, otherwise the bare value or `key: value` pairs.
+ */
+export function fmtToolArgs(args: unknown): string | undefined {
+  if (args === undefined || args === null) return undefined;
+  let value: unknown = args;
+  if (typeof value === "string") {
+    const raw = value; // the string as it arrived
+    try {
+      value = JSON.parse(raw) as unknown;
+    } catch {
+      return raw; // not JSON: show it as it came
+    }
+  }
+  const safe = redact(value);
+  if (safe && typeof safe === "object" && !Array.isArray(safe)) {
+    const rec = safe as Record<string, unknown>;
+    const cmd = rec.command ?? rec.cmd;
+    if (typeof cmd === "string") return cmd;
+    const entries = Object.entries(rec).map(
+      ([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`,
+    );
+    return entries.length > 0 ? entries.join("  ") : undefined;
+  }
+  return typeof safe === "string" ? safe : JSON.stringify(safe);
+}
+
+// ── history ──────────────────────────────────────────────────────────────
+
+/**
+ * Fold the runtime's history document into messages.
+ *
+ * `content` has two shapes and both must be normalized: a user message is a
+ * plain string, while assistant and toolResult messages are arrays of content
+ * blocks. Treating a string as an array iterates it character by character and
+ * silently drops the user's prompt.
+ */
+export function historyToMsgs(items: HistoryMessage[], nextId: () => number, now: number = Date.now()): ThreadMsg[] {
+  const out: ThreadMsg[] = [];
+  for (const it of items) {
+    if (it.role === "user") {
+      const text =
+        typeof it.content === "string"
+          ? it.content
+          : it.content
+              .filter((b) => b.type === "text")
+              .map((b) => b.text ?? "")
+              .join("\n");
+      if (text.trim()) out.push({ id: nextId(), role: "user", text });
+      continue;
+    }
+    // Reuse the trailing assistant bubble so a text + toolCall + toolResult run
+    // stays one bubble; a user message closes it.
+    let msg = out[out.length - 1];
+    if (!msg || msg.role !== "agent") {
+      msg = { ...newAgentMsg(nextId(), now), phase: "done" };
+      out.push(msg);
+    }
+    let agent = msg;
+    const blocks = typeof it.content === "string" ? [{ type: "text" as const, text: it.content }] : it.content;
+    for (const b of blocks) {
+      if (b.type === "text" && b.text) {
+        const last = agent.blocks[agent.blocks.length - 1];
+        agent =
+          last?.kind === "text"
+            ? { ...agent, blocks: [...agent.blocks.slice(0, -1), { ...last, text: `${last.text}\n\n${b.text}` }] }
+            : { ...agent, blocks: [...agent.blocks, { kind: "text", text: b.text }] };
+      } else if (b.type === "toolCall" && it.role === "assistant") {
+        // A history call is born finished: its result, if it had one, is a
+        // separate toolResult message handled below.
+        agent = {
+          ...agent,
+          blocks: [
+            ...agent.blocks,
+            { kind: "tool", callId: b.id, name: b.name ?? "tool", args: fmtToolArgs(b.arguments), done: true },
+          ],
+        };
+      } else if (b.type === "toolCall") {
+        // A toolResult message carries the call id and its output in `text`.
+        agent = { ...agent, blocks: attachToolResult(agent.blocks, b.id, b.text ?? "") };
+      }
+    }
+    out[out.length - 1] = agent;
+  }
+  return out;
+}
+
+// ── status line ──────────────────────────────────────────────────────────
+
+export type StatusTone = "run" | "done" | "stopped" | "lost" | "error" | "wait";
+
+export interface StatusLine {
+  tone: StatusTone;
+  /** An i18n key under cubepilot.chat.* — never a literal, because every
+   *  user-visible string needs zh-CN, zh-TW and en. */
+  key: string;
+  /** Interpolation values for that key. */
+  vars?: Record<string, string | number>;
+}
+
+/**
+ * The newest turn's own state. The header composes this with the states that
+ * outrank it (stopping, a failed turn check, waiting on the user, running in
+ * another tab).
+ *
+ * A lost transport is reported before the phase guard because a synthesized
+ * terminal can arrive on a path where no event was ever seen, leaving the
+ * message with no phase at all.
+ */
+export function turnStatus(msg: AgentMsg, now: number): StatusLine {
+  if (msg.transportLost) return { tone: "lost", key: "cubepilot.chat.statusLost" };
+  if (msg.phase === "done") {
+    if (msg.stopped) return { tone: "stopped", key: "cubepilot.chat.statusStopped" };
+    if (msg.error) return { tone: "error", key: "cubepilot.chat.statusFailed" };
+    return { tone: "done", key: "cubepilot.chat.statusDone" };
+  }
+  const secs = Math.max(0, Math.round((now - msg.phaseAt) / 1000));
+  if (msg.phase === "tools") {
+    const running = msg.blocks.filter((b) => b.kind === "tool" && !b.done).length;
+    return { tone: "run", key: "cubepilot.chat.statusTools", vars: { count: running, secs } };
+  }
+  if (msg.phase === "streaming") return { tone: "run", key: "cubepilot.chat.statusStreaming", vars: { secs } };
+  return { tone: "run", key: "cubepilot.chat.statusThinking", vars: { secs } };
+}
+
+/** True when the turn is parked on a human, in any part of the transcript. */
+export function waitingOnUser(msgs: ThreadMsg[]): "approval" | "question" | null {
+  const agentMsgs = msgs.filter((m) => m.role === "agent");
+  if (agentMsgs.some((m) => openQuestions(m).length > 0)) return "question";
+  if (agentMsgs.some((m) => openApprovals(m).length > 0)) return "approval";
+  return null;
+}

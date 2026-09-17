@@ -233,7 +233,10 @@ export type AgentSseEvent =
   | { type: "tool_result"; sessionId: string; callId?: string; name?: string; output?: string }
   | { type: "message_done"; sessionId: string; error?: string; stopped?: boolean }
   | { type: "approval_pending"; sessionId: string; callId: string; name?: string; command?: string; level?: string; message?: string }
-  | { type: "approval_resolved"; sessionId: string; callId: string; approved: boolean }
+  // `approved` is absent when nobody decided — the turn was stopped while the
+  // write was parked. That is NOT the same as an explicit false (a rejection),
+  // so the field is optional rather than defaulting to false.
+  | { type: "approval_resolved"; sessionId: string; callId: string; approved?: boolean }
   | {
       type: "question_pending";
       sessionId: string;
