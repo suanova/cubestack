@@ -53,7 +53,7 @@ const ERROR_COLOR = "#e15c5c";
 
 const CHAT_GRID: SxProps<Theme> = {
   display: "grid",
-  gridTemplateColumns: "236px minmax(0,1fr)",
+  gridTemplateColumns: "157px minmax(0,1fr)",
   gap: "14px",
   alignItems: "start",
   "@media (max-width: 1180px)": { gridTemplateColumns: "1fr" },
@@ -978,6 +978,7 @@ export function ChatPane() {
                 type="button"
                 onClick={() => selectModel(m.id)}
                 aria-pressed={active}
+                title={m.id}
                 data-od-id={`obj-${m.id}`}
                 sx={{
                   width: "100%",
