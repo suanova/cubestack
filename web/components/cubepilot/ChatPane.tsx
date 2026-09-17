@@ -1068,10 +1068,6 @@ export function ChatPane() {
               {agentRoleLine}
             </Box>
           </Box>
-
-          <Card sx={{ p: "12px 14px", mt: "8px" }}>
-            <Box sx={{ fontSize: 12, color: "text.secondary", lineHeight: 1.7 }}>{t("cubepilot.chat.objectsNote")}</Box>
-          </Card>
         </Box>
 
         {/* ── chat card ── */}
