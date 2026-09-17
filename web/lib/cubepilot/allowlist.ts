@@ -99,15 +99,31 @@ export function ownedRules(rules: AllowlistRule[] | undefined): OwnedRuleCr[] {
   return sanitized.map((r) => ({ pattern: r.pattern, ...(r.argPattern ? { argPattern: r.argPattern } : {}) }));
 }
 
-/** Constructs Go's regexp accepts but JavaScript's RegExp reads differently or
- *  rejects. The gateway matches with JavaScript's RegExp, so a rule written
- *  here has to be one it can actually apply — a rule that throws at match time
- *  is a rule that silently never fires. (reference: internal/allowlist.Validate) */
+/** Constructs Go's RE2 accepts that the gateway's JavaScript `new RegExp`
+ *  does not accept, or reads differently. The gateway passes no `u` flag, so
+ *  `[[:alpha:]]` and `\p{...}` are not the classes they look like there.
+ *
+ *  Copied entry-for-entry from the reference (`internal/allowlist.jsIncompatible`)
+ *  so the portal refuses exactly what the API refuses. Two details are
+ *  load-bearing:
+ *   - `(?P<` MUST come first: `(?[a-zA-Z-]` also matches `(?P`, so the other
+ *     order makes this entry unreachable and reports the wrong construct.
+ *   - the classes are wider than they look: `-` is in the flag class (for
+ *     `(?-i)`) and `pP` covers `\P{...}`. Narrowing either one lets a pattern
+ *     through that the API then rejects.
+ *
+ *  This is a best-effort denylist, not a sound validator — the reference says
+ *  so and accepts the residual divergence because it is fail-closed: a pattern
+ *  the gateway cannot compile throws at match time and the runtime treats that
+ *  as no-match, so the command asks again rather than auto-passing. For the
+ *  same reason it is deliberately escape-blind: `\(?b` (a literal paren,
+ *  optional) is a valid regex that this screen still refuses, and that false
+ *  rejection is inherited from the reference rather than a gap to close here. */
 const JS_INCOMPATIBLE = [
-  { re: /\(\?[a-zA-Z]/, why: "inline flags like (?i)" },
-  { re: /\(\?P</, why: "named groups spelled (?P<name>) (JavaScript uses (?<name>))" },
-  { re: /\[\[:/, why: "POSIX character classes like [[:alpha:]]" },
-  { re: /\\p\{/, why: "\\p{...} without the u flag" },
+  { re: /\(\?P</, why: "a named group (?P<name>...), which JavaScript spells (?<name>...)" },
+  { re: /\(\?[a-zA-Z-]/, why: "an inline flag group such as (?i); pass flags to RegExp instead" },
+  { re: /\[\[:/, why: "a POSIX class such as [[:alpha:]]" },
+  { re: /\\[pP]\{/, why: "a Unicode property such as \\p{L}, which needs the RegExp u flag" },
 ];
 
 /**
@@ -131,7 +147,7 @@ export function validateRule(rule: { pattern: string; argPattern?: string }): st
   if (rule.argPattern) {
     for (const { re, why } of JS_INCOMPATIBLE) {
       if (re.test(rule.argPattern)) {
-        return `argPattern uses ${why}, which JavaScript's new RegExp does not accept`;
+        return `argPattern uses ${why}, which JavaScript's new RegExp does not accept: the gateway matches argPattern with new RegExp, not RE2`;
       }
     }
     try {

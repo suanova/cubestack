@@ -122,11 +122,16 @@ describe("validateRule", () => {
     expect(validateRule({ pattern: "x", argPattern: "([unclosed" })).toContain("not a valid regular expression");
   });
 
-  it("rejects an argPattern Go accepts but JavaScript's RegExp does not", () => {
-    expect(validateRule({ pattern: "x", argPattern: "(?i)GET" })).toContain("does not accept");
-    expect(validateRule({ pattern: "x", argPattern: "(?P<n>.*)" })).toContain("does not accept");
-    expect(validateRule({ pattern: "x", argPattern: "[[:alpha:]]+" })).toContain("does not accept");
-    expect(validateRule({ pattern: "x", argPattern: "\\p{L}+" })).toContain("does not accept");
+  it("rejects an argPattern Go accepts but JavaScript's RegExp does not, naming the construct", () => {
+    // Each assertion pins the CONSTRUCT, not just the rejection. Asserting only
+    // the substring "does not accept" is what let a mis-ordered screen report
+    // '(?P<n>.*)' as an inline-flag problem while the suite stayed green.
+    expect(validateRule({ pattern: "x", argPattern: "(?i)GET" })).toContain("inline flag group");
+    expect(validateRule({ pattern: "x", argPattern: "(?-i)GET" })).toContain("inline flag group");
+    expect(validateRule({ pattern: "x", argPattern: "(?P<n>.*)" })).toContain("named group");
+    expect(validateRule({ pattern: "x", argPattern: "[[:alpha:]]+" })).toContain("POSIX class");
+    expect(validateRule({ pattern: "x", argPattern: "\\p{L}+" })).toContain("Unicode property");
+    expect(validateRule({ pattern: "x", argPattern: "\\P{L}+" })).toContain("Unicode property");
   });
 
   it("accepts the JS spelling of a named group", () => {
