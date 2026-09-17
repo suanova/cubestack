@@ -460,13 +460,16 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     // The narration that followed the tool must render AFTER the tool card, not
     // above it with every other sentence.
     const bubble = page.locator('[data-od-id="agent-bubble"]').last();
+    // Wait for the turn to land first: evaluateAll does not retry, so reading
+    // mid-stream would see a shorter list and flake.
+    await expect(bubble.locator("[data-od-block]")).toHaveCount(3);
     const order = await bubble.locator('[data-od-block]').evaluateAll((els) =>
       els.map((e) => e.getAttribute("data-od-block")),
     );
     expect(order).toEqual(["text", "tool", "text"]);
   });
 
-  test("a finished tool card collapses, and the reader's expansion is remembered", async ({ page }) => {
+  test("a finished tool card collapses, and clicking it opens the output", async ({ page }) => {
     await stubAgent(page, { sessions: [SESSION], turnEvents: TURN_TOOL_THEN_TEXT });
     await page.goto("/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
@@ -492,7 +495,11 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     // A fenced block must become a real code element, not literal backticks.
     await expect(bubble.locator("pre")).toContainText("kubectl get pods");
     await expect(bubble).not.toContainText("```");
-    await expect(bubble.locator("li")).toContainText("检查节点");
+    // Array form on purpose: a single-string toContainText is dispatched as
+    // `to.have.text`, which is strict, and this fixture renders TWO list items —
+    // so the single-string form fails with a strict-mode violation rather than a
+    // text mismatch, and could never pass.
+    await expect(bubble.locator("li")).toContainText(["检查节点", "检查 DevicePlugin"]);
   });
 });
 
