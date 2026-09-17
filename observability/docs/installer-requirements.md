@@ -279,6 +279,7 @@ BMC 凭据经 values 传入）。chart（OCI: `harbor.isuanova.com/suanova/cubes
 ```bash
 helm upgrade --install cubestack-bmc-exporter \
   oci://harbor.isuanova.com/suanova/cubestack-bmc-exporter-chart \
+  --version 1.0.0 \
   -n monitoring \
   --set bmc.username=root \
   --set bmc.password='<BMC 密码>' \
