@@ -21,11 +21,13 @@ import {
   useState,
 } from "react";
 
-/** Status hues matching the semantic tokens the prototype derives in its CSS. */
-export const STATUS_OK = "#27c37b";
-export const STATUS_WARN = "#e0a13a";
-export const STATUS_ERR = "#e15c5c";
-export const VIOLET = "#8b5cf6";
+/** Status hues. These are the tokens globals.css derives from --accent, so a
+ *  change to the accent moves them too (the prototypes defined them the same
+ *  way). Anything that needs a tint mixes them the way Pill does below. */
+export const STATUS_OK = "var(--ok)";
+export const STATUS_WARN = "var(--warn)";
+export const STATUS_ERR = "var(--danger)";
+export const VIOLET = "var(--violet)";
 
 export const soft = (hex: string, pct = 13) => `color-mix(in oklch, ${hex} ${pct}%, transparent)`;
 
