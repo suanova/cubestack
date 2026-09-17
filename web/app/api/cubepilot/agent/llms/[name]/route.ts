@@ -89,8 +89,14 @@ export const PUT = withAuth<Ctx>(async (req, _session, ctx) => {
     return Response.json({ error: e instanceof Error ? e.message : String(e) }, { status: 400 });
   }
   // The model list is replaced wholesale, so adding or removing one id is this
-  // same request.
-  const models = normalizeModelIds(body.models ?? []);
+  // same request. The assertion does not validate JSON: a bare string would
+  // iterate per character and a non-array would throw, both outside the try
+  // block below.
+  const rawModels = body.models;
+  if (rawModels !== undefined && (!Array.isArray(rawModels) || rawModels.some((m) => typeof m !== "string"))) {
+    return Response.json({ error: "models must be an array of model id strings" }, { status: 400 });
+  }
+  const models = normalizeModelIds(rawModels ?? []);
   const modelsError = modelIdsError(models);
   if (modelsError) return Response.json({ error: modelsError }, { status: 400 });
   const apiKey = (body.apiKey ?? "").trim();
@@ -103,6 +109,24 @@ export const PUT = withAuth<Ctx>(async (req, _session, ctx) => {
     const { providers, index } = found;
     const existing = providers[index];
     const owned = llmCredentialName(name);
+
+    // An edit may drop model ids the list used to carry: an instance selecting
+    // a dropped ref would fail on its next turn, so refuse like the DELETE
+    // guard (instancesSelecting) rather than break it.
+    const removedIds = (existing.models ?? []).filter((id) => !models.includes(id));
+    if (removedIds.length > 0) {
+      const users = await instancesSelectingRefs(providerRefs({ ...existing, models: removedIds }));
+      if (users.length > 0) {
+        return Response.json(
+          {
+            error: `cannot remove model id(s) ${removedIds.join(", ")} from "${name}" — selected by ${users.length} instance(s): ${users
+              .map((u) => u.name)
+              .join(", ")}`,
+          },
+          { status: 409 },
+        );
+      }
+    }
 
     // An edit may switch public → keyed (drop the ref) or keyed → public; a
     // keyed edit without a new key keeps the stored credential.

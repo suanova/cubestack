@@ -1462,7 +1462,7 @@ export function ChatPane() {
                       alignItems: "center",
                       gap: "4px",
                       height: 28,
-                      px: "8px 4px",
+                      px: "8px",
                       border: "none",
                       borderRadius: "24px",
                       bgcolor: "transparent",

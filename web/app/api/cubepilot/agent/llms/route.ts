@@ -72,7 +72,14 @@ export const POST = withAuth(async (req) => {
   } catch (e) {
     return Response.json({ error: e instanceof Error ? e.message : String(e) }, { status: 400 });
   }
-  const models = normalizeModelIds(body.models ?? []);
+  // The assertion above does not validate the JSON: a bare string iterates
+  // per character and a non-array throws before modelIdsError could run, both
+  // outside the try block below.
+  const rawModels = body.models;
+  if (rawModels !== undefined && (!Array.isArray(rawModels) || rawModels.some((m) => typeof m !== "string"))) {
+    return Response.json({ error: "models must be an array of model id strings" }, { status: 400 });
+  }
+  const models = normalizeModelIds(rawModels ?? []);
   const modelsError = modelIdsError(models);
   if (modelsError) return Response.json({ error: modelsError }, { status: 400 });
   const apiKey = (body.apiKey ?? "").trim();

@@ -157,6 +157,18 @@ describe("/api/cubepilot/agent/llms", () => {
     expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
+  it("refuses a models value that is not an array of strings (POST and PUT)", async () => {
+    // A bare string would otherwise iterate per character ("abc" → a, b, c) and
+    // a non-array would throw outside the route's try blocks.
+    const postRes = await POST(await post({ name: "a", endpoint: "https://x/v1", models: "abc", public: true }), undefined);
+    expect(postRes.status).toBe(400);
+    expect(((await postRes.json()) as { error: string }).error).toContain("array of model id strings");
+    const putRes = await PUT(await put({ endpoint: "https://x/v1", models: [1, 2] }), ctx("deepseek"));
+    expect(putRes.status).toBe(400);
+    expect(((await putRes.json()) as { error: string }).error).toContain("array of model id strings");
+    expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
   it("rolls the provider back when the credential cannot be written", async () => {
     // The re-read after the failed write sees the entry the first patch added.
     const withProvider = {
@@ -221,6 +233,29 @@ describe("/api/cubepilot/agent/llms", () => {
     const [init] = patchNamespacedCustomObject.mock.calls[0] as [{ body?: unknown[] }];
     expect(init.body).toEqual([
       { op: "replace", path: "/spec/providers/0/endpoint", value: "https://new/v1" },
+      { op: "remove", path: "/spec/providers/0/credentialRef" },
+    ]);
+  });
+
+  it("refuses to drop model ids that an instance still selects (PUT)", async () => {
+    // Replacing deepseek-chat with another id drops the ref the instance runs.
+    mockK8s(TEMPLATE_CR, [
+      { metadata: { name: "admin-cubepilot" }, spec: { owner: "admin", selectedModel: "deepseek/deepseek-chat", templateRef: "cubepilot" } },
+      { metadata: { name: "other-cubepilot" }, spec: { owner: "x", selectedModel: "something-else", templateRef: "cubepilot" } },
+    ]);
+    const res = await PUT(await put({ endpoint: "https://new/v1", models: ["deepseek-reasoner"], public: true }), ctx("deepseek"));
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toContain("admin-cubepilot");
+    expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
+  it("drops model ids no instance selects (PUT)", async () => {
+    const res = await PUT(await put({ endpoint: "https://new/v1", models: ["deepseek-reasoner"], public: true }), ctx("deepseek"));
+    expect(res.status).toBe(200);
+    const [init] = patchNamespacedCustomObject.mock.calls[0] as [{ body?: unknown[] }];
+    expect(init.body).toEqual([
+      { op: "replace", path: "/spec/providers/0/endpoint", value: "https://new/v1" },
+      { op: "replace", path: "/spec/providers/0/models", value: ["deepseek-reasoner"] },
       { op: "remove", path: "/spec/providers/0/credentialRef" },
     ]);
   });
