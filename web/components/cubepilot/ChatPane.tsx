@@ -3,8 +3,9 @@
 // 聊天 tab — the unified conversation surface for inference models and the
 // CubePilot agent, mirroring public/chat.html: object list (gateway models
 // + AI assistant) | chat card. The chat card fills the viewport height, the
-// thread scrolls inside its own scrollbar, and the composer is docked at the
-// very bottom; sampling params (model mode) sit just above the composer.
+// thread scrolls inside its own scrollbar, and the composer is a floating bar
+// docked at the very bottom; sampling params (model mode) collapse into a
+// chip in the composer's bottom row and open in a popover.
 // There is no context rail: the instance phase/model line lives in the card
 // header, and the config tab owns the policy/allowlist detail.
 //
@@ -22,7 +23,7 @@
 // client restores the user's latest session (history + pending HITL cards),
 // and polls history while a turn is still in flight after a reload.
 
-import { Box, SxProps, Theme } from "@mui/material";
+import { Box, Popover, SxProps, Theme } from "@mui/material";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { PLATFORM_MODEL_NAME, displayModelName } from "@/lib/cubepilot/types";
@@ -38,7 +39,7 @@ import type {
 import { useI18n } from "@/lib/i18n";
 
 import { fmtTime } from "./format";
-import { CopyBtn, ParamsCard, SampleParams } from "./Playground";
+import { CopyBtn, ParamsPanel, SampleParams } from "./Playground";
 import { Btn, Card, CpInput, CpTextArea, Icons, Pill, monoSx, STATUS_WARN, useToast } from "./ui";
 
 // The portal tokens have no violet; one hue + color-mix against var(--fg)
@@ -57,6 +58,18 @@ const CHAT_GRID: SxProps<Theme> = {
   alignItems: "start",
   "@media (max-width: 1180px)": { gridTemplateColumns: "1fr" },
 };
+
+// 14px glyphs for the composer's sampling-params chip (DSH access-mode look).
+const SLIDERS_ICON = (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+    <path d="M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z" />
+  </svg>
+);
+const CHEVRON_DOWN_ICON = (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
+    <path d="M6 9l6 6 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
 
 const userMsgSx: SxProps<Theme> = {
   alignSelf: "flex-end",
@@ -240,6 +253,8 @@ export function ChatPane() {
   const [streaming, setStreaming] = useState<string | null>(null);
   const [copied, setCopied] = useState<"endpoint" | null>(null);
   const [params, setParams] = useState<SampleParams>({ temperature: 0.7, topP: 0.9, maxTokens: 1024 });
+  /** Anchor of the sampling-params popover; null = the chip is collapsed. */
+  const [paramsAnchor, setParamsAnchor] = useState<HTMLElement | null>(null);
 
   // Agent (CubePilot) state — real data from the agent CRs + agent API.
   const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null);
@@ -250,6 +265,8 @@ export function ChatPane() {
 
   const inputEl = useRef<HTMLTextAreaElement | null>(null);
   const threadEl = useRef<HTMLDivElement | null>(null);
+  /** The composer's sampling-params chip; anchors the params popover. */
+  const paramsChipRef = useRef<HTMLButtonElement | null>(null);
   // Guards against in-flight fetch/stream from a previous object.
   const genRef = useRef(0);
   const idRef = useRef(0);
@@ -1310,21 +1327,17 @@ export function ChatPane() {
             ) : null}
           </Box>
 
-          {isModel ? (
-            <Box sx={{ borderTop: 1, borderColor: "divider", p: "10px 14px" }}>
-              <ParamsCard params={params} onChange={(patch) => setParams((p) => ({ ...p, ...patch }))} />
-            </Box>
-          ) : null}
-
           {/* Composer: a floating bar pinned to the window's bottom edge (the
               DSH look) — a rounded card with a soft shadow instead of a flat
-              top-border row; the thread scrolls above it. */}
+              top-border row; the thread scrolls above it. In model mode the
+              sampling params collapse into a chip in the bar's bottom row
+              (DSH's access-mode look) and open in a popover. */}
           <Box sx={{ p: "10px 14px 12px", flex: "none" }}>
             <Box
               sx={{
                 display: "flex",
-                gap: "10px",
-                alignItems: "flex-end",
+                flexDirection: "column",
+                gap: "8px",
                 border: 1,
                 borderColor: "divider",
                 borderRadius: "16px",
@@ -1333,7 +1346,7 @@ export function ChatPane() {
                   `0 1px 2px ${theme.palette.mode === "dark" ? "rgba(0,0,0,0.45)" : "rgba(0,0,0,0.05)"}, 0 8px 20px ${
                     theme.palette.mode === "dark" ? "rgba(0,0,0,0.5)" : "rgba(0,0,0,0.09)"
                   }`,
-                p: "6px 6px 6px 10px",
+                p: "8px 10px",
                 "&:focus-within": { borderColor: "var(--accent)" },
               }}
             >
@@ -1355,7 +1368,7 @@ export function ChatPane() {
                 aria-label={t("cubepilot.chat.placeholder")}
                 data-od-id="chat-input"
                 sx={{
-                  flex: 1,
+                  width: "100%",
                   resize: "none",
                   border: 0,
                   boxShadow: "none",
@@ -1367,16 +1380,84 @@ export function ChatPane() {
                   "&:focus": { borderColor: "divider", boxShadow: "none" },
                 }}
               />
-              {isAgent && sending ? (
-                <Btn variant="secondary" onClick={() => void stopAgent()} data-od-id="stop-btn">
-                  {t("cubepilot.chat.stop")}
-                </Btn>
-              ) : (
-                <Btn variant="primary" disabled={sending || !objKind} onClick={() => sendMessage()} data-od-id="send-btn">
-                  {t("cubepilot.chat.send")}
-                </Btn>
-              )}
+              <Box sx={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                {isModel ? (
+                  <Box
+                    ref={paramsChipRef}
+                    component="button"
+                    type="button"
+                    data-od-id="params-chip"
+                    aria-haspopup="dialog"
+                    aria-expanded={paramsAnchor !== null}
+                    onClick={() => setParamsAnchor(paramsAnchor ? null : paramsChipRef.current)}
+                    sx={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: "4px",
+                      height: 28,
+                      px: "8px 4px",
+                      border: "none",
+                      borderRadius: "24px",
+                      bgcolor: "transparent",
+                      color: "text.secondary",
+                      fontSize: 13,
+                      lineHeight: "20px",
+                      fontWeight: 500,
+                      cursor: "pointer",
+                      flex: "none",
+                      "&:hover": { bgcolor: "action.hover" },
+                      "&:focus-visible": { boxShadow: "0 0 0 2px var(--border)" },
+                    }}
+                  >
+                    {SLIDERS_ICON}
+                    <Box component="span">{t("cubepilot.playground.paramsTitle")}</Box>
+                    <Box
+                      component="span"
+                      sx={{
+                        display: "inline-flex",
+                        color: "text.disabled",
+                        transform: paramsAnchor !== null ? "rotate(180deg)" : "none",
+                        transition: "transform 120ms ease",
+                      }}
+                    >
+                      {CHEVRON_DOWN_ICON}
+                    </Box>
+                  </Box>
+                ) : null}
+                <Box sx={{ flex: 1 }} />
+                {isAgent && sending ? (
+                  <Btn variant="secondary" onClick={() => void stopAgent()} data-od-id="stop-btn">
+                    {t("cubepilot.chat.stop")}
+                  </Btn>
+                ) : (
+                  <Btn variant="primary" disabled={sending || !objKind} onClick={() => sendMessage()} data-od-id="send-btn">
+                    {t("cubepilot.chat.send")}
+                  </Btn>
+                )}
+              </Box>
             </Box>
+            <Popover
+              open={paramsAnchor !== null}
+              anchorEl={paramsAnchor}
+              onClose={() => setParamsAnchor(null)}
+              anchorOrigin={{ vertical: "top", horizontal: "left" }}
+              transformOrigin={{ vertical: "bottom", horizontal: "left" }}
+              slotProps={{
+                paper: {
+                  sx: {
+                    p: "10px 12px",
+                    border: 1,
+                    borderColor: "divider",
+                    borderRadius: "var(--radius)",
+                    bgcolor: "background.default",
+                  },
+                },
+              }}
+            >
+              <Box sx={{ width: 320 }}>
+                <ParamsPanel params={params} onChange={(patch) => setParams((p) => ({ ...p, ...patch }))} />
+              </Box>
+            </Popover>
           </Box>
         </Card>
       </Box>

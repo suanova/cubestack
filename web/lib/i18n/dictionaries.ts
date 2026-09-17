@@ -513,7 +513,6 @@ const zhCN = {
   "cubepilot.playground.gateway": "AI Gateway",
   "cubepilot.playground.emptyReply": "模型返回了空回复",
   "cubepilot.playground.paramsTitle": "采样参数",
-  "cubepilot.playground.paramsSession": "本次会话",
   "cubepilot.playground.metaParams": "temperature {temperature} · top_p {topP} · max_tokens {maxTokens}",
   "cubepilot.playground.metaGenerated": "生成 {chars} 字符 · {secs}s",
 } as const;
@@ -1008,7 +1007,6 @@ const zhTW: Dictionary = {
   "cubepilot.playground.gateway": "AI Gateway",
   "cubepilot.playground.emptyReply": "模型返回了空回覆",
   "cubepilot.playground.paramsTitle": "採樣參數",
-  "cubepilot.playground.paramsSession": "本次對話",
   "cubepilot.playground.metaParams": "temperature {temperature} · top_p {topP} · max_tokens {maxTokens}",
   "cubepilot.playground.metaGenerated": "生成 {chars} 字元 · {secs}s",
 };
@@ -1500,7 +1498,6 @@ const en: Dictionary = {
   "cubepilot.playground.gateway": "AI Gateway",
   "cubepilot.playground.emptyReply": "The model returned an empty reply",
   "cubepilot.playground.paramsTitle": "Sampling params",
-  "cubepilot.playground.paramsSession": "This session",
   "cubepilot.playground.metaParams": "temperature {temperature} · top_p {topP} · max_tokens {maxTokens}",
   "cubepilot.playground.metaGenerated": "Generated {chars} chars · {secs}s",
 };

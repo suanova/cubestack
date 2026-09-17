@@ -204,7 +204,7 @@ describe("cubepilot page", () => {
     act(() => root.unmount());
   });
 
-  it("selects the first model and streams a reply with the params card at the card bottom", async () => {
+  it("selects the first model and streams a reply with the sampling params collapsed in the composer", async () => {
     const { container, root } = renderPage();
     await act(async () => {});
 
@@ -212,8 +212,15 @@ describe("cubepilot page", () => {
     expect(
       (container.querySelector('[data-od-id="obj-glm-5.2-chat"]') as HTMLElement).getAttribute("aria-pressed"),
     ).toBe("true");
-    expect(container.querySelector('[data-od-id="params-card"]')).not.toBeNull();
-    // No fake metrics card: the params card docks at the bottom of the chat card.
+    // Sampling params collapse into a chip in the composer by default.
+    expect(container.querySelector('[data-od-id="params-chip"]')).not.toBeNull();
+    expect(document.body.querySelector('[data-od-id="params-card"]')).toBeNull();
+    // The chip opens the params panel in a popover (a body portal).
+    act(() => {
+      (container.querySelector('[data-od-id="params-chip"]') as HTMLElement).click();
+    });
+    expect(document.body.querySelector('[data-od-id="params-card"]')).not.toBeNull();
+    // No fake metrics card.
     expect(container.querySelector('[data-od-id="metrics-card"]')).toBeNull();
     expect(container.querySelector('[data-od-id="api-card"]')).toBeNull();
     expect(container.querySelector('[data-od-id="pg-endpoint"]')?.textContent).toContain("/v1/chat/completions");
@@ -266,7 +273,8 @@ describe("cubepilot page", () => {
     expect(container.querySelector('[data-od-id="allowlist-card"]')).toBeNull();
     expect(container.querySelector('[data-od-id="tool-whitelist-card"]')).toBeNull();
     expect(container.querySelector('[data-od-id="approval-card"]')).toBeNull();
-    expect(container.querySelector('[data-od-id="params-card"]')).toBeNull();
+    // Agent mode has no sampling-params chip (model-side control).
+    expect(container.querySelector('[data-od-id="params-chip"]')).toBeNull();
 
     // The greeting is data-driven (skills from the CRs, model from the CR)
     // because the stub user has no sessions yet.
@@ -327,14 +335,14 @@ describe("cubepilot page", () => {
     expect(approved).toBe(true);
     expect(container.querySelector('[data-od-id="approval-approve"]')).toBeNull();
 
-    // Back to the model: the params card docks back at the card bottom and
-    // the thread resets.
+    // Back to the model: the sampling-params chip is back in the composer
+    // and the thread resets.
     const modelObj = container.querySelector('[data-od-id="obj-glm-5.2-chat"]') as HTMLElement;
     act(() => {
       modelObj.click();
     });
     await act(async () => {});
-    expect(container.querySelector('[data-od-id="params-card"]')).not.toBeNull();
+    expect(container.querySelector('[data-od-id="params-chip"]')).not.toBeNull();
     expect(container.querySelector('[data-od-id="tool-whitelist-card"]')).toBeNull();
     expect(container.textContent).toContain("已切换到 glm-5.2-chat");
     act(() => root.unmount());
