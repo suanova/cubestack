@@ -719,6 +719,15 @@ export function ChatPane() {
     if (!agentSessionKey) return;
     try {
       const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(agentSessionKey)}/question/pending`);
+      if (res.status === 404) {
+        // This endpoint's 404 IS the "gone" signal, not a failed read: its body
+        // is defined as {"error":"no pending question"} — "the question is not
+        // there", the same condition an empty list reports. Reading it as a
+        // refresh failure would park the card in pending for the rest of the
+        // session behind a retry that can never succeed.
+        patchQuestion(callId, (q) => ({ ...q, state: "expired", error: undefined }));
+        return;
+      }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const { questions } = (await res.json()) as {
         questions?: Array<{ id?: string; questions?: AgentQuestionItem[]; timeoutSeconds?: number }>;
@@ -736,8 +745,10 @@ export function ChatPane() {
       }
       patchQuestion(callId, (q) => ({ ...q, state: "expired", error: undefined }));
     } catch {
-      // The re-read failed, so "gone" is not established either. The card stays
-      // open and says what went wrong rather than settling on a guess.
+      // The re-read itself failed (network, 5xx), so "gone" is not established
+      // either. Only a CONFIRMED gone settles the card: a transient failure that
+      // hid the controls would leave the user unable to answer a question the
+      // agent is still parked on.
       patchQuestion(callId, (q) => ({ ...q, state: "pending", error: t("cubepilot.chat.questionRefreshFailed") }));
     }
   }

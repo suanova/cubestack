@@ -170,6 +170,22 @@ const TURN_QUESTION = [
   },
 ];
 
+/** What GET .../question/pending reports while the question is still open: the
+ *  same prompt TURN_QUESTION streamed, plus the gateway's own remaining time. */
+const PENDING_QUESTION = {
+  id: "q-1",
+  questions: [
+    {
+      questionId: "scope",
+      header: "巡检范围",
+      question: "本次巡检覆盖哪些节点?",
+      multiSelect: true,
+      options: [{ label: "全部节点", description: "含 GPU 节点" }, { label: "仅 compute 节点" }],
+    },
+  ],
+  timeoutSeconds: 30,
+};
+
 const HISTORY = [
   { role: "user", content: "上次巡检的结论?" },
   { role: "assistant", content: [{ type: "text", text: "上次巡检:2 个节点 NotReady,已在 09:20 恢复。" }] },
@@ -205,6 +221,16 @@ interface Stubs {
   turnActive?: boolean;
   pendingApproval?: object | null;
   turnEvents?: object[];
+  /** What POST /question answers with. 404/409 are the refusals that send the
+   *  pane to the pending list instead of letting it guess at the outcome. */
+  questionPostStatus?: number;
+  /** The pending list once an answer has been refused: the same question still
+   *  open (the answer was not accepted) or an empty list (it is gone). */
+  pendingQuestionKept?: boolean;
+  pendingQuestionMissing?: boolean;
+  /** That read's own status, to drive the branch where it 404s — this endpoint's
+   *  404 means "no pending question", i.e. gone, not "the read failed". */
+  pendingQuestionStatus?: number;
 }
 
 /** Apply the requested change to the stored posture, as the route does. */
@@ -221,6 +247,11 @@ async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
   const captured: Captured = { approvalPosts: [], questionPosts: [], pendingPaths: [], configPuts: [], confirmPuts: [], llmPosts: [] };
   let config = stubs.config ?? CONFIG_READY;
   let confirm = stubs.confirm ?? CONFIRM;
+  // The pending list reflects the post-refusal world only once an answer has
+  // been refused. The restore read that runs when the session is first picked
+  // must still see nothing pending, or it would attach the card before the turn
+  // that raises it has even started.
+  let refusedAnswer = false;
   const sessions = stubs.sessions === undefined ? [] : stubs.sessions;
   await page.route("**/api/cubepilot/**", async (route) => {
     const req = route.request();
@@ -289,10 +320,20 @@ async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
         return sessions === null ? json({ error: "agent API unavailable" }, 503) : json({ sessions });
       }
       if (path.endsWith("/turn")) return json({ active: stubs.turnActive ?? false });
-      if (path.endsWith("/approval/pending") || path.endsWith("/question/pending")) {
+      if (path.endsWith("/approval/pending")) {
         captured.pendingPaths.push(path);
         const body = stubs.pendingApproval ?? null;
-        return path.endsWith("/approval/pending") && body ? json({ approval: body }) : json({ error: "no pending request" }, 404);
+        return body ? json({ approval: body }) : json({ error: "no pending request" }, 404);
+      }
+      if (path.endsWith("/question/pending")) {
+        captured.pendingPaths.push(path);
+        if (refusedAnswer) {
+          if (stubs.pendingQuestionStatus) return json({ error: "no pending question" }, stubs.pendingQuestionStatus);
+          if (stubs.pendingQuestionKept) return json({ questions: [PENDING_QUESTION] });
+          if (stubs.pendingQuestionMissing) return json({ questions: [] });
+        }
+        // The endpoint's real 404 body: "the question is not there".
+        return json({ error: "no pending question" }, 404);
       }
       if (path.endsWith("/approval") && method === "POST") {
         const body = post() as { decision?: string };
@@ -301,6 +342,10 @@ async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
       }
       if (path.endsWith("/question") && method === "POST") {
         captured.questionPosts.push({ path, body: post() as { id?: string; answers?: Record<string, string[]> } });
+        if (stubs.questionPostStatus) {
+          refusedAnswer = true;
+          return json({ error: "question is no longer open" }, stubs.questionPostStatus);
+        }
         return json({ ok: true });
       }
       if (path.endsWith("/abort") && method === "POST") return json({ ok: true });
@@ -571,11 +616,75 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
 
     const card = page.locator('[data-od-id="hitl-dock"] [data-od-id="question-item"]');
     await expect(card).toContainText("等待回答");
-    // The local countdown runs out and the controls lock, but the card must not
-    // claim an expiry only the gateway can declare.
-    await expect(card.locator('[data-od-id="question-submit"]')).toBeDisabled({ timeout: 5_000 });
-    await expect(card).toContainText("即将超时");
+    // Assert the EXPIRY state first, by its own text. `toBeDisabled` alone is
+    // not load-bearing: submit is also disabled until an option is picked, so it
+    // would pass on a card with no countdown logic at all. The pill text is what
+    // proves the local countdown reached zero, and the pair below is what proves
+    // the client did NOT overclaim an expiry only the gateway can declare.
+    await expect(card).toContainText("即将超时", { timeout: 5_000 });
+    await expect(card.locator('[data-od-id="question-submit"]')).toBeDisabled();
     await expect(card).not.toContainText("已超时");
+  });
+
+  test("a refused answer re-reads the pending list and leaves the still-open question answerable", async ({ page }) => {
+    // The refusal (409) does not say WHY. Re-reading the pending list is what
+    // tells "not accepted" apart from "gone": here the question is still there,
+    // so the card reopens with the server's own fresh deadline and the reason
+    // on it, and the user can answer again.
+    await stubAgent(page, { sessions: [SESSION], turnEvents: TURN_QUESTION, questionPostStatus: 409, pendingQuestionKept: true });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="obj-cubepilot"]').click();
+    await page.locator('[data-od-id="chat-input"]').fill("巡检");
+    await page.locator('[data-od-id="send-btn"]').click();
+
+    const card = page.locator('[data-od-id="hitl-dock"] [data-od-id="question-item"]');
+    await expect(card).toContainText("等待回答");
+    await card.locator("button").filter({ hasText: "全部节点" }).click();
+    await card.locator('[data-od-id="question-submit"]').click();
+
+    await expect(card).toContainText("该回答未被接受");
+    await expect(card).not.toContainText("已超时");
+    await expect(card.locator('[data-od-id="question-submit"]')).toBeEnabled();
+  });
+
+  test("a refused answer against a question the gateway dropped settles as expired", async ({ page }) => {
+    // The re-read succeeds and the question is not in the list: that IS the
+    // "gone" signal, so the card is over.
+    await stubAgent(page, { sessions: [SESSION], turnEvents: TURN_QUESTION, questionPostStatus: 409, pendingQuestionMissing: true });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="obj-cubepilot"]').click();
+    await page.locator('[data-od-id="chat-input"]').fill("巡检");
+    await page.locator('[data-od-id="send-btn"]').click();
+
+    const card = page.locator('[data-od-id="hitl-dock"] [data-od-id="question-item"]');
+    await expect(card).toContainText("等待回答");
+    await card.locator("button").filter({ hasText: "全部节点" }).click();
+    await card.locator('[data-od-id="question-submit"]').click();
+
+    // Settled: the controls are gone and the record moved into the bubble.
+    await expect(page.locator('[data-od-id="hitl-dock"] [data-od-id="question-item"]')).toHaveCount(0);
+    await expect(page.locator('[data-od-id="agent-bubble"] [data-od-id="question-item"]')).toContainText("已超时");
+  });
+
+  test("a re-read that 404s settles the question as expired, not as a refresh failure", async ({ page }) => {
+    // This endpoint's 404 is defined as {"error":"no pending question"}, i.e.
+    // "the question is not there" — the same "gone" signal as an empty list, and
+    // NOT a failed refresh. Reading it as a failure parks the card in pending
+    // for the rest of the session behind a retry that can never succeed.
+    await stubAgent(page, { sessions: [SESSION], turnEvents: TURN_QUESTION, questionPostStatus: 409, pendingQuestionStatus: 404 });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="obj-cubepilot"]').click();
+    await page.locator('[data-od-id="chat-input"]').fill("巡检");
+    await page.locator('[data-od-id="send-btn"]').click();
+
+    const card = page.locator('[data-od-id="hitl-dock"] [data-od-id="question-item"]');
+    await expect(card).toContainText("等待回答");
+    await card.locator("button").filter({ hasText: "全部节点" }).click();
+    await card.locator('[data-od-id="question-submit"]').click();
+
+    await expect(page.locator('[data-od-id="agent-bubble"] [data-od-id="question-item"]')).toContainText("已超时");
+    await expect(page.locator('[data-od-id="hitl-dock"] [data-od-id="question-item"]')).toHaveCount(0);
+    await expect(page.locator('[data-od-id="question-item"]')).not.toContainText("无法刷新该问题");
   });
 });
 
