@@ -204,7 +204,7 @@ describe("cubepilot page", () => {
     act(() => root.unmount());
   });
 
-  it("selects the first model and streams a reply with the params rail", async () => {
+  it("selects the first model and streams a reply with the params card at the card bottom", async () => {
     const { container, root } = renderPage();
     await act(async () => {});
 
@@ -213,7 +213,7 @@ describe("cubepilot page", () => {
       (container.querySelector('[data-od-id="obj-glm-5.2-chat"]') as HTMLElement).getAttribute("aria-pressed"),
     ).toBe("true");
     expect(container.querySelector('[data-od-id="params-card"]')).not.toBeNull();
-    // No fake metrics card: the rail is the params card only (the cURL card is gone).
+    // No fake metrics card: the params card docks at the bottom of the chat card.
     expect(container.querySelector('[data-od-id="metrics-card"]')).toBeNull();
     expect(container.querySelector('[data-od-id="api-card"]')).toBeNull();
     expect(container.querySelector('[data-od-id="pg-endpoint"]')?.textContent).toContain("/v1/chat/completions");
@@ -250,7 +250,7 @@ describe("cubepilot page", () => {
     act(() => root.unmount());
   }, 10000);
 
-  it("switches to the agent: real rail, data greeting, SSE turn with an approval card", async () => {
+  it("switches to the agent: data greeting, SSE turn with an approval card", async () => {
     const { container, root } = renderPage();
     await act(async () => {});
 
@@ -260,14 +260,12 @@ describe("cubepilot page", () => {
       agentObj.click();
     });
 
-    // The context rail swaps to the agent cards (status + whitelist +
-    // approval; no canned recent-calls card).
-    expect(container.querySelector('[data-od-id="agent-status-card"]')).not.toBeNull();
-    // The rail splits the confirmation allowlist from the agent's skills.
-    expect(container.querySelector('[data-od-id="allowlist-card"]')).not.toBeNull();
-    expect(container.querySelector('[data-od-id="tool-whitelist-card"]')).not.toBeNull();
-    expect(container.querySelector('[data-od-id="approval-card"]')).not.toBeNull();
-    expect(container.querySelector('[data-od-id="recent-calls-card"]')).toBeNull();
+    // No context rail in agent mode: the chat card owns the full width and
+    // the instance state lives in the card header.
+    expect(container.querySelector('[data-od-id="agent-status-card"]')).toBeNull();
+    expect(container.querySelector('[data-od-id="allowlist-card"]')).toBeNull();
+    expect(container.querySelector('[data-od-id="tool-whitelist-card"]')).toBeNull();
+    expect(container.querySelector('[data-od-id="approval-card"]')).toBeNull();
     expect(container.querySelector('[data-od-id="params-card"]')).toBeNull();
 
     // The greeting is data-driven (skills from the CRs, model from the CR)
@@ -283,18 +281,16 @@ describe("cubepilot page", () => {
         (container.textContent ?? "").includes("会话审计已开启");
     }
     expect(greeted).toBe(true);
-    // The whitelist card lists the platform skills with their enabled state.
-    expect(container.textContent).toContain("集群巡检");
-    expect(container.textContent).toContain("GPU 体检");
-    expect(container.textContent).toContain("已启用");
 
-    // Quick chip → a real turn streams through the pilot proxy.
-    const chip = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(
-      (b) => b.textContent === "分析 Ceph OSD 使用率告警",
-    );
-    expect(chip).toBeDefined();
+    // Composer → a real turn streams through the pilot proxy.
+    const input = container.querySelector('[data-od-id="chat-input"]') as HTMLTextAreaElement;
+    const setValue = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")!.set!;
     act(() => {
-      chip!.click();
+      setValue.call(input, "分析 Ceph OSD 使用率告警");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    act(() => {
+      (container.querySelector('[data-od-id="send-btn"]') as HTMLElement).click();
     });
 
     // The SSE events land: accumulated text, the paired tool result, and
@@ -331,7 +327,8 @@ describe("cubepilot page", () => {
     expect(approved).toBe(true);
     expect(container.querySelector('[data-od-id="approval-approve"]')).toBeNull();
 
-    // Back to the model: the model rail is restored and the thread resets.
+    // Back to the model: the params card docks back at the card bottom and
+    // the thread resets.
     const modelObj = container.querySelector('[data-od-id="obj-glm-5.2-chat"]') as HTMLElement;
     act(() => {
       modelObj.click();

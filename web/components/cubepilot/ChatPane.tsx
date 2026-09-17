@@ -2,9 +2,11 @@
 
 // 聊天 tab — the unified conversation surface for inference models and the
 // CubePilot agent, mirroring public/chat.html: object list (gateway models
-// + AI assistant) | chat card | context rail that follows the selected
-// object (model: sampling params / cURL; agent: status / tool whitelist /
-// approval).
+// + AI assistant) | chat card. The chat card fills the viewport height, the
+// thread scrolls inside its own scrollbar, and the composer is docked at the
+// very bottom; sampling params (model mode) sit just above the composer.
+// There is no context rail: the instance phase/model line lives in the card
+// header, and the config tab owns the policy/allowlist detail.
 //
 // Model side: the object list is the real model catalog from the AI Gateway
 // (/api/cubepilot/playground/services → gateway /v1/models), and replies are
@@ -29,19 +31,15 @@ import type {
   AgentQuestionItem,
   AgentSseEvent,
   AgentStatus,
-  ConfirmView,
   GatewayModel,
   HistoryMessage,
-  QuickChip,
   SkillInfo,
 } from "@/lib/cubepilot/types";
-import { ruleKey } from "@/lib/cubepilot/allowlist";
 import { useI18n } from "@/lib/i18n";
 
 import { fmtTime } from "./format";
 import { CopyBtn, ParamsCard, SampleParams } from "./Playground";
-import { setStoredTab } from "./tabStore";
-import { Btn, Card, CardHead, CpInput, CpTextArea, Icons, Pill, monoSx, STATUS_WARN, useToast } from "./ui";
+import { Btn, Card, CpInput, CpTextArea, Icons, Pill, monoSx, STATUS_WARN, useToast } from "./ui";
 
 // The portal tokens have no violet; one hue + color-mix against var(--fg)
 // adapts to the theme (dark violet on light, light violet on dark).
@@ -54,7 +52,7 @@ const ERROR_COLOR = "#e15c5c";
 
 const CHAT_GRID: SxProps<Theme> = {
   display: "grid",
-  gridTemplateColumns: "236px minmax(0,1fr) 300px",
+  gridTemplateColumns: "236px minmax(0,1fr)",
   gap: "14px",
   alignItems: "start",
   "@media (max-width: 1180px)": { gridTemplateColumns: "1fr" },
@@ -147,7 +145,6 @@ interface AgentMeta {
   status: AgentStatus | null;
   config: AgentConfig | null;
   skills: SkillInfo[];
-  confirm: ConfirmView | null;
 }
 
 /** Format tool_call arguments for display (objects compact, strings as-is). */
@@ -248,9 +245,6 @@ export function ChatPane() {
   const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null);
   const [agentConfig, setAgentConfig] = useState<AgentConfig | null>(null);
   const [agentSkills, setAgentSkills] = useState<SkillInfo[]>([]);
-  /** The confirmation view: the effective policy + the allowlist the rail shows. */
-  const [agentConfirm, setAgentConfirm] = useState<ConfirmView | null>(null);
-  const [agentMetaError, setAgentMetaError] = useState("");
   const [agentSessionKey, setAgentSessionKey] = useState<string | null>(null);
   const [agentNotice, setAgentNotice] = useState("");
 
@@ -311,42 +305,36 @@ export function ChatPane() {
   }
 
   /**
-   * The agent's real meta (instance status, config, skill whitelist) from the
-   * agent CRs. Returns the fresh values (the state they set is one render
-   * stale inside the calling async flow).
+   * The agent's real meta (instance status, config, skills) from the agent
+   * CRs. Returns the fresh values (the state they set is one render stale
+   * inside the calling async flow).
    */
   async function loadAgentMeta(): Promise<AgentMeta> {
     try {
-      const [stRes, cfgRes, skRes, cfRes] = await Promise.all([
+      const [stRes, cfgRes, skRes] = await Promise.all([
         fetch("/api/cubepilot/agent/status"),
         fetch("/api/cubepilot/agent/config"),
         fetch("/api/cubepilot/skills"),
-        fetch("/api/cubepilot/agent/confirm"),
       ]);
-      const [stBody, cfgBody, skBody, cfBody] = await Promise.all([
+      const [stBody, cfgBody, skBody] = await Promise.all([
         stRes.json().catch(() => null),
         cfgRes.json().catch(() => null),
         skRes.json().catch(() => null),
-        cfRes.json().catch(() => null),
       ]);
       if (!stRes.ok) throw new Error((stBody as { error?: string } | null)?.error ?? `HTTP ${stRes.status}`);
-      // The agent meta is global (the object list entry + the context rail),
+      // The agent meta is global (the object list entry + the card header),
       // not part of the conversation generation: apply it even when a model
       // auto-selection bumped that generation while these requests were in
       // flight (otherwise the object entry stays "loading" forever).
       const status = stBody as AgentStatus;
       const config = cfgRes.ok ? ((cfgBody as { config?: AgentConfig } | null)?.config ?? null) : null;
       const skills = skRes.ok ? ((skBody as { skills?: SkillInfo[] } | null)?.skills ?? []) : [];
-      const confirm = cfRes.ok ? (cfBody as ConfirmView | null) : null;
       setAgentStatus(status);
       setAgentConfig(config);
       setAgentSkills(skills);
-      setAgentConfirm(confirm);
-      setAgentMetaError("");
-      return { status, config, skills, confirm };
-    } catch (e) {
-      setAgentMetaError(String(e));
-      return { status: null, config: null, skills: [], confirm: null };
+      return { status, config, skills };
+    } catch {
+      return { status: null, config: null, skills: [] };
     }
   }
 
@@ -939,12 +927,6 @@ export function ChatPane() {
   // matter for the captured session key and message list.
   /* eslint-enable react-hooks/exhaustive-deps */
 
-  const chips: QuickChip[] = (
-    isModel
-      ? [t("cubepilot.chat.chipModel1"), t("cubepilot.chat.chipModel2"), t("cubepilot.chat.chipModel3")]
-      : [t("cubepilot.chat.chipAgent1"), t("cubepilot.chat.chipAgent2"), t("cubepilot.chat.chipAgent3")]
-  ).map((label) => ({ label }));
-
   const agentRoleLine = !agentStatus
     ? t("cubepilot.chat.agentMetaLoading")
     : !agentStatus.exists
@@ -1075,7 +1057,24 @@ export function ChatPane() {
         </Box>
 
         {/* ── chat card ── */}
-        <Card data-od-id="chat-card" sx={{ display: "flex", flexDirection: "column", minHeight: 600 }}>
+        {/* The card fills the viewport below the app chrome (237px above:
+            sticky topbar + page head + tabs + pane sub; the chat tab has no
+            page bottom padding), so the thread is the flex filler that
+            scrolls inside its own scrollbar and the floating composer sits
+            at the window's bottom edge. */}
+        <Card
+          data-od-id="chat-card"
+          sx={{
+            display: "flex",
+            flexDirection: "column",
+            height: "calc(100dvh - 237px)",
+            minHeight: 480,
+            // Visible so the floating composer's shadow is not clipped at the
+            // card's bottom edge.
+            overflow: "visible",
+            "@media (max-width: 1180px)": { height: "auto" },
+          }}
+        >
           <Box
             sx={{
               display: "flex",
@@ -1154,52 +1153,22 @@ export function ChatPane() {
             </Btn>
           </Box>
 
-          {objKind ? (
-            <Box
-              data-od-id="quick-chips"
-              sx={{ display: "flex", gap: "8px", flexWrap: "wrap", px: "18px", py: "12px", borderBottom: 1, borderColor: "divider" }}
-            >
-              {chips.map((c) => (
-                <Box
-                  key={c.label}
-                  component="button"
-                  type="button"
-                  disabled={sending}
-                  onClick={() => sendMessage(c.label)}
-                  data-od-id="quick-chip"
-                  sx={{
-                    fontSize: 12.5,
-                    border: 1,
-                    borderColor: "divider",
-                    borderRadius: 999,
-                    bgcolor: "background.default",
-                    color: "text.primary",
-                    p: "5px 13px",
-                    cursor: sending ? "default" : "pointer",
-                    opacity: sending ? 0.5 : 1,
-                    "&:hover": { borderColor: "text.primary" },
-                  }}
-                >
-                  {c.label}
-                </Box>
-              ))}
-            </Box>
-          ) : null}
-
           <Box
             ref={threadEl}
             data-od-id="chat-thread"
             aria-live="polite"
             sx={{
-              flex: 1,
+              // 480px basis keeps the thread sized when the card has no
+              // definite height (narrow layout); otherwise it flex-fills and
+              // scrolls inside its own scrollbar.
+              flex: "1 1 480px",
+              minHeight: 160,
               overflowY: "auto",
               p: "18px",
               display: "flex",
               flexDirection: "column",
               gap: "14px",
-              height: 480,
               bgcolor: "var(--surface)",
-              "@media (max-width: 1180px)": { height: 420 },
             }}
           >
             {agentNotice ? (
@@ -1341,207 +1310,75 @@ export function ChatPane() {
             ) : null}
           </Box>
 
-          <Box sx={{ borderTop: 1, borderColor: "divider", p: "12px 14px", display: "flex", gap: "10px", alignItems: "flex-end" }}>
-            <CpTextArea
-              ref={inputEl}
-              rows={1}
-              value={input}
-              onChange={(e) => {
-                setInput(e.target.value);
-                autoGrow();
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-                  e.preventDefault();
-                  sendMessage();
-                }
-              }}
-              placeholder={t("cubepilot.chat.placeholder")}
-              aria-label={t("cubepilot.chat.placeholder")}
-              data-od-id="chat-input"
+          {isModel ? (
+            <Box sx={{ borderTop: 1, borderColor: "divider", p: "10px 14px" }}>
+              <ParamsCard params={params} onChange={(patch) => setParams((p) => ({ ...p, ...patch }))} />
+            </Box>
+          ) : null}
+
+          {/* Composer: a floating bar pinned to the window's bottom edge (the
+              DSH look) — a rounded card with a soft shadow instead of a flat
+              top-border row; the thread scrolls above it. */}
+          <Box sx={{ p: "10px 14px 12px", flex: "none" }}>
+            <Box
               sx={{
-                flex: 1,
-                resize: "none",
-                padding: "10px 12px",
-                minHeight: 44,
-                maxHeight: 120,
-                fontSize: 13.5,
+                display: "flex",
+                gap: "10px",
+                alignItems: "flex-end",
+                border: 1,
+                borderColor: "divider",
+                borderRadius: "16px",
+                bgcolor: "background.default",
+                boxShadow: (theme) =>
+                  `0 1px 2px ${theme.palette.mode === "dark" ? "rgba(0,0,0,0.45)" : "rgba(0,0,0,0.05)"}, 0 8px 20px ${
+                    theme.palette.mode === "dark" ? "rgba(0,0,0,0.5)" : "rgba(0,0,0,0.09)"
+                  }`,
+                p: "6px 6px 6px 10px",
+                "&:focus-within": { borderColor: "var(--accent)" },
               }}
-            />
-            {isAgent && sending ? (
-              <Btn variant="secondary" onClick={() => void stopAgent()} data-od-id="stop-btn">
-                {t("cubepilot.chat.stop")}
-              </Btn>
-            ) : (
-              <Btn variant="primary" disabled={sending || !objKind} onClick={() => sendMessage()} data-od-id="send-btn">
-                {t("cubepilot.chat.send")}
-              </Btn>
-            )}
+            >
+              <CpTextArea
+                ref={inputEl}
+                rows={1}
+                value={input}
+                onChange={(e) => {
+                  setInput(e.target.value);
+                  autoGrow();
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                    e.preventDefault();
+                    sendMessage();
+                  }
+                }}
+                placeholder={t("cubepilot.chat.placeholder")}
+                aria-label={t("cubepilot.chat.placeholder")}
+                data-od-id="chat-input"
+                sx={{
+                  flex: 1,
+                  resize: "none",
+                  border: 0,
+                  boxShadow: "none",
+                  bgcolor: "transparent",
+                  padding: "9px 4px",
+                  minHeight: 40,
+                  maxHeight: 120,
+                  fontSize: 13.5,
+                  "&:focus": { borderColor: "divider", boxShadow: "none" },
+                }}
+              />
+              {isAgent && sending ? (
+                <Btn variant="secondary" onClick={() => void stopAgent()} data-od-id="stop-btn">
+                  {t("cubepilot.chat.stop")}
+                </Btn>
+              ) : (
+                <Btn variant="primary" disabled={sending || !objKind} onClick={() => sendMessage()} data-od-id="send-btn">
+                  {t("cubepilot.chat.send")}
+                </Btn>
+              )}
+            </Box>
           </Box>
         </Card>
-
-        {/* ── context rail ── */}
-        {isAgent ? (
-          <Box sx={{ display: "flex", flexDirection: "column", gap: "14px" }}>
-            <Card data-od-id="agent-status-card">
-              <Box sx={{ display: "flex", alignItems: "center", gap: "12px", p: "16px 18px 14px" }}>
-                <Box
-                  aria-hidden
-                  sx={{
-                    width: 30,
-                    height: 30,
-                    borderRadius: 8,
-                    display: "grid",
-                    placeItems: "center",
-                    color: "#fff",
-                    flex: "none",
-                    bgcolor: VIOLET,
-                  }}
-                >
-                  {Icons.spark({ size: 15 })}
-                </Box>
-                <Box sx={{ minWidth: 0 }}>
-                  <Box sx={{ fontSize: 14, fontWeight: 650 }}>CubePilot</Box>
-                  <Box sx={{ fontSize: 11.5, color: "text.secondary" }}>{t("cubepilot.chat.agentRole")}</Box>
-                </Box>
-                <Box sx={{ ml: "auto", textAlign: "right", ...monoSx, fontSize: 10.5, color: "text.secondary", lineHeight: 1.6 }}>
-                  {agentStatus?.lastActivity ? (
-                    <>
-                      {t("cubepilot.chat.lastActivity")}
-                      <br />
-                      {fmtTime(agentStatus.lastActivity)}
-                    </>
-                  ) : (
-                    t("cubepilot.chat.statusLabel", { status: agentStatus?.phase || "—" })
-                  )}
-                </Box>
-              </Box>
-              <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr" }}>
-                <Box sx={{ p: "12px 18px", borderTop: 1, borderColor: "divider", borderRight: 1, minWidth: 0 }}>
-                  <Box sx={{ fontSize: 11, color: "text.secondary" }}>{t("cubepilot.chat.railModel")}</Box>
-                  <Box sx={{ ...monoSx, fontSize: 12, fontWeight: 650, mt: "3px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {displayModelName(agentConfig?.selectedModel || PLATFORM_MODEL_NAME)}
-                  </Box>
-                </Box>
-                <Box sx={{ p: "12px 18px", borderTop: 1, borderColor: "divider" }}>
-                  <Box sx={{ fontSize: 11, color: "text.secondary" }}>{t("cubepilot.chat.railPhase")}</Box>
-                  <Box sx={{ ...monoSx, fontSize: 12, fontWeight: 650, mt: "3px" }}>{agentStatus?.phase || "—"}</Box>
-                </Box>
-              </Box>
-            </Card>
-
-            {agentMetaError ? (
-              <Card data-od-id="agent-meta-error-card">
-                <Box sx={{ p: "10px 18px", fontSize: 12, color: ERROR_COLOR, wordBreak: "break-word" }}>
-                  {t("cubepilot.chat.metaError", { error: agentMetaError })}
-                </Box>
-              </Card>
-            ) : null}
-
-            {/* The allowlist only exists under the Allowlist policy: with None
-                everything passes (audited), so the card is hidden entirely. */}
-            {agentConfirm?.confirmPolicy === "Allowlist" ? (
-              <Card data-od-id="allowlist-card">
-                <CardHead
-                  title={t("cubepilot.chat.railAllowlist")}
-                  hint={t("cubepilot.chat.railAllowlistMeta", { count: String(agentConfirm.allowlist.length) })}
-                />
-                <Box sx={{ display: "flex", flexWrap: "wrap", gap: "6px", p: "12px 18px", borderTop: 1, borderColor: "divider" }}>
-                  {agentConfirm.allowlist.map((r) => (
-                    <Box
-                      key={ruleKey(r)}
-                      data-od-id="rail-allowlist-tag"
-                      data-owned={r.owned ? "true" : "false"}
-                      title={[r.label || r.pattern, r.argPattern ? `argPattern: ${r.argPattern}` : ""].filter(Boolean).join("\n")}
-                      sx={{
-                        display: "inline-flex",
-                        alignItems: "center",
-                        border: 1,
-                        borderColor: r.owned ? "color-mix(in oklch, var(--accent) 40%, var(--border))" : "divider",
-                        bgcolor: r.owned ? "var(--accent-soft)" : "var(--surface)",
-                        borderRadius: 999,
-                        p: "3px 9px",
-                        ...monoSx,
-                        fontSize: 11.5,
-                      }}
-                    >
-                      {r.pattern}
-                    </Box>
-                  ))}
-                </Box>
-                <Box sx={{ px: "18px", pb: "12px", fontSize: 11.5, color: "text.secondary", lineHeight: 1.6 }}>
-                  {t("cubepilot.chat.railAllowlistNote")}
-                </Box>
-              </Card>
-            ) : null}
-
-            {/* The agent's tools (skills) — separate from the confirmation
-                allowlist above. */}
-            <Card data-od-id="tool-whitelist-card">
-              <CardHead title={t("cubepilot.chat.railSkills")} hint={t("cubepilot.chat.railTotal", { count: String(agentSkills.length) })} />
-              {agentSkills.length === 0 && !agentMetaError ? (
-                <Box sx={{ p: "10px 18px", borderTop: 1, borderColor: "divider", fontSize: 12.5, color: "text.secondary" }}>
-                  {t("cubepilot.chat.noSkills")}
-                </Box>
-              ) : null}
-              {agentSkills.map((s) => (
-                <Box
-                  key={s.name}
-                  title={s.description}
-                  sx={{ display: "flex", alignItems: "center", gap: "10px", p: "9px 18px", borderTop: 1, borderColor: "divider", fontSize: 12.5 }}
-                >
-                  <Box sx={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {s.displayName || s.name}
-                  </Box>
-                  <Pill variant={s.enabled ? "ok" : "neutral"}>{s.enabled ? t("cubepilot.chat.skillEnabled") : t("cubepilot.chat.skillDisabled")}</Pill>
-                </Box>
-              ))}
-            </Card>
-
-            <Card data-od-id="approval-card">
-              <CardHead title={t("cubepilot.chat.railApproval")} hint={t("cubepilot.chat.railApprovalMeta")} />
-              <Box
-                sx={{
-                  p: "13px 18px",
-                  borderTop: 1,
-                  borderColor: "divider",
-                  bgcolor: "var(--surface)",
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: "9px",
-                }}
-              >
-                <Box sx={{ fontSize: 11.5, color: "text.secondary", lineHeight: 1.6 }}>{t("cubepilot.chat.railApprovalNote")}</Box>
-                <Box
-                  component="button"
-                  type="button"
-                  onClick={() => setStoredTab("config")}
-                  sx={{
-                    alignSelf: "flex-start",
-                    border: 0,
-                    bg: "transparent",
-                    p: 0,
-                    cursor: "pointer",
-                    fontSize: 12,
-                    fontWeight: 550,
-                    color: "var(--accent-strong)",
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: "4px",
-                    "&:hover": { textDecoration: "underline", textUnderlineOffset: 3 },
-                  }}
-                >
-                  {t("cubepilot.chat.railApprovalLink")}
-                </Box>
-              </Box>
-            </Card>
-          </Box>
-        ) : (
-          <ParamsCard
-            params={params}
-            onChange={(patch) => setParams((p) => ({ ...p, ...patch }))}
-          />
-        )}
       </Box>
     </Box>
   );

@@ -255,8 +255,3 @@ export interface AgentQuestionOption {
   label: string;
   description?: string;
 }
-
-/** A quick-question chip above the thread (a prompt preset). */
-export interface QuickChip {
-  label: string;
-}

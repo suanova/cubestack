@@ -34,7 +34,17 @@ export default function CubepilotPage() {
   }));
 
   return (
-    <Box sx={{ p: "26px 28px 64px", maxWidth: 1240, mx: "auto", width: "100%" }}>
+    <Box
+      sx={{
+        p: "26px 28px 64px",
+        // The chat tab fills to the window bottom (its floating composer is
+        // pinned to the viewport's bottom edge), so no page bottom padding.
+        paddingBottom: tab === "chat" ? 0 : "64px",
+        maxWidth: 1240,
+        mx: "auto",
+        width: "100%",
+      }}
+    >
       <Box
         data-od-id="page-head"
         sx={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: "20px", mb: "18px" }}

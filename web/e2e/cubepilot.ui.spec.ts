@@ -293,7 +293,7 @@ test.beforeEach(async ({ context, page }) => {
 });
 
 test.describe("cubepilot agent chat (CR-backed data)", () => {
-  test("greets with the instance's model, the allowlist and the skills", async ({ page }) => {
+  test("greets with the instance's model and shows its state in the card header", async ({ page }) => {
     await stubAgent(page);
     await page.goto("/cubepilot");
 
@@ -303,55 +303,18 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     await obj.click();
 
     const thread = page.locator('[data-od-id="chat-thread"]');
+    // The greeting is data-driven: the instance's skills and model from the CRs.
     await expect(thread).toContainText("技能 2 项,当前模型 qwen38-27b");
     await expect(thread).toContainText("会话审计已开启");
 
-    // The rail lists the confirmation allowlist as tags: the hardcoded platform
-    // defaults plus the caller's own rule.
-    const allow = page.locator('[data-od-id="allowlist-card"]');
-    await expect(allow).toContainText("白名单");
-    await expect(allow).toContainText("4 条自动放行");
-    await expect(allow).toContainText("kubectl");
-    await expect(allow).toContainText("ls");
-    await expect(allow).toContainText("helm ls");
-    await expect(allow.locator('[data-od-id="rail-allowlist-tag"][data-owned="true"]')).toHaveCount(1);
-    await expect(allow).toContainText("命中的命令直接放行");
-
-    // Skills live in their own card (tools, not the allowlist).
-    const skills = page.locator('[data-od-id="tool-whitelist-card"]');
-    await expect(skills).toContainText("技能(工具)");
-    await expect(skills).toContainText("2 项");
-    await expect(skills).toContainText("集群巡检");
-    await expect(skills).toContainText("GPU 体检");
-    await expect(skills).toContainText("已启用");
-    await expect(skills).toContainText("未启用");
-
-    // The status card is the instance's own state, not a demo fixture.
-    const rail = page.locator('[data-od-id="agent-status-card"]');
-    await expect(rail).toContainText("最近活动");
-    await expect(rail).toContainText("当前模型");
-    // The rail shows the model id alone: the platform provider's prefix is
-    // internal plumbing.
-    await expect(rail).toContainText("qwen38-27b");
-    await expect(rail).toContainText("阶段");
-    await expect(rail).toContainText("Ready");
-
-    // Write ops still route through the approval queue; the model-mode rail
-    // (params/api cards) is not rendered for the agent.
-    await expect(page.locator('[data-od-id="approval-card"]')).toContainText("写操作");
-    await expect(page.locator('[data-od-id="params-card"]')).toHaveCount(0);
-  });
-
-  test("hides the rail allowlist under the None policy", async ({ page }) => {
-    await stubAgent(page, { confirm: { ...CONFIRM, confirmPolicy: "None", override: "None" } });
-    await page.goto("/cubepilot");
-    await page.locator('[data-od-id="obj-cubepilot"]').click();
-
-    // None passes everything through, so there is no allowlist to show — but the
-    // skills card stays.
-    await expect(page.locator('[data-od-id="agent-status-card"]')).toContainText("Ready");
+    // The chat tab has no context rail: the instance state lives in the card
+    // header (phase pill + activity line), not in a right-hand card column.
+    await expect(page.locator('[data-od-id="chat-card"]')).toContainText("Ready");
     await expect(page.locator('[data-od-id="allowlist-card"]')).toHaveCount(0);
-    await expect(page.locator('[data-od-id="tool-whitelist-card"]')).toContainText("集群巡检");
+    await expect(page.locator('[data-od-id="tool-whitelist-card"]')).toHaveCount(0);
+    await expect(page.locator('[data-od-id="agent-status-card"]')).toHaveCount(0);
+    await expect(page.locator('[data-od-id="approval-card"]')).toHaveCount(0);
+    await expect(page.locator('[data-od-id="params-card"]')).toHaveCount(0);
   });
 
   test("asks to provision the instance when the caller has none", async ({ page }) => {
@@ -366,13 +329,11 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     await expect(thread).toContainText("Agent 实例尚未创建");
     await expect(thread).toContainText("「配置」页保存一次模型配置");
 
-    // No instance → no phase, the runtime default model, and the platform
-    // baseline still lists the registered skills.
-    const rail = page.locator('[data-od-id="agent-status-card"]');
-    await expect(rail).toContainText("状态 · —");
-    // No instance yet → the rail shows the platform model the save would use.
-    await expect(rail).toContainText("cubestack");
-    await expect(page.locator('[data-od-id="tool-whitelist-card"]')).toContainText("集群巡检");
+    // No instance → the card header carries the not-provisioned line and no
+    // context rail is rendered.
+    await expect(page.locator('[data-od-id="chat-card"]')).toContainText("实例未创建");
+    await expect(page.locator('[data-od-id="agent-status-card"]')).toHaveCount(0);
+    await expect(page.locator('[data-od-id="tool-whitelist-card"]')).toHaveCount(0);
   });
 
   test("streams a turn and approves the write operation it blocks on", async ({ page }) => {
@@ -382,7 +343,8 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
 
     const thread = page.locator('[data-od-id="chat-thread"]');
     await expect(thread).toContainText("技能 2 项");
-    await page.locator('[data-od-id="quick-chip"]').filter({ hasText: "分析 Ceph OSD 使用率告警" }).click();
+    await page.locator('[data-od-id="chat-input"]').fill("分析 Ceph OSD 使用率告警");
+    await page.locator('[data-od-id="send-btn"]').click();
 
     // The prompt bubble, the accumulated deltas and the paired tool result.
     await expect(thread).toContainText("分析 Ceph OSD 使用率告警");
@@ -417,7 +379,8 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     await page.locator('[data-od-id="obj-cubepilot"]').click();
 
     await expect(page.locator('[data-od-id="chat-thread"]')).toContainText("技能 2 项");
-    await page.locator('[data-od-id="quick-chip"]').filter({ hasText: "生成升级前预检结论" }).click();
+    await page.locator('[data-od-id="chat-input"]').fill("生成升级前预检结论");
+    await page.locator('[data-od-id="send-btn"]').click();
 
     const card = page.locator('[data-od-id="question-item"]');
     await expect(card).toContainText("Agent 需要你确认");
