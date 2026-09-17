@@ -99,7 +99,7 @@ label 用 `bmc_ip` 而不是 `node`，是因为 exporter 本身不知道 BMC IP 
 
 ## 6. Prometheus 接入
 
-沿用现有 `mx-exporter` 的 `ScrapeConfig` 静态 target 模式。两个 exporter 各自一个 ScrapeConfig（`job` label 区分），每个 BMC 一个 staticConfigs entry，用 `__param_target` label 把 BMC IP 注入 scrape URL，并用 relabelConfigs 把 `instance` 重写为 BMC IP（这样两个 BMC 的指标在 dashboard 里用 `instance` 区分）：
+沿用现有 `mx-exporter` 的 `ScrapeConfig` 静态 target 模式。两个 exporter 各自一个 ScrapeConfig（`job` label 区分），每个 BMC 一个 staticConfigs entry，用 `__param_target` label 把 BMC IP 注入 scrape URL，并用 `relabelings` 把 `instance` 重写为 BMC IP（这样两个 BMC 的指标在 dashboard 里用 `instance` 区分）：
 
 ```yaml
 apiVersion: monitoring.coreos.com/v1alpha1

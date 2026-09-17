@@ -1419,7 +1419,7 @@
       },
       "targets": [
         {
-          "expr": "vllm:num_requests_running",
+          "expr": "vllm:num_requests_running{model_name=~\"$model_name\"}",
           "legendFormat": "Running",
           "refId": "A",
           "datasource": {
@@ -1430,7 +1430,7 @@
           "range": true
         },
         {
-          "expr": "vllm:num_requests_waiting",
+          "expr": "vllm:num_requests_waiting{model_name=~\"$model_name\"}",
           "legendFormat": "Waiting",
           "refId": "B",
           "datasource": {
@@ -1504,7 +1504,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(vllm:num_requests_running)",
+          "expr": "sum(vllm:num_requests_running{model_name=~\"$model_name\"})",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -1573,7 +1573,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(vllm:num_requests_waiting)",
+          "expr": "sum(vllm:num_requests_waiting{model_name=~\"$model_name\"})",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -1909,7 +1909,7 @@
           "range": true
         },
         {
-          "expr": "rate(vllm:num_preemptions_total[$__interval])",
+          "expr": "rate(vllm:num_preemptions_total{model_name=~\"$model_name\"}[$__interval])",
           "legendFormat": "Preemptions/s",
           "refId": "B",
           "datasource": {
@@ -2052,7 +2052,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(rate(vllm:num_preemptions_total[5m]))",
+          "expr": "sum(rate(vllm:num_preemptions_total{model_name=~\"$model_name\"}[5m]))",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -2190,7 +2190,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(increase(vllm:num_preemptions_total[$__range]))",
+          "expr": "sum(increase(vllm:num_preemptions_total{model_name=~\"$model_name\"}[$__range]))",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -2264,7 +2264,7 @@
             }
           },
           "mappings": [],
-          "unit": "percent",
+          "unit": "percentunit",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -2274,7 +2274,7 @@
               },
               {
                 "color": "red",
-                "value": 80
+                "value": 0.8
               }
             ]
           }
@@ -2283,7 +2283,7 @@
       },
       "targets": [
         {
-          "expr": "vllm:kv_cache_usage_perc",
+          "expr": "vllm:kv_cache_usage_perc{model_name=~\"$model_name\"}",
           "legendFormat": "{{instance}}",
           "refId": "A",
           "datasource": {
@@ -2316,7 +2316,7 @@
           "decimals": 2,
           "displayName": "KV-Avg",
           "mappings": [],
-          "unit": "percent",
+          "unit": "percentunit",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -2326,7 +2326,7 @@
               },
               {
                 "color": "red",
-                "value": 80
+                "value": 0.8
               }
             ]
           }
@@ -2357,7 +2357,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "avg(vllm:kv_cache_usage_perc)",
+          "expr": "avg(vllm:kv_cache_usage_perc{model_name=~\"$model_name\"})",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -2385,7 +2385,7 @@
           "decimals": 2,
           "displayName": "KV-Max",
           "mappings": [],
-          "unit": "percent",
+          "unit": "percentunit",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -2395,7 +2395,7 @@
               },
               {
                 "color": "red",
-                "value": 80
+                "value": 0.8
               }
             ]
           }
@@ -2426,7 +2426,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max(vllm:kv_cache_usage_perc)",
+          "expr": "max(vllm:kv_cache_usage_perc{model_name=~\"$model_name\"})",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"

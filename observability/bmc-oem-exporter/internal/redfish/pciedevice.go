@@ -51,20 +51,21 @@ type pcieDeviceCollection struct {
 }
 
 // Client queries a single BMC's Redfish PCIeDevices collection over HTTPS
-// with basic auth. TLS verification is skipped because BMCs use self-signed
-// certificates by default (same assumption idrac_exporter makes).
+// with basic auth. BMCs use self-signed certificates by default, so TLS
+// verification is skipped only when the operator explicitly opts in via
+// skipVerify (chart value bmcOemExporter.tlsInsecure / BMC_TLS_SKIP_VERIFY).
 type Client struct {
 	httpClient *http.Client
 	username   string
 	password   string
 }
 
-func NewClient(username, password string, timeout time.Duration) *Client {
+func NewClient(username, password string, timeout time.Duration, skipVerify bool) *Client {
 	return &Client{
 		httpClient: &http.Client{
 			Timeout: timeout,
 			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // BMC self-signed certs
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: skipVerify}, //nolint:gosec // opt-in for BMC self-signed certs
 			},
 		},
 		username: username,

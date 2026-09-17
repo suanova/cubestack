@@ -37,6 +37,12 @@ spec:
                 secretKeyRef:
                   name: {{ include "cubestack-bmc-exporter.fullname" . }}-bmc-credentials
                   key: password
+            # /probe 目标白名单: 与 ScrapeConfig 的抓取目标一致, 防止共享凭据
+            # 被指向任意可达的 HTTPS 端点
+            - name: BMC_HOSTS
+              value: {{ join "," .Values.bmc.hosts | quote }}
+            - name: BMC_TLS_SKIP_VERIFY
+              value: {{ .Values.bmcOemExporter.tlsInsecure | quote }}
           ports:
             - name: metrics
               containerPort: 9622

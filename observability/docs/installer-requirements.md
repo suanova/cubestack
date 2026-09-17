@@ -186,14 +186,16 @@ PROMETHEUS_NAMESPACE="${PROMETHEUS_NAMESPACE:-monitoring}"
 PROMETHEUS_RELEASE_NAME="${PROMETHEUS_RELEASE_NAME:-kube-prometheus}"
 PROMETHEUS_CHART_DIR="${PROMETHEUS_CHART_DIR:-${REPO_ROOT}/deployments/offline-files/kube-prometheus-stack}"
 GRAFANA_ADMIN_USER="${GRAFANA_ADMIN_USER:-admin}"
-GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD:-CHANGE_ME}"   # 必须传入 helm values grafana.adminPassword
+GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD:-CHANGE_ME}"   # 必须传入 helm values grafana.adminPassword; 部署前校验见下方 ⚠
 # CubeStack observability 目录（recording rules + dashboards）
 # 默认从 cubestack 仓库同级目录读取；离线环境打包后放 /opt/cubestack/observability
 CUBESTACK_OBSERVABILITY_DIR="${CUBESTACK_OBSERVABILITY_DIR:-/opt/cubestack/observability}"
 ```
 
-> ⚠ `GRAFANA_ADMIN_PASSWORD` 必须落地到 helm values（`grafana.adminPassword`）：
-> 不设置时 helm 生成随机密码存 secret，用户无法预知（实测环境因此需要手工重置）。
+> ⚠ `GRAFANA_ADMIN_PASSWORD` 必须落地到 helm values（`grafana.adminPassword`）。
+> **helm 安装前必须硬失败校验**：变量未设置、为空、或仍等于 `CHANGE_ME` 占位符时立即报错退出，
+> 禁止用已知默认口令部署 Grafana（与 BMC exporter 的凭据校验同理）。不设置时 helm 会生成
+> 随机密码存 secret，用户无法预知（实测环境因此需要手工重置），也不是可接受的行为。
 
 ---
 
@@ -276,14 +278,26 @@ BMC 凭据经 values 传入）。chart（OCI: `harbor.isuanova.com/suanova/cubes
 
 **安装**：
 
+BMC 密码不要放 `--set`（shell history / 进程参数可见，且含特殊字符时易被 helm 误解析）——
+用 values 文件（权限 600）传入，装完即删：
+
 ```bash
+umask 077
+cat > /tmp/bmc-values.yaml <<EOF
+bmc:
+  username: root
+  password: '<BMC 密码>'
+  hosts: [10.6.2.14, 10.6.2.18]
+bmcOemExporter:
+  tlsInsecure: true   # BMC 为自签名证书时显式开启; 生产环境应配置 CA 并保持 false
+EOF
+
 helm upgrade --install cubestack-bmc-exporter \
   oci://harbor.isuanova.com/suanova/cubestack-bmc-exporter-chart \
   --version 1.0.0 \
   -n monitoring \
-  --set bmc.username=root \
-  --set bmc.password='<BMC 密码>' \
-  --set bmc.hosts='{10.6.2.14,10.6.2.18}'
+  -f /tmp/bmc-values.yaml
+rm -f /tmp/bmc-values.yaml
 ```
 
 **常用配置**：
@@ -302,8 +316,11 @@ helm upgrade --install cubestack-bmc-exporter \
 - 离线环境无法访问 harbor 时：镜像需在节点本地构建导入（bmc-oem-exporter 用仓库 Dockerfile
   多阶段构建，需本机 buildah store 先有 `golang:1.26` 基础镜像；idrac-exporter 为 Go 静态编译
   + buildah scratch 镜像；均需 `ctr -n k8s.io images import`，参考
-  `deploy/bmc/deploy-bmc.sh`），安装时用 `--set bmcOemExporter.image.repository=...`
-  指向本地导入的镜像名。
+  `deploy/bmc/deploy-bmc.sh`），安装时**两个 exporter 的镜像仓库都要覆盖**（只覆盖一个时
+  另一个仍指向 harbor 无法拉取）；导入的 tag 不是 `latest` 时两个 `image.tag` 也要一起
+  显式指定：
+  `--set bmcOemExporter.image.repository=<本地名> --set idracExporter.image.repository=<本地名>
+  --set bmcOemExporter.image.tag=<导入tag> --set idracExporter.image.tag=<导入tag>`。
 
 **验证**：
 

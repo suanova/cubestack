@@ -41,4 +41,4 @@ Grafana UI → Dashboards → Import → Upload JSON file，或通过 installer 
 
 ## 面板说明
 
-`bmc-hardware.json` 每个面板的含义与异常判读见 `../docs/bmc-dashboard-panels.md`。
+`bmc-hardware.json` 每个面板的含义与异常判读见 `../../docs/bmc-dashboard-panels.md`。

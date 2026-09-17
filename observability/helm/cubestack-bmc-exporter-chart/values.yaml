@@ -17,6 +17,9 @@ bmcOemExporter:
     repository: harbor.isuanova.com/suanova/bmc-oem-exporter
     tag: latest
     pullPolicy: IfNotPresent
+  # BMC 使用自签名证书。默认保持 TLS 校验(true 时跳过校验, 仅确认 BMC 自签后显式开启;
+  # 提供 BMC CA 的正式加固方案见 docs/bmc-oem-exporter-design.md)。
+  tlsInsecure: false
   nodeSelector: {}
   # 调度容忍: 钉在 control-plane 节点(nodeSelector)时需容忍 NoSchedule 污点
   tolerations: []

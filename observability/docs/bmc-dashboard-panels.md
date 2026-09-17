@@ -24,7 +24,7 @@ Dashboard 文件：`dashboards/grafana/bmc-hardware.json`（uid `bmc-hardware-cu
 | **Drives Not OK** | 不健康的硬盘数量 | >0 = 硬盘故障或预故障，看 Drive Health 表定位 |
 | **Memory Modules Not OK** | 不健康的内存条数量 | >0 = DIMM 报错（通常是 ECC 错误累积），看 Memory Modules 表 |
 | **Fans Not OK** | 不健康的风扇数量 | >0 = 风扇停转/失效，**立即查温度**——散热能力下降后温度会跟着涨 |
-| **BMC Scrape Success** | bmc-oem-exporter 最近一次能否成功探测这台 BMC | Not OK = BMC 网络不通/宕机/密码错误。此时该 BMC 的所有面板数据都是旧值，别信 |
+| **BMC Scrape Success** | bmc-oem-exporter 最近一次能否成功探测这台 BMC | Not OK = BMC 网络不通/宕机/密码错误。此时该 BMC 的 **PCIe Devices / GPU OEM 面板**（仅 bmc-oem-exporter 提供）数据是旧值，别信；温度/功耗/存储等标准面板由 idrac_exporter 独立抓取，不受影响 |
 | **idrac Scrape Errors** | idrac_exporter 累计 Redfish 调用错误数（所选 BMC 合计） | 持续增长 = BMC 响应异常或频繁超时；偶尔+1 可忽略 |
 
 ---
@@ -92,4 +92,4 @@ Dashboard 文件：`dashboards/grafana/bmc-hardware.json`（uid `bmc-hardware-cu
 1. **Overview 第一行**：全绿 = 整机健康，跳过细节
 2. 哪个 stat 不是 0/OK → 去对应区块的表定位具体部件
 3. **GPU Power Draw** 扫一眼有没有"一条线平躺"或"一条线起飞"的卡
-4. 最后看 **BMC Scrape Success** 确认数据本身是新鲜的（Not OK 时上面的判断都不算数）
+4. 最后看 **BMC Scrape Success** 确认数据本身是新鲜的（Not OK 时只影响 bmc-oem-exporter 提供的 PCIe/GPU OEM 面板；idrac_exporter 独立抓取的标准面板不受影响）

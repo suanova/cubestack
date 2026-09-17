@@ -47,26 +47,36 @@ spec:
           expr: |
             max by (namespace, inference_service, uuid) (
               label_replace(
-                label_replace(
-                  mx_gpu_usage / 100,
-                  "namespace", "$1", "exported_namespace", "(.*)"
+                (
+                  label_replace(
+                    label_replace(
+                      mx_gpu_usage / 100,
+                      "namespace", "$1", "exported_namespace", "(.*)"
+                    ),
+                    "pod", "$1", "exported_pod", "(.*)"
+                  )
+                  * on(namespace, pod) group_left(label_ai_cubestack_io_inference_service)
+                  kube_pod_labels{label_ai_cubestack_io_inference_service!=""}
                 ),
-                "pod", "$1", "exported_pod", "(.*)"
+                "inference_service", "$1", "label_ai_cubestack_io_inference_service", "(.*)"
               )
-              * on(namespace, pod) group_left(label_ai_cubestack_io_inference_service)
-              kube_pod_labels{label_ai_cubestack_io_inference_service!=""}
             )
             or
             max by (namespace, devenv, uuid) (
               label_replace(
-                label_replace(
-                  mx_gpu_usage / 100,
-                  "namespace", "$1", "exported_namespace", "(.*)"
+                (
+                  label_replace(
+                    label_replace(
+                      mx_gpu_usage / 100,
+                      "namespace", "$1", "exported_namespace", "(.*)"
+                    ),
+                    "pod", "$1", "exported_pod", "(.*)"
+                  )
+                  * on(namespace, pod) group_left(label_ai_cubestack_io_dev_environment)
+                  kube_pod_labels{label_ai_cubestack_io_dev_environment!=""}
                 ),
-                "pod", "$1", "exported_pod", "(.*)"
+                "devenv", "$1", "label_ai_cubestack_io_dev_environment", "(.*)"
               )
-              * on(namespace, pod) group_left(label_ai_cubestack_io_dev_environment)
-              kube_pod_labels{label_ai_cubestack_io_dev_environment!=""}
             )
 
         # GPU VRAM utilization per InferenceService or DevEnvironment (MetaX)
@@ -74,26 +84,36 @@ spec:
           expr: |
             max by (namespace, inference_service, uuid) (
               label_replace(
-                label_replace(
-                  mx_hbm_bw_util / 100,
-                  "namespace", "$1", "exported_namespace", "(.*)"
+                (
+                  label_replace(
+                    label_replace(
+                      mx_hbm_bw_util / 100,
+                      "namespace", "$1", "exported_namespace", "(.*)"
+                    ),
+                    "pod", "$1", "exported_pod", "(.*)"
+                  )
+                  * on(namespace, pod) group_left(label_ai_cubestack_io_inference_service)
+                  kube_pod_labels{label_ai_cubestack_io_inference_service!=""}
                 ),
-                "pod", "$1", "exported_pod", "(.*)"
+                "inference_service", "$1", "label_ai_cubestack_io_inference_service", "(.*)"
               )
-              * on(namespace, pod) group_left(label_ai_cubestack_io_inference_service)
-              kube_pod_labels{label_ai_cubestack_io_inference_service!=""}
             )
             or
             max by (namespace, devenv, uuid) (
               label_replace(
-                label_replace(
-                  mx_hbm_bw_util / 100,
-                  "namespace", "$1", "exported_namespace", "(.*)"
+                (
+                  label_replace(
+                    label_replace(
+                      mx_hbm_bw_util / 100,
+                      "namespace", "$1", "exported_namespace", "(.*)"
+                    ),
+                    "pod", "$1", "exported_pod", "(.*)"
+                  )
+                  * on(namespace, pod) group_left(label_ai_cubestack_io_dev_environment)
+                  kube_pod_labels{label_ai_cubestack_io_dev_environment!=""}
                 ),
-                "pod", "$1", "exported_pod", "(.*)"
+                "devenv", "$1", "label_ai_cubestack_io_dev_environment", "(.*)"
               )
-              * on(namespace, pod) group_left(label_ai_cubestack_io_dev_environment)
-              kube_pod_labels{label_ai_cubestack_io_dev_environment!=""}
             )
 
     - name: cubestack.gpu.per_card
