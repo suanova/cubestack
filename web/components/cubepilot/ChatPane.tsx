@@ -1337,7 +1337,7 @@ export function ChatPane() {
               sx={{
                 display: "flex",
                 flexDirection: "column",
-                gap: "8px",
+                gap: "6px",
                 border: 1,
                 borderColor: "divider",
                 borderRadius: "16px",
@@ -1346,7 +1346,7 @@ export function ChatPane() {
                   `0 1px 2px ${theme.palette.mode === "dark" ? "rgba(0,0,0,0.45)" : "rgba(0,0,0,0.05)"}, 0 8px 20px ${
                     theme.palette.mode === "dark" ? "rgba(0,0,0,0.5)" : "rgba(0,0,0,0.09)"
                   }`,
-                p: "8px 10px",
+                p: "6px 8px",
                 "&:focus-within": { borderColor: "var(--accent)" },
               }}
             >
@@ -1373,8 +1373,8 @@ export function ChatPane() {
                   border: 0,
                   boxShadow: "none",
                   bgcolor: "transparent",
-                  padding: "9px 4px",
-                  minHeight: 40,
+                  padding: "6px 4px",
+                  minHeight: 34,
                   maxHeight: 120,
                   fontSize: 13.5,
                   "&:focus": { borderColor: "divider", boxShadow: "none" },
@@ -1426,11 +1426,11 @@ export function ChatPane() {
                 ) : null}
                 <Box sx={{ flex: 1 }} />
                 {isAgent && sending ? (
-                  <Btn variant="secondary" onClick={() => void stopAgent()} data-od-id="stop-btn">
+                  <Btn variant="secondary" small onClick={() => void stopAgent()} data-od-id="stop-btn">
                     {t("cubepilot.chat.stop")}
                   </Btn>
                 ) : (
-                  <Btn variant="primary" disabled={sending || !objKind} onClick={() => sendMessage()} data-od-id="send-btn">
+                  <Btn variant="primary" small disabled={sending || !objKind} onClick={() => sendMessage()} data-od-id="send-btn">
                     {t("cubepilot.chat.send")}
                   </Btn>
                 )}
