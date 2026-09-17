@@ -25,6 +25,7 @@
 
 import { Box, Popover, SxProps, Theme } from "@mui/material";
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { PointerEvent as ReactPointerEvent } from "react";
 
 import { PLATFORM_MODEL_NAME, displayModelName } from "@/lib/cubepilot/types";
 import type {
@@ -51,13 +52,18 @@ const VIOLET_SOFT = `color-mix(in oklch, ${VIOLET} 9%, transparent)`;
 const ACCENT_FILL = "color-mix(in oklch, var(--accent) 82%, var(--fg))";
 const ERROR_COLOR = "#e15c5c";
 
-const CHAT_GRID: SxProps<Theme> = {
+// The object list is a draggable pane: the column width is component state,
+// and the resizer handle rides the 16px gutter between the two panes.
+const LIST_COL_DEFAULT = 157;
+const LIST_COL_MIN = 120;
+const LIST_COL_MAX = 460;
+
+const chatGridSx = (listW: number): SxProps<Theme> => ({
   display: "grid",
-  gridTemplateColumns: "157px minmax(0,1fr)",
-  gap: "14px",
+  gridTemplateColumns: `${listW}px 16px minmax(0,1fr)`,
   alignItems: "start",
   "@media (max-width: 1180px)": { gridTemplateColumns: "1fr" },
-};
+});
 
 // 14px glyphs for the composer's sampling-params chip (DSH access-mode look).
 const SLIDERS_ICON = (
@@ -255,6 +261,37 @@ export function ChatPane() {
   const [params, setParams] = useState<SampleParams>({ temperature: 0.7, topP: 0.9, maxTokens: 1024 });
   /** Anchor of the sampling-params popover; null = the chip is collapsed. */
   const [paramsAnchor, setParamsAnchor] = useState<HTMLElement | null>(null);
+  /** Object-list column width in px; dragged with the pane resizer. */
+  const [listW, setListW] = useState(LIST_COL_DEFAULT);
+  const [resizing, setResizing] = useState(false);
+  const resizeStart = useRef({ x: 0, w: 0 });
+
+  const startResize = (e: ReactPointerEvent<HTMLDivElement>): void => {
+    e.preventDefault();
+    resizeStart.current = { x: e.clientX, w: listW };
+    setResizing(true);
+  };
+
+  // While resizing: track the pointer on window, clamp the column width, and
+  // keep the drag from selecting text or scrolling the page (touch).
+  useEffect(() => {
+    if (!resizing) return;
+    const onMove = (e: PointerEvent): void => {
+      const next = resizeStart.current.w + (e.clientX - resizeStart.current.x);
+      setListW(Math.min(LIST_COL_MAX, Math.max(LIST_COL_MIN, next)));
+    };
+    const onUp = (): void => setResizing(false);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+    };
+  }, [resizing]);
 
   // Agent (CubePilot) state — real data from the agent CRs + agent API.
   const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null);
@@ -965,9 +1002,9 @@ export function ChatPane() {
       </Box>
       {toastView}
 
-      <Box sx={CHAT_GRID}>
+      <Box sx={chatGridSx(listW)}>
         {/* ── objects ── */}
-        <Box data-od-id="object-list">
+        <Box data-od-id="object-list" sx={{ "@media (max-width: 1180px)": { mb: "14px" } }}>
           <Box sx={groupLabelSx}>{t("cubepilot.chat.objectsModels")}</Box>
           {models.map((m) => {
             const active = isModel && m.id === svcId;
@@ -1069,6 +1106,39 @@ export function ChatPane() {
             </Box>
           </Box>
         </Box>
+
+        {/* ── resizer: drag to resize the object list column ── */}
+        <Box
+          data-od-id="pane-resizer"
+          role="separator"
+          aria-orientation="vertical"
+          aria-valuemin={LIST_COL_MIN}
+          aria-valuemax={LIST_COL_MAX}
+          aria-valuenow={listW}
+          aria-label={t("cubepilot.chat.resizeAria")}
+          onPointerDown={startResize}
+          sx={{
+            alignSelf: "stretch",
+            position: "relative",
+            cursor: "col-resize",
+            touchAction: "none",
+            zIndex: 5,
+            "@media (max-width: 1180px)": { display: "none" },
+            "&::before": {
+              content: '""',
+              position: "absolute",
+              top: 0,
+              bottom: 0,
+              left: "50%",
+              transform: "translateX(-50%)",
+              width: resizing ? 3 : 2,
+              borderRadius: 2,
+              bgcolor: resizing ? "var(--accent)" : "divider",
+              transition: "background-color 120ms ease, width 120ms ease",
+            },
+            "&:hover::before": { bgcolor: "var(--accent)" },
+          }}
+        />
 
         {/* ── chat card ── */}
         {/* The card fills the viewport below the app chrome (237px above:

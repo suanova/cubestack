@@ -348,6 +348,37 @@ describe("cubepilot page", () => {
     act(() => root.unmount());
   }, 15000);
 
+  it("resizes the object list column by dragging the pane resizer", async () => {
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    const resizer = container.querySelector('[data-od-id="pane-resizer"]') as HTMLElement;
+    expect(resizer).not.toBeNull();
+    expect(resizer.getAttribute("role")).toBe("separator");
+    expect(resizer.getAttribute("aria-valuenow")).toBe("157");
+
+    const drag = (fromX: number, toX: number): void => {
+      act(() => {
+        resizer.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, clientX: fromX }));
+      });
+      act(() => {
+        window.dispatchEvent(new PointerEvent("pointermove", { clientX: toX }));
+        window.dispatchEvent(new PointerEvent("pointerup"));
+      });
+    };
+
+    // Dragging 100px right widens the column by 100px.
+    drag(200, 300);
+    expect(resizer.getAttribute("aria-valuenow")).toBe("257");
+
+    // Drags beyond the bounds clamp to the min/max.
+    drag(200, 5000);
+    expect(resizer.getAttribute("aria-valuenow")).toBe("460");
+    drag(200, -5000);
+    expect(resizer.getAttribute("aria-valuenow")).toBe("120");
+    act(() => root.unmount());
+  });
+
   it("shows the platform model without its internal alias, external providers with their name", async () => {
     stubApi({
       exists: true,

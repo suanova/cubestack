@@ -431,6 +431,35 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
   });
 });
 
+test.describe("cubepilot chat pane (layout)", () => {
+  test("drags the resizer to resize the object list column", async ({ page }) => {
+    await stubAgent(page);
+    await page.goto("/cubepilot");
+
+    const resizer = page.locator('[data-od-id="pane-resizer"]');
+    await expect(resizer).toBeVisible();
+    const list = page.locator('[data-od-id="object-list"]');
+
+    const colWidth = async (): Promise<number> =>
+      list.evaluate((el) => el.getBoundingClientRect().width);
+    const before = await colWidth();
+
+    // Drag the resizer ~80px to the right with a real mouse.
+    const box = await resizer.boundingBox();
+    if (!box) throw new Error("resizer has no bounding box");
+    const x = box.x + box.width / 2;
+    const y = box.y + box.height / 2;
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x + 80, y, { steps: 8 });
+    await page.mouse.up();
+
+    // The column (and thus the resizer's reported width) grows by ~80px.
+    const after = await colWidth();
+    expect(after).toBeGreaterThan(before + 50);
+  });
+});
+
 test.describe("cubepilot config (AgentInstance CR + AgentTemplate catalog)", () => {
   test("shows the instance state, the inherited policy and persists edits", async ({ page }) => {
     const captured = await stubAgent(page);
