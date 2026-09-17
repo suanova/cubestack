@@ -1,0 +1,383 @@
+"use client";
+
+// The agent's side of the thread: one bubble per turn, its blocks in the order
+// they arrived, a card per tool call, and the turn's closing text as a panel.
+//
+// The blocks themselves come from lib/cubepilot/agentThread — the model already
+// decided that a turn is an ordered list of text and tool blocks rather than a
+// text string plus a tools array. This file only draws them, and draws them in
+// array order: flattening tools into their own list is what made a turn's
+// narration render as a paragraph above a tool call it had actually followed.
+//
+// Approvals and questions are deliberately absent here. An agent bubble is a
+// record of what happened, so the cards that still need an answer dock under the
+// composer (HitlDock) instead of living in a scrolled-past bubble.
+
+import { Box } from "@mui/material";
+import { ReactNode, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkBreaks from "remark-breaks";
+
+import type { AgentBlock, AgentMsg, ThreadMsg } from "@/lib/cubepilot/agentThread";
+import { useI18n } from "@/lib/i18n";
+
+import { Icons, Pill, monoSx } from "./ui";
+
+/** A user turn, right-aligned and inverted (prototype chat.html:208). */
+const userBubbleSx = {
+  alignSelf: "flex-end",
+  maxWidth: "82%",
+  p: "11px 14px",
+  borderRadius: "var(--radius)",
+  borderBottomRightRadius: 2,
+  bgcolor: "text.primary",
+  color: "background.default",
+  fontSize: 13.5,
+  lineHeight: 1.6,
+} as const;
+
+/** An agent turn, left-aligned, bordered in the agent's own hue
+ *  (prototype chat.html:210 — the same 42% mix globals.css names --violet-bd). */
+const agentBubbleSx = {
+  alignSelf: "flex-start",
+  maxWidth: "82%",
+  p: "11px 14px",
+  borderRadius: "var(--radius)",
+  borderBottomLeftRadius: 2,
+  bgcolor: "background.default",
+  border: "1px solid var(--violet-bd)",
+  fontSize: 13.5,
+  lineHeight: 1.65,
+  wordBreak: "break-word",
+} as const;
+
+/** One tool invocation: a header that can be collapsed, then — only once the
+ *  reader asks for it — the command it ran and what came back. */
+function ToolCard({
+  block,
+  running,
+  open,
+  onToggle,
+}: {
+  block: Extract<AgentBlock, { kind: "tool" }>;
+  running: boolean;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  const { t } = useI18n();
+  // A tool that never returned because the turn ended is not "running" forever:
+  // it is stopped, and saying so is the difference between "wait" and "gone".
+  const pill = running
+    ? { variant: "accent" as const, label: t("cubepilot.chat.toolRunning"), pulse: true }
+    : block.done
+      ? { variant: "ok" as const, label: t("cubepilot.chat.toolDone"), pulse: false }
+      : { variant: "neutral" as const, label: t("cubepilot.chat.toolStopped"), pulse: false };
+  return (
+    <Box
+      data-od-id="tool-card"
+      sx={{ border: 1, borderColor: "var(--violet-bd)", borderRadius: "6px", bgcolor: "color-mix(in oklch, var(--violet) 9%, transparent)", overflow: "hidden" }}
+    >
+      <Box
+        component="button"
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        title={open ? t("cubepilot.chat.collapseTool") : t("cubepilot.chat.expandTool")}
+        data-od-id="tool-card-head"
+        sx={{
+          display: "flex",
+          alignItems: "center",
+          gap: "8px",
+          width: "100%",
+          border: 0,
+          bgcolor: "transparent",
+          color: "text.primary",
+          fontFamily: "inherit",
+          textAlign: "left",
+          p: "8px 12px",
+          cursor: "pointer",
+        }}
+      >
+        <Box sx={{ color: "var(--violet-text)", display: "flex", flex: "none" }}>{Icons.tool({ size: 13 })}</Box>
+        <Box sx={{ ...monoSx, fontSize: 11.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {block.name}
+        </Box>
+        <Pill variant={pill.variant} dot pulse={pill.pulse} sx={{ ml: "auto" }}>
+          {pill.label}
+        </Pill>
+        <Box component="span" aria-hidden sx={{ ...monoSx, fontSize: 10, color: "text.secondary", flex: "none" }}>
+          {open ? "▾" : "▸"}
+        </Box>
+      </Box>
+      {open ? (
+        <Box sx={{ px: "12px", pb: "10px", display: "flex", flexDirection: "column", gap: "8px" }}>
+          {block.args ? (
+            <Box
+              component="pre"
+              sx={{
+                m: 0,
+                fontFamily: "var(--font-mono)",
+                fontSize: 11.5,
+                lineHeight: 1.7,
+                // The command, in the softened treatment the fenced blocks got:
+                // a tinted box with a violet left bar, not an inverted --fg block.
+                bgcolor: "color-mix(in oklch, var(--violet) 8%, var(--surface))",
+                borderLeft: "2px solid var(--violet-text)",
+                borderRadius: "6px",
+                p: "8px 10px",
+                overflowX: "auto",
+                whiteSpace: "pre",
+              }}
+            >
+              {block.args}
+            </Box>
+          ) : null}
+          {block.output !== undefined ? (
+            <Box
+              data-od-id="tool-output"
+              sx={{
+                fontFamily: "var(--font-mono)",
+                fontSize: 11,
+                lineHeight: 1.8,
+                bgcolor: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "6px",
+                p: "8px 10px",
+                // A long listing is the point of the card, but it must not push
+                // the rest of the turn off the screen: it scrolls in place.
+                maxHeight: 220,
+                overflow: "auto",
+                whiteSpace: "pre-wrap",
+                color: "text.secondary",
+              }}
+            >
+              {block.output}
+            </Box>
+          ) : null}
+        </Box>
+      ) : null}
+    </Box>
+  );
+}
+
+/** The agent's text as Markdown.
+ *
+ *  react-markdown rather than the hand-rolled Markdown.tsx: that one is a
+ *  subset parser whose inline splitter mangles `**bold with `code` inside**`,
+ *  which is ordinary LLM output, and agent output is arbitrary Markdown rather
+ *  than the demo content it was written for. remarkBreaks keeps single newlines
+ *  as breaks — chat text relies on it. Raw HTML is escaped by default.
+ *
+ *  Inline code is styled by CSS on the wrapper, NOT by a `code` component:
+ *  react-markdown v10 passes no `inline` flag, and a fenced block written
+ *  without a language carries no className either, so a component-level test
+ *  cannot tell inline from block. CSS can — `pre code` resets what `& code` sets. */
+function AgentMarkdown({ text }: { text: string }) {
+  return (
+    <Box
+      sx={{
+        fontSize: 13.5,
+        lineHeight: 1.7,
+        wordBreak: "break-word",
+        "& > p:first-of-type": { mt: 0 },
+        "& code": {
+          fontFamily: "var(--font-mono)",
+          fontSize: "0.92em",
+          bgcolor: "color-mix(in oklch, var(--fg) 7%, transparent)",
+          border: "1px solid var(--border)",
+          borderRadius: "4px",
+          px: "4px",
+        },
+        "& pre code": { bgcolor: "transparent", border: 0, px: 0, fontSize: "inherit" },
+      }}
+    >
+      <ReactMarkdown
+        remarkPlugins={[remarkBreaks]}
+        components={{
+          p: ({ children }) => <Box component="p" sx={{ m: "8px 0" }}>{children}</Box>,
+          ul: ({ children }) => <Box component="ul" sx={{ m: "8px 0", pl: "20px" }}>{children}</Box>,
+          ol: ({ children }) => <Box component="ol" sx={{ m: "8px 0", pl: "20px" }}>{children}</Box>,
+          li: ({ children }) => <Box component="li" sx={{ mt: "3px" }}>{children}</Box>,
+          h1: ({ children }) => <Box component="h4" sx={{ m: "14px 0 6px", fontSize: 15, fontWeight: 650, lineHeight: 1.4 }}>{children}</Box>,
+          h2: ({ children }) => <Box component="h5" sx={{ m: "14px 0 6px", fontSize: 14, fontWeight: 650, lineHeight: 1.4 }}>{children}</Box>,
+          h3: ({ children }) => <Box component="h6" sx={{ m: "14px 0 6px", fontSize: 14, fontWeight: 650, lineHeight: 1.4 }}>{children}</Box>,
+          a: ({ children, href }) => (
+            <Box
+              component="a"
+              href={href}
+              target="_blank"
+              rel="noreferrer"
+              sx={{ color: "var(--accent-strong)", textDecoration: "underline", textUnderlineOffset: "2px" }}
+            >
+              {children}
+            </Box>
+          ),
+          // The same softened treatment Task 3 gave Markdown.tsx's fenced
+          // blocks: a --surface box with a violet left bar, not the inverted
+          // --fg block that was the loudest thing on the page.
+          pre: ({ children }) => (
+            <Box
+              component="pre"
+              sx={{
+                fontFamily: "var(--font-mono)",
+                fontSize: 11.5,
+                lineHeight: 1.7,
+                bgcolor: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderLeft: "2px solid var(--violet-text)",
+                color: "var(--fg)",
+                borderRadius: "6px",
+                p: "10px 12px",
+                overflowX: "auto",
+                whiteSpace: "pre",
+                m: "8px 0",
+              }}
+            >
+              {children}
+            </Box>
+          ),
+        }}
+      >
+        {text}
+      </ReactMarkdown>
+    </Box>
+  );
+}
+
+/** One agent turn. */
+function AgentBubble({
+  msg,
+  mi,
+  sessionKey,
+  openedTools,
+  onToggleTool,
+}: {
+  msg: AgentMsg;
+  mi: number;
+  sessionKey: string | null;
+  openedTools: Record<string, boolean>;
+  onToggleTool: (key: string, open: boolean) => void;
+}) {
+  const { t } = useI18n();
+  // The turn's closing text becomes a panel only when the turn also ran a tool:
+  // with no tool in between there is nothing to close out, and boxing every
+  // single-paragraph reply would make an ordinary answer look like a report.
+  const ranTools = msg.blocks.some((b) => b.kind === "tool");
+  const lastText = msg.blocks.reduce((acc, b, i) => (b.kind === "text" ? i : acc), -1);
+  // Only a confirmed, clean end makes the closing text "the answer". A stopped
+  // or failed turn is labelled as a reply, so a mid-turn snapshot can never
+  // read as the result disappearing.
+  const settled = msg.phase === "done" && !msg.stopped && !msg.error && !msg.transportLost;
+  return (
+    <Box data-od-id="agent-bubble" sx={agentBubbleSx}>
+      <Box
+        sx={{
+          ...monoSx,
+          fontSize: 10,
+          letterSpacing: "0.06em",
+          textTransform: "uppercase",
+          color: "var(--violet-text)",
+          mb: "6px",
+        }}
+      >
+        CUBEPILOT
+      </Box>
+      {msg.blocks.map((b, bi) => {
+        if (b.kind === "tool") {
+          const running = !b.done && msg.phase !== "done";
+          const key = `${sessionKey ?? ""}-${b.callId || `p${mi}-${bi}`}`;
+          const open = openedTools[key] ?? running;
+          return (
+            <Box key={bi} data-od-block="tool" sx={{ mt: bi > 0 ? "8px" : 0 }}>
+              <ToolCard block={b} running={running} open={open} onToggle={() => onToggleTool(key, !open)} />
+            </Box>
+          );
+        }
+        const panel = ranTools && bi === lastText;
+        return (
+          <Box key={bi} data-od-block="text" sx={{ mt: bi > 0 ? "8px" : 0 }}>
+            {b.superseded?.length ? (
+              <Box component="details" data-od-id="superseded" sx={{ mb: "6px" }}>
+                <Box component="summary" sx={{ ...monoSx, fontSize: 11, color: "text.secondary", cursor: "pointer" }}>
+                  {t("cubepilot.chat.earlier", { count: b.superseded.length })}
+                </Box>
+                {b.superseded.map((s, si) => (
+                  <Box key={si} sx={{ mt: "6px", fontSize: 12.5, color: "text.secondary", whiteSpace: "pre-wrap" }}>
+                    {s}
+                  </Box>
+                ))}
+              </Box>
+            ) : null}
+            {panel ? (
+              <Box
+                sx={{
+                  border: "1px solid",
+                  borderRadius: "6px",
+                  p: "9px 11px",
+                  ...(settled
+                    ? { bgcolor: "var(--accent-soft)", borderColor: "color-mix(in oklch, var(--accent) 32%, var(--border))" }
+                    : { bgcolor: "var(--surface)", borderColor: "var(--border)" }),
+                }}
+              >
+                <Box
+                  sx={{
+                    ...monoSx,
+                    fontSize: 10,
+                    letterSpacing: "0.06em",
+                    textTransform: "uppercase",
+                    mb: "4px",
+                    color: settled ? "var(--accent-strong)" : "text.secondary",
+                  }}
+                >
+                  {settled ? t("cubepilot.chat.finalResult") : t("cubepilot.chat.reply")}
+                </Box>
+                <AgentMarkdown text={b.text} />
+              </Box>
+            ) : (
+              <AgentMarkdown text={b.text} />
+            )}
+          </Box>
+        );
+      })}
+    </Box>
+  );
+}
+
+export function AgentThread({
+  msgs,
+  sessionKey,
+}: {
+  msgs: ThreadMsg[];
+  sessionKey: string | null;
+  // The rest of the thread's props — the ticker's `now`, the two decision
+  // dispatchers and the composer slot — are part of this component's interface
+  // with the pane but are not read yet: a bubble renders blocks only, and the
+  // cards the decisions belong to, the status line that dates a running turn
+  // and the composer all render around the thread rather than inside a bubble.
+  now: number;
+  onDecideApproval: (msgId: number, callId: string, decision: "approve" | "reject" | "allow-always") => void;
+  onAnswerQuestion: (msgId: number, callId: string, answers: Record<string, string[]>, cancel: boolean) => void;
+  composerSlot?: ReactNode;
+}) {
+  const [openedTools, setOpenedTools] = useState<Record<string, boolean>>({});
+  return (
+    <Box sx={{ display: "flex", flexDirection: "column", gap: "14px", minWidth: 0 }}>
+      {msgs.map((m, mi) =>
+        m.role === "user" ? (
+          <Box key={m.id} sx={userBubbleSx}>
+            {m.text}
+          </Box>
+        ) : (
+          <AgentBubble
+            key={m.id}
+            msg={m}
+            mi={mi}
+            sessionKey={sessionKey}
+            openedTools={openedTools}
+            onToggleTool={(key, open) => setOpenedTools((prev) => ({ ...prev, [key]: open }))}
+          />
+        ),
+      )}
+    </Box>
+  );
+}

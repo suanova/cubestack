@@ -17,6 +17,9 @@ const ARG_PATTERN_EXAMPLE = String.raw`^(status|list)\b.*$`;
 const SESSION_KEY = "agent:main:conv-7f3c";
 const ENC_KEY = encodeURIComponent(SESSION_KEY);
 
+/** The session the viewer picks before sending a fresh turn. */
+const SESSION = { sessionKey: SESSION_KEY, title: "Ceph 巡检" };
+
 /** The instance's real state, as the CR-projected endpoints report it. */
 const CONFIG_READY = {
   exists: true,
@@ -114,6 +117,23 @@ const TURN_APPROVAL = [
     level: "write",
     message: "调整 OSD 参数属于写操作",
   },
+  { type: "message_done", sessionId: SESSION_KEY },
+];
+
+/** A turn whose narration continues after the tool call — the ordering case. */
+const TURN_TOOL_THEN_TEXT = [
+  { type: "message_start", sessionId: SESSION_KEY },
+  { type: "message_delta", sessionId: SESSION_KEY, delta: "先查一下。" },
+  { type: "tool_call", sessionId: SESSION_KEY, name: "shell", callId: "call-1", arguments: { cmd: "ceph df" } },
+  { type: "tool_result", sessionId: SESSION_KEY, callId: "call-1", name: "shell", output: "POOL USED: 71%" },
+  { type: "message_delta", sessionId: SESSION_KEY, delta: "使用率 71%。" },
+  { type: "message_done", sessionId: SESSION_KEY },
+];
+
+/** A reply carrying the Markdown an agent actually emits. */
+const TURN_MARKDOWN = [
+  { type: "message_start", sessionId: SESSION_KEY },
+  { type: "message_delta", sessionId: SESSION_KEY, delta: "可以这样查:\n\n```sh\nkubectl get pods -A\n```\n\n然后:\n\n- 检查节点\n- 检查 DevicePlugin\n" },
   { type: "message_done", sessionId: SESSION_KEY },
 ];
 
@@ -428,6 +448,51 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     const decoded = captured.pendingPaths.map((p) => decodeURIComponent(p));
     expect(decoded.some((p) => p.includes(`/api/v1/sessions/${SESSION_KEY}/approval/pending`))).toBe(true);
     expect(decoded.some((p) => p.includes(`/api/v1/sessions/${SESSION_KEY}/question/pending`))).toBe(true);
+  });
+
+  test("renders a turn's narration and tool calls in the order they arrived", async ({ page }) => {
+    await stubAgent(page, { sessions: [SESSION], turnEvents: TURN_TOOL_THEN_TEXT });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="object-agent"]').click();
+    await page.locator('[data-od-id="chat-input"]').fill("看看集群");
+    await page.locator('[data-od-id="chat-send"]').click();
+
+    // The narration that followed the tool must render AFTER the tool card, not
+    // above it with every other sentence.
+    const bubble = page.locator('[data-od-id="agent-bubble"]').last();
+    const order = await bubble.locator('[data-od-block]').evaluateAll((els) =>
+      els.map((e) => e.getAttribute("data-od-block")),
+    );
+    expect(order).toEqual(["text", "tool", "text"]);
+  });
+
+  test("a finished tool card collapses, and the reader's expansion is remembered", async ({ page }) => {
+    await stubAgent(page, { sessions: [SESSION], turnEvents: TURN_TOOL_THEN_TEXT });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="object-agent"]').click();
+    await page.locator('[data-od-id="chat-input"]').fill("看看集群");
+    await page.locator('[data-od-id="chat-send"]').click();
+
+    const card = page.locator('[data-od-id="tool-card"]').first();
+    await expect(card.locator('[data-od-id="tool-card-head"]')).toHaveAttribute("aria-expanded", "false");
+    await expect(card.locator('[data-od-id="tool-output"]')).toHaveCount(0);
+
+    await card.locator('[data-od-id="tool-card-head"]').click();
+    await expect(card.locator('[data-od-id="tool-output"]')).toContainText("POOL USED");
+  });
+
+  test("renders the agent's text as Markdown", async ({ page }) => {
+    await stubAgent(page, { sessions: [SESSION], turnEvents: TURN_MARKDOWN });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="object-agent"]').click();
+    await page.locator('[data-od-id="chat-input"]').fill("给我一段命令");
+    await page.locator('[data-od-id="chat-send"]').click();
+
+    const bubble = page.locator('[data-od-id="agent-bubble"]').last();
+    // A fenced block must become a real code element, not literal backticks.
+    await expect(bubble.locator("pre")).toContainText("kubectl get pods");
+    await expect(bubble).not.toContainText("```");
+    await expect(bubble.locator("li")).toContainText("检查节点");
   });
 });
 
