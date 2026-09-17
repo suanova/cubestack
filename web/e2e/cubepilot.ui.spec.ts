@@ -219,6 +219,9 @@ interface Stubs {
   sessions?: object[] | null;
   history?: object[];
   turnActive?: boolean;
+  /** The /turn read itself fails (502, as the route answers when it could not
+   *  determine). "Could not check" is not the same as "nothing is running". */
+  turnCheckFails?: boolean;
   pendingApproval?: object | null;
   turnEvents?: object[];
   /** What POST /question answers with. 404/409 are the refusals that send the
@@ -319,7 +322,12 @@ async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
       if (path.endsWith("/api/v1/sessions")) {
         return sessions === null ? json({ error: "agent API unavailable" }, 503) : json({ sessions });
       }
-      if (path.endsWith("/turn")) return json({ active: stubs.turnActive ?? false });
+      if (path.endsWith("/turn")) {
+        // A failed check is the API's own 502: it could not determine, which is
+        // not the same answer as "no turn is running".
+        if (stubs.turnCheckFails) return json({ error: "could not check" }, 502);
+        return json({ active: stubs.turnActive ?? false });
+      }
       if (path.endsWith("/approval/pending")) {
         captured.pendingPaths.push(path);
         const body = stubs.pendingApproval ?? null;
@@ -466,6 +474,10 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     await expect(card).toContainText("本次巡检覆盖哪些节点?");
     await expect(card).toContainText("全部节点");
 
+    // The parked question owns the header line, ahead of the lost transport the
+    // fixture's missing terminal produces (see the docked-approval spec above).
+    await expect(page.locator('[data-od-id="agent-status"]')).toContainText("等待你的回答");
+
     // Submit stays disabled until the multi-select prompt is answered.
     const submit = page.locator('[data-od-id="question-submit"]');
     await expect(submit).toBeDisabled();
@@ -506,6 +518,29 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     const decoded = captured.pendingPaths.map((p) => decodeURIComponent(p));
     expect(decoded.some((p) => p.includes(`/api/v1/sessions/${SESSION_KEY}/approval/pending`))).toBe(true);
     expect(decoded.some((p) => p.includes(`/api/v1/sessions/${SESSION_KEY}/question/pending`))).toBe(true);
+  });
+
+  test("a turn that survived a reload says so, and offers Stop", async ({ page }) => {
+    // A turn started elsewhere (or left running across a reload) has no stream
+    // in this view, so the only thing that can say it is still going is the
+    // server's /turn answer — and Stop is then the only control that ends it.
+    await stubAgent(page, { sessions: [SESSION], history: HISTORY, turnActive: true });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="obj-cubepilot"]').click();
+
+    await expect(page.locator('[data-od-id="agent-status"]')).toContainText("仍在运行");
+    await expect(page.locator('[data-od-id="stop-btn"]')).toBeVisible();
+  });
+
+  test("a failed turn check says so and offers no Stop", async ({ page }) => {
+    await stubAgent(page, { sessions: [SESSION], history: HISTORY, turnCheckFails: true });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="obj-cubepilot"]').click();
+
+    await expect(page.locator('[data-od-id="agent-status"]')).toContainText("无法确认");
+    // Stop would fail for the same reason the check did, so it is not offered.
+    await expect(page.locator('[data-od-id="stop-btn"]')).toHaveCount(0);
+    await expect(page.locator('[data-od-id="send-btn"]')).toBeVisible();
   });
 
   test("renders a turn's narration and tool calls in the order they arrived", async ({ page }) => {
@@ -571,6 +606,11 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     await expect(pending).toHaveCount(1);
     // Docked: it must live inside the composer region, which does not scroll.
     await expect(page.locator('[data-od-id="hitl-dock"] [data-od-id="approval-approve"]')).toBeVisible();
+    // The header reports the parked turn, not the lost transport this fixture
+    // also carries: a turn blocked on a human has no terminal event, so the stub
+    // ends the stream and the client marks it lost — and "waiting on your
+    // approval" has to outrank that. This is the priority chain's acceptance.
+    await expect(page.locator('[data-od-id="agent-status"]')).toContainText("等待你的审批");
 
     await page.locator('[data-od-id="hitl-dock"] [data-od-id="approval-approve"]').click();
     // Decided: it moves into the thread as a record.

@@ -33,8 +33,12 @@ import {
   newAgentMsg,
   openApprovals,
   openQuestions,
+  turnStatus,
+  waitingOnUser,
   type AgentApproval,
+  type AgentMsg,
   type AgentQuestion,
+  type StatusLine,
   type ThreadMsg,
 } from "@/lib/cubepilot/agentThread";
 import { PLATFORM_MODEL_NAME, displayModelName } from "@/lib/cubepilot/types";
@@ -128,6 +132,22 @@ interface ModelMsg {
 /** One row of the thread. */
 type ChatMsg = ThreadMsg | ModelMsg;
 
+/** The newest assistant turn — the one whose own state the card header reports
+ *  when nothing outranks it. */
+const newestAgent = (list: ThreadMsg[]): AgentMsg | undefined =>
+  [...list].reverse().find((m): m is AgentMsg => m.role === "agent");
+
+/** How each tone of the status line is dressed. `run` pulses, because a turn
+ *  that is going somewhere is the one state that changes on its own. */
+const STATUS_PILL = {
+  run: "accent",
+  done: "ok",
+  stopped: "neutral",
+  lost: "warn",
+  error: "danger",
+  wait: "warn",
+} as const;
+
 const groupLabelSx: SxProps<Theme> = {
   ...monoSx,
   fontSize: 10.5,
@@ -203,6 +223,19 @@ export function ChatPane() {
   const [agentSkills, setAgentSkills] = useState<SkillInfo[]>([]);
   const [agentSessionKey, setAgentSessionKey] = useState<string | null>(null);
   const [agentNotice, setAgentNotice] = useState("");
+  /** A turn is running for this session with no stream of this pane's own — one
+   *  another tab started, or one that outlived a reload. The card header says
+   *  so and the composer's Stop is the control that ends it. */
+  const [runningElsewhere, setRunningElsewhere] = useState(false);
+  /** The /turn read itself failed, so whether a turn is running is simply
+   *  unknown. Kept apart from `runningElsewhere` so the header never claims a
+   *  turn nobody confirmed — and never offers a Stop that would fail for the
+   *  same reason the check did. */
+  const [turnCheckFailed, setTurnCheckFailed] = useState(false);
+  /** A stop of that turn is in flight. The server answers /abort only once the
+   *  session has settled, so this is a long wait with nothing else moving: the
+   *  header reports it for the whole of it. */
+  const [stoppingElsewhere, setStoppingElsewhere] = useState(false);
   /** The instance's confirm policy is Allowlist, so a durable approval would
    *  mean something. False until read (and false when the read fails): the
    *  "always allow" button offers a rule that would not apply otherwise. */
@@ -260,6 +293,12 @@ export function ChatPane() {
     stopTurnPolling();
     setStreaming(null);
     setThinkingText(null);
+    // The no-stream turn state describes the session this pane is leaving. It
+    // is retired with it, so a reload of another object cannot inherit a "still
+    // running" that was never about it.
+    setRunningElsewhere(false);
+    setTurnCheckFailed(false);
+    setStoppingElsewhere(false);
   }
 
   function selectModel(modelId: string): void {
@@ -400,17 +439,11 @@ export function ChatPane() {
       setAgentSessionKey(first.sessionKey);
       await loadAgentHistory(first.sessionKey);
       if (genRef.current !== gen) return;
-      try {
-        const tRes = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(first.sessionKey)}/turn`);
-        if (tRes.ok && genRef.current === gen) {
-          const { active } = (await tRes.json()) as { active?: boolean };
-          if (active) {
-            setAgentNotice(t("cubepilot.chat.turnActive"));
-            startTurnPolling(first.sessionKey);
-          }
-        }
-      } catch {
-        /* no turn info */
+      const running = await checkTurnElsewhere(first.sessionKey, gen);
+      if (genRef.current !== gen) return;
+      if (running) {
+        setAgentNotice(t("cubepilot.chat.turnActive"));
+        startTurnPolling(first.sessionKey);
       }
       await restorePendingHitl(first.sessionKey);
     } catch (e) {
@@ -419,6 +452,51 @@ export function ChatPane() {
         setAgentNotice(t("cubepilot.chat.sessionsUnavailable", { error: String(e) }));
       }
     }
+  }
+
+  /**
+   * Ask the server whether the session still has a turn in flight — the only
+   * signal that survives a reload, since this pane then has no stream to
+   * consult. Answers with what it found, because the state it sets is one
+   * render stale inside the async flow that calls it.
+   *
+   * Never folded into "not running": the route answers 502 exactly when it
+   * could not determine the answer, and a check that failed is reported as
+   * that rather than as a quiet conversation.
+   */
+  async function checkTurnElsewhere(key: string, gen: number): Promise<boolean> {
+    try {
+      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/turn`);
+      if (genRef.current !== gen) return false;
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const { active } = (await res.json()) as { active?: boolean };
+      if (genRef.current !== gen) return false;
+      setRunningElsewhere(active === true);
+      setTurnCheckFailed(false);
+      return active === true;
+    } catch {
+      if (genRef.current !== gen) return false;
+      setRunningElsewhere(false);
+      setTurnCheckFailed(true);
+      return false;
+    }
+  }
+
+  /** Re-ask after a failed check. Without it the "could not check" status would
+   *  have no way back to an answer short of leaving the conversation. */
+  function retryTurnCheck(): void {
+    if (!agentSessionKey) return;
+    setTurnCheckFailed(false);
+    void checkTurnElsewhere(agentSessionKey, genRef.current);
+  }
+
+  /** Withdraw the status on request. Retry is the way back to an answer, not a
+   *  way out of it: for a channel this pane cannot use, every retry fails the
+   *  same way and the status would sit in the header of an otherwise working
+   *  conversation with no control that removes it. Dismissing claims nothing —
+   *  a reload, a session switch or a send all ask again. */
+  function dismissTurnCheck(): void {
+    setTurnCheckFailed(false);
   }
 
   async function loadAgentHistory(key: string): Promise<void> {
@@ -499,12 +577,19 @@ export function ChatPane() {
           stopTurnPolling();
           return;
         }
-        if (!active) {
-          stopTurnPolling();
-          setAgentNotice("");
-          await loadAgentHistory(key);
-          await restorePendingHitl(key);
+        // A poll that fails is not the header's "could not check": the status is
+        // already the server's own answer, and one dropped request in a 3s
+        // rhythm is not worth replacing it with an alarm. Only a definite
+        // "nothing is running" retires the state.
+        if (active === true) {
+          setRunningElsewhere(true);
+          return;
         }
+        stopTurnPolling();
+        setRunningElsewhere(false);
+        setAgentNotice("");
+        await loadAgentHistory(key);
+        await restorePendingHitl(key);
       } catch {
         /* keep polling */
       }
@@ -632,10 +717,17 @@ export function ChatPane() {
           if (genRef.current === gen) handleAgentEvent(evt, msgId);
         }
       }
-      // The stream may die without the terminal event; per contract the
-      // client synthesizes message_done so the UI always resets.
+      // The stream ended without the terminal event. That is a transport
+      // failure, not a turn outcome: the run may still be executing on the
+      // server, so nothing here may end the turn or settle the cards it left
+      // parked. The reason is kept on the bubble for diagnostics — the line the
+      // user reads is the header's own "connection lost" — and the run is
+      // re-checked, because the server is the only thing that can say whether
+      // it is still going.
       if (!gotDone && genRef.current === gen) {
-        setMsgs((list) => list.map((x) => (x.id === msgId && x.role === "agent" ? { ...x, error: t("cubepilot.chat.streamLost") } : x)));
+        const reason = t("cubepilot.chat.streamLost");
+        setMsgs((list) => list.map((x) => (x.id === msgId && x.role === "agent" ? { ...x, transportLost: reason } : x)));
+        if (agentSessionKey) void checkTurnElsewhere(agentSessionKey, gen);
       }
     } catch (e) {
       if (genRef.current === gen) {
@@ -737,8 +829,11 @@ export function ChatPane() {
         patchQuestion(callId, (q) => ({
           ...q,
           state: "pending",
-          // The gateway's remainder, not this browser's stale one.
-          ...(still.timeoutSeconds ? { deadline: Date.now() + still.timeoutSeconds * 1000 } : {}),
+          // The gateway's remainder, not this browser's stale one — and cleared
+          // outright when the list entry carries none, because that entry is
+          // authoritative: keeping the old deadline would lock the card up
+          // (isExpiring) while the gateway still calls the question open.
+          deadline: still.timeoutSeconds ? Date.now() + still.timeoutSeconds * 1000 : undefined,
           error: t("cubepilot.chat.questionNotAccepted"),
         }));
         return;
@@ -776,13 +871,65 @@ export function ChatPane() {
     }
   }
 
+  /**
+   * Abort the session's turn, reporting the server's own refusal.
+   *
+   * /abort answers only once the session has settled, so a refusal is an
+   * expected outcome and not a crash: 504 means the turn did not settle in
+   * time, 502 that the gateway channel was unavailable. Either way the turn is
+   * still running, which is what the caller decides with.
+   */
+  async function abortTurn(key: string): Promise<{ ok: true } | { ok: false; error: string }> {
+    try {
+      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/abort`, { method: "POST" });
+      if (res.ok) return { ok: true };
+      const body = (await res.json().catch(() => null)) as { error?: string } | null;
+      return { ok: false, error: body?.error ?? `HTTP ${res.status}` };
+    } catch (e) {
+      return { ok: false, error: String(e instanceof Error ? e.message : e) };
+    }
+  }
+
+  /** Stop the turn this pane is streaming. Its own stream ends when the server
+   *  settles it, and that is the feedback the user gets, so the answer is not
+   *  read here. */
   async function stopAgent(): Promise<void> {
     if (!agentSessionKey) return;
-    try {
-      await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(agentSessionKey)}/abort`, { method: "POST" });
-    } catch {
-      /* best effort — the stream ends on its own */
+    await abortTurn(agentSessionKey);
+  }
+
+  /**
+   * Stop the turn this pane is NOT streaming — the one the header reports as
+   * still running. Here the answer matters: with nothing on screen moving, a
+   * refusal that stayed silent would look like the click never landed.
+   */
+  async function stopElsewhere(): Promise<void> {
+    if (!agentSessionKey || stoppingElsewhere) return;
+    const key = agentSessionKey;
+    // Captured before the await and re-checked after it: the round trip ends
+    // only when the turn has settled, so the user can leave this conversation
+    // in the meantime, and an answer for the one they left must not repaint the
+    // one they moved to.
+    const gen = genRef.current;
+    setStoppingElsewhere(true);
+    const res = await abortTurn(key);
+    if (genRef.current !== gen) return;
+    setStoppingElsewhere(false);
+    if (!res.ok) {
+      // Refused, so the turn is still running: the Stop stays on screen for
+      // another try, with the server's own reason reported.
+      showToast(res.error, "error");
+      return;
     }
+    // The stop landed. Nothing is running for this session any more; the poll
+    // that was watching for its end has nothing left to watch; and the turn it
+    // ended exists only in the history the abort has just persisted. The
+    // generation is bumped so a /turn answer still in flight from that poll
+    // cannot re-arm the status from its pre-stop snapshot.
+    setRunningElsewhere(false);
+    stopTurnPolling();
+    genRef.current++;
+    await loadAgentHistory(key);
   }
 
   // ── send ──
@@ -887,16 +1034,57 @@ export function ChatPane() {
       } else {
         const gen = ++genRef.current;
         const agentMsgId = nextId();
-        setMsgs((m) => [...m, { id: nextId(), role: "user", text }, newAgentMsg(agentMsgId)]);
-        setInput("");
-        if (el) el.style.height = "auto";
+        const key = agentSessionKey;
+        // Held for the whole sequence below, reload included. The stop is a long
+        // round trip with nothing visible happening, and the text still sitting
+        // in the box is exactly what makes a second Enter look reasonable — so
+        // the guard is what keeps that second submission from starting a turn
+        // against the session the first one is still stopping. It is set here
+        // rather than in the continuation because this render is the last one
+        // before the await.
         setSending(true);
-        void sendAgent(text, gen, agentMsgId).finally(() => {
-          if (genRef.current === gen) {
-            setSending(false);
-            setThinkingText(null);
+        void (async () => {
+          // A send into a session whose turn is still running is either refused
+          // with a 409 or has its text steered into the running turn and
+          // swallowed — neither is what the user asked for. So the turn is
+          // stopped first, and the message goes out on a session that has
+          // settled. The failed check takes the same route: it confirmed no turn
+          // and its stop is refused for the same reason the check failed, so it
+          // costs one cheap request and is then the only request left that can
+          // re-establish the gateway channel.
+          if (key && (runningElsewhere || turnCheckFailed)) {
+            const res = await abortTurn(key);
+            if (genRef.current !== gen) return;
+            if (!res.ok && runningElsewhere) {
+              // Refused on a turn the server CONFIRMED. The composer's Stop is
+              // on screen and is the control that ends that turn, so the message
+              // is held back and stays in the box for another try, rather than
+              // racing the turn it was meant to replace.
+              setSending(false);
+              return;
+            }
+            if (res.ok) {
+              setRunningElsewhere(false);
+              stopTurnPolling();
+              await loadAgentHistory(key);
+              if (genRef.current !== gen) return;
+            }
           }
-        });
+          // This pane is about to drive its own turn, and its own stream is the
+          // state from here on: the no-stream status described the turn being
+          // left behind.
+          setRunningElsewhere(false);
+          setTurnCheckFailed(false);
+          setMsgs((m) => [...m, { id: nextId(), role: "user", text }, newAgentMsg(agentMsgId)]);
+          setInput("");
+          if (el) el.style.height = "auto";
+          void sendAgent(text, gen, agentMsgId).finally(() => {
+            if (genRef.current === gen) {
+              setSending(false);
+              setThinkingText(null);
+            }
+          });
+        })();
       }
     },
     [msgs, objKind, svc, sending, params, nextId, showToast, t, agentSessionKey],
@@ -928,6 +1116,32 @@ export function ChatPane() {
   // it.
   const dockApprovals = msgs.flatMap((m) => (m.role === "agent" ? openApprovals(m) : []));
   const dockQuestions = msgs.flatMap((m) => (m.role === "agent" ? openQuestions(m) : []));
+
+  // What the card header says this conversation is doing. The order of the
+  // chain is the point, not an accident:
+  //  - "stopping" outranks "running" because a confirmed turn IS still running
+  //    while its abort settles; testing the run first would show "still running"
+  //    for the whole wait and make the click look like it did nothing.
+  //  - a failed check is NOT "idle", so it must not fall through to the turn's
+  //    own state — and it deliberately carries no Stop, since the stop would
+  //    fail for the same reason the check did.
+  //  - a turn parked on a human outranks one merely running (the agent is
+  //    blocked on the user, and the controls that unblock it are right below),
+  //    and it carries no done check: nothing there has finished. It is also what
+  //    ranks above a lost transport, which the turn's own state reports first.
+  const lastAgent = newestAgent(agentMsgs);
+  const waiting = waitingOnUser(agentMsgs);
+  const status: StatusLine = stoppingElsewhere
+    ? { tone: "run", key: "cubepilot.chat.statusStopping" }
+    : turnCheckFailed
+      ? { tone: "lost", key: "cubepilot.chat.statusCheckFailed" }
+      : waiting
+        ? { tone: "wait", key: waiting === "question" ? "cubepilot.chat.statusAwaitAnswer" : "cubepilot.chat.statusAwaitApproval" }
+        : runningElsewhere
+          ? { tone: "run", key: "cubepilot.chat.statusRunningElsewhere" }
+          : lastAgent
+            ? turnStatus(lastAgent, now)
+            : { tone: "done", key: "cubepilot.chat.statusDone" };
 
   return (
     <Box>
@@ -1171,6 +1385,46 @@ export function ChatPane() {
             </Btn>
           </Box>
 
+          {/* The state of the turn, in the card's own frame rather than in the
+              thread below it. It has to be up here: the thread scrolls, and this
+              line is read exactly when a long turn has been quiet for a while
+              and the user has started to wonder whether it is still going. The
+              reference puts it in its header for the same reason. */}
+          {isAgent ? (
+            <Box
+              data-od-id="agent-status"
+              aria-live="polite"
+              sx={{
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+                px: "18px",
+                py: "9px",
+                borderBottom: 1,
+                borderColor: "divider",
+              }}
+            >
+              <Pill variant={STATUS_PILL[status.tone]} dot pulse={status.tone === "run"}>
+                {t(status.key, status.vars)}
+              </Pill>
+              {/* The two ways on from a check that could not answer, beside the
+                  status they belong to. Retry is the way back to an answer, and
+                  Dismiss the way out of an alarm that cannot resolve itself —
+                  a channel this pane cannot use fails every retry the same way,
+                  and without it the status would sit here forever. */}
+              {turnCheckFailed ? (
+                <Box sx={{ display: "flex", alignItems: "center", gap: "4px", ml: "auto" }}>
+                  <Btn variant="ghost" small onClick={retryTurnCheck} data-od-id="turn-retry">
+                    {t("cubepilot.chat.retry")}
+                  </Btn>
+                  <Btn variant="ghost" small onClick={dismissTurnCheck} data-od-id="turn-dismiss">
+                    {t("cubepilot.chat.dismiss")}
+                  </Btn>
+                </Box>
+              ) : null}
+            </Box>
+          ) : null}
+
           <Box
             ref={threadEl}
             data-od-id="chat-thread"
@@ -1358,8 +1612,22 @@ export function ChatPane() {
                   </Box>
                 ) : null}
                 <Box sx={{ flex: 1 }} />
-                {isAgent && sending ? (
-                  <Btn variant="secondary" small onClick={() => void stopAgent()} data-od-id="stop-btn">
+                {/* Stop is offered for a turn this pane is streaming, and for
+                    one it merely knows about — a turn that survived a reload, or
+                    that another tab started, is still this session's turn and
+                    this is still the control that ends it. Only a CONFIRMED one:
+                    when the check itself failed, nothing established that a turn
+                    is running, and the abort would need the very channel whose
+                    absence is what failed the check, so Send stays and the
+                    header offers Retry instead. */}
+                {isAgent && (sending || (runningElsewhere && !turnCheckFailed)) ? (
+                  <Btn
+                    variant="secondary"
+                    small
+                    disabled={stoppingElsewhere}
+                    onClick={() => void (sending ? stopAgent() : stopElsewhere())}
+                    data-od-id="stop-btn"
+                  >
                     {t("cubepilot.chat.stop")}
                   </Btn>
                 ) : (

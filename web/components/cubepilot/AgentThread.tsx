@@ -302,6 +302,41 @@ function AgentBubble({
       >
         CUBEPILOT
       </Box>
+      {/* How this turn ended, when that is not simply "it ended". The header
+          carries the two-word version of these; the bubble is where the detail
+          lives, and where a turn that failed or was stopped is explained at all.
+          A lost transport is not a turn outcome — the run may still be
+          executing — so it gets the amber headline and keeps the stream's own
+          reason underneath it as diagnostics, rather than presenting that reason
+          as the turn's error. A stopped turn neither finished nor failed, so it
+          gets the muted marker. A turn that ended cleanly gets none of them: an
+          ordinary reply must not sprout a line saying so. */}
+      {msg.error ? (
+        <Box data-od-id="agent-error" sx={{ fontSize: 12.5, color: "var(--danger)", mb: "8px", whiteSpace: "pre-wrap" }}>
+          {msg.error}
+        </Box>
+      ) : null}
+      {msg.transportLost ? (
+        <Box data-od-id="agent-lost" sx={{ mb: "8px" }}>
+          <Box sx={{ fontSize: 12.5, color: "var(--warn)" }}>{t("cubepilot.chat.statusLost")}</Box>
+          <Box sx={{ fontSize: 11.5, color: "text.secondary", mt: "2px", whiteSpace: "pre-wrap" }}>{msg.transportLost}</Box>
+        </Box>
+      ) : null}
+      {msg.stopped ? (
+        <Box data-od-id="agent-stopped" sx={{ fontSize: 12.5, color: "text.secondary", mb: "8px" }}>
+          {t("cubepilot.chat.statusStopped")}
+        </Box>
+      ) : null}
+      {/* The turn has produced nothing yet. Without this the bubble is a label
+          over an empty box, which reads as a rendering fault rather than as a
+          turn that is thinking. The header's "Thinking… {secs}s" answers a
+          different question — whether the turn is still going — and does not
+          stand in for it. */}
+      {msg.phase === "thinking" && msg.blocks.length === 0 ? (
+        <Box data-od-id="agent-thinking" sx={{ fontSize: 12.5, color: "text.secondary" }}>
+          {t("cubepilot.chat.thinkingAgent")}
+        </Box>
+      ) : null}
       {msg.blocks.map((b, bi) => {
         if (b.kind === "tool") {
           const running = !b.done && msg.phase !== "done";
