@@ -1,7 +1,17 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
 
-import { applyAgentEvent, attachToolResult, fmtToolArgs, historyToMsgs, newAgentMsg } from "./agentThread";
+import {
+  applyAgentEvent,
+  attachToolResult,
+  fmtToolArgs,
+  historyToMsgs,
+  isExpiring,
+  newAgentMsg,
+  remainingSeconds,
+  turnStatus,
+  waitingOnUser,
+} from "./agentThread";
 import type { AgentBlock, AgentMsg, ThreadMsg } from "./agentThread";
 import type { AgentSseEvent } from "./types";
 
@@ -159,6 +169,129 @@ describe("applyAgentEvent — message_done", () => {
       { type: "message_done", sessionId: "s" },
     ]);
     expect(m.questions[0].state).toBe("cancelled");
+  });
+
+  it("settles an undecided approval as STOPPED — the resolve event races the stream", () => {
+    // The server publishes the resolve alongside the terminal, but it races the
+    // stream's close. A card left live would offer Approve/Reject buttons that
+    // POST to a record the settle already deleted, and would keep the header
+    // saying "waiting" for a turn that is over.
+    const m = fold([
+      { type: "approval_pending", sessionId: "s", callId: "a1", name: "exec", command: "kubectl delete pod x", level: "write" },
+      { type: "message_done", sessionId: "s" },
+    ]);
+    expect(m.approvals[0].state).toBe("stopped");
+  });
+
+  it("leaves a decision that did arrive alone", () => {
+    const m = fold([
+      { type: "approval_pending", sessionId: "s", callId: "a1", name: "exec", command: "x", level: "write" },
+      { type: "approval_resolved", sessionId: "s", callId: "a1", approved: true },
+      { type: "message_done", sessionId: "s" },
+    ]);
+    expect(m.approvals[0].state).toBe("approved");
+  });
+});
+
+describe("turnStatus", () => {
+  it("reports a lost transport before anything else, even with no phase", () => {
+    const m = { ...newAgentMsg(1, T0), phase: "done" as const, transportLost: "boom" };
+    expect(turnStatus(m, T0)).toEqual({ tone: "lost", key: "cubepilot.chat.statusLost" });
+  });
+
+  it("names the live phase with the elapsed seconds", () => {
+    const thinking = { ...newAgentMsg(1, T0), phase: "thinking" as const };
+    expect(turnStatus(thinking, T0 + 12_000)).toEqual({
+      tone: "run",
+      key: "cubepilot.chat.statusThinking",
+      vars: { secs: 12 },
+    });
+  });
+
+  it("counts only the tools still in flight", () => {
+    const m = fold([
+      { type: "tool_call", sessionId: "s", name: "exec", callId: "c1" },
+      { type: "tool_call", sessionId: "s", name: "exec", callId: "c2" },
+      { type: "tool_result", sessionId: "s", callId: "c1", output: "done" },
+    ]);
+    expect(turnStatus(m, T0 + 3_000)).toEqual({
+      tone: "run",
+      key: "cubepilot.chat.statusTools",
+      vars: { count: 1, secs: 3 },
+    });
+  });
+
+  it("says it is collating, not running zero tools, once every tool has returned", () => {
+    const m = fold([
+      { type: "tool_call", sessionId: "s", name: "exec", callId: "c1" },
+      { type: "tool_result", sessionId: "s", callId: "c1", output: "done" },
+    ]);
+    expect(turnStatus(m, T0 + 4_000)).toEqual({
+      tone: "run",
+      key: "cubepilot.chat.statusCollating",
+      vars: { secs: 4 },
+    });
+  });
+
+  it("distinguishes a finished turn's three outcomes", () => {
+    const done = (extra: Partial<AgentMsg>) => ({ ...newAgentMsg(1, T0), phase: "done" as const, ...extra });
+    expect(turnStatus(done({}), T0)).toEqual({ tone: "done", key: "cubepilot.chat.statusDone" });
+    expect(turnStatus(done({ stopped: true }), T0)).toEqual({ tone: "stopped", key: "cubepilot.chat.statusStopped" });
+    expect(turnStatus(done({ error: "boom" }), T0)).toEqual({ tone: "error", key: "cubepilot.chat.statusFailed" });
+  });
+});
+
+describe("waitingOnUser", () => {
+  it("is null while nothing is parked", () => {
+    expect(waitingOnUser([newAgentMsg(1, T0)])).toBeNull();
+  });
+
+  it("reports a pending question ahead of a pending approval", () => {
+    const m = fold([
+      { type: "approval_pending", sessionId: "s", callId: "a1", name: "exec", command: "x", level: "write" },
+      { type: "question_pending", sessionId: "s", callId: "q1", question: { questions: [{ questionId: "x", question: "?" }] } },
+    ]);
+    expect(waitingOnUser([m])).toBe("question");
+  });
+
+  it("stops reporting once the terminal settles the cards", () => {
+    const m = fold([
+      { type: "approval_pending", sessionId: "s", callId: "a1", name: "exec", command: "x", level: "write" },
+      { type: "message_done", sessionId: "s" },
+    ]);
+    expect(waitingOnUser([m])).toBeNull();
+  });
+
+  it("ignores a user message in the list", () => {
+    expect(waitingOnUser([{ id: 1, role: "user", text: "hi" }])).toBeNull();
+  });
+});
+
+describe("question timing", () => {
+  const q = (deadline?: number) => ({ callId: "q1", questions: [], state: "pending" as const, ...(deadline ? { deadline } : {}) });
+
+  it("reports no remaining time when the event carried no timeout", () => {
+    expect(remainingSeconds(q(), T0)).toBeUndefined();
+  });
+
+  it("rounds the remainder", () => {
+    expect(remainingSeconds(q(T0 + 45_000), T0)).toBe(45);
+    expect(remainingSeconds(q(T0 + 44_600), T0)).toBe(45);
+  });
+
+  it("never goes negative", () => {
+    expect(remainingSeconds(q(T0 - 5_000), T0)).toBe(0);
+  });
+
+  it("is expiring at zero, and not before", () => {
+    expect(isExpiring(q(T0 + 1_000), T0)).toBe(false);
+    expect(isExpiring(q(T0), T0)).toBe(true);
+    // Undefined deadline is not the same as expired.
+    expect(isExpiring(q(), T0)).toBe(false);
+  });
+
+  it("is not expiring once the card has settled, whatever the clock says", () => {
+    expect(isExpiring({ ...q(T0), state: "answered" }, T0)).toBe(false);
   });
 });
 

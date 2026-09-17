@@ -7,6 +7,7 @@
 //
 // Contract: cubepilot docs/cubepilot/api.md §4/§5/§7.
 
+import type { MessageKey } from "@/lib/i18n/dictionaries";
 import type { AgentQuestionItem, AgentSseEvent, HistoryMessage } from "./types";
 
 export type AgentPhase = "thinking" | "tools" | "streaming" | "done";
@@ -151,11 +152,26 @@ export function applyAgentEvent(msg: AgentMsg, evt: AgentSseEvent, now: number =
         questions: msg.questions.map((q) => (q.callId === evt.callId ? { ...q, state: resolveOutcome(evt.message) } : q)),
       };
     case "message_done":
+      // Reached ONLY for a confirmed server terminal. A synthesized terminal
+      // reports a transport failure, not the end of the turn: the run may still
+      // be parked on these very cards, and settling them would take away the
+      // only controls that can unblock it. The caller filters those out before
+      // folding (the stream-lost path sets `transportLost` instead of folding a
+      // terminal), so this case must never see one.
       return {
         ...msg,
         phase: "done",
         error: evt.error || undefined,
         stopped: evt.stopped === true,
+        // Settle BOTH channels, like the reference's settleBubbleCards. The
+        // resolved event is published alongside the terminal but races the
+        // stream's close, so a card whose event was lost would otherwise stay
+        // live — offering Approve/Reject buttons that POST to a record the settle
+        // already deleted, and keeping `waitingOnUser` non-empty so the header
+        // reports "waiting" for a turn that is over.
+        approvals: msg.approvals.map((a) =>
+          a.state === "pending" || a.state === "deciding" ? { ...a, state: "stopped" as const } : a,
+        ),
         // The same outcome the server's own settle publishes, so a card looks
         // identical whether its resolved event arrived or was lost.
         questions: msg.questions.map((q) =>
@@ -395,9 +411,11 @@ export type StatusTone = "run" | "done" | "stopped" | "lost" | "error" | "wait";
 
 export interface StatusLine {
   tone: StatusTone;
-  /** An i18n key under cubepilot.chat.* — never a literal, because every
-   *  user-visible string needs zh-CN, zh-TW and en. */
-  key: string;
+  /** An i18n key under cubepilot.chat.*. Typed as `MessageKey` rather than
+   *  `string` so a typo is a compile error instead of the raw key being
+   *  rendered into the header. The import is type-only, so this module stays
+   *  free of any runtime dependency. */
+  key: MessageKey;
   /** Interpolation values for that key. */
   vars?: Record<string, string | number>;
 }
@@ -421,7 +439,12 @@ export function turnStatus(msg: AgentMsg, now: number): StatusLine {
   const secs = Math.max(0, Math.round((now - msg.phaseAt) / 1000));
   if (msg.phase === "tools") {
     const running = msg.blocks.filter((b) => b.kind === "tool" && !b.done).length;
-    return { tone: "run", key: "cubepilot.chat.statusTools", vars: { count: running, secs } };
+    // Every tool has returned and the model is digesting what they said. The
+    // reference splits this out of "running tools" for the same reason:
+    // "Running 0 tool(s)" is a sentence that describes nothing.
+    return running > 0
+      ? { tone: "run", key: "cubepilot.chat.statusTools", vars: { count: running, secs } }
+      : { tone: "run", key: "cubepilot.chat.statusCollating", vars: { secs } };
   }
   if (msg.phase === "streaming") return { tone: "run", key: "cubepilot.chat.statusStreaming", vars: { secs } };
   return { tone: "run", key: "cubepilot.chat.statusThinking", vars: { secs } };
