@@ -100,7 +100,15 @@ function sseBody(events: object[]): string {
   return events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("");
 }
 
-/** A completed turn: deltas, a paired tool call, and a write approval. */
+/** A turn parked on a write approval.
+ *
+ *  It carries NO terminal, and must not: a turn waiting on a human has not
+ *  ended — the stream stays open until the card is resolved. The stub cannot
+ *  hold a stream open, so the body simply ends and the client reports the stream
+ *  as lost; either way the card stays answerable, which is what the specs below
+ *  are about. A trailing `message_done` would claim the turn was over while the
+ *  card was still parked, and a turn that really does end settles its parked
+ *  cards (nobody decided them) — the opposite of what these specs assert. */
 const TURN_APPROVAL = [
   { type: "message_start", sessionId: SESSION_KEY },
   { type: "agent_thinking", sessionId: SESSION_KEY },
@@ -117,7 +125,6 @@ const TURN_APPROVAL = [
     level: "write",
     message: "调整 OSD 参数属于写操作",
   },
-  { type: "message_done", sessionId: SESSION_KEY },
 ];
 
 /** A turn whose narration continues after the tool call — the ordering case. */
@@ -137,7 +144,11 @@ const TURN_MARKDOWN = [
   { type: "message_done", sessionId: SESSION_KEY },
 ];
 
-/** A turn that blocks on an ask_user question with a multi-select prompt. */
+/** A turn that blocks on an ask_user question with a multi-select prompt.
+ *
+ *  No terminal here either, for the same reason as TURN_APPROVAL: the agent is
+ *  parked on the human, so the turn has not ended and its question must stay
+ *  answerable (a real terminal would settle it as dismissed). */
 const TURN_QUESTION = [
   { type: "message_start", sessionId: SESSION_KEY },
   { type: "message_delta", sessionId: SESSION_KEY, delta: "巡检前需要确认范围。" },
@@ -157,7 +168,6 @@ const TURN_QUESTION = [
       ],
     },
   },
-  { type: "message_done", sessionId: SESSION_KEY },
 ];
 
 const HISTORY = [
@@ -366,10 +376,13 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     await page.locator('[data-od-id="chat-input"]').fill("分析 Ceph OSD 使用率告警");
     await page.locator('[data-od-id="send-btn"]').click();
 
-    // The prompt bubble, the accumulated deltas and the paired tool result.
+    // The prompt bubble, the accumulated deltas and the paired tool result. A
+    // tool that has returned rests collapsed — its output is one click away,
+    // which is the point of the card — so reading it means opening the card.
     await expect(thread).toContainText("分析 Ceph OSD 使用率告警");
     await expect(thread).toContainText("OSD 使用率 71%。");
     await expect(thread).toContainText("shell");
+    await page.locator('[data-od-id="tool-card-head"]').first().click();
     await expect(thread).toContainText("POOL USED: 71%");
 
     // The write op blocks the turn with an approval card.
@@ -500,6 +513,69 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     // so the single-string form fails with a strict-mode violation rather than a
     // text mismatch, and could never pass.
     await expect(bubble.locator("li")).toContainText(["检查节点", "检查 DevicePlugin"]);
+  });
+
+  test("a pending approval docks above the composer, and lands in the thread once decided", async ({ page }) => {
+    await stubAgent(page, { sessions: [SESSION], turnEvents: TURN_APPROVAL });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="obj-cubepilot"]').click();
+    await page.locator('[data-od-id="chat-input"]').fill("调整 OSD");
+    await page.locator('[data-od-id="send-btn"]').click();
+
+    const pending = page.locator('[data-od-id="hitl-dock"] [data-od-id="approval-item"]');
+    await expect(pending).toHaveCount(1);
+    // Docked: it must live inside the composer region, which does not scroll.
+    await expect(page.locator('[data-od-id="hitl-dock"] [data-od-id="approval-approve"]')).toBeVisible();
+
+    await page.locator('[data-od-id="hitl-dock"] [data-od-id="approval-approve"]').click();
+    // Decided: it moves into the thread as a record.
+    await expect(page.locator('[data-od-id="hitl-dock"] [data-od-id="approval-item"]')).toHaveCount(0);
+    await expect(page.locator('[data-od-id="agent-bubble"] [data-od-id="approval-item"]')).toHaveCount(1);
+  });
+
+  test("an approval resolved without a decision reads Stopped, not Rejected", async ({ page }) => {
+    // The server publishes `approval_resolved` alongside the terminal, and it
+    // carries no `approved` field when nobody decided: the turn ended while the
+    // write was parked, which is not the rejection the user never made.
+    await stubAgent(page, {
+      sessions: [SESSION],
+      turnEvents: [...TURN_APPROVAL, { type: "approval_resolved", sessionId: SESSION_KEY, callId: "app-1" }, { type: "message_done", sessionId: SESSION_KEY }],
+    });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="obj-cubepilot"]').click();
+    await page.locator('[data-od-id="chat-input"]').fill("调整 OSD");
+    await page.locator('[data-od-id="send-btn"]').click();
+
+    const card = page.locator('[data-od-id="approval-item"]');
+    await expect(card).toContainText("已停止");
+    await expect(card).not.toContainText("已拒绝");
+  });
+
+  test("a question counts down, then withdraws its controls without claiming expiry", async ({ page }) => {
+    await stubAgent(page, {
+      sessions: [SESSION],
+      turnEvents: [
+        { type: "message_start", sessionId: SESSION_KEY },
+        {
+          type: "question_pending",
+          sessionId: SESSION_KEY,
+          callId: "q-1",
+          question: { questions: [{ questionId: "scope", question: "范围?", options: [{ label: "全部" }] }], timeoutSeconds: 2 },
+        },
+      ],
+    });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="obj-cubepilot"]').click();
+    await page.locator('[data-od-id="chat-input"]').fill("巡检");
+    await page.locator('[data-od-id="send-btn"]').click();
+
+    const card = page.locator('[data-od-id="hitl-dock"] [data-od-id="question-item"]');
+    await expect(card).toContainText("等待回答");
+    // The local countdown runs out and the controls lock, but the card must not
+    // claim an expiry only the gateway can declare.
+    await expect(card.locator('[data-od-id="question-submit"]')).toBeDisabled({ timeout: 5_000 });
+    await expect(card).toContainText("即将超时");
+    await expect(card).not.toContainText("已超时");
   });
 });
 

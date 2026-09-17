@@ -9,18 +9,21 @@
 // array order: flattening tools into their own list is what made a turn's
 // narration render as a paragraph above a tool call it had actually followed.
 //
-// Approvals and questions are deliberately absent here. An agent bubble is a
-// record of what happened, so the cards that still need an answer dock under the
-// composer (HitlDock) instead of living in a scrolled-past bubble.
+// Approvals and questions dock under the composer while they are still open —
+// an agent bubble is a record of what happened, and a card that still needs an
+// answer belongs where the answer can be given without hunting for it. Once
+// settled, the card is exactly that record, and this is where it is drawn: next
+// to the work it let through, not in the composer.
 
 import { Box } from "@mui/material";
 import { ReactNode, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkBreaks from "remark-breaks";
 
-import type { AgentBlock, AgentMsg, ThreadMsg } from "@/lib/cubepilot/agentThread";
+import type { AgentApproval, AgentBlock, AgentMsg, AgentQuestion, ThreadMsg } from "@/lib/cubepilot/agentThread";
 import { useI18n } from "@/lib/i18n";
 
+import { ApprovalCard, QuestionCard } from "./HitlDock";
 import { Icons, Pill, monoSx } from "./ui";
 
 /** A user turn, right-aligned and inverted (prototype chat.html:208). */
@@ -244,17 +247,28 @@ function AgentMarkdown({ text }: { text: string }) {
   );
 }
 
+/** A card the dock no longer carries: it was decided, or the turn's end settled
+ *  it with nobody having decided. Either way it is over, and what it records is
+ *  the outcome of the work it introduced. */
+const settledApproval = (a: AgentApproval): boolean => a.state !== "pending" && a.state !== "deciding";
+const settledQuestion = (q: AgentQuestion): boolean => q.state !== "pending" && q.state !== "submitting";
+
 /** One agent turn. */
 function AgentBubble({
   msg,
   mi,
   sessionKey,
+  now,
   openedTools,
   onToggleTool,
 }: {
   msg: AgentMsg;
   mi: number;
   sessionKey: string | null;
+  /** The pane's 1s ticker. A settled question shows no countdown, so nothing
+   *  here needs it yet — but the card is the same component the dock draws live
+   *  ones with, and it takes the same clock. */
+  now: number;
   openedTools: Record<string, boolean>;
   onToggleTool: (key: string, open: boolean) => void;
 }) {
@@ -345,6 +359,20 @@ function AgentBubble({
           </Box>
         );
       })}
+      {/* What this turn was let through: the cards it settled, kept next to the
+          work they belong to. The dock carries a card only while it is open, and
+          the same components draw both, so a decided card looks the same in both
+          places. */}
+      {msg.approvals.filter(settledApproval).map((a) => (
+        <Box key={a.callId} sx={{ mt: "9px" }}>
+          <ApprovalCard approval={a} />
+        </Box>
+      ))}
+      {msg.questions.filter(settledQuestion).map((q) => (
+        <Box key={q.callId} sx={{ mt: "9px" }}>
+          <QuestionCard question={q} now={now} />
+        </Box>
+      ))}
     </Box>
   );
 }
@@ -352,14 +380,15 @@ function AgentBubble({
 export function AgentThread({
   msgs,
   sessionKey,
+  now,
 }: {
   msgs: ThreadMsg[];
   sessionKey: string | null;
-  // The rest of the thread's props — the ticker's `now`, the two decision
-  // dispatchers and the composer slot — are part of this component's interface
-  // with the pane but are not read yet: a bubble renders blocks only, and the
-  // cards the decisions belong to, the status line that dates a running turn
-  // and the composer all render around the thread rather than inside a bubble.
+  // `now` dates a running turn's status line (Task 7) and the countdown of any
+  // question on a card. The two decision dispatchers and the composer slot are
+  // part of this component's interface with the pane but are not read: the dock
+  // owns the cards that can still be answered, and the ones this component draws
+  // are settled, which is to say controls-free.
   now: number;
   onDecideApproval: (msgId: number, callId: string, decision: "approve" | "reject" | "allow-always") => void;
   onAnswerQuestion: (msgId: number, callId: string, answers: Record<string, string[]>, cancel: boolean) => void;
@@ -379,6 +408,7 @@ export function AgentThread({
             msg={m}
             mi={mi}
             sessionKey={sessionKey}
+            now={now}
             openedTools={openedTools}
             onToggleTool={(key, open) => setOpenedTools((prev) => ({ ...prev, [key]: open }))}
           />

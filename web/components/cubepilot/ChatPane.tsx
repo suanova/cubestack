@@ -27,6 +27,16 @@ import { Box, Popover, SxProps, Theme } from "@mui/material";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 
+import {
+  applyAgentEvent,
+  historyToMsgs,
+  newAgentMsg,
+  openApprovals,
+  openQuestions,
+  type AgentApproval,
+  type AgentQuestion,
+  type ThreadMsg,
+} from "@/lib/cubepilot/agentThread";
 import { PLATFORM_MODEL_NAME, displayModelName } from "@/lib/cubepilot/types";
 import type {
   AgentConfig,
@@ -40,8 +50,10 @@ import type {
 import { useI18n } from "@/lib/i18n";
 
 import { fmtTime } from "./format";
+import { HitlDock, type ApprovalDecision } from "./HitlDock";
 import { CopyBtn, ParamsPanel, SampleParams } from "./Playground";
-import { Btn, Card, CpInput, CpTextArea, Icons, Pill, monoSx, STATUS_WARN, useToast } from "./ui";
+import { AgentThread } from "./AgentThread";
+import { Btn, Card, CpTextArea, Icons, Pill, monoSx, useToast } from "./ui";
 
 // The portal tokens have no violet; one hue + color-mix against var(--fg)
 // adapts to the theme (dark violet on light, light violet on dark).
@@ -50,7 +62,6 @@ const VIOLET_BORDER = `color-mix(in oklch, ${VIOLET} 55%, var(--border))`;
 const VIOLET_TEXT = `color-mix(in oklch, ${VIOLET} 75%, var(--fg))`;
 const VIOLET_SOFT = `color-mix(in oklch, ${VIOLET} 9%, transparent)`;
 const ACCENT_FILL = "color-mix(in oklch, var(--accent) 82%, var(--fg))";
-const ERROR_COLOR = "#e15c5c";
 
 // The object list is a draggable pane: the column width is component state,
 // and the resizer handle rides the 16px gutter between the two panes.
@@ -103,49 +114,19 @@ const botMsgSx: SxProps<Theme> = {
   wordBreak: "break-word",
 };
 
-/** One agent tool invocation (tool_call + tool_result paired by callId). */
-interface AgentToolMsg {
-  callId?: string;
-  name: string;
-  arguments?: string;
-  output?: string;
-  done: boolean;
+/** One gateway-model reply. Agent turns are `AgentMsg` from
+ *  lib/cubepilot/agentThread — the pane does not own their shape any more than
+ *  it owns their rendering. */
+interface ModelMsg {
+  id: number;
+  role: "model";
+  text: string;
+  meta?: string;
+  notice?: boolean;
 }
 
-/** One HITL write-approval card (approval_pending / approval_resolved). */
-interface AgentApprovalMsg {
-  callId: string;
-  name?: string;
-  command?: string;
-  level?: string;
-  message?: string;
-  state: "pending" | "deciding" | "approved" | "rejected";
-}
-
-/** One ask_user question card (question_pending / question_resolved). */
-interface AgentQuestionMsg {
-  callId: string;
-  questions: AgentQuestionItem[];
-  state: "pending" | "submitting" | "answered" | "cancelled" | "expired";
-  answers?: Record<string, string[]>;
-}
-
-/** One thread message. Agent messages grow with the SSE stream. */
-type ChatMsg =
-  | { id: number; role: "user"; text: string }
-  | { id: number; role: "model"; text: string; meta?: string; notice?: boolean }
-  | {
-      id: number;
-      role: "agent";
-      text: string;
-      tools: AgentToolMsg[];
-      approvals: AgentApprovalMsg[];
-      questions: AgentQuestionMsg[];
-      thinking: boolean;
-      error?: string;
-      stopped?: boolean;
-      meta?: string;
-    };
+/** One row of the thread. */
+type ChatMsg = ThreadMsg | ModelMsg;
 
 const groupLabelSx: SxProps<Theme> = {
   ...monoSx,
@@ -164,83 +145,6 @@ interface AgentMeta {
   status: AgentStatus | null;
   config: AgentConfig | null;
   skills: SkillInfo[];
-}
-
-/** Format tool_call arguments for display (objects compact, strings as-is). */
-function fmtArgs(a: unknown): string {
-  if (typeof a === "string") return a;
-  try {
-    return JSON.stringify(a);
-  } catch {
-    return String(a);
-  }
-}
-
-const newAgentMsg = (id: number, extra?: Partial<Extract<ChatMsg, { role: "agent" }>>): Extract<ChatMsg, { role: "agent" }> => ({
-  id,
-  role: "agent",
-  text: "",
-  tools: [],
-  approvals: [],
-  questions: [],
-  thinking: false,
-  ...extra,
-});
-
-/**
- * Normalize the runtime history document into thread messages: user items
- * become user bubbles (string or text blocks), assistant items become agent
- * bubbles, toolResult items attach their output to the matching (or newest
- * open) tool of the preceding agent bubble.
- */
-function historyToMsgs(items: HistoryMessage[], nextId: () => number): ChatMsg[] {
-  const out: ChatMsg[] = [];
-  for (const it of items) {
-    if (it.role === "user") {
-      const text =
-        typeof it.content === "string"
-          ? it.content
-          : it.content.filter((b) => b.type === "text").map((b) => b.text ?? "").join("\n");
-      if (text.trim()) out.push({ id: nextId(), role: "user", text });
-      continue;
-    }
-    // The agent bubble of this run: reuse the trailing one so a
-    // text + toolCall + toolResult run stays in a single bubble.
-    let idx = out.length - 1;
-    if (idx < 0 || out[idx].role !== "agent") {
-      out.push(newAgentMsg(nextId()));
-      idx = out.length - 1;
-    }
-    let agent = out[idx] as Extract<ChatMsg, { role: "agent" }>;
-    const blocks = typeof it.content === "string" ? [{ type: "text" as const, text: it.content }] : it.content;
-    for (const b of blocks) {
-      if (b.type === "text" && b.text) {
-        agent = { ...agent, text: agent.text ? `${agent.text}\n\n${b.text}` : b.text };
-      } else if (b.type === "toolCall") {
-        if (it.role === "assistant") {
-          agent = {
-            ...agent,
-            tools: [
-              ...agent.tools,
-              { callId: b.id, name: b.name ?? "tool", arguments: b.arguments !== undefined ? fmtArgs(b.arguments) : undefined, done: false },
-            ],
-          };
-        } else {
-          const open = b.id ? agent.tools.findIndex((t) => t.callId === b.id && !t.done) : agent.tools.findIndex((t) => !t.done);
-          const i = open >= 0 ? open : agent.tools.length - 1;
-          if (i >= 0) {
-            const tools: AgentToolMsg[] = [...agent.tools];
-            tools[i] = { ...tools[i], output: b.text ?? "", done: true };
-            agent = { ...agent, tools };
-          }
-        }
-      }
-    }
-    // Each block above replaced the bubble with an updated copy — write the
-    // accumulated bubble back, or the restored text/tools are dropped.
-    out[idx] = agent;
-  }
-  return out;
 }
 
 export function ChatPane() {
@@ -299,6 +203,23 @@ export function ChatPane() {
   const [agentSkills, setAgentSkills] = useState<SkillInfo[]>([]);
   const [agentSessionKey, setAgentSessionKey] = useState<string | null>(null);
   const [agentNotice, setAgentNotice] = useState("");
+  /** The instance's confirm policy is Allowlist, so a durable approval would
+   *  mean something. False until read (and false when the read fails): the
+   *  "always allow" button offers a rule that would not apply otherwise. */
+  const [allowAlwaysOk, setAllowAlwaysOk] = useState(false);
+  /** The 1s ticker's clock. A question's countdown is derived from it, so it has
+   *  to move for the card to lock itself up when the gateway's timeout runs out. */
+  const [now, setNow] = useState(() => Date.now());
+
+  // Only while a turn is unfinished: the countdown is the one thing on this page
+  // that needs a second-by-second clock, and an idle page must not re-render
+  // every second for nothing.
+  const anyLive = msgs.some((m) => m.role === "agent" && m.phase !== "done");
+  useEffect(() => {
+    if (!anyLive) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [anyLive]);
 
   const inputEl = useRef<HTMLTextAreaElement | null>(null);
   const threadEl = useRef<HTMLDivElement | null>(null);
@@ -392,20 +313,46 @@ export function ChatPane() {
     }
   }
 
-  /** The greeting (real data: instance, model, whitelist size). */
+  /** The greeting (real data: instance, model, whitelist size).
+   *
+   *  The greeting and its footnote are two text blocks of one agent turn: the
+   *  model carries no per-message meta line, and the footnote is not a turn
+   *  outcome either — it is the second thing the greeting says. */
   function greetingMsgs(status: AgentStatus | null, config: AgentConfig | null, skills: SkillInfo[]): ChatMsg[] {
-    if (!status?.exists) {
-      return [newAgentMsg(nextId(), { text: t("cubepilot.chat.greetingNoInstance"), meta: t("cubepilot.chat.greetingMeta") })];
-    }
-    return [
-      newAgentMsg(nextId(), {
-        text: t("cubepilot.chat.greeting", {
+    const greeting = !status?.exists
+      ? t("cubepilot.chat.greetingNoInstance")
+      : t("cubepilot.chat.greeting", {
           tools: String(skills.length),
           model: displayModelName(config?.selectedModel || PLATFORM_MODEL_NAME),
-        }),
-        meta: t("cubepilot.chat.greetingMeta"),
-      }),
+        });
+    return [
+      {
+        ...newAgentMsg(nextId()),
+        // Nothing is running: the greeting says what the agent is looking at, so
+        // its turn is already told. Leaving it unfinished would start the ticker
+        // and report a live turn that does not exist.
+        phase: "done",
+        blocks: [
+          { kind: "text", text: greeting },
+          { kind: "text", text: t("cubepilot.chat.greetingMeta") },
+        ],
+      },
     ];
+  }
+
+  /** Read the instance's confirm policy once, which decides whether the durable
+   *  "always allow" decision is worth offering at all. A read that fails leaves
+   *  it off: the button promises a rule that will stop the asking, and a promise
+   *  that might not hold is worse than a button the user never sees. */
+  async function loadConfirmPolicy(): Promise<void> {
+    try {
+      const res = await fetch("/api/cubepilot/agent/confirm");
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const body = (await res.json()) as { confirmPolicy?: string };
+      setAllowAlwaysOk(body.confirmPolicy === "Allowlist");
+    } catch {
+      setAllowAlwaysOk(false);
+    }
   }
 
   function selectAgent(): void {
@@ -491,15 +438,14 @@ export function ChatPane() {
   async function restorePendingHitl(key: string): Promise<void> {
     const gen = genRef.current;
     const attachApproval = (a: { approvalId: string; tool?: string; command?: string; level?: string; message?: string }) => {
+      // The card belongs to the turn it was raised in — the newest one here,
+      // since restore happens before anything else can arrive.
+      const card: AgentApproval = { callId: a.approvalId, name: a.tool, command: a.command, level: a.level, message: a.message, state: "pending" };
       setMsgs((m) => {
         const lastIdx = [...m].reverse().findIndex((x) => x.role === "agent");
-        if (lastIdx < 0) return [...m, newAgentMsg(nextId(), { approvals: [{ callId: a.approvalId, name: a.tool, command: a.command, level: a.level, message: a.message, state: "pending" }] })];
+        if (lastIdx < 0) return [...m, { ...newAgentMsg(nextId()), approvals: [card] }];
         const i = m.length - 1 - lastIdx;
-        return m.map((x, xi) =>
-          xi === i && x.role === "agent"
-            ? { ...x, approvals: [...x.approvals, { callId: a.approvalId, name: a.tool, command: a.command, level: a.level, message: a.message, state: "pending" as const }] }
-            : x,
-        );
+        return m.map((x, xi) => (xi === i && x.role === "agent" ? { ...x, approvals: [...x.approvals, card] } : x));
       });
     };
     try {
@@ -591,6 +537,9 @@ export function ChatPane() {
   useEffect(() => {
     void loadModels();
     void loadAgentMeta();
+    // The policy that decides whether a durable approval is on offer: read once,
+    // like the rest of the instance meta.
+    void loadConfirmPolicy();
     return () => {
       cancelInflight();
     };
@@ -621,79 +570,18 @@ export function ChatPane() {
 
   // ── agent conversation (real SSE via the pilot proxy) ───────────────────
 
-  /** Apply one SSE event to the in-flight agent message. */
+  /** Apply one SSE event to the in-flight agent message.
+   *
+   *  The fold itself is `applyAgentEvent` (lib/cubepilot/agentThread): what an
+   *  event means to a turn — text order, tool pairing, how a card settles when a
+   *  decision's `approved` field is absent — is model behaviour, and it is the
+   *  same behaviour the dock and the thread are drawn from. What is left here is
+   *  only what the event means to the PANE: which session it belongs to, and that
+   *  the model-side "thinking" indicator is over. */
   function handleAgentEvent(evt: AgentSseEvent, msgId: number): void {
-    const update = (fn: (m: Extract<ChatMsg, { role: "agent" }>) => Extract<ChatMsg, { role: "agent" }>) => {
-      setMsgs((list) => list.map((x) => (x.id === msgId && x.role === "agent" ? fn(x) : x)));
-    };
-    switch (evt.type) {
-      case "message_start":
-        setAgentSessionKey(evt.sessionId);
-        break;
-      case "agent_thinking":
-        break; // the thinking indicator is already shown
-      case "message_delta":
-        setThinkingText(null);
-        update((m) => ({ ...m, thinking: false, text: m.text + evt.delta }));
-        break;
-      case "text_replace":
-        setThinkingText(null);
-        // Replace, never append (the gateway rewrites earlier narration).
-        update((m) => ({ ...m, thinking: false, text: evt.delta }));
-        break;
-      case "tool_call":
-        setThinkingText(null);
-        update((m) => ({
-          ...m,
-          thinking: false,
-          tools: [...m.tools, { callId: evt.callId, name: evt.name, arguments: evt.arguments !== undefined ? fmtArgs(evt.arguments) : undefined, done: false }],
-        }));
-        break;
-      case "tool_result":
-        update((m) => {
-          const open = evt.callId ? m.tools.findIndex((x) => x.callId === evt.callId && !x.done) : m.tools.findIndex((x) => !x.done);
-          const i = open >= 0 ? open : m.tools.length - 1;
-          if (i < 0) return m;
-          const tools = [...m.tools];
-          tools[i] = { ...tools[i], output: evt.output ?? "", done: true };
-          return { ...m, tools };
-        });
-        break;
-      case "approval_pending":
-        setThinkingText(null);
-        update((m) => ({
-          ...m,
-          approvals: [...m.approvals, { callId: evt.callId, name: evt.name, command: evt.command, level: evt.level, message: evt.message, state: "pending" }],
-        }));
-        break;
-      case "approval_resolved":
-        update((m) => ({
-          ...m,
-          approvals: m.approvals.map((a) => (a.callId === evt.callId ? { ...a, state: evt.approved ? ("approved" as const) : ("rejected" as const) } : a)),
-        }));
-        break;
-      case "question_pending":
-        setThinkingText(null);
-        update((m) => ({
-          ...m,
-          questions: [...m.questions, { callId: evt.callId, questions: evt.question?.questions ?? [], state: "pending" }],
-        }));
-        break;
-      case "question_resolved":
-        update((m) => ({
-          ...m,
-          questions: m.questions.map((q) =>
-            q.callId === evt.callId
-              ? { ...q, state: evt.message === "cancelled" ? ("cancelled" as const) : evt.message === "expired" ? ("expired" as const) : ("answered" as const) }
-              : q,
-          ),
-        }));
-        break;
-      case "message_done":
-        setThinkingText(null);
-        update((m) => ({ ...m, thinking: false, error: evt.error || undefined, stopped: evt.stopped === true }));
-        break;
-    }
+    if (evt.type === "message_start") setAgentSessionKey(evt.sessionId);
+    if (evt.type !== "agent_thinking" && evt.type !== "message_start" && evt.type !== "message_done") setThinkingText(null);
+    setMsgs((list) => list.map((x) => (x.id === msgId && x.role === "agent" ? applyAgentEvent(x, evt) : x)));
   }
 
   async function sendAgent(text: string, gen: number, msgId: number): Promise<void> {
@@ -747,27 +635,43 @@ export function ChatPane() {
       // The stream may die without the terminal event; per contract the
       // client synthesizes message_done so the UI always resets.
       if (!gotDone && genRef.current === gen) {
-        setMsgs((list) => list.map((x) => (x.id === msgId && x.role === "agent" ? { ...x, thinking: false, error: t("cubepilot.chat.streamLost") } : x)));
+        setMsgs((list) => list.map((x) => (x.id === msgId && x.role === "agent" ? { ...x, error: t("cubepilot.chat.streamLost") } : x)));
       }
     } catch (e) {
       if (genRef.current === gen) {
         setThinkingText(null);
-        setMsgs((list) => list.map((x) => (x.id === msgId && x.role === "agent" ? { ...x, thinking: false, error: String(e instanceof Error ? e.message : e) } : x)));
+        setMsgs((list) => list.map((x) => (x.id === msgId && x.role === "agent" ? { ...x, error: String(e instanceof Error ? e.message : e) } : x)));
       }
     }
   }
 
   // ── HITL actions ──
 
-  async function decideApproval(msgId: number, callId: string, decision: "approve" | "reject" | "allow-always"): Promise<void> {
+  /** Patch one card wherever it lives in the transcript. Cards are identified by
+   *  their call id, which is what the dock and the thread both carry, and a call
+   *  belongs to exactly one turn. */
+  const patchApproval = useCallback(
+    (callId: string, fn: (a: AgentApproval) => AgentApproval): void => {
+      setMsgs((list) =>
+        list.map((x) => (x.role === "agent" ? { ...x, approvals: x.approvals.map((a) => (a.callId === callId ? fn(a) : a)) } : x)),
+      );
+    },
+    [],
+  );
+  const patchQuestion = useCallback(
+    (callId: string, fn: (q: AgentQuestion) => AgentQuestion): void => {
+      setMsgs((list) =>
+        list.map((x) => (x.role === "agent" ? { ...x, questions: x.questions.map((q) => (q.callId === callId ? fn(q) : q)) } : x)),
+      );
+    },
+    [],
+  );
+
+  async function decideApproval(callId: string, decision: ApprovalDecision): Promise<void> {
     if (!agentSessionKey) return;
-    setMsgs((list) =>
-      list.map((x) =>
-        x.id === msgId && x.role === "agent"
-          ? { ...x, approvals: x.approvals.map((a) => (a.callId === callId ? { ...a, state: "deciding" as const } : a)) }
-          : x,
-      ),
-    );
+    // Optimistic: the click answers a card the turn is blocked on, so it must
+    // look like it landed immediately.
+    patchApproval(callId, (a) => ({ ...a, state: "deciding", error: undefined }));
     try {
       const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(agentSessionKey)}/approval`, {
         method: "POST",
@@ -775,46 +679,72 @@ export function ChatPane() {
         body: JSON.stringify({ decision }),
       });
       if (!res.ok) {
-        const err = (await res.json().catch(() => null)) as { error?: string } | null;
+        const body = (await res.json().catch(() => null)) as { error?: string } | null;
         if (res.status === 404 || res.status === 409) {
-          // Expired / already resolved: clear the local card (contract §5.1).
-          setMsgs((list) =>
-            list.map((x) => (x.id === msgId && x.role === "agent" ? { ...x, approvals: x.approvals.filter((a) => a.callId !== callId) } : x)),
-          );
+          // The record is gone: the turn ended (or another client decided) while
+          // this click was in flight. Nobody decided, which is the neutral
+          // "stopped" — reporting the user's own click as a rejection would
+          // attribute to them a decision the server refused.
+          patchApproval(callId, (a) => ({ ...a, state: "stopped", error: undefined }));
           return;
         }
-        throw new Error(err?.error ?? `HTTP ${res.status}`);
+        throw new Error(body?.error ?? `HTTP ${res.status}`);
       }
+      const body = (await res.json().catch(() => null)) as { allowlisted?: boolean } | null;
       // The approval_resolved event normally follows on the stream; when the
       // stream is already closed the response is the only outcome signal.
-      setMsgs((list) =>
-        list.map((x) =>
-          x.id === msgId && x.role === "agent"
-            ? { ...x, approvals: x.approvals.map((a) => (a.callId === callId && a.state === "deciding" ? { ...a, state: decision === "reject" ? ("rejected" as const) : ("approved" as const) } : a)) }
-            : x,
-        ),
-      );
+      patchApproval(callId, (a) => (a.state === "deciding" ? { ...a, state: decision === "reject" ? "rejected" : "approved" } : a));
+      if (decision === "allow-always" && body?.allowlisted !== true) {
+        // The approval took; the durable rule did not. Calling that a success
+        // would tell the user it will not ask again, and it will.
+        showToast(t("cubepilot.chat.approvalNotAllowlisted"), "error");
+      }
     } catch (e) {
-      setMsgs((list) =>
-        list.map((x) =>
-          x.id === msgId && x.role === "agent"
-            ? { ...x, approvals: x.approvals.map((a) => (a.callId === callId ? { ...a, state: "pending" as const } : a)) }
-            : x,
-        ),
-      );
-      showToast(t("cubepilot.failed", { error: String(e) }), "error");
+      // The card stays answerable, with the reason on it: a toast would leave it
+      // looking like nothing had happened, and the user would click again.
+      patchApproval(callId, (a) => ({ ...a, state: "pending", error: String(e instanceof Error ? e.message : e) }));
     }
   }
 
-  async function submitQuestion(msgId: number, callId: string, answers: Record<string, string[]>, cancel: boolean): Promise<void> {
+  /**
+   * Re-read the session's pending questions after a refused answer.
+   *
+   * The refusal (404/409) does not say WHY, and guessing is what loses an
+   * answer: if the question is still open, the answer was not accepted and the
+   * card must stay open for another try, with the server's own fresh deadline;
+   * only a question that is really gone is over, and only then is "expired" a
+   * statement about anything.
+   */
+  async function reopenOrExpireQuestion(callId: string): Promise<void> {
     if (!agentSessionKey) return;
-    setMsgs((list) =>
-      list.map((x) =>
-        x.id === msgId && x.role === "agent"
-          ? { ...x, questions: x.questions.map((q) => (q.callId === callId ? { ...q, state: "submitting" as const, answers: cancel ? q.answers : answers } : q)) }
-          : x,
-      ),
-    );
+    try {
+      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(agentSessionKey)}/question/pending`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const { questions } = (await res.json()) as {
+        questions?: Array<{ id?: string; questions?: AgentQuestionItem[]; timeoutSeconds?: number }>;
+      };
+      const still = (questions ?? []).find((q) => q.id === callId);
+      if (still) {
+        patchQuestion(callId, (q) => ({
+          ...q,
+          state: "pending",
+          // The gateway's remainder, not this browser's stale one.
+          ...(still.timeoutSeconds ? { deadline: Date.now() + still.timeoutSeconds * 1000 } : {}),
+          error: t("cubepilot.chat.questionNotAccepted"),
+        }));
+        return;
+      }
+      patchQuestion(callId, (q) => ({ ...q, state: "expired", error: undefined }));
+    } catch {
+      // The re-read failed, so "gone" is not established either. The card stays
+      // open and says what went wrong rather than settling on a guess.
+      patchQuestion(callId, (q) => ({ ...q, state: "pending", error: t("cubepilot.chat.questionRefreshFailed") }));
+    }
+  }
+
+  async function submitQuestion(callId: string, answers: Record<string, string[]>, cancel: boolean): Promise<void> {
+    if (!agentSessionKey) return;
+    patchQuestion(callId, (q) => ({ ...q, state: "submitting", answers: cancel ? q.answers : answers, error: undefined }));
     try {
       const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(agentSessionKey)}/question`, {
         method: "POST",
@@ -822,31 +752,16 @@ export function ChatPane() {
         body: JSON.stringify({ id: callId, ...(cancel ? { cancel: true } : { answers }) }),
       });
       if (!res.ok) {
-        const err = (await res.json().catch(() => null)) as { error?: string } | null;
+        const body = (await res.json().catch(() => null)) as { error?: string } | null;
         if (res.status === 404 || res.status === 409) {
-          setMsgs((list) =>
-            list.map((x) => (x.id === msgId && x.role === "agent" ? { ...x, questions: x.questions.filter((q) => q.callId !== callId) } : x)),
-          );
+          await reopenOrExpireQuestion(callId);
           return;
         }
-        throw new Error(err?.error ?? `HTTP ${res.status}`);
+        throw new Error(body?.error ?? `HTTP ${res.status}`);
       }
-      setMsgs((list) =>
-        list.map((x) =>
-          x.id === msgId && x.role === "agent"
-            ? { ...x, questions: x.questions.map((q) => (q.callId === callId ? { ...q, state: cancel ? ("cancelled" as const) : ("answered" as const) } : q)) }
-            : x,
-        ),
-      );
+      patchQuestion(callId, (q) => ({ ...q, state: cancel ? "cancelled" : "answered", error: undefined }));
     } catch (e) {
-      setMsgs((list) =>
-        list.map((x) =>
-          x.id === msgId && x.role === "agent"
-            ? { ...x, questions: x.questions.map((q) => (q.callId === callId ? { ...q, state: "pending" as const } : q)) }
-            : x,
-        ),
-      );
-      showToast(t("cubepilot.failed", { error: String(e) }), "error");
+      patchQuestion(callId, (q) => ({ ...q, state: "pending", error: String(e instanceof Error ? e.message : e) }));
     }
   }
 
@@ -961,11 +876,10 @@ export function ChatPane() {
       } else {
         const gen = ++genRef.current;
         const agentMsgId = nextId();
-        setMsgs((m) => [...m, { id: nextId(), role: "user", text }, newAgentMsg(agentMsgId, { thinking: true })]);
+        setMsgs((m) => [...m, { id: nextId(), role: "user", text }, newAgentMsg(agentMsgId)]);
         setInput("");
         if (el) el.style.height = "auto";
         setSending(true);
-        // The thinking indicator lives inside the agent bubble (m.thinking).
         void sendAgent(text, gen, agentMsgId).finally(() => {
           if (genRef.current === gen) {
             setSending(false);
@@ -994,6 +908,15 @@ export function ChatPane() {
 
   const agentPillVariant =
     agentStatus?.phase === "Ready" ? "ok" : agentStatus?.phase === "Failed" ? "danger" : agentStatus?.phase ? "warn" : "neutral";
+
+  /** The agent's rows of the thread — what AgentThread draws. */
+  const agentMsgs = msgs.filter((m): m is ThreadMsg => m.role === "user" || m.role === "agent");
+  // The cards the transcript is still parked on, from EVERY turn in it: a write
+  // parked by a turn several bubbles back is still a turn blocked on the user,
+  // and its card would otherwise have scrolled away with the bubble that raised
+  // it.
+  const dockApprovals = msgs.flatMap((m) => (m.role === "agent" ? openApprovals(m) : []));
+  const dockQuestions = msgs.flatMap((m) => (m.role === "agent" ? openQuestions(m) : []));
 
   return (
     <Box>
@@ -1258,120 +1181,37 @@ export function ChatPane() {
             {agentNotice ? (
               <Box sx={{ ...botMsgSx, fontSize: 12.5, color: "text.secondary", borderStyle: "dashed" }}>{agentNotice}</Box>
             ) : null}
-            {msgs.map((m) =>
-              m.role === "user" ? (
-                <Box key={m.id} sx={userMsgSx}>
-                  {m.text}
-                </Box>
-              ) : m.role === "model" ? (
-                <Box key={m.id} sx={botMsgSx}>
-                  <Box sx={{ ...monoSx, fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--accent-strong)", mb: "6px" }}>
-                    MODEL · {svc?.id ?? ""}
-                  </Box>
-                  {m.text}
-                  {m.meta ? (
-                    <Box sx={{ ...monoSx, fontSize: 10.5, color: "text.secondary", mt: "8px" }}>{m.meta}</Box>
-                  ) : null}
-                </Box>
-              ) : (
-                <Box key={m.id} sx={{ ...botMsgSx, borderColor: VIOLET_BORDER }}>
-                  <Box sx={{ ...monoSx, fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase", color: VIOLET_TEXT, mb: "6px" }}>
-                    CUBEPILOT
-                  </Box>
-                  {m.text ? <Box>{m.text}</Box> : null}
-                  {m.thinking && !m.text && m.tools.length === 0 ? (
-                    <Box sx={{ fontSize: 12.5, color: "text.secondary" }}>{t("cubepilot.chat.thinkingAgent")}</Box>
-                  ) : null}
-                  {m.tools.map((tool, ti) => (
-                    <Box
-                      key={(tool.callId ?? "t") + ti}
-                      sx={{
-                        m: "9px 0 0",
-                        border: 1,
-                        borderColor: VIOLET_BORDER,
-                        borderRadius: 6,
-                        bgcolor: VIOLET_SOFT,
-                        p: "8px 12px",
-                      }}
-                    >
-                      <Box sx={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                        <Box sx={{ color: VIOLET_TEXT, display: "flex" }}>{Icons.tool({ size: 13 })}</Box>
-                        <Box sx={{ ...monoSx, fontSize: 11.5, fontWeight: 600 }}>{tool.name}</Box>
-                        {!tool.done ? (
-                          <Box sx={{ ml: "auto", ...monoSx, fontSize: 10.5, color: "text.secondary" }}>…</Box>
-                        ) : null}
-                      </Box>
-                      {tool.arguments ? (
-                        <Box
-                          component="pre"
-                          sx={{ m: "6px 0 0", ...monoSx, fontSize: 11, overflowX: "auto", whiteSpace: "pre-wrap", color: "text.secondary" }}
-                        >
-                          {tool.arguments}
-                        </Box>
-                      ) : null}
-                      {tool.output ? (
-                        <Box sx={{ m: "6px 0 0", ...monoSx, fontSize: 11, whiteSpace: "pre-wrap", color: "text.secondary", lineHeight: 1.7 }}>
-                          {tool.output}
-                        </Box>
-                      ) : null}
+            {/* The agent's side of the thread is AgentThread's to draw: its
+                bubbles, its text, its tool cards and the cards it settled. The
+                pane owns which of the two conversations is on screen, not what a
+                turn looks like — drawing it here as well would print every
+                message twice (AgentThread draws the user's too). */}
+            {isAgent ? (
+              <AgentThread
+                msgs={agentMsgs}
+                sessionKey={agentSessionKey}
+                now={now}
+                onDecideApproval={(msgId, callId, decision) => void decideApproval(callId, decision)}
+                onAnswerQuestion={(msgId, callId, answers, cancel) => void submitQuestion(callId, answers, cancel)}
+              />
+            ) : (
+              msgs.map((m) =>
+                m.role === "model" ? (
+                  <Box key={m.id} sx={botMsgSx}>
+                    <Box sx={{ ...monoSx, fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--accent-strong)", mb: "6px" }}>
+                      MODEL · {svc?.id ?? ""}
                     </Box>
-                  ))}
-                  {m.approvals.map((a) => (
-                    <Box
-                      key={a.callId}
-                      data-od-id="approval-item"
-                      sx={{ m: "9px 0 0", border: 1, borderColor: `color-mix(in oklch, ${STATUS_WARN} 55%, var(--border))`, borderRadius: 6, p: "10px 12px", bgcolor: `color-mix(in oklch, ${STATUS_WARN} 9%, transparent)`, display: "flex", flexDirection: "column", gap: "7px" }}
-                    >
-                      <Box sx={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                        <Box sx={{ fontSize: 12, fontWeight: 600 }}>{t("cubepilot.chat.approvalTitle")}</Box>
-                        {a.level ? (
-                          <Pill variant={a.level === "write" ? "warn" : "neutral"}>{a.level}</Pill>
-                        ) : null}
-                        {a.state !== "pending" && a.state !== "deciding" ? (
-                          <Pill variant={a.state === "approved" ? "ok" : "danger"}>
-                            {a.state === "approved" ? t("cubepilot.chat.approvalApproved") : t("cubepilot.chat.approvalRejected")}
-                          </Pill>
-                        ) : null}
-                      </Box>
-                      {a.command ? (
-                        <Box component="pre" sx={{ m: 0, ...monoSx, fontSize: 11.5, whiteSpace: "pre-wrap", bgcolor: "var(--surface)", borderRadius: 5, p: "7px 10px" }}>
-                          {a.command}
-                        </Box>
-                      ) : null}
-                      {a.message ? <Box sx={{ fontSize: 12, color: "text.secondary" }}>{a.message}</Box> : null}
-                      {a.state === "pending" || a.state === "deciding" ? (
-                        <Box sx={{ display: "flex", gap: "7px", flexWrap: "wrap" }}>
-                          <Btn small variant="primary" disabled={a.state === "deciding"} onClick={() => void decideApproval(m.id, a.callId, "approve")} data-od-id="approval-approve">
-                            {t("cubepilot.chat.approvalApprove")}
-                          </Btn>
-                          <Btn small disabled={a.state === "deciding"} onClick={() => void decideApproval(m.id, a.callId, "reject")} data-od-id="approval-reject">
-                            {t("cubepilot.chat.approvalReject")}
-                          </Btn>
-                          <Btn small disabled={a.state === "deciding"} onClick={() => void decideApproval(m.id, a.callId, "allow-always")} data-od-id="approval-allow">
-                            {t("cubepilot.chat.approvalAllowAlways")}
-                          </Btn>
-                        </Box>
-                      ) : null}
-                    </Box>
-                  ))}
-                  {m.questions.map((q) => (
-                    <QuestionCardView
-                      key={q.callId}
-                      q={q}
-                      disabled={q.state !== "pending"}
-                      onAnswer={(answers) => void submitQuestion(m.id, q.callId, answers, false)}
-                      onCancel={() => void submitQuestion(m.id, q.callId, {}, true)}
-                    />
-                  ))}
-                  {m.error ? (
-                    <Box sx={{ ...monoSx, fontSize: 11.5, color: ERROR_COLOR, mt: "8px", whiteSpace: "pre-wrap" }}>{m.error}</Box>
-                  ) : null}
-                  {m.stopped ? (
-                    <Box sx={{ fontSize: 12, color: "text.secondary", mt: "6px" }}>{t("cubepilot.chat.stopped")}</Box>
-                  ) : null}
-                  {m.meta ? <Box sx={{ ...monoSx, fontSize: 10.5, color: "text.secondary", mt: "8px" }}>{m.meta}</Box> : null}
-                </Box>
-              ),
+                    {m.text}
+                    {m.meta ? (
+                      <Box sx={{ ...monoSx, fontSize: 10.5, color: "text.secondary", mt: "8px" }}>{m.meta}</Box>
+                    ) : null}
+                  </Box>
+                ) : m.role === "user" ? (
+                  <Box key={m.id} sx={userMsgSx}>
+                    {m.text}
+                  </Box>
+                ) : null,
+              )
             )}
             {thinkingText ? <Box sx={{ ...botMsgSx, color: "text.secondary" }}>{thinkingText}</Box> : null}
             {streaming !== null && svc ? (
@@ -1400,6 +1240,21 @@ export function ChatPane() {
               sampling params collapse into a chip in the bar's bottom row
               (DSH's access-mode look) and open in a popover. */}
           <Box sx={{ p: "10px 14px 12px", flex: "none" }}>
+            {/* The cards a turn is parked on, docked above the composer rather
+                than in the bubble that raised them: the thread scrolls, so a
+                card drawn in it is a card the user has to go looking for — and
+                the turn stays parked for exactly as long as they are looking. */}
+            {isAgent ? (
+              <HitlDock
+                approvals={dockApprovals}
+                questions={dockQuestions}
+                sessionKey={agentSessionKey}
+                now={now}
+                allowAlwaysOk={allowAlwaysOk}
+                onDecide={(callId, decision) => void decideApproval(callId, decision)}
+                onAnswer={(callId, answers, cancel) => void submitQuestion(callId, answers, cancel)}
+              />
+            ) : null}
             <Box
               sx={{
                 display: "flex",
@@ -1528,134 +1383,6 @@ export function ChatPane() {
           </Box>
         </Card>
       </Box>
-    </Box>
-  );
-}
-
-/** One ask_user card: options (radio/checkbox) or free text, submit/cancel. */
-function QuestionCardView({
-  q,
-  disabled,
-  onAnswer,
-  onCancel,
-}: {
-  q: AgentQuestionMsg;
-  disabled: boolean;
-  onAnswer: (answers: Record<string, string[]>) => void;
-  onCancel: () => void;
-}) {
-  const { t } = useI18n();
-  const [sel, setSel] = useState<Record<string, string[]>>({});
-  const [free, setFree] = useState<Record<string, string>>({});
-
-  const toggleOption = (qid: string, multi: boolean | undefined, label: string) => {
-    setSel((s) => {
-      const cur = s[qid] ?? [];
-      const next = multi ? (cur.includes(label) ? cur.filter((x) => x !== label) : [...cur, label]) : [label];
-      return { ...s, [qid]: next };
-    });
-  };
-
-  const answerFor = (item: AgentQuestionItem): string[] =>
-    item.options && item.options.length > 0 ? (sel[item.questionId] ?? []) : (free[item.questionId] ?? "").trim() ? [(free[item.questionId] ?? "").trim()] : [];
-
-  const ready = q.questions.every((item) => answerFor(item).length > 0);
-
-  const resolvedLabel =
-    q.state === "answered" ? t("cubepilot.chat.questionAnswered") : q.state === "cancelled" ? t("cubepilot.chat.questionCancelled") : q.state === "expired" ? t("cubepilot.chat.questionExpired") : "";
-
-  return (
-    <Box
-      data-od-id="question-item"
-      sx={{ m: "9px 0 0", border: 1, borderColor: VIOLET_BORDER, borderRadius: 6, p: "10px 12px", bgcolor: VIOLET_SOFT, display: "flex", flexDirection: "column", gap: "9px" }}
-    >
-      <Box sx={{ display: "flex", alignItems: "center", gap: "8px" }}>
-        <Box sx={{ fontSize: 12, fontWeight: 600 }}>{t("cubepilot.chat.questionTitle")}</Box>
-        {disabled && resolvedLabel ? (
-          <Pill variant={q.state === "answered" ? "ok" : "neutral"}>{resolvedLabel}</Pill>
-        ) : null}
-      </Box>
-      {q.questions.map((item) => (
-        <Box key={item.questionId} sx={{ display: "flex", flexDirection: "column", gap: "5px" }}>
-          {item.header ? <Box sx={{ ...monoSx, fontSize: 10.5, color: VIOLET_TEXT, fontWeight: 600 }}>{item.header}</Box> : null}
-          <Box sx={{ fontSize: 12.5 }}>{item.question}</Box>
-          {item.options && item.options.length > 0 ? (
-            <Box sx={{ display: "flex", flexDirection: "column", gap: "4px", mt: "2px" }}>
-              {item.options.map((opt) => {
-                const checked = (sel[item.questionId] ?? []).includes(opt.label);
-                return (
-                  <Box
-                    key={opt.label}
-                    component="button"
-                    type="button"
-                    disabled={disabled}
-                    onClick={() => toggleOption(item.questionId, item.multiSelect, opt.label)}
-                    sx={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: "8px",
-                      textAlign: "left",
-                      fontFamily: "inherit",
-                      fontSize: 12.5,
-                      color: "text.primary",
-                      border: 1,
-                      borderColor: checked ? VIOLET : "divider",
-                      borderRadius: 6,
-                      p: "6px 10px",
-                      cursor: disabled ? "default" : "pointer",
-                      bgcolor: checked ? "var(--surface)" : "transparent",
-                      opacity: disabled && !checked ? 0.55 : 1,
-                    }}
-                  >
-                    <Box
-                      aria-hidden
-                      sx={{
-                        width: 13,
-                        height: 13,
-                        flex: "none",
-                        border: 1,
-                        borderColor: checked ? VIOLET : "divider",
-                        borderRadius: item.multiSelect ? 3 : "50%",
-                        display: "grid",
-                        placeItems: "center",
-                        color: "#fff",
-                        bgcolor: checked ? VIOLET : "transparent",
-                        fontSize: 9,
-                      }}
-                    >
-                      {checked ? "✓" : ""}
-                    </Box>
-                    <Box sx={{ minWidth: 0 }}>
-                      {opt.label}
-                      {opt.description ? (
-                        <Box sx={{ fontSize: 11, color: "text.secondary" }}>{opt.description}</Box>
-                      ) : null}
-                    </Box>
-                  </Box>
-                );
-              })}
-            </Box>
-          ) : (
-            <CpInput
-              aria-label={item.question}
-              value={free[item.questionId] ?? ""}
-              disabled={disabled}
-              onChange={(e) => setFree((f) => ({ ...f, [item.questionId]: e.target.value }))}
-              sx={{ mt: "2px", fontSize: 12.5 }}
-            />
-          )}
-        </Box>
-      ))}
-      {!disabled ? (
-        <Box sx={{ display: "flex", gap: "7px" }}>
-          <Btn small variant="primary" disabled={!ready || q.state === "submitting"} data-od-id="question-submit" onClick={() => onAnswer(Object.fromEntries(q.questions.map((i) => [i.questionId, answerFor(i)])))}>
-            {t("cubepilot.chat.questionSubmit")}
-          </Btn>
-          <Btn small disabled={q.state === "submitting"} data-od-id="question-cancel" onClick={onCancel}>
-            {t("cubepilot.chat.questionCancel")}
-          </Btn>
-        </Box>
-      ) : null}
     </Box>
   );
 }

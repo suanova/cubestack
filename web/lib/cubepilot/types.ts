@@ -241,7 +241,11 @@ export type AgentSseEvent =
       type: "question_pending";
       sessionId: string;
       callId: string;
-      question?: { questions?: AgentQuestionItem[]; timeoutSeconds?: number };
+      // `isOther` says the gateway accepts free text alongside the options. The
+      // gateway sets it, cubepilot-api does not project it yet, so it is
+      // optional: absent means "no free-text entry", and the day the field
+      // starts arriving the entry appears without a client change.
+      question?: { questions?: AgentQuestionItem[]; timeoutSeconds?: number; isOther?: boolean };
     }
   | { type: "question_resolved"; sessionId: string; callId: string; message?: string };
 

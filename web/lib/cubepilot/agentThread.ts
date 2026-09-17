@@ -138,7 +138,7 @@ export function applyAgentEvent(msg: AgentMsg, evt: AgentSseEvent, now: number =
           ...msg,
           questions: [
             ...msg.questions,
-            newQuestion(evt.callId, evt.question?.questions ?? [], evt.question?.timeoutSeconds, now),
+            newQuestion(evt.callId, evt.question?.questions ?? [], evt.question?.timeoutSeconds, evt.question?.isOther, now),
           ],
         },
         "tools",
@@ -222,12 +222,17 @@ function newQuestion(
   callId: string,
   questions: AgentQuestionItem[],
   timeoutSeconds: number | undefined,
+  isOther: boolean | undefined,
   now: number,
 ): AgentQuestion {
   return {
     callId,
     questions,
     state: "pending",
+    // Passed through rather than defaulted: the gateway may offer free text
+    // beside the options, and until cubepilot-api projects the field it is
+    // absent — which the card reads as "no free-text entry".
+    ...(isOther ? { isOther } : {}),
     // Derived from the remainder rather than an absolute deadline: the event
     // carries what is left, so a countdown does not depend on this browser's
     // clock agreeing with the API's.
