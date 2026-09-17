@@ -330,6 +330,24 @@ describe("/api/cubepilot/agent/config", () => {
     );
   });
 
+  it("PUT: over-long userInstructions → 400 before any cluster read", async () => {
+    // The contract says the route turns EVERY rejection into a 400, so the
+    // length path needs its own case — the marker case alone leaves it verified
+    // only by inference. No k8s mock is set up, which is itself the assertion:
+    // the guard must fire before the first cluster read.
+    const res = await PUT(
+      await authedRequest({
+        method: "PUT",
+        body: JSON.stringify({ config: { userInstructions: "x".repeat(20_001) } }),
+      }),
+      undefined,
+    );
+    expect(res.status).toBe(400);
+    expect((await res.json()) as { error?: string }).toEqual(
+      expect.objectContaining({ error: expect.stringContaining("character limit") }),
+    );
+  });
+
   it("PUT: instance name taken by another user → 409", async () => {
     mockK8s({ metadata: { name: "tester-cubepilot" }, spec: { owner: "other" } });
     const res = await PUT(

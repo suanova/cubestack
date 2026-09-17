@@ -19,6 +19,17 @@ describe("validateInstructions", () => {
     expect(validateInstructions(atLimit + "𝄞")).toContain("character limit");
   });
 
+  it("trims before counting, like the reference", () => {
+    // A paste artifact: the content sits exactly at the limit and carries a
+    // trailing newline. The reference trims first (`policy.go:25`) and accepts
+    // it; counting the raw value would 400 an edit the backend would render.
+    const atLimit = "x".repeat(MAX_INSTRUCTION_CHARS);
+    expect(validateInstructions(`${atLimit}\n`)).toBeNull();
+    expect(validateInstructions(`\n${atLimit}\n`)).toBeNull();
+    // ...but trimming must not buy extra budget for real content.
+    expect(validateInstructions(`${atLimit}x\n`)).toContain("character limit");
+  });
+
   it("rejects the reserved managed-section markers", () => {
     expect(validateInstructions(`前置内容 ${MANAGED_START} 后置`)).toContain("reserved managed-section marker");
     expect(validateInstructions(`前置内容 ${MANAGED_END} 后置`)).toContain("reserved managed-section marker");
