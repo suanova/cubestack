@@ -645,6 +645,12 @@ export function ChatPane() {
       if (!res.ok) return;
       const body = (await res.json()) as { items?: HistoryMessage[] };
       if (genRef.current !== gen) return;
+      // Re-read the ref rather than trusting the caller's earlier read: a tick
+      // that started as a follower can still be waiting on this fetch when the
+      // user sends, and replacing the transcript then would take the bubble the
+      // stream is writing to with it — every later event would be applied to an
+      // id no longer in the list, and the turn would show nothing at all.
+      if (ownTurnRef.current) return;
       const raw = JSON.stringify(body.items ?? []);
       if (raw === lastHistoryRef.current) return;
       lastHistoryRef.current = raw;
