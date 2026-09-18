@@ -538,7 +538,7 @@ export default function OverviewPage() {
     : [];
 
   return (
-    <Box sx={{ p: "26px 28px 64px", maxWidth: 1240, mx: "auto", width: "100%" }}>
+    <Box sx={{ p: "26px 28px 64px", mx: "auto", width: "100%" }}>
       <Box
         data-od-id="page-head"
         sx={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: "20px", mb: "22px" }}

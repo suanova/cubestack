@@ -105,7 +105,7 @@ export default function DashboardsPage({
   const selected = dashboards.find((d) => d.metadata.name === selectedName) ?? null;
 
   return (
-    <Box sx={{ p: 3, maxWidth: 1240, width: "100%" }}>
+    <Box sx={{ p: 3, width: "100%" }}>
       <Typography
         sx={{
           fontSize: 22,

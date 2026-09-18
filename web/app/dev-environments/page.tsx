@@ -239,7 +239,7 @@ export default function DevEnvironmentsPage() {
 
   return (
     <>
-      <Box sx={{ p: "26px 28px 64px", maxWidth: 1320, width: "100%", mx: "auto" }}>
+      <Box sx={{ p: "26px 28px 64px", width: "100%", mx: "auto" }}>
         <Box
           data-od-id="page-head"
           sx={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: "20px", mb: "22px" }}
