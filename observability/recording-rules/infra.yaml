@@ -5,6 +5,10 @@ metadata:
   namespace: monitoring
   labels:
     app.kubernetes.io/part-of: cubestack-observability
+    # The cluster's Prometheus CR only loads rules carrying this label
+    # (spec.ruleSelector: release=kube-prometheus); without it the
+    # rules are never applied to Prometheus.
+    release: kube-prometheus
 spec:
   groups:
     - name: cubestack.node
@@ -50,15 +54,18 @@ spec:
             )
 
         # Per-node RDMA port health: min across all ports (1=all Active, 0=any down)
-        # infiniband exporter already carries a node label directly (unlike
-        # node_cpu/node_memory above), so no internal_ip join is needed or
-        # possible here — its instance label is the exporter pod's IP, not
-        # the node's, so an internal_ip-based join against kube_node_info
-        # never matches and silently returns no series.
+        # node-exporter's infiniband collector carries no node label (only
+        # instance/device/port), so the instance->node join via kube_node_info
+        # is required, same as node_cpu/node_memory above.
         - record: cluster_node:cubestack_network_rdma_port_up:min
           expr: |
             min by (node) (
-              node_infiniband_state_id == bool 4
+              label_replace(
+                node_infiniband_state_id == bool 4,
+                "internal_ip", "$1", "instance", "([^:]+):.*"
+              )
+              * on (internal_ip) group_left(node)
+              kube_node_info
             )
 
         # Per-node network receive bytes rate (excluding loopback and veth)
@@ -92,16 +99,25 @@ spec:
             )
 
         # Per-node RDMA receive bytes rate
-        # infiniband exporter already carries a node label directly, so no join is needed
         - record: cluster_node:cubestack_network_rdma_receive_bytes:rate5m
           expr: |
             sum by (node) (
-              rate(infiniband_port_data_received_bytes_total[5m])
+              label_replace(
+                rate(node_infiniband_port_data_received_bytes_total[5m]),
+                "internal_ip", "$1", "instance", "([^:]+):.*"
+              )
+              * on (internal_ip) group_left(node)
+              kube_node_info
             )
 
         # Per-node RDMA transmit bytes rate
         - record: cluster_node:cubestack_network_rdma_transmit_bytes:rate5m
           expr: |
             sum by (node) (
-              rate(infiniband_port_data_transmitted_bytes_total[5m])
+              label_replace(
+                rate(node_infiniband_port_data_transmitted_bytes_total[5m]),
+                "internal_ip", "$1", "instance", "([^:]+):.*"
+              )
+              * on (internal_ip) group_left(node)
+              kube_node_info
             )

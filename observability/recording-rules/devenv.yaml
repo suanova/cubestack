@@ -5,6 +5,10 @@ metadata:
   namespace: monitoring
   labels:
     app.kubernetes.io/part-of: cubestack-observability
+    # The cluster's Prometheus CR only loads rules carrying this label
+    # (spec.ruleSelector: release=kube-prometheus); without it the
+    # rules are never applied to Prometheus.
+    release: kube-prometheus
 spec:
   groups:
     - name: cubestack.devenv
@@ -15,7 +19,7 @@ spec:
           expr: |
             sum by (namespace, devenv) (
               label_replace(
-                kube_pod_container_resource_requests{resource=~"nvidia.com/gpu|metax-tech.com/gpu"}
+                kube_pod_container_resource_requests{resource=~"nvidia_com_gpu|metax_tech_com_gpu"}
                 * on(namespace, pod) group_left(label_ai_cubestack_io_dev_environment)
                 kube_pod_labels{label_ai_cubestack_io_dev_environment!=""},
                 "devenv", "$1", "label_ai_cubestack_io_dev_environment", "(.*)"

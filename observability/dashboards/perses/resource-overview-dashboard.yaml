@@ -28,7 +28,7 @@ spec:
                                 name: prometheus-datasource
                             labelName: node
                             matchers:
-                                - DCGM_FI_DEV_GPU_UTIL
+                                - cubestack_node_cpu_utilization_ratio
                     name: node
             -
                 kind: ListVariable
@@ -47,8 +47,9 @@ spec:
                             datasource:
                                 kind: PrometheusDatasource
                                 name: prometheus-datasource
-                            labelName: gpu
-                            matchers: []
+                            labelName: uuid
+                            matchers:
+                            -   cubestack_gpu_utilization_ratio
                     name: gpu
         panels:
             '0':
@@ -70,8 +71,8 @@ spec:
                                             kind: PrometheusDatasource
                                             name: prometheus-datasource
                                         minStep: ''
-                                        query: DCGM_FI_DEV_GPU_TEMP{node=~"$node",gpu=~"$gpu"}
-                                        seriesNameFormat: '{{node}} · GPU {{gpu}}'
+                                        query: cubestack_gpu_temperature_celsius{node=~"$node",uuid=~"$gpu"}
+                                        seriesNameFormat: '{{node}} · GPU {{deviceId}}'
             '1':
                 kind: Panel
                 spec:
@@ -92,7 +93,7 @@ spec:
                                             kind: PrometheusDatasource
                                             name: prometheus-datasource
                                         minStep: ''
-                                        query: avg(DCGM_FI_DEV_GPU_TEMP{node=~"$node",gpu=~"$gpu"})
+                                        query: avg(cubestack_gpu_temperature_celsius{node=~"$node",uuid=~"$gpu"})
                                         seriesNameFormat: ''
             '2':
                 kind: Panel
@@ -113,8 +114,8 @@ spec:
                                             kind: PrometheusDatasource
                                             name: prometheus-datasource
                                         minStep: ''
-                                        query: DCGM_FI_DEV_POWER_USAGE{node=~"$node",gpu=~"$gpu"}
-                                        seriesNameFormat: '{{node}} · GPU {{gpu}}'
+                                        query: cubestack_gpu_power_watts{node=~"$node",uuid=~"$gpu"}
+                                        seriesNameFormat: '{{node}} · GPU {{deviceId}}'
             '3':
                 kind: Panel
                 spec:
@@ -135,7 +136,7 @@ spec:
                                             kind: PrometheusDatasource
                                             name: prometheus-datasource
                                         minStep: ''
-                                        query: sum(DCGM_FI_DEV_POWER_USAGE{node=~"$node",gpu=~"$gpu"})
+                                        query: sum(cubestack_gpu_power_watts{node=~"$node",uuid=~"$gpu"})
                                         seriesNameFormat: ''
             '6':
                 kind: Panel
@@ -156,8 +157,8 @@ spec:
                                             kind: PrometheusDatasource
                                             name: prometheus-datasource
                                         minStep: ''
-                                        query: DCGM_FI_DEV_GPU_UTIL{node=~"$node",gpu=~"$gpu"}
-                                        seriesNameFormat: '{{node}} · GPU {{gpu}}'
+                                        query: cubestack_gpu_utilization_ratio{node=~"$node",uuid=~"$gpu"}
+                                        seriesNameFormat: '{{node}} · GPU {{deviceId}}'
             '10':
                 kind: Panel
                 spec:
@@ -181,7 +182,7 @@ spec:
                                             kind: PrometheusDatasource
                                             name: prometheus-datasource
                                         minStep: ''
-                                        query: node_cpu_usage{node=~"$node"}
+                                        query: cubestack_node_cpu_utilization_ratio{node=~"$node"}
                                         seriesNameFormat: '{{node}}'
             '11':
                 kind: Panel
@@ -206,7 +207,7 @@ spec:
                                             kind: PrometheusDatasource
                                             name: prometheus-datasource
                                         minStep: ''
-                                        query: avg by (node) (DCGM_FI_DEV_GPU_UTIL{node=~"$node",gpu=~"$gpu"})
+                                        query: avg by (node) (cubestack_gpu_utilization_ratio{node=~"$node",uuid=~"$gpu"})
                                         seriesNameFormat: '{{node}}'
             '12':
                 kind: Panel
@@ -231,7 +232,7 @@ spec:
                                             kind: PrometheusDatasource
                                             name: prometheus-datasource
                                         minStep: ''
-                                        query: node_memory_usage{node=~"$node"}
+                                        query: cubestack_node_memory_utilization_ratio{node=~"$node"}
                                         seriesNameFormat: '{{node}}'
             '13':
                 kind: Panel
@@ -256,7 +257,7 @@ spec:
                                             kind: PrometheusDatasource
                                             name: prometheus-datasource
                                         minStep: ''
-                                        query: rdma_usage{node=~"$node"}
+                                        query: cluster_node:cubestack_network_rdma_receive_bytes:rate5m{node=~"$node"} + cluster_node:cubestack_network_rdma_transmit_bytes:rate5m{node=~"$node"}
                                         seriesNameFormat: '{{node}}'
         layouts:
             -

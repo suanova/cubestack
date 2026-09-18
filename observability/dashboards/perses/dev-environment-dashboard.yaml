@@ -7,17 +7,15 @@ spec:
     config:
         display:
             name: Dev Environment
-            description: "Dev Environment: GPU, CPU, memory, network and storage usage per instance"
+            description: "Dev Environment: GPU, CPU, memory, network and storage usage per Dev Environment"
         variables:
         -   kind: ListVariable
             spec:
-                # The dev pool's instances (dev-test-1, dev-demo-1, ...) are the GPU
-                # machines that host Dev Environments. They are scoped by usage so
-                # the dropdown lists only them — the GPU Overview's `node` and `gpu`
-                # dropdowns (which include the inference machines) are the cluster
-                # view; this dashboard is the dev-pool view.
+                # One entry per Dev Environment (from the ai.cubestack.io/dev-environment
+                # pod label via the cubestack_devenv recording rules), so the dropdown
+                # only lists dev environments that are actually running.
                 display:
-                    name: instance
+                    name: devenv
                     hidden: false
                 defaultValue: $__all
                 allowAllValue: true
@@ -30,10 +28,10 @@ spec:
                         datasource:
                             kind: PrometheusDatasource
                             name: prometheus-datasource
-                        labelName: instance
+                        labelName: devenv
                         matchers:
-                        - DCGM_FI_DEV_GPU_UTIL{usage="devEnvironment"}
-                name: instance
+                        - cubestack_devenv_cpu_usage_cores:sum
+                name: devenv
         panels:
             "0":
                 kind: Panel
@@ -56,8 +54,8 @@ spec:
                                         kind: PrometheusDatasource
                                         name: prometheus-datasource
                                     minStep: ''
-                                    query: avg by (instance) (DCGM_FI_DEV_GPU_UTIL{instance=~"$instance", usage="devEnvironment"})
-                                    seriesNameFormat: '{{instance}}'
+                                    query: max by (devenv) (cubestack_gpu_utilization_ratio:max{devenv=~"$devenv"})
+                                    seriesNameFormat: '{{devenv}}'
             "1":
                 kind: Panel
                 spec:
@@ -79,8 +77,8 @@ spec:
                                         kind: PrometheusDatasource
                                         name: prometheus-datasource
                                     minStep: ''
-                                    query: node_cpu_usage{instance=~"$instance", usage="devEnvironment"}
-                                    seriesNameFormat: '{{instance}}'
+                                    query: cubestack_devenv_cpu_usage_cores:sum{devenv=~"$devenv"} / cubestack_devenv_cpu_request_cores:sum{devenv=~"$devenv"}
+                                    seriesNameFormat: '{{devenv}}'
             "2":
                 kind: Panel
                 spec:
@@ -102,8 +100,8 @@ spec:
                                         kind: PrometheusDatasource
                                         name: prometheus-datasource
                                     minStep: ''
-                                    query: node_memory_usage{instance=~"$instance", usage="devEnvironment"}
-                                    seriesNameFormat: '{{instance}}'
+                                    query: cubestack_devenv_memory_working_set_bytes:sum{devenv=~"$devenv"} / cubestack_devenv_memory_request_bytes:sum{devenv=~"$devenv"}
+                                    seriesNameFormat: '{{devenv}}'
             "3":
                 kind: Panel
                 spec:
@@ -125,8 +123,8 @@ spec:
                                         kind: PrometheusDatasource
                                         name: prometheus-datasource
                                     minStep: ''
-                                    query: node_network_usage{instance=~"$instance", usage="devEnvironment"}
-                                    seriesNameFormat: '{{instance}}'
+                                    query: cubestack_devenv_network_receive_bytes:rate5m{devenv=~"$devenv"} + cubestack_devenv_network_transmit_bytes:rate5m{devenv=~"$devenv"}
+                                    seriesNameFormat: '{{devenv}}'
             "4":
                 kind: Panel
                 spec:
@@ -148,8 +146,8 @@ spec:
                                         kind: PrometheusDatasource
                                         name: prometheus-datasource
                                     minStep: ''
-                                    query: node_storage_usage{instance=~"$instance", usage="devEnvironment"}
-                                    seriesNameFormat: '{{instance}}'
+                                    query: cubestack_devenv_fs_read_bytes:rate5m{devenv=~"$devenv"} + cubestack_devenv_fs_write_bytes:rate5m{devenv=~"$devenv"}
+                                    seriesNameFormat: '{{devenv}}'
         layouts:
         -   kind: Grid
             spec:

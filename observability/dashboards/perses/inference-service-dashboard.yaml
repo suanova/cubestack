@@ -12,7 +12,7 @@ spec:
         -   kind: ListVariable
             spec:
                 display:
-                    name: instance
+                    name: Service
                     hidden: false
                 defaultValue: $__all
                 allowAllValue: true
@@ -24,15 +24,16 @@ spec:
                         datasource:
                             kind: PrometheusDatasource
                             name: prometheus-datasource
-                        labelName: instance
-                        matchers: []
-                name: instance
+                        labelName: inference_service
+                        matchers:
+                        -   cubestack_inference_requests_running:sum
+                name: inference_service
         -   kind: ListVariable
             spec:
-                # The model is implied by the selected instance (each inference
+                # The model is implied by the selected inference service (each
                 # service serves exactly one model), so it is resolved in the
                 # background instead of shown as a dropdown; the island renders its
-                # value as read-only text beside the instance picker.
+                # value as read-only text beside the service picker.
                 display:
                     name: model
                     hidden: true
@@ -44,9 +45,9 @@ spec:
                         datasource:
                             kind: PrometheusDatasource
                             name: prometheus-datasource
-                        labelName: model_name
+                        labelName: gen_ai_request_model
                         matchers:
-                        -   'sglang_num_running_reqs{instance=~"$instance"}'
+                        -   cubestack_inference_request_duration_seconds:p50_rate5m
                 name: model_name
         panels:
             "0":
@@ -74,7 +75,7 @@ spec:
                                     datasource:
                                         kind: PrometheusDatasource
                                         name: prometheus-datasource
-                                    query: histogram_quantile(0.99, sum by (le) (rate(sglang_e2e_request_latency_seconds_bucket[$__rate_interval])))
+                                    query: cubestack_inference_request_duration_seconds:p99_rate5m{gen_ai_request_model=~"$model_name"}
                                     seriesNameFormat: P99
                     -   kind: TimeSeriesQuery
                         spec:
@@ -84,8 +85,8 @@ spec:
                                     datasource:
                                         kind: PrometheusDatasource
                                         name: prometheus-datasource
-                                    query: histogram_quantile(0.9, sum by (le) (rate(sglang_e2e_request_latency_seconds_bucket[$__rate_interval])))
-                                    seriesNameFormat: P90
+                                    query: cubestack_inference_request_duration_seconds:p95_rate5m{gen_ai_request_model=~"$model_name"}
+                                    seriesNameFormat: P95
                     -   kind: TimeSeriesQuery
                         spec:
                             plugin:
@@ -94,43 +95,8 @@ spec:
                                     datasource:
                                         kind: PrometheusDatasource
                                         name: prometheus-datasource
-                                    query: histogram_quantile(0.5, sum by (le) (rate(sglang_e2e_request_latency_seconds_bucket[$__rate_interval])))
+                                    query: cubestack_inference_request_duration_seconds:p50_rate5m{gen_ai_request_model=~"$model_name"}
                                     seriesNameFormat: P50
-                    -   kind: TimeSeriesQuery
-                        spec:
-                            plugin:
-                                kind: PrometheusTimeSeriesQuery
-                                spec:
-                                    datasource:
-                                        kind: PrometheusDatasource
-                                        name: prometheus-datasource
-                                    query: avg(rate(sglang_e2e_request_latency_seconds_sum[$__rate_interval])
-                                        /  rate(sglang_e2e_request_latency_seconds_count[$__rate_interval]))
-                                    seriesNameFormat: Avg
-            "1":
-                kind: Panel
-                spec:
-                    display:
-                        name: End-to-End Request Latency(s) Heatmap
-                    plugin:
-                        kind: HeatMapChart
-                        spec:
-                            logBase: 10
-                            showVisualMap: true
-                            yAxisFormat:
-                                decimalPlaces: 2
-                                unit: decimal
-                    queries:
-                    -   kind: TimeSeriesQuery
-                        spec:
-                            plugin:
-                                kind: PrometheusTimeSeriesQuery
-                                spec:
-                                    datasource:
-                                        kind: PrometheusDatasource
-                                        name: prometheus-datasource
-                                    query: sglang_e2e_request_latency_seconds{model_name=~"$model_name"}
-                                    seriesNameFormat: latency
             "2":
                 kind: Panel
                 spec:
@@ -156,7 +122,7 @@ spec:
                                     datasource:
                                         kind: PrometheusDatasource
                                         name: prometheus-datasource
-                                    query: histogram_quantile(0.99, sum by (le) (rate(sglang_time_to_first_token_seconds_bucket[$__rate_interval])))
+                                    query: cubestack_inference_time_to_first_token_seconds:p99_rate5m{gen_ai_request_model=~"$model_name"}
                                     seriesNameFormat: P99
                     -   kind: TimeSeriesQuery
                         spec:
@@ -166,8 +132,8 @@ spec:
                                     datasource:
                                         kind: PrometheusDatasource
                                         name: prometheus-datasource
-                                    query: histogram_quantile(0.9, sum by (le) (rate(sglang_time_to_first_token_seconds_bucket[$__rate_interval])))
-                                    seriesNameFormat: P90
+                                    query: cubestack_inference_time_to_first_token_seconds:p95_rate5m{gen_ai_request_model=~"$model_name"}
+                                    seriesNameFormat: P95
                     -   kind: TimeSeriesQuery
                         spec:
                             plugin:
@@ -176,43 +142,8 @@ spec:
                                     datasource:
                                         kind: PrometheusDatasource
                                         name: prometheus-datasource
-                                    query: histogram_quantile(0.5, sum by (le) (rate(sglang_time_to_first_token_seconds_bucket[$__rate_interval])))
+                                    query: cubestack_inference_time_to_first_token_seconds:p50_rate5m{gen_ai_request_model=~"$model_name"}
                                     seriesNameFormat: P50
-                    -   kind: TimeSeriesQuery
-                        spec:
-                            plugin:
-                                kind: PrometheusTimeSeriesQuery
-                                spec:
-                                    datasource:
-                                        kind: PrometheusDatasource
-                                        name: prometheus-datasource
-                                    query: avg(rate(sglang_time_to_first_token_seconds_sum[$__rate_interval])
-                                        /  rate(sglang_time_to_first_token_seconds_count[$__rate_interval]))
-                                    seriesNameFormat: Avg
-            "3":
-                kind: Panel
-                spec:
-                    display:
-                        name: Time-To-First-Token Seconds Heatmap
-                    plugin:
-                        kind: HeatMapChart
-                        spec:
-                            logBase: 10
-                            showVisualMap: true
-                            yAxisFormat:
-                                decimalPlaces: 2
-                                unit: decimal
-                    queries:
-                    -   kind: TimeSeriesQuery
-                        spec:
-                            plugin:
-                                kind: PrometheusTimeSeriesQuery
-                                spec:
-                                    datasource:
-                                        kind: PrometheusDatasource
-                                        name: prometheus-datasource
-                                    query: sglang_time_to_first_token_seconds{model_name=~"$model_name"}
-                                    seriesNameFormat: latency
             "4":
                 kind: Panel
                 spec:
@@ -239,8 +170,8 @@ spec:
                                         kind: PrometheusDatasource
                                         name: prometheus-datasource
                                     minStep: ''
-                                    query: sglang_num_running_reqs
-                                    seriesNameFormat: '{{instance}}'
+                                    query: cubestack_inference_requests_running:sum{inference_service=~"$inference_service"}
+                                    seriesNameFormat: '{{inference_service}}'
             "5":
                 kind: Panel
                 spec:
@@ -266,8 +197,8 @@ spec:
                                     datasource:
                                         kind: PrometheusDatasource
                                         name: prometheus-datasource
-                                    query: sglang_gen_throughput
-                                    seriesNameFormat: '{{instance}}'
+                                    query: cubestack_inference_generation_tokens:rate5m{gen_ai_request_model=~"$model_name"}
+                                    seriesNameFormat: '{{gen_ai_request_model}}'
             "6":
                 kind: Panel
                 spec:
@@ -293,8 +224,8 @@ spec:
                                     datasource:
                                         kind: PrometheusDatasource
                                         name: prometheus-datasource
-                                    query: sglang_cache_hit_rate
-                                    seriesNameFormat: '{{instance}}'
+                                    query: cubestack_inference_cache_hit_ratio:avg{inference_service=~"$inference_service"}
+                                    seriesNameFormat: '{{inference_service}}'
             "7":
                 kind: Panel
                 spec:
@@ -320,8 +251,8 @@ spec:
                                     datasource:
                                         kind: PrometheusDatasource
                                         name: prometheus-datasource
-                                    query: sglang_num_queue_reqs
-                                    seriesNameFormat: '{{instance}}'
+                                    query: cubestack_inference_requests_waiting:sum{inference_service=~"$inference_service"}
+                                    seriesNameFormat: '{{inference_service}}'
         layouts:
         -   kind: Grid
             spec:
@@ -337,39 +268,27 @@ spec:
                     width: 12
                     height: 8
                     content:
-                        $ref: '#/spec/panels/1'
-                -   x: 0
-                    "y": 8
-                    width: 12
-                    height: 8
-                    content:
                         $ref: '#/spec/panels/2'
-                -   x: 12
-                    "y": 8
-                    width: 12
-                    height: 8
-                    content:
-                        $ref: '#/spec/panels/3'
                 -   x: 0
-                    "y": 16
+                    "y": 8
                     width: 12
                     height: 8
                     content:
                         $ref: '#/spec/panels/4'
                 -   x: 12
-                    "y": 16
+                    "y": 8
                     width: 12
                     height: 8
                     content:
                         $ref: '#/spec/panels/5'
                 -   x: 0
-                    "y": 24
+                    "y": 16
                     width: 12
                     height: 8
                     content:
                         $ref: '#/spec/panels/6'
                 -   x: 12
-                    "y": 24
+                    "y": 16
                     width: 12
                     height: 8
                     content:

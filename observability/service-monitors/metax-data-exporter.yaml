@@ -1,0 +1,25 @@
+# Scrape the MetaX data exporter (GPU telemetry: mx_gpu_usage,
+# mx_chip_hotspot_temp, mx_board_power, ...) that backs the cubestack-gpu
+# recording rules. The exporter ships with the metax-operator stack in the
+# metax-operator namespace.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: metax-data-exporter
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: cubestack-observability
+    # The cluster's Prometheus CR only scrapes ServiceMonitors carrying this
+    # label (spec.serviceMonitorSelector); without it the monitor is never
+    # picked up.
+    release: kube-prometheus
+spec:
+  namespaceSelector:
+    matchNames:
+      - metax-operator
+  selector:
+    matchLabels:
+      app: metax-data-exporter
+  endpoints:
+    - port: metrics
+      interval: 15s

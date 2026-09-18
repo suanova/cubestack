@@ -5,6 +5,10 @@ metadata:
   namespace: monitoring
   labels:
     app.kubernetes.io/part-of: cubestack-observability
+    # The cluster's Prometheus CR only loads rules carrying this label
+    # (spec.ruleSelector: release=kube-prometheus); without it the
+    # rules are never applied to Prometheus.
+    release: kube-prometheus
 spec:
   groups:
     - name: cubestack.inference_service.vllm
