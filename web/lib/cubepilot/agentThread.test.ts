@@ -333,11 +333,16 @@ describe("historyToMsgs", () => {
   });
 
   it("folds an assistant text + toolCall + toolResult run into one bubble, in order", () => {
+    // The toolResult message is the runtime's real shape: it carries its output
+    // in a block of type `text`, and the call it answers in a MESSAGE-level
+    // `toolCallId` — never in a `toolCall` block. Pinning the block shape here is
+    // what let the pairing branch go untested while it silently dropped every
+    // restored result.
     const out = historyToMsgs(
       [
         { role: "assistant", content: [{ type: "text", text: "先查一下。" }] },
         { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "exec", arguments: { cmd: "ceph df" } }] },
-        { role: "toolResult", content: [{ type: "toolCall", id: "c1", text: "POOL USED: 71%" }] },
+        { role: "toolResult", toolCallId: "c1", content: [{ type: "text", text: "POOL USED: 71%" }] },
         { role: "assistant", content: [{ type: "text", text: "使用率 71%。" }] },
       ],
       nextId,
@@ -346,6 +351,9 @@ describe("historyToMsgs", () => {
     expect(out).toHaveLength(1);
     const msg = out[0] as AgentMsg;
     expect(msg.blocks.map((b) => b.kind)).toEqual(["text", "tool", "text"]);
+    // The result is the card's output, not narration: attaching it must not also
+    // leave its text in the turn's prose.
+    expect(textOf(msg)).toEqual(["先查一下。", "使用率 71%。"]);
     expect(toolsOf(msg.blocks)[0].output).toBe("POOL USED: 71%");
     expect(toolsOf(msg.blocks)[0].done).toBe(true);
   });

@@ -221,6 +221,11 @@ export interface HistoryContentBlock {
 export interface HistoryMessage {
   role: "user" | "assistant" | "toolResult";
   content: string | HistoryContentBlock[];
+  /** The call a toolResult message answers. Message-level, not a content block:
+   *  the runtime puts the output in a `text` block beside it. Absent when the
+   *  runtime does not supply one, in which case the result pairs by arrival
+   *  order. */
+  toolCallId?: string;
 }
 
 /** One SSE event of POST /api/v1/messages (data lines; type discriminates). */

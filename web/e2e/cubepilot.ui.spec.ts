@@ -208,6 +208,10 @@ interface Captured {
   pendingPaths: string[];
   configPuts: Array<{ selectedModel?: string; userInstructions?: string }>;
   confirmPuts: Array<{ confirmPolicy?: string; allowlist?: AllowlistRule[] }>;
+  /** Every POST the pane made to the agent API, in the order it made them. The
+   *  stop-then-send route is a claim about that ORDER — an abort on the wire
+   *  before the message — so neither request can be checked on its own. */
+  agentPosts: string[];
 }
 
 interface Stubs {
@@ -247,7 +251,7 @@ function confirmAfterPut(body: { confirmPolicy?: string; allowlist?: AllowlistRu
 
 /** Stub every endpoint the three panes touch with CR-shaped responses. */
 async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
-  const captured: Captured = { approvalPosts: [], questionPosts: [], pendingPaths: [], configPuts: [], confirmPuts: [], llmPosts: [] };
+  const captured: Captured = { approvalPosts: [], questionPosts: [], pendingPaths: [], configPuts: [], confirmPuts: [], llmPosts: [], agentPosts: [] };
   let config = stubs.config ?? CONFIG_READY;
   let confirm = stubs.confirm ?? CONFIRM;
   // The pending list reflects the post-refusal world only once an answer has
@@ -311,6 +315,7 @@ async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
 
     // ── the agent API proxy ──
     if (path.includes("/api/cubepilot/pilot/")) {
+      if (method === "POST") captured.agentPosts.push(path);
       if (path.endsWith("/messages") && method === "POST") {
         return route.fulfill({
           status: 200,
@@ -530,6 +535,36 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
 
     await expect(page.locator('[data-od-id="agent-status"]')).toContainText("仍在运行");
     await expect(page.locator('[data-od-id="stop-btn"]')).toBeVisible();
+  });
+
+  test("stops a turn that survived a reload, and sends on the settled session", async ({ page }) => {
+    // A turn running in another tab, or left running across a reload, has no
+    // stream in this view — so Stop is the only control that ends it, and the
+    // send that follows has to find the session settled. Against a session whose
+    // turn is still running the POST is either refused with a 409 or has its
+    // text steered into the running turn and swallowed; the abort must therefore
+    // be on the wire BEFORE the message, which is a claim about their order and
+    // not about either request alone.
+    const captured = await stubAgent(page, { sessions: [SESSION], history: HISTORY, turnActive: true });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="obj-cubepilot"]').click();
+
+    await expect(page.locator('[data-od-id="agent-status"]')).toContainText("仍在运行");
+    await page.locator('[data-od-id="stop-btn"]').click();
+
+    // The stop landed: the turn is no longer reported as running, so the
+    // composer is back to Send and the turn is a normal one to add to.
+    await expect(page.locator('[data-od-id="send-btn"]')).toBeVisible();
+
+    await page.locator('[data-od-id="chat-input"]').fill("再巡检一次");
+    await page.locator('[data-od-id="send-btn"]').click();
+    await expect(page.locator('[data-od-id="chat-thread"]')).toContainText("再巡检一次");
+
+    const posts = captured.agentPosts.map((p) => decodeURIComponent(p));
+    expect(posts).toEqual([
+      `/api/cubepilot/pilot/api/v1/sessions/${SESSION_KEY}/abort`,
+      "/api/cubepilot/pilot/api/v1/messages",
+    ]);
   });
 
   test("a failed turn check says so and offers no Stop", async ({ page }) => {

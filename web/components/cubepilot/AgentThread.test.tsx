@@ -67,8 +67,9 @@ const cardHead = (container: HTMLElement): HTMLElement =>
 
 const expanded = (container: HTMLElement): string | null => cardHead(container).getAttribute("aria-expanded");
 
-/** Markdown lives in its own function; the cases that also want a tool card
- *  render the text as the last block so it is not eaten by the result panel. */
+/** The tool card's output box. Present only while the card is open, so it also
+ *  answers "is this card expanded" for the cases that need the body, not just
+ *  the head. */
 const output = (container: HTMLElement): Element | null => container.querySelector('[data-od-id="tool-output"]');
 
 describe("AgentThread", () => {
@@ -218,5 +219,57 @@ describe("AgentThread", () => {
         (p) => (p.textContent ?? "").includes("第一行") && (p.textContent ?? "").includes("第二行"),
       ),
     ).toBe(true);
+  });
+
+  it("explains a turn that failed with its own error, on the bubble", () => {
+    const { container } = render([agentMsg(1, [text("查了一半。")], { error: "gateway 502" })], S1);
+
+    const line = container.querySelector('[data-od-id="agent-error"]');
+    expect(line).not.toBeNull();
+    expect(line?.textContent).toBe("gateway 502");
+
+    // An ordinary reply must not sprout a line saying it ended: the bubble
+    // carries only what is not simply "it ended".
+    const { container: clean } = render([agentMsg(1, [text("好了。")])], S1);
+    expect(clean.querySelector('[data-od-id="agent-error"]')).toBeNull();
+  });
+
+  it("reports a lost stream as a transport failure, with the stream's reason under it", () => {
+    const { container } = render(
+      [agentMsg(1, [text("查了一半。")], { transportLost: "连接中断,本轮输出可能不完整。" })],
+      S1,
+    );
+
+    const box = container.querySelector('[data-od-id="agent-lost"]');
+    expect(box).not.toBeNull();
+    // The headline is the transport status, and the reason is kept beneath it as
+    // diagnostics — the run may still be executing, so neither is painted as the
+    // turn's own failure.
+    expect(box?.textContent).toContain("连接已断开");
+    expect(box?.textContent).toContain("本轮输出可能不完整");
+    expect(container.querySelector('[data-od-id="agent-error"]')).toBeNull();
+  });
+
+  it("marks a stopped turn without calling it a failure", () => {
+    const { container } = render([agentMsg(1, [text("到此为止。")], { stopped: true })], S1);
+
+    const line = container.querySelector('[data-od-id="agent-stopped"]');
+    expect(line).not.toBeNull();
+    expect(line?.textContent).toBe("已停止");
+    expect(container.querySelector('[data-od-id="agent-error"]')).toBeNull();
+  });
+
+  it("shows the thinking indicator while the turn has nothing to show yet", () => {
+    const { container } = render([agentMsg(1, [], { phase: "thinking" })], S1);
+
+    const line = container.querySelector('[data-od-id="agent-thinking"]');
+    expect(line).not.toBeNull();
+    expect(line?.textContent).toContain("正在调用监控与集群 API");
+
+    // It stands in for the empty bubble, not for a running turn: a turn with no
+    // blocks that has ENDED must not claim to be thinking. Whether a turn is
+    // still going is the header's status line, not this.
+    const { container: ended } = render([agentMsg(1, [])], S1);
+    expect(ended.querySelector('[data-od-id="agent-thinking"]')).toBeNull();
   });
 });

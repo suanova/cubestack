@@ -161,7 +161,11 @@ export function applyAgentEvent(msg: AgentMsg, evt: AgentSseEvent, now: number =
       return {
         ...msg,
         phase: "done",
-        error: evt.error || undefined,
+        // api.md makes the two mutually exclusive, and the reference reads them
+        // as an `else if`: a terminal carrying both would otherwise paint a
+        // stopped turn as a failed one as well. `stopped` wins, which is also
+        // the order `turnStatus` ranks them in.
+        error: evt.stopped === true ? undefined : evt.error || undefined,
         stopped: evt.stopped === true,
         // Settle BOTH channels, like the reference's settleBubbleCards. The
         // resolved event is published alongside the terminal but races the
@@ -382,6 +386,24 @@ export function historyToMsgs(items: HistoryMessage[], nextId: () => number, now
       out.push(msg);
     }
     let agent = msg;
+    // A toolResult message carries its output in a block of type `text`, NOT
+    // `toolCall`: keying on the block type is the bug this shipped with — the
+    // branch never fired, so every tool result was dropped on reload. Key on the
+    // ROLE, and take the call id from the message when present; with none,
+    // `attachToolResult` falls back to arrival order, as the reference does.
+    //
+    // The message is handled whole and then skipped: its output is one
+    // message-level value, attached once to the call it answers, and it is that
+    // card's output — never the turn's narration.
+    if (it.role === "toolResult") {
+      const result =
+        typeof it.content === "string" ? it.content : it.content.map((b) => b.text ?? "").join("\n");
+      if (result) {
+        agent = { ...agent, blocks: attachToolResult(agent.blocks, it.toolCallId, result) };
+        out[out.length - 1] = agent;
+      }
+      continue;
+    }
     const blocks = typeof it.content === "string" ? [{ type: "text" as const, text: it.content }] : it.content;
     for (const b of blocks) {
       if (b.type === "text" && b.text) {
@@ -390,9 +412,9 @@ export function historyToMsgs(items: HistoryMessage[], nextId: () => number, now
           last?.kind === "text"
             ? { ...agent, blocks: [...agent.blocks.slice(0, -1), { ...last, text: `${last.text}\n\n${b.text}` }] }
             : { ...agent, blocks: [...agent.blocks, { kind: "text", text: b.text }] };
-      } else if (b.type === "toolCall" && it.role === "assistant") {
+      } else if (b.type === "toolCall") {
         // A history call is born finished: its result, if it had one, is a
-        // separate toolResult message handled below.
+        // separate toolResult message handled above.
         agent = {
           ...agent,
           blocks: [
@@ -400,9 +422,6 @@ export function historyToMsgs(items: HistoryMessage[], nextId: () => number, now
             { kind: "tool", callId: b.id, name: b.name ?? "tool", args: fmtToolArgs(b.arguments), done: true },
           ],
         };
-      } else if (b.type === "toolCall") {
-        // A toolResult message carries the call id and its output in `text`.
-        agent = { ...agent, blocks: attachToolResult(agent.blocks, b.id, b.text ?? "") };
       }
     }
     out[out.length - 1] = agent;

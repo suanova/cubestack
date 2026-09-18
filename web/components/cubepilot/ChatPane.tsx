@@ -306,6 +306,12 @@ export function ChatPane() {
     stopTurnPolling();
     setStreaming(null);
     setThinkingText(null);
+    // `sending` too: both sides clear it in a generation-guarded `finally`, so
+    // the send in flight here can never clear it — the generation it checks
+    // against was just bumped. Left set, the Send of the object the user moved
+    // TO stays disabled until a reload. The agent side's stop-then-send await
+    // makes that window seconds long rather than milliseconds.
+    setSending(false);
     // The no-stream turn state describes the session this pane is leaving. It
     // is retired with it, so a reload of another object cannot inherit a "still
     // running" that was never about it.
@@ -528,16 +534,23 @@ export function ChatPane() {
   /** Re-attach cards the turn is currently blocked on (required after reload). */
   async function restorePendingHitl(key: string): Promise<void> {
     const gen = genRef.current;
+    /** A card with no turn in the thread to hang it on gets its own bubble. The
+     *  phase is `done`, never the constructor's `thinking`: this turn is PARKED,
+     *  not running, and a live phase would start the 1 Hz ticker and paint a
+     *  "thinking" bubble for a turn that is waiting on a human. */
+    const attachToNewest = (patch: (m: AgentMsg) => AgentMsg): void => {
+      setMsgs((m) => {
+        const lastIdx = [...m].reverse().findIndex((x) => x.role === "agent");
+        if (lastIdx < 0) return [...m, patch({ ...newAgentMsg(nextId()), phase: "done" })];
+        const i = m.length - 1 - lastIdx;
+        return m.map((x, xi) => (xi === i && x.role === "agent" ? patch(x) : x));
+      });
+    };
     const attachApproval = (a: { approvalId: string; tool?: string; command?: string; level?: string; message?: string }) => {
       // The card belongs to the turn it was raised in — the newest one here,
       // since restore happens before anything else can arrive.
       const card: AgentApproval = { callId: a.approvalId, name: a.tool, command: a.command, level: a.level, message: a.message, state: "pending" };
-      setMsgs((m) => {
-        const lastIdx = [...m].reverse().findIndex((x) => x.role === "agent");
-        if (lastIdx < 0) return [...m, { ...newAgentMsg(nextId()), approvals: [card] }];
-        const i = m.length - 1 - lastIdx;
-        return m.map((x, xi) => (xi === i && x.role === "agent" ? { ...x, approvals: [...x.approvals, card] } : x));
-      });
+      attachToNewest((x) => ({ ...x, approvals: [...x.approvals, card] }));
     };
     try {
       const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/approval/pending`);
@@ -552,24 +565,32 @@ export function ChatPane() {
     }
     try {
       const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/question/pending`);
+      // This endpoint's 404 IS "nothing is pending", not a failed read: its body
+      // is defined as {"error":"no pending question"}. Anything else is a read
+      // that failed, and it is thrown so that it is reported rather than folded
+      // into "idle".
+      if (res.status !== 404 && !res.ok) throw new Error(`HTTP ${res.status}`);
       if (res.ok && genRef.current === gen) {
         const { questions } = (await res.json()) as {
           questions?: Array<{ id?: string; questions?: AgentQuestionItem[] }>;
         };
         for (const q of questions ?? []) {
           if (!q.id) continue;
-          setMsgs((m) => {
-            const lastIdx = [...m].reverse().findIndex((x) => x.role === "agent");
-            if (lastIdx < 0) return m;
-            const i = m.length - 1 - lastIdx;
-            return m.map((x, xi) =>
-              xi === i && x.role === "agent" ? { ...x, questions: [...x.questions, { callId: q.id as string, questions: q.questions ?? [], state: "pending" as const }] } : x,
-            );
-          });
+          const card: AgentQuestion = { callId: q.id, questions: q.questions ?? [], state: "pending" };
+          attachToNewest((x) => ({ ...x, questions: [...x.questions, card] }));
         }
       }
-    } catch {
-      /* silent */
+    } catch (e) {
+      // The read failed, so whether the agent is parked on a question is simply
+      // unknown. Staying silent would leave a parked turn looking idle, with no
+      // card anywhere — the dock is the only place a live card is drawn — and
+      // no way to answer it. The reference says so for the same reason.
+      if (genRef.current === gen) {
+        setMsgs((m) => [
+          ...m,
+          { ...newAgentMsg(nextId()), phase: "done", error: t("cubepilot.chat.pendingQuestionUnavailable", { error: String(e) }) },
+        ]);
+      }
     }
   }
 
@@ -684,6 +705,16 @@ export function ChatPane() {
 
   async function sendAgent(text: string, gen: number, msgId: number): Promise<void> {
     let gotDone = false;
+    // The session this stream turned out to be for. A brand-new chat has no id
+    // at send time — the server mints one and reports it in `message_start` —
+    // and `agentSessionKey` is the value the RENDER that started this send
+    // captured, which is null for a first message. The stream-lost path below
+    // needs the id the stream actually reported, or a lost first stream skips
+    // the re-check and leaves the header saying "connection lost" with no Stop,
+    // while the next send goes straight to POST /messages and meets the 409 (or
+    // is steered into the running turn) that the stop-first route exists to
+    // prevent.
+    let sessionOfTurn: string | null = null;
     try {
       const res = await fetch("/api/cubepilot/pilot/api/v1/messages", {
         method: "POST",
@@ -726,6 +757,7 @@ export function ChatPane() {
           } catch {
             continue;
           }
+          if (evt.type === "message_start") sessionOfTurn = evt.sessionId;
           if (evt.type === "message_done") gotDone = true;
           if (genRef.current === gen) handleAgentEvent(evt, msgId);
         }
@@ -740,7 +772,11 @@ export function ChatPane() {
       if (!gotDone && genRef.current === gen) {
         const reason = t("cubepilot.chat.streamLost");
         setMsgs((list) => list.map((x) => (x.id === msgId && x.role === "agent" ? { ...x, transportLost: reason } : x)));
-        if (agentSessionKey) void checkTurnElsewhere(agentSessionKey, gen);
+        // The id the STREAM reported when it has one: this closure's
+        // `agentSessionKey` is the send-time render's, which names no session
+        // for a first message.
+        const key = sessionOfTurn ?? agentSessionKey;
+        if (key) void checkTurnElsewhere(key, gen);
       }
     } catch (e) {
       if (genRef.current === gen) {
@@ -953,6 +989,15 @@ export function ChatPane() {
       const el = inputEl.current;
       const text = (presetText ?? el?.value ?? "").trim();
       if (!text || !objKind || sending) return;
+      // A composer Stop is in flight, so the turn it is stopping is still running
+      // server-side and its outcome is unknown. Refusing here is what keeps this
+      // send from racing it: Enter during the stop bumps the generation, and the
+      // stop's continuation then returns early WITHOUT clearing
+      // `stoppingElsewhere` — the header would read "Stopping…" and the Stop
+      // would stay disabled for the rest of the session. The Send button is not
+      // offered in this window; Enter is, which is why the guard has to be here
+      // too.
+      if (stoppingElsewhere) return;
 
       if (objKind === "model") {
         if (!svc) return;
@@ -1100,7 +1145,7 @@ export function ChatPane() {
         })();
       }
     },
-    [msgs, objKind, svc, sending, params, nextId, showToast, t, agentSessionKey],
+    [msgs, objKind, svc, sending, stoppingElsewhere, runningElsewhere, turnCheckFailed, params, nextId, showToast, t, agentSessionKey],
   );
   // sendAgent/handleAgentEvent are plain closures over this render's state;
   // the deps above (incl. agentSessionKey, which sendAgent reads) are what
