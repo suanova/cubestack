@@ -1,0 +1,330 @@
+apiVersion: perses.dev/v1alpha2
+kind: PersesDashboard
+metadata:
+    name: resource-overview-dashboard
+    namespace: monitoring
+spec:
+    config:
+        display:
+            name: Resource Overview
+            description: 'Resource Overview: node CPU, memory and RDMA usage with per-GPU temperature, power and utilization'
+        variables:
+            -
+                kind: ListVariable
+                spec:
+                    display:
+                        name: node
+                        hidden: false
+                    defaultValue: $__all
+                    allowAllValue: true
+                    allowMultiple: false
+                    customAllValue: .*
+                    sort: alphabetical-asc
+                    plugin:
+                        kind: PrometheusLabelValuesVariable
+                        spec:
+                            datasource:
+                                kind: PrometheusDatasource
+                                name: prometheus-datasource
+                            labelName: node
+                            matchers:
+                                - cubestack_node_cpu_utilization_ratio
+                    name: node
+            -
+                kind: ListVariable
+                spec:
+                    display:
+                        name: gpu
+                        hidden: false
+                    defaultValue: $__all
+                    allowAllValue: true
+                    allowMultiple: false
+                    customAllValue: .*
+                    sort: alphabetical-asc
+                    plugin:
+                        kind: PrometheusLabelValuesVariable
+                        spec:
+                            datasource:
+                                kind: PrometheusDatasource
+                                name: prometheus-datasource
+                            labelName: uuid
+                            matchers:
+                            -   cubestack_gpu_utilization_ratio
+                    name: gpu
+        panels:
+            '0':
+                kind: Panel
+                spec:
+                    display:
+                        name: GPU Temperature
+                    plugin:
+                        kind: TimeSeriesChart
+                        spec: {}
+                    queries:
+                        -
+                            kind: TimeSeriesQuery
+                            spec:
+                                plugin:
+                                    kind: PrometheusTimeSeriesQuery
+                                    spec:
+                                        datasource:
+                                            kind: PrometheusDatasource
+                                            name: prometheus-datasource
+                                        minStep: ''
+                                        query: cubestack_gpu_temperature_celsius{node=~"$node",uuid=~"$gpu"}
+                                        seriesNameFormat: '{{node}} · GPU {{deviceId}}'
+            '1':
+                kind: Panel
+                spec:
+                    display:
+                        name: GPU Avg. Temp
+                    plugin:
+                        kind: GaugeChart
+                        spec:
+                            calculation: last
+                    queries:
+                        -
+                            kind: TimeSeriesQuery
+                            spec:
+                                plugin:
+                                    kind: PrometheusTimeSeriesQuery
+                                    spec:
+                                        datasource:
+                                            kind: PrometheusDatasource
+                                            name: prometheus-datasource
+                                        minStep: ''
+                                        query: avg(cubestack_gpu_temperature_celsius{node=~"$node",uuid=~"$gpu"})
+                                        seriesNameFormat: ''
+            '2':
+                kind: Panel
+                spec:
+                    display:
+                        name: GPU Power Usage
+                    plugin:
+                        kind: TimeSeriesChart
+                        spec: {}
+                    queries:
+                        -
+                            kind: TimeSeriesQuery
+                            spec:
+                                plugin:
+                                    kind: PrometheusTimeSeriesQuery
+                                    spec:
+                                        datasource:
+                                            kind: PrometheusDatasource
+                                            name: prometheus-datasource
+                                        minStep: ''
+                                        query: cubestack_gpu_power_watts{node=~"$node",uuid=~"$gpu"}
+                                        seriesNameFormat: '{{node}} · GPU {{deviceId}}'
+            '3':
+                kind: Panel
+                spec:
+                    display:
+                        name: GPU Power Total
+                    plugin:
+                        kind: GaugeChart
+                        spec:
+                            calculation: last
+                    queries:
+                        -
+                            kind: TimeSeriesQuery
+                            spec:
+                                plugin:
+                                    kind: PrometheusTimeSeriesQuery
+                                    spec:
+                                        datasource:
+                                            kind: PrometheusDatasource
+                                            name: prometheus-datasource
+                                        minStep: ''
+                                        query: sum(cubestack_gpu_power_watts{node=~"$node",uuid=~"$gpu"})
+                                        seriesNameFormat: ''
+            '6':
+                kind: Panel
+                spec:
+                    display:
+                        name: GPU Utilization
+                    plugin:
+                        kind: TimeSeriesChart
+                        spec: {}
+                    queries:
+                        -
+                            kind: TimeSeriesQuery
+                            spec:
+                                plugin:
+                                    kind: PrometheusTimeSeriesQuery
+                                    spec:
+                                        datasource:
+                                            kind: PrometheusDatasource
+                                            name: prometheus-datasource
+                                        minStep: ''
+                                        query: cubestack_gpu_utilization_ratio{node=~"$node",uuid=~"$gpu"}
+                                        seriesNameFormat: '{{node}} · GPU {{deviceId}}'
+            '10':
+                kind: Panel
+                spec:
+                    display:
+                        name: CPU Usage
+                        description: '@hide-when-specific:gpu node CPU usage (hidden when a single GPU is selected)'
+                    plugin:
+                        kind: TimeSeriesChart
+                        spec:
+                            legend:
+                                mode: list
+                                position: bottom
+                    queries:
+                        -
+                            kind: TimeSeriesQuery
+                            spec:
+                                plugin:
+                                    kind: PrometheusTimeSeriesQuery
+                                    spec:
+                                        datasource:
+                                            kind: PrometheusDatasource
+                                            name: prometheus-datasource
+                                        minStep: ''
+                                        query: cubestack_node_cpu_utilization_ratio{node=~"$node"}
+                                        seriesNameFormat: '{{node}}'
+            '11':
+                kind: Panel
+                spec:
+                    display:
+                        name: GPU Usage
+                        description: '@hide-when-specific:gpu node GPU usage (hidden when a single GPU is selected)'
+                    plugin:
+                        kind: TimeSeriesChart
+                        spec:
+                            legend:
+                                mode: list
+                                position: bottom
+                    queries:
+                        -
+                            kind: TimeSeriesQuery
+                            spec:
+                                plugin:
+                                    kind: PrometheusTimeSeriesQuery
+                                    spec:
+                                        datasource:
+                                            kind: PrometheusDatasource
+                                            name: prometheus-datasource
+                                        minStep: ''
+                                        query: avg by (node) (cubestack_gpu_utilization_ratio{node=~"$node",uuid=~"$gpu"})
+                                        seriesNameFormat: '{{node}}'
+            '12':
+                kind: Panel
+                spec:
+                    display:
+                        name: Memory Usage
+                        description: '@hide-when-specific:gpu node memory usage (hidden when a single GPU is selected)'
+                    plugin:
+                        kind: TimeSeriesChart
+                        spec:
+                            legend:
+                                mode: list
+                                position: bottom
+                    queries:
+                        -
+                            kind: TimeSeriesQuery
+                            spec:
+                                plugin:
+                                    kind: PrometheusTimeSeriesQuery
+                                    spec:
+                                        datasource:
+                                            kind: PrometheusDatasource
+                                            name: prometheus-datasource
+                                        minStep: ''
+                                        query: cubestack_node_memory_utilization_ratio{node=~"$node"}
+                                        seriesNameFormat: '{{node}}'
+            '13':
+                kind: Panel
+                spec:
+                    display:
+                        name: RDMA Usage
+                        description: '@hide-when-specific:gpu node RDMA usage (hidden when a single GPU is selected)'
+                    plugin:
+                        kind: TimeSeriesChart
+                        spec:
+                            legend:
+                                mode: list
+                                position: bottom
+                    queries:
+                        -
+                            kind: TimeSeriesQuery
+                            spec:
+                                plugin:
+                                    kind: PrometheusTimeSeriesQuery
+                                    spec:
+                                        datasource:
+                                            kind: PrometheusDatasource
+                                            name: prometheus-datasource
+                                        minStep: ''
+                                        query: cluster_node:cubestack_network_rdma_receive_bytes:rate5m{node=~"$node"} + cluster_node:cubestack_network_rdma_transmit_bytes:rate5m{node=~"$node"}
+                                        seriesNameFormat: '{{node}}'
+        layouts:
+            -
+                kind: Grid
+                spec:
+                    items:
+                        -
+                            x: 0
+                            'y': 0
+                            width: 12
+                            height: 8
+                            content:
+                                $ref: '#/spec/panels/10'
+                        -
+                            x: 12
+                            'y': 0
+                            width: 12
+                            height: 8
+                            content:
+                                $ref: '#/spec/panels/11'
+                        -
+                            x: 0
+                            'y': 8
+                            width: 12
+                            height: 8
+                            content:
+                                $ref: '#/spec/panels/12'
+                        -
+                            x: 12
+                            'y': 8
+                            width: 12
+                            height: 8
+                            content:
+                                $ref: '#/spec/panels/13'
+                        -
+                            x: 0
+                            'y': 16
+                            width: 12
+                            height: 8
+                            content:
+                                $ref: '#/spec/panels/6'
+                        -
+                            x: 12
+                            'y': 16
+                            width: 12
+                            height: 8
+                            content:
+                                $ref: '#/spec/panels/0'
+                        -
+                            x: 0
+                            'y': 24
+                            width: 12
+                            height: 8
+                            content:
+                                $ref: '#/spec/panels/1'
+                        -
+                            x: 12
+                            'y': 24
+                            width: 12
+                            height: 8
+                            content:
+                                $ref: '#/spec/panels/2'
+                        -
+                            x: 0
+                            'y': 32
+                            width: 12
+                            height: 8
+                            content:
+                                $ref: '#/spec/panels/3'
+        duration: 1h

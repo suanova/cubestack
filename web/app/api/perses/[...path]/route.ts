@@ -9,6 +9,37 @@ export const runtime = "nodejs";
 // mapping; in-cluster this points at the Perses Service URL.
 const PERSES_SERVER_URL = process.env.PERSES_SERVER_URL ?? "http://localhost:8080";
 
+// The project the provisioned dashboards live in. Runtime (helm
+// env.PERSES_PROJECT) override: the client bundle only has a build-time
+// default baked in (web/lib/perses/config.ts) and always sends that name in
+// the URL, so the proxy substitutes the deployment's project when the env
+// var is set. When it is NOT set, the client's build-time value is passed
+// through untouched (e.g. an image built with NEXT_PUBLIC_PERSES_PROJECT).
+// Rebuilding the portal is NOT required to point at a different project.
+const PERSES_PROJECT_OVERRIDE = process.env.PERSES_PROJECT;
+
+/**
+ * Substitute the deployment's project for whatever project segment the client
+ * sent, when PERSES_PROJECT is set. The client addresses resources under two
+ * shapes that carry the project at a fixed position:
+ *
+ *   - api/v1/projects/<project>/...        (resource API: dashboards)
+ *   - proxy/projects/<project>/...         (project-datasource proxy)
+ *
+ * Global-datasource proxy paths (proxy/globaldatasources/...) carry no
+ * project and pass through untouched.
+ */
+function resolveProjectPath(path: string[]): string[] {
+  if (!PERSES_PROJECT_OVERRIDE) return path;
+  if (path.length > 3 && path[0] === "api" && path[1] === "v1" && path[2] === "projects") {
+    return [path[0]!, path[1]!, path[2]!, PERSES_PROJECT_OVERRIDE, ...path.slice(4)];
+  }
+  if (path.length > 2 && path[0] === "proxy" && path[1] === "projects") {
+    return [path[0]!, path[1]!, PERSES_PROJECT_OVERRIDE, ...path.slice(3)];
+  }
+  return path;
+}
+
 /**
  * Forward a read-only portal `/api/perses/*` request to the Perses server.
  *
@@ -31,7 +62,7 @@ function isDatasourceQuery(path: string[]): boolean {
 }
 
 async function proxy(request: NextRequest, path: string[]) {
-  const upstreamUrl = `${PERSES_SERVER_URL}/${path.join("/")}${request.nextUrl.search}`;
+  const upstreamUrl = `${PERSES_SERVER_URL}/${resolveProjectPath(path).join("/")}${request.nextUrl.search}`;
 
   if (request.method === "POST" && !isDatasourceQuery(path)) {
     // Only datasource queries may be written to; reject resource mutations.

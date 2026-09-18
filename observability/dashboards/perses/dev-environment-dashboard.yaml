@@ -1,0 +1,185 @@
+apiVersion: perses.dev/v1alpha2
+kind: PersesDashboard
+metadata:
+    name: dev-environment-dashboard
+    namespace: monitoring
+spec:
+    config:
+        display:
+            name: Dev Environment
+            description: "Dev Environment: GPU, CPU, memory, network and storage usage per Dev Environment"
+        variables:
+        -   kind: ListVariable
+            spec:
+                # One entry per Dev Environment (from the ai.cubestack.io/dev-environment
+                # pod label via the cubestack_devenv recording rules), so the dropdown
+                # only lists dev environments that are actually running.
+                display:
+                    name: devenv
+                    hidden: false
+                defaultValue: $__all
+                allowAllValue: true
+                allowMultiple: false
+                customAllValue: .*
+                sort: alphabetical-asc
+                plugin:
+                    kind: PrometheusLabelValuesVariable
+                    spec:
+                        datasource:
+                            kind: PrometheusDatasource
+                            name: prometheus-datasource
+                        labelName: devenv
+                        matchers:
+                        - cubestack_devenv_cpu_usage_cores:sum
+                name: devenv
+        panels:
+            "0":
+                kind: Panel
+                spec:
+                    display:
+                        name: GPU Usage
+                    plugin:
+                        kind: TimeSeriesChart
+                        spec:
+                            legend:
+                                mode: list
+                                position: bottom
+                    queries:
+                    -   kind: TimeSeriesQuery
+                        spec:
+                            plugin:
+                                kind: PrometheusTimeSeriesQuery
+                                spec:
+                                    datasource:
+                                        kind: PrometheusDatasource
+                                        name: prometheus-datasource
+                                    minStep: ''
+                                    query: max by (devenv) (cubestack_gpu_utilization_ratio:max{devenv=~"$devenv"})
+                                    seriesNameFormat: '{{devenv}}'
+            "1":
+                kind: Panel
+                spec:
+                    display:
+                        name: CPU Usage
+                    plugin:
+                        kind: TimeSeriesChart
+                        spec:
+                            legend:
+                                mode: list
+                                position: bottom
+                    queries:
+                    -   kind: TimeSeriesQuery
+                        spec:
+                            plugin:
+                                kind: PrometheusTimeSeriesQuery
+                                spec:
+                                    datasource:
+                                        kind: PrometheusDatasource
+                                        name: prometheus-datasource
+                                    minStep: ''
+                                    query: cubestack_devenv_cpu_usage_cores:sum{devenv=~"$devenv"} / cubestack_devenv_cpu_request_cores:sum{devenv=~"$devenv"}
+                                    seriesNameFormat: '{{devenv}}'
+            "2":
+                kind: Panel
+                spec:
+                    display:
+                        name: Memory Usage
+                    plugin:
+                        kind: TimeSeriesChart
+                        spec:
+                            legend:
+                                mode: list
+                                position: bottom
+                    queries:
+                    -   kind: TimeSeriesQuery
+                        spec:
+                            plugin:
+                                kind: PrometheusTimeSeriesQuery
+                                spec:
+                                    datasource:
+                                        kind: PrometheusDatasource
+                                        name: prometheus-datasource
+                                    minStep: ''
+                                    query: cubestack_devenv_memory_working_set_bytes:sum{devenv=~"$devenv"} / cubestack_devenv_memory_request_bytes:sum{devenv=~"$devenv"}
+                                    seriesNameFormat: '{{devenv}}'
+            "3":
+                kind: Panel
+                spec:
+                    display:
+                        name: Network Usage
+                    plugin:
+                        kind: TimeSeriesChart
+                        spec:
+                            legend:
+                                mode: list
+                                position: bottom
+                    queries:
+                    -   kind: TimeSeriesQuery
+                        spec:
+                            plugin:
+                                kind: PrometheusTimeSeriesQuery
+                                spec:
+                                    datasource:
+                                        kind: PrometheusDatasource
+                                        name: prometheus-datasource
+                                    minStep: ''
+                                    query: cubestack_devenv_network_receive_bytes:rate5m{devenv=~"$devenv"} + cubestack_devenv_network_transmit_bytes:rate5m{devenv=~"$devenv"}
+                                    seriesNameFormat: '{{devenv}}'
+            "4":
+                kind: Panel
+                spec:
+                    display:
+                        name: Storage Usage
+                    plugin:
+                        kind: TimeSeriesChart
+                        spec:
+                            legend:
+                                mode: list
+                                position: bottom
+                    queries:
+                    -   kind: TimeSeriesQuery
+                        spec:
+                            plugin:
+                                kind: PrometheusTimeSeriesQuery
+                                spec:
+                                    datasource:
+                                        kind: PrometheusDatasource
+                                        name: prometheus-datasource
+                                    minStep: ''
+                                    query: cubestack_devenv_fs_read_bytes:rate5m{devenv=~"$devenv"} + cubestack_devenv_fs_write_bytes:rate5m{devenv=~"$devenv"}
+                                    seriesNameFormat: '{{devenv}}'
+        layouts:
+        -   kind: Grid
+            spec:
+                items:
+                -   x: 0
+                    "y": 0
+                    width: 12
+                    height: 8
+                    content:
+                        $ref: '#/spec/panels/0'
+                -   x: 12
+                    "y": 0
+                    width: 12
+                    height: 8
+                    content:
+                        $ref: '#/spec/panels/1'
+                -   x: 0
+                    "y": 8
+                    width: 12
+                    height: 8
+                    content:
+                        $ref: '#/spec/panels/2'
+                -   x: 12
+                    "y": 8
+                    width: 12
+                    height: 8
+                    content:
+                        $ref: '#/spec/panels/3'
+                -   x: 0
+                    "y": 16
+                    width: 24
+                    height: 8
+                    content:
+                        $ref: '#/spec/panels/4'
+        duration: 1h

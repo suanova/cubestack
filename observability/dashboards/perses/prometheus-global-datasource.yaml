@@ -1,0 +1,22 @@
+# Cluster-wide Prometheus datasource for the portal dashboards.
+#
+# The name `prometheus-datasource` must match the reference used by the
+# dashboard queries (datasource.name) and by the portal's /api/overview and
+# /api/inferenceservices proxy calls (PROMETHEUS_DATASOURCE). The browser
+# never talks to Prometheus directly: portal -> Perses -> this URL.
+apiVersion: perses.dev/v1alpha2
+kind: PersesGlobalDatasource
+metadata:
+    name: prometheus-datasource
+spec:
+    config:
+        display:
+            name: Prometheus
+        default: true
+        plugin:
+            kind: PrometheusDatasource
+            spec:
+                proxy:
+                    kind: HTTPProxy
+                    spec:
+                        url: http://kube-prometheus-kube-prome-prometheus.monitoring.svc:9090

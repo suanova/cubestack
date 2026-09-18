@@ -23,7 +23,7 @@ await esbuild.build({
   jsx: "automatic",
   // Make react resolve its production build. process.env itself is folded to {}
   // (lib/perses/config.ts reads process.env.NEXT_PUBLIC_PERSES_PROJECT, which
-  // then falls back to the "perses-dev" default like the Next build).
+  // then falls back to the "monitoring" default like the Next build).
   define: {
     "process.env.NODE_ENV": '"production"',
     "process.env": "{}",

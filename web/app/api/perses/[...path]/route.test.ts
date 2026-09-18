@@ -85,4 +85,61 @@ describe("perses proxy route", () => {
     expect(route).not.toHaveProperty("PATCH");
     expect(route).not.toHaveProperty("DELETE");
   });
+
+  // The route also reads PERSES_PROJECT at module load, so these tests reset
+  // the module registry before importing.
+  it("substitutes the deployment project (PERSES_PROJECT) in the resource API path", async () => {
+    vi.stubEnv("PERSES_SERVER_URL", UPSTREAM);
+    vi.stubEnv("PERSES_PROJECT", "monitoring");
+    vi.resetModules();
+    const { GET } = await import("./route");
+    const upstream = mockUpstream(200, "[]");
+
+    const request = await makeRequest("GET", "http://localhost/api/perses/api/v1/projects/perses-dev/dashboards");
+    const res = await GET(request, {
+      params: Promise.resolve({ path: ["api", "v1", "projects", "perses-dev", "dashboards"] }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(upstream).toHaveBeenCalledTimes(1);
+    const [url] = upstream.mock.calls[0]!;
+    expect(url).toBe(`${UPSTREAM}/api/v1/projects/monitoring/dashboards`);
+  });
+
+  it("substitutes the deployment project in the project-datasource proxy path", async () => {
+    vi.stubEnv("PERSES_SERVER_URL", UPSTREAM);
+    vi.stubEnv("PERSES_PROJECT", "monitoring");
+    vi.resetModules();
+    const { GET } = await import("./route");
+    const upstream = mockUpstream(200, "{}");
+
+    const request = await makeRequest(
+      "GET",
+      "http://localhost/api/perses/proxy/projects/perses-dev/datasources/demo/api/v1/query",
+    );
+    const res = await GET(request, {
+      params: Promise.resolve({ path: ["proxy", "projects", "perses-dev", "datasources", "demo", "api/v1/query"] }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(upstream).toHaveBeenCalledTimes(1);
+    const [url] = upstream.mock.calls[0]!;
+    expect(url).toBe(`${UPSTREAM}/proxy/projects/monitoring/datasources/demo/api/v1/query`);
+  });
+
+  it("passes the client's project through when PERSES_PROJECT is not set", async () => {
+    vi.stubEnv("PERSES_SERVER_URL", UPSTREAM);
+    vi.resetModules();
+    const { GET } = await import("./route");
+    const upstream = mockUpstream(200, "[]");
+
+    const request = await makeRequest("GET", "http://localhost/api/perses/api/v1/projects/custom-proj/dashboards");
+    const res = await GET(request, {
+      params: Promise.resolve({ path: ["api", "v1", "projects", "custom-proj", "dashboards"] }),
+    });
+
+    expect(res.status).toBe(200);
+    const [url] = upstream.mock.calls[0]!;
+    expect(url).toBe(`${UPSTREAM}/api/v1/projects/custom-proj/dashboards`);
+  });
 });
