@@ -220,6 +220,11 @@ interface Captured {
    *  choosing from that list is what picked a cron/task session and broke the
    *  page open. */
   sessionListCalls: number;
+  /** The most history reads that were ever in flight at once. The follow loop
+   *  must never overlap them: an interval fires on its own clock, so a slow read
+   *  would run alongside the next one and the older answer could land last,
+   *  putting the transcript backwards. */
+  maxHistoryInFlight: number;
   /** How many times the pane asked whether the session's turn is running. The
    *  pane watches the conversation for as long as it is on screen, not only while
    *  it believes a turn is in flight — the conversation can move without this
@@ -244,6 +249,9 @@ interface Stubs {
   /** Successive /messages bodies, the last one repeating. Lets a spec watch the
    *  transcript update WHILE a turn runs, which is the no-local-stream case. */
   historySequence?: object[][];
+  /** Makes each history read take this long. Longer than the follow loop's
+   *  period, which is what a reader on a slow link sees. */
+  historyDelayMs?: number;
   turnActive?: boolean;
   /** Successive /turn answers, the last one repeating. Lets a spec watch the
    *  pane pick up a turn that STARTS after the conversation has settled — the
@@ -278,7 +286,7 @@ function confirmAfterPut(body: { confirmPolicy?: string; allowlist?: AllowlistRu
 
 /** Stub every endpoint the three panes touch with CR-shaped responses. */
 async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
-  const captured: Captured = { approvalPosts: [], questionPosts: [], pendingPaths: [], historyPaths: [], sessionListCalls: 0, turnReads: 0, configPuts: [], confirmPuts: [], llmPosts: [], agentPosts: [] };
+  const captured: Captured = { approvalPosts: [], questionPosts: [], pendingPaths: [], historyPaths: [], sessionListCalls: 0, maxHistoryInFlight: 0, turnReads: 0, configPuts: [], confirmPuts: [], llmPosts: [], agentPosts: [] };
   let config = stubs.config ?? CONFIG_READY;
   let confirm = stubs.confirm ?? CONFIRM;
   // The pending list reflects the post-refusal world only once an answer has
@@ -288,6 +296,7 @@ async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
   let refusedAnswer = false;
   let messagesRead = 0;
   let turnReads = 0;
+  let historyInFlight = 0;
   const sessions = stubs.sessions === undefined ? [] : stubs.sessions;
   await page.route("**/api/cubepilot/**", async (route) => {
     const req = route.request();
@@ -354,11 +363,14 @@ async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
       }
       if (path.endsWith("/messages")) {
         captured.historyPaths.push(path);
-        if (stubs.historySequence?.length) {
-          const i = Math.min(messagesRead++, stubs.historySequence.length - 1);
-          return json({ items: stubs.historySequence[i] });
-        }
-        return json({ items: stubs.history ?? [] });
+        historyInFlight++;
+        captured.maxHistoryInFlight = Math.max(captured.maxHistoryInFlight, historyInFlight);
+        if (stubs.historyDelayMs) await new Promise((r) => setTimeout(r, stubs.historyDelayMs));
+        const body = stubs.historySequence?.length
+          ? { items: stubs.historySequence[Math.min(messagesRead++, stubs.historySequence.length - 1)] }
+          : { items: stubs.history ?? [] };
+        historyInFlight--;
+        return json(body);
       }
       if (path.endsWith("/api/v1/sessions")) {
         captured.sessionListCalls++;
@@ -661,6 +673,36 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
       timeout: 20_000,
     });
     expect(captured.turnReads).toBeGreaterThan(2);
+  });
+
+  test("never runs two history reads at once", async ({ page }) => {
+    // The follow loop schedules its next tick when the last one finishes, not on
+    // a fixed clock. An interval would fire during a slow read, and the two
+    // answers can land in either order — the older snapshot arriving last, the
+    // transcript jumping backwards, and only a later tick repairing it. A read
+    // slower than the period is the ordinary case on a slow link, not a corner.
+    const captured = await stubAgent(page, {
+      sessions: [SESSION],
+      turnActive: true,
+      historyDelayMs: 4000,
+      historySequence: [
+        [{ role: "user", content: "在跑吗?" }],
+        [
+          { role: "user", content: "在跑吗?" },
+          { role: "assistant", content: [{ type: "toolCall", id: "t1", name: "exec", arguments: { command: "kubectl get nodes" } }] },
+        ],
+      ],
+    });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="obj-cubepilot"]').click();
+
+    await expect(page.locator('[data-od-id="agent-bubble"] [data-od-id="tool-card"]')).toHaveCount(1, {
+      timeout: 30_000,
+    });
+    // At least two reads, or "never more than one in flight" would hold for a
+    // loop that only ever ran once.
+    expect(captured.historyPaths.length).toBeGreaterThan(1);
+    expect(captured.maxHistoryInFlight).toBe(1);
   });
 
   test("a turn that survived a reload says so, and offers Stop", async ({ page }) => {

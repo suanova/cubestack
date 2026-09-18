@@ -186,6 +186,11 @@ interface AgentMeta {
  */
 const SESSION_KEY = "agent:main:conv-portal";
 
+/** How long the follow loop waits between ticks. Short enough that a turn
+ *  running in another window looks live; long enough that an idle conversation
+ *  is one small GET every few seconds. */
+const FOLLOW_INTERVAL_MS = 3000;
+
 export function ChatPane() {
   const { t } = useI18n();
   const { showToast, toastView } = useToast();
@@ -291,8 +296,10 @@ export function ChatPane() {
   // Guards against in-flight fetch/stream from a previous object.
   const genRef = useRef(0);
   const idRef = useRef(0);
-  /** The session follow loop; runs for as long as a conversation is on screen. */
-  const turnPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  /** The session follow loop; runs for as long as a conversation is on screen.
+   *  One pending tick — the loop schedules its next one, so there is at most
+   *  this one in flight. */
+  const turnPollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** The raw history document last rendered, so the follow loop can skip a
    *  re-render (and a re-scroll) when the server's copy has not moved. */
   const lastHistoryRef = useRef<string>("");
@@ -326,7 +333,7 @@ export function ChatPane() {
 
   function stopTurnPolling(): void {
     if (turnPollRef.current) {
-      clearInterval(turnPollRef.current);
+      clearTimeout(turnPollRef.current);
       turnPollRef.current = null;
     }
   }
@@ -675,60 +682,75 @@ export function ChatPane() {
    *
    * Idle ticks cost one small GET; the history is only re-read while a turn is
    * actually running, and only re-rendered when the server's copy has moved.
+   *
+   * Each tick schedules the next one when it is done, rather than the loop being
+   * driven by an interval. An interval fires on its own clock whatever the last
+   * tick is doing, so a read slower than the period overlaps with the next one —
+   * and the two can land in either order, the older snapshot replacing the newer
+   * and the transcript running backwards until a later tick repairs it. A chain
+   * cannot overlap: there is never more than one read in flight.
    */
   function startFollowing(key: string): void {
     stopTurnPolling();
     const gen = genRef.current;
-    turnPollRef.current = setInterval(async () => {
-      if (genRef.current !== gen) {
-        stopTurnPolling();
+
+    const tickOnce = async (): Promise<void> => {
+      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/turn`);
+      if (!res.ok || genRef.current !== gen) return;
+      const { active } = (await res.json()) as { active?: boolean };
+      if (genRef.current !== gen) return;
+      if (ownTurnRef.current) {
+        // A turn this pane started. Its stream is the state, and the history
+        // document is no substitute: it holds no approval or question cards, so
+        // adopting it would delete the cards the reader is looking at, and it
+        // cannot say that the stream died. The one thing a stream that has
+        // already ended cannot tell the pane is whether the run is still going,
+        // and that is all this read is for.
+        if (active !== true) ownTurnRef.current = false;
         return;
       }
+      if (active === true) {
+        setRunningElsewhere(true);
+        // Keep the transcript moving while the turn runs. Without this the view
+        // is frozen until the turn ENDS — which is what a reader sees when the
+        // turn was started in ANOTHER browser (one fixed key means one
+        // conversation, so that is now the ordinary case) or after their own
+        // stream died. The runtime writes a running turn into the history as it
+        // goes, so re-reading it is what makes the output appear at all.
+        followingRef.current = true;
+        await refreshHistoryIfChanged(key);
+        return;
+      }
+      // A poll that fails is not the header's "could not check": the status is
+      // already the server's own answer, and one dropped request in a 3s rhythm
+      // is not worth replacing it with an alarm. Only a definite "nothing is
+      // running" retires the state.
+      setRunningElsewhere(false);
+      if (followingRef.current) {
+        followingRef.current = false;
+        setAgentNotice("");
+        await loadAgentHistory(key);
+        await restorePendingHitl(key);
+      }
+    };
+
+    const tick = async (): Promise<void> => {
+      if (genRef.current !== gen) return;
       try {
-        const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/turn`);
-        if (!res.ok || genRef.current !== gen) return;
-        const { active } = (await res.json()) as { active?: boolean };
-        if (genRef.current !== gen) {
-          stopTurnPolling();
-          return;
-        }
-        if (ownTurnRef.current) {
-          // A turn this pane started. Its stream is the state, and the history
-          // document is no substitute: it holds no approval or question cards, so
-          // adopting it would delete the cards the reader is looking at, and it
-          // cannot say that the stream died. The one thing a stream that has
-          // already ended cannot tell the pane is whether the run is still going,
-          // and that is all this read is for.
-          if (active !== true) ownTurnRef.current = false;
-          return;
-        }
-        if (active === true) {
-          setRunningElsewhere(true);
-          // Keep the transcript moving while the turn runs. Without this the view
-          // is frozen until the turn ENDS — which is what a reader sees when the
-          // turn was started in ANOTHER browser (one fixed key means one
-          // conversation, so that is now the ordinary case) or after their own
-          // stream died. The runtime writes a running turn into the history as it
-          // goes, so re-reading it is what makes the output appear at all.
-          followingRef.current = true;
-          await refreshHistoryIfChanged(key);
-          return;
-        }
-        // A poll that fails is not the header's "could not check": the status is
-        // already the server's own answer, and one dropped request in a 3s
-        // rhythm is not worth replacing it with an alarm. Only a definite
-        // "nothing is running" retires the state.
-        setRunningElsewhere(false);
-        if (followingRef.current) {
-          followingRef.current = false;
-          setAgentNotice("");
-          await loadAgentHistory(key);
-          await restorePendingHitl(key);
-        }
+        await tickOnce();
       } catch {
         /* keep polling */
       }
-    }, 3000);
+      // The single place that decides whether the loop lives on: a stop, a
+      // session switch or a send all bump the generation, and a tick already in
+      // flight must not schedule a successor for a conversation this pane has
+      // left.
+      if (genRef.current === gen) {
+        turnPollRef.current = setTimeout(() => void tick(), FOLLOW_INTERVAL_MS);
+      }
+    };
+
+    turnPollRef.current = setTimeout(() => void tick(), FOLLOW_INTERVAL_MS);
   }
 
   /** Load the gateway model catalog; on first load select the first model. */
