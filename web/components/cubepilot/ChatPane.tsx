@@ -291,11 +291,21 @@ export function ChatPane() {
   // Guards against in-flight fetch/stream from a previous object.
   const genRef = useRef(0);
   const idRef = useRef(0);
-  /** Polls history while a turn is in flight after a reload. */
+  /** The session follow loop; runs for as long as a conversation is on screen. */
   const turnPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  /** The raw history document last rendered, so the in-flight poll can skip a
+  /** The raw history document last rendered, so the follow loop can skip a
    *  re-render (and a re-scroll) when the server's copy has not moved. */
   const lastHistoryRef = useRef<string>("");
+  /** True from the moment this pane drives a turn until the server says that turn
+   *  has stopped running. While it holds, this pane's own view of the turn is the
+   *  truth — its stream wrote it — and the follow loop must not replace it with
+   *  the history document, which carries no HITL cards and cannot say that a
+   *  stream died. */
+  const ownTurnRef = useRef(false);
+  /** Whether the follow loop has been adopting the history document for the turn
+   *  it is watching now. Only a turn this pane did NOT author is watched that
+   *  way, and its terminal read is what completes that transcript. */
+  const followingRef = useRef(false);
 
   const svc = models.find((s) => s.id === svcId) ?? null;
   const endpointText = endpoint ? `${endpoint}/v1/chat/completions` : "";
@@ -324,6 +334,10 @@ export function ChatPane() {
   function cancelInflight(): void {
     genRef.current++;
     stopTurnPolling();
+    // The turn and its follow state describe the session this pane is leaving.
+    ownTurnRef.current = false;
+    followingRef.current = false;
+    lastHistoryRef.current = "";
     setStreaming(null);
     setThinkingText(null);
     // `sending` too: both sides clear it in a generation-guarded `finally`, so
@@ -478,8 +492,11 @@ export function ChatPane() {
     if (genRef.current !== gen) return;
     if (running) {
       setAgentNotice(t("cubepilot.chat.turnActive"));
-      startTurnPolling(key);
+      // Armed, so that the terminal read that clears the notice and completes the
+      // transcript is taken even if the turn ends before the loop's first tick.
+      followingRef.current = true;
     }
+    startFollowing(key);
     await restorePendingHitl(key);
   }
 
@@ -637,8 +654,23 @@ export function ChatPane() {
     }
   }
 
-  /** Poll history every 3s while a reloaded turn is still in flight. */
-  function startTurnPolling(key: string): void {
+  /**
+   * Watch the conversation for as long as it is the one on screen.
+   *
+   * The pane cannot infer the conversation's state from its own stream, because
+   * the conversation belongs to the user and not to this tab: any of their other
+   * windows can move it, and a run this pane started can outlive the stream that
+   * started it. A pane that stops watching once it believes nothing is running
+   * therefore stops updating for good — which is what a user saw: a transcript
+   * frozen half an hour back, a header saying the last turn had finished while a
+   * turn was running, and the approval the agent was parked on never drawn. It
+   * went unanswered, the run was aborted for being stuck, and the agent's own
+   * reply complained the command "被中断" — twice.
+   *
+   * Idle ticks cost one small GET; the history is only re-read while a turn is
+   * actually running, and only re-rendered when the server's copy has moved.
+   */
+  function startFollowing(key: string): void {
     stopTurnPolling();
     const gen = genRef.current;
     turnPollRef.current = setInterval(async () => {
@@ -654,10 +686,16 @@ export function ChatPane() {
           stopTurnPolling();
           return;
         }
-        // A poll that fails is not the header's "could not check": the status is
-        // already the server's own answer, and one dropped request in a 3s
-        // rhythm is not worth replacing it with an alarm. Only a definite
-        // "nothing is running" retires the state.
+        if (ownTurnRef.current) {
+          // A turn this pane started. Its stream is the state, and the history
+          // document is no substitute: it holds no approval or question cards, so
+          // adopting it would delete the cards the reader is looking at, and it
+          // cannot say that the stream died. The one thing a stream that has
+          // already ended cannot tell the pane is whether the run is still going,
+          // and that is all this read is for.
+          if (active !== true) ownTurnRef.current = false;
+          return;
+        }
         if (active === true) {
           setRunningElsewhere(true);
           // Keep the transcript moving while the turn runs. Without this the view
@@ -666,14 +704,21 @@ export function ChatPane() {
           // conversation, so that is now the ordinary case) or after their own
           // stream died. The runtime writes a running turn into the history as it
           // goes, so re-reading it is what makes the output appear at all.
+          followingRef.current = true;
           await refreshHistoryIfChanged(key);
           return;
         }
-        stopTurnPolling();
+        // A poll that fails is not the header's "could not check": the status is
+        // already the server's own answer, and one dropped request in a 3s
+        // rhythm is not worth replacing it with an alarm. Only a definite
+        // "nothing is running" retires the state.
         setRunningElsewhere(false);
-        setAgentNotice("");
-        await loadAgentHistory(key);
-        await restorePendingHitl(key);
+        if (followingRef.current) {
+          followingRef.current = false;
+          setAgentNotice("");
+          await loadAgentHistory(key);
+          await restorePendingHitl(key);
+        }
       } catch {
         /* keep polling */
       }
@@ -1181,6 +1226,11 @@ export function ChatPane() {
           // left behind.
           setRunningElsewhere(false);
           setTurnCheckFailed(false);
+          // From here this pane drives the turn, and the follow loop must leave
+          // its transcript alone until the server says the turn is over. Set
+          // after the stop-first step, which can return without sending.
+          ownTurnRef.current = true;
+          followingRef.current = false;
           setMsgs((m) => [...m, { id: nextId(), role: "user", text }, newAgentMsg(agentMsgId)]);
           setInput("");
           if (el) el.style.height = "auto";

@@ -264,7 +264,7 @@ describe("AgentThread", () => {
 
     const line = container.querySelector('[data-od-id="agent-thinking"]');
     expect(line).not.toBeNull();
-    expect(line?.textContent).toContain("正在调用监控与集群 API");
+    expect(line?.textContent).toContain("正在处理你的请求");
 
     // It stands in for the empty bubble, not for a running turn: a turn with no
     // blocks that has ENDED must not claim to be thinking. Whether a turn is

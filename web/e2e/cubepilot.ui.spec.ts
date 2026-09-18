@@ -220,6 +220,11 @@ interface Captured {
    *  choosing from that list is what picked a cron/task session and broke the
    *  page open. */
   sessionListCalls: number;
+  /** How many times the pane asked whether the session's turn is running. The
+   *  pane watches the conversation for as long as it is on screen, not only while
+   *  it believes a turn is in flight — the conversation can move without this
+   *  pane having done anything. */
+  turnReads: number;
   configPuts: Array<{ selectedModel?: string; userInstructions?: string }>;
   confirmPuts: Array<{ confirmPolicy?: string; allowlist?: AllowlistRule[] }>;
   /** Every POST the pane made to the agent API, in the order it made them. The
@@ -240,6 +245,11 @@ interface Stubs {
    *  transcript update WHILE a turn runs, which is the no-local-stream case. */
   historySequence?: object[][];
   turnActive?: boolean;
+  /** Successive /turn answers, the last one repeating. Lets a spec watch the
+   *  pane pick up a turn that STARTS after the conversation has settled — the
+   *  conversation is the user's, not this tab's, so it can move without this
+   *  pane having done anything. */
+  turnSequence?: boolean[];
   /** The /turn read itself fails (502, as the route answers when it could not
    *  determine). "Could not check" is not the same as "nothing is running". */
   turnCheckFails?: boolean;
@@ -268,7 +278,7 @@ function confirmAfterPut(body: { confirmPolicy?: string; allowlist?: AllowlistRu
 
 /** Stub every endpoint the three panes touch with CR-shaped responses. */
 async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
-  const captured: Captured = { approvalPosts: [], questionPosts: [], pendingPaths: [], historyPaths: [], sessionListCalls: 0, configPuts: [], confirmPuts: [], llmPosts: [], agentPosts: [] };
+  const captured: Captured = { approvalPosts: [], questionPosts: [], pendingPaths: [], historyPaths: [], sessionListCalls: 0, turnReads: 0, configPuts: [], confirmPuts: [], llmPosts: [], agentPosts: [] };
   let config = stubs.config ?? CONFIG_READY;
   let confirm = stubs.confirm ?? CONFIRM;
   // The pending list reflects the post-refusal world only once an answer has
@@ -277,6 +287,7 @@ async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
   // that raises it has even started.
   let refusedAnswer = false;
   let messagesRead = 0;
+  let turnReads = 0;
   const sessions = stubs.sessions === undefined ? [] : stubs.sessions;
   await page.route("**/api/cubepilot/**", async (route) => {
     const req = route.request();
@@ -357,6 +368,11 @@ async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
         // A failed check is the API's own 502: it could not determine, which is
         // not the same answer as "no turn is running".
         if (stubs.turnCheckFails) return json({ error: "could not check" }, 502);
+        captured.turnReads++;
+        if (stubs.turnSequence?.length) {
+          const i = Math.min(turnReads++, stubs.turnSequence.length - 1);
+          return json({ active: stubs.turnSequence[i] });
+        }
         return json({ active: stubs.turnActive ?? false });
       }
       if (path.endsWith("/approval/pending")) {
@@ -609,6 +625,42 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     await expect(page.locator('[data-od-id="agent-bubble"] [data-od-id="tool-card"]')).toHaveCount(1, {
       timeout: 15_000,
     });
+  });
+
+  test("a turn that starts after the pane settled is picked up", async ({ page }) => {
+    // The conversation belongs to the user, not to this tab. A pane that decides
+    // once — "nothing is running, so there is nothing to watch" — never learns
+    // otherwise, and a turn started in another window leaves it frozen for good.
+    // What that looks like on screen is staler than it sounds: a transcript half
+    // an hour back, a header saying the last turn had finished while a turn was
+    // running, and the approval the agent was parked on never drawn — so it was
+    // never answered, and the run was aborted for being stuck.
+    const captured = await stubAgent(page, {
+      sessions: [SESSION],
+      turnSequence: [false, false, true, true, true, true, true, true],
+      historySequence: [
+        [{ role: "user", content: "在跑吗?" }],
+        [
+          { role: "user", content: "在跑吗?" },
+          { role: "assistant", content: [{ type: "toolCall", id: "t1", name: "exec", arguments: { command: "kubectl get nodes" } }] },
+        ],
+      ],
+    });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="obj-cubepilot"]').click();
+
+    // It settles first: the load-time check and the first tick both say idle, and
+    // the thread holds only what was there.
+    await expect(page.locator('[data-od-id="chat-thread"]')).toContainText("在跑吗?");
+    await expect(page.locator('[data-od-id="agent-status"]')).not.toContainText("仍在运行");
+
+    // Nothing is clicked from here. The turn that starts afterwards has to be
+    // noticed by the pane on its own.
+    await expect(page.locator('[data-od-id="agent-status"]')).toContainText("仍在运行", { timeout: 20_000 });
+    await expect(page.locator('[data-od-id="agent-bubble"] [data-od-id="tool-card"]')).toHaveCount(1, {
+      timeout: 20_000,
+    });
+    expect(captured.turnReads).toBeGreaterThan(2);
   });
 
   test("a turn that survived a reload says so, and offers Stop", async ({ page }) => {
