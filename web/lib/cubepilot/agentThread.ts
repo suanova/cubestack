@@ -19,7 +19,16 @@ export type AgentPhase = "thinking" | "tools" | "streaming" | "done";
  * after every sentence it was interleaved with.
  */
 export type AgentBlock =
-  | { kind: "text"; text: string; superseded?: string[] }
+  | {
+      kind: "text";
+      text: string;
+      superseded?: string[];
+      /** Set only on narration — the agent's between-tool commentary. It names
+       *  the block the text belongs to: a later snapshot with the same id
+       *  replaces this one's text, a new id starts a new block. Text without it
+       *  is the turn's own text: its reply, or a restored assistant message. */
+      blockId?: string;
+    }
   | { kind: "tool"; callId?: string; name: string; args?: string; output?: string; done: boolean };
 
 export interface AgentApproval {
@@ -91,6 +100,8 @@ export function applyAgentEvent(msg: AgentMsg, evt: AgentSseEvent, now: number =
       return appendText(setPhase(msg, "streaming", now), evt.delta);
     case "text_replace":
       return replaceText(setPhase(msg, "streaming", now), evt.delta);
+    case "narration":
+      return narrate(msg, evt.blockId, evt.text);
     case "tool_call":
       return setPhase(
         {
@@ -182,6 +193,13 @@ export function applyAgentEvent(msg: AgentMsg, evt: AgentSseEvent, now: number =
           q.state === "pending" || q.state === "submitting" ? { ...q, state: "cancelled" as const } : q,
         ),
       };
+    default:
+      // An event this build does not know: a newer API's addition, or one this
+      // client has not been taught yet. Ignoring it is the only safe reading —
+      // the alternative is returning nothing, which the caller stores as a hole
+      // in `msgs` and the thread then crashes on, taking down a conversation
+      // that was otherwise fine. `narration` arrived exactly this way.
+      return msg;
   }
 }
 
@@ -189,11 +207,42 @@ function setPhase(msg: AgentMsg, phase: AgentPhase, now: number): AgentMsg {
   return msg.phase === phase ? msg : { ...msg, phase, phaseAt: now };
 }
 
+/**
+ * Fold one narration snapshot onto the turn.
+ *
+ * The text is the block's WHOLE text, not an increment, so this replaces rather
+ * than appends — an implementation that appended would print the step once per
+ * snapshot. A `blockId` already in the turn is that block; a new one is a new
+ * step, appended where it arrived, which is what keeps narration on either side
+ * of a tool call on either side of its card.
+ */
+function narrate(msg: AgentMsg, blockId: string, text: string): AgentMsg {
+  const at = msg.blocks.findIndex((b) => b.kind === "text" && b.blockId === blockId);
+  if (at >= 0) {
+    const blocks = [...msg.blocks];
+    const cur = blocks[at] as Extract<AgentBlock, { kind: "text" }>;
+    if (cur.text === text) return msg;
+    blocks[at] = { ...cur, text };
+    return { ...msg, blocks };
+  }
+  return { ...msg, blocks: [...msg.blocks, { kind: "text", text, blockId }] };
+}
+
+/** The block a streamed answer continues: the last one, and only when it is the
+ *  turn's own text. A narration block is never continued — the answer is a
+ *  different thing, and merging it into the commentary would print the agent's
+ *  conclusion inside the sentence introducing a tool call. */
+function answerBlock(blocks: AgentBlock[]): number {
+  const last = blocks[blocks.length - 1];
+  return last?.kind === "text" && last.blockId === undefined ? blocks.length - 1 : -1;
+}
+
 function appendText(msg: AgentMsg, delta: string): AgentMsg {
   const blocks = [...msg.blocks];
-  const last = blocks[blocks.length - 1];
-  if (last?.kind === "text") {
-    blocks[blocks.length - 1] = { ...last, text: last.text + delta };
+  const at = answerBlock(blocks);
+  if (at >= 0) {
+    const cur = blocks[at] as Extract<AgentBlock, { kind: "text" }>;
+    blocks[at] = { ...cur, text: cur.text + delta };
   } else {
     blocks.push({ kind: "text", text: delta });
   }
@@ -202,8 +251,9 @@ function appendText(msg: AgentMsg, delta: string): AgentMsg {
 
 function replaceText(msg: AgentMsg, next: string): AgentMsg {
   const blocks = [...msg.blocks];
-  const last = blocks[blocks.length - 1];
-  if (last?.kind !== "text") {
+  const at = answerBlock(blocks);
+  const last = at >= 0 ? (blocks[at] as Extract<AgentBlock, { kind: "text" }>) : undefined;
+  if (!last) {
     blocks.push({ kind: "text", text: next });
     return { ...msg, blocks };
   }
@@ -214,7 +264,9 @@ function replaceText(msg: AgentMsg, next: string): AgentMsg {
   // so a repeated snapshot cannot pile up copies of the same text.
   const superseded =
     last.text && last.text !== next ? [...(last.superseded ?? []), last.text] : last.superseded;
-  blocks[blocks.length - 1] = {
+  // No `blockId` carried over: this block is the turn's own text, which is what
+  // the answer replaces.
+  blocks[at] = {
     kind: "text",
     text: next,
     ...(superseded?.length ? { superseded } : {}),

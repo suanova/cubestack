@@ -142,6 +142,19 @@ const TURN_TOOL_THEN_TEXT = [
   { type: "message_done", sessionId: SESSION_KEY },
 ];
 
+/** A turn whose agent narrates between its tool calls (cubepilot #216). The
+ *  narration arrives as a SNAPSHOT per block, not as a delta, and carries no
+ *  run of its own — it is what the agent says before it calls the next tool. */
+const TURN_NARRATION = [
+  { type: "message_start", sessionId: SESSION_KEY },
+  { type: "narration", sessionId: SESSION_KEY, blockId: "n1", text: "先看节点。" },
+  { type: "tool_call", sessionId: SESSION_KEY, name: "exec", callId: "call-1", arguments: { command: "kubectl get nodes" } },
+  { type: "tool_result", sessionId: SESSION_KEY, callId: "call-1", name: "exec", output: "clyang" },
+  { type: "narration", sessionId: SESSION_KEY, blockId: "n2", text: "节点正常,再看 Pod。" },
+  { type: "message_delta", sessionId: SESSION_KEY, delta: "共 1 个节点。" },
+  { type: "message_done", sessionId: SESSION_KEY },
+];
+
 /** A reply carrying the Markdown an agent actually emits. */
 const TURN_MARKDOWN = [
   { type: "message_start", sessionId: SESSION_KEY },
@@ -703,6 +716,32 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     // loop that only ever ran once.
     expect(captured.historyPaths.length).toBeGreaterThan(1);
     expect(captured.maxHistoryInFlight).toBe(1);
+  });
+
+  test("draws the agent's between-tool narration where it happened", async ({ page }) => {
+    // The stream used to carry the tool cards and the final answer and nothing
+    // between them: the cards appeared one after another with no account of what
+    // the agent had found or was about to do — while the same turn read back from
+    // history showed every step. The narration now arrives as its own event, and
+    // it belongs between the cards, not gathered at the end.
+    await stubAgent(page, { sessions: [SESSION], turnEvents: TURN_NARRATION });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="obj-cubepilot"]').click();
+    await page.locator('[data-od-id="chat-input"]').fill("看看集群");
+    await page.locator('[data-od-id="send-btn"]').click();
+
+    const bubble = page.locator('[data-od-id="agent-bubble"]').last();
+    await expect(bubble.locator("[data-od-block]")).toHaveCount(4);
+    const order = await bubble.locator('[data-od-block]').evaluateAll((els) =>
+      els.map((e) => e.getAttribute("data-od-block")),
+    );
+    // narration, the card it introduced, the next narration, then the answer.
+    expect(order).toEqual(["text", "tool", "text", "text"]);
+    await expect(bubble).toContainText("先看节点。");
+    await expect(bubble).toContainText("节点正常,再看 Pod。");
+    // The answer is its own block: merging it into the narration above would
+    // print the conclusion inside the sentence introducing the tool call.
+    await expect(bubble).toContainText("共 1 个节点。");
   });
 
   test("a turn that survived a reload says so, and offers Stop", async ({ page }) => {

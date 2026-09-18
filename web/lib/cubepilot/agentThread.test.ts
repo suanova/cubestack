@@ -91,6 +91,64 @@ describe("applyAgentEvent — text_replace", () => {
   });
 });
 
+describe("applyAgentEvent — narration", () => {
+  // The agent's between-tool commentary (cubepilot #216). Without these the
+  // stream showed tool cards appearing one after another with nothing between
+  // them, while the same turn read from history showed every step — and, before
+  // the event was known at all, the unknown type left a hole in `msgs` that the
+  // thread crashed on.
+
+  it("appends each step in arrival order, between the cards it introduced", () => {
+    const m = fold([
+      { type: "narration", sessionId: "s", blockId: "n1", text: "先看节点。" },
+      { type: "tool_call", sessionId: "s", name: "exec", callId: "c1", arguments: { command: "kubectl get nodes" } },
+      { type: "narration", sessionId: "s", blockId: "n2", text: "节点正常,看 Pod。" },
+      { type: "tool_call", sessionId: "s", name: "exec", callId: "c2", arguments: { command: "kubectl get pods -A" } },
+    ]);
+    expect(m.blocks.map((b) => b.kind)).toEqual(["text", "tool", "text", "tool"]);
+    expect(textOf(m)).toEqual(["先看节点。", "节点正常,看 Pod。"]);
+  });
+
+  it("replaces a block's text rather than appending the snapshot to it", () => {
+    // `text` is the block's WHOLE text. Appending would print the step once per
+    // snapshot, which is what the lane's re-publish would do.
+    const m = fold([
+      { type: "narration", sessionId: "s", blockId: "n1", text: "先看" },
+      { type: "narration", sessionId: "s", blockId: "n1", text: "先看节点,再看 Pod" },
+    ]);
+    expect(textOf(m)).toEqual(["先看节点,再看 Pod"]);
+  });
+
+  it("keeps the answer out of the narration it follows", () => {
+    // The narration introduces a tool call; the reply is a different thing, and
+    // merging them would print the conclusion inside that sentence.
+    const m = fold([
+      { type: "narration", sessionId: "s", blockId: "n1", text: "先看节点。" },
+      { type: "message_delta", sessionId: "s", delta: "共 1 个节点。" },
+    ]);
+    expect(m.blocks.map((b) => b.kind)).toEqual(["text", "text"]);
+    expect(textOf(m)).toEqual(["先看节点。", "共 1 个节点。"]);
+  });
+
+  it("continues the reply across deltas that follow narration", () => {
+    const m = fold([
+      { type: "narration", sessionId: "s", blockId: "n1", text: "先看节点。" },
+      { type: "message_delta", sessionId: "s", delta: "共 1 个" },
+      { type: "message_delta", sessionId: "s", delta: "节点。" },
+    ]);
+    expect(textOf(m)).toEqual(["先看节点。", "共 1 个节点。"]);
+  });
+
+  it("ignores an event type this build does not know", () => {
+    // A newer API's addition must not take the page down: the fold returns the
+    // message unchanged, rather than nothing, which the caller would store as a
+    // hole in the list and the thread would crash on.
+    const m = fold([{ type: "some_future_event", sessionId: "s" } as unknown as AgentSseEvent]);
+    expect(m.blocks).toEqual([]);
+    expect(m.phase).toBe("thinking");
+  });
+});
+
 describe("applyAgentEvent — approvals", () => {
   const pending: AgentSseEvent = {
     type: "approval_pending",

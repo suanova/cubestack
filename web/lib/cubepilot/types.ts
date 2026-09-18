@@ -234,6 +234,15 @@ export type AgentSseEvent =
   | { type: "agent_thinking"; sessionId: string }
   | { type: "message_delta"; sessionId: string; delta: string }
   | { type: "text_replace"; sessionId: string; delta: string }
+  // The agent's between-tool narration (cubepilot #216): what it found and what
+  // it is about to do. `text` is the block's FULL text, not an increment — the
+  // gateway publishes that lane as one snapshot per block — so a reader replaces
+  // the block's text rather than appending to it. The same `blockId` means the
+  // same block; a new one means the agent has moved on to a new step.
+  //
+  // It is NOT the answer: that still arrives as `message_delta` / `text_replace`
+  // and must not be merged into a narration block.
+  | { type: "narration"; sessionId: string; blockId: string; text: string }
   | { type: "tool_call"; sessionId: string; name: string; callId?: string; arguments?: unknown }
   | { type: "tool_result"; sessionId: string; callId?: string; name?: string; output?: string }
   | { type: "message_done"; sessionId: string; error?: string; stopped?: boolean }
