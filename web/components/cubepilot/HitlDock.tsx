@@ -71,7 +71,7 @@ export function ApprovalCard({
       sx={{
         border: 1,
         borderColor: `color-mix(in oklch, ${STATUS_WARN} 55%, var(--border))`,
-        borderRadius: 6,
+        borderRadius: 2,
         bgcolor: `color-mix(in oklch, ${STATUS_WARN} 9%, transparent)`,
         p: "10px 12px",
         display: "flex",
@@ -138,7 +138,7 @@ export function ApprovalCard({
                 wordBreak: "break-all",
                 bgcolor: "var(--surface)",
                 border: "1px solid var(--border)",
-                borderRadius: 5,
+                borderRadius: 2,
                 p: "7px 10px",
               }}
             >
@@ -260,7 +260,7 @@ export function QuestionCard({
       sx={{
         border: 1,
         borderColor: "var(--violet-bd)",
-        borderRadius: 6,
+        borderRadius: 2,
         bgcolor: "color-mix(in oklch, var(--violet) 9%, transparent)",
         p: "10px 12px",
         display: "flex",
@@ -309,7 +309,7 @@ export function QuestionCard({
                         color: active ? "#fff" : "text.primary",
                         border: 1,
                         borderColor: active ? "var(--accent)" : "divider",
-                        borderRadius: 6,
+                        borderRadius: 2,
                         p: "6px 10px",
                         cursor: locked ? "default" : "pointer",
                         bgcolor: active ? "var(--accent)" : "transparent",
