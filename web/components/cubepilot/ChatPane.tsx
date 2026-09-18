@@ -293,6 +293,9 @@ export function ChatPane() {
   const idRef = useRef(0);
   /** Polls history while a turn is in flight after a reload. */
   const turnPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  /** The raw history document last rendered, so the in-flight poll can skip a
+   *  re-render (and a re-scroll) when the server's copy has not moved. */
+  const lastHistoryRef = useRef<string>("");
 
   const svc = models.find((s) => s.id === svcId) ?? null;
   const endpointText = endpoint ? `${endpoint}/v1/chat/completions` : "";
@@ -539,6 +542,7 @@ export function ChatPane() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const body = (await res.json()) as { items?: HistoryMessage[] };
       if (genRef.current !== gen) return true;
+      lastHistoryRef.current = JSON.stringify(body.items ?? []);
       const restored = historyToMsgs(body.items ?? [], nextId);
       setMsgs(restored);
       return restored.length > 0;
@@ -611,6 +615,28 @@ export function ChatPane() {
     }
   }
 
+  /**
+   * Re-read the history, but only re-render when the server's copy actually
+   * moved. A naive reload every 3s would hand `msgs` a new array each time, and
+   * the thread's autoscroll keys on it — the reader would be yanked to the bottom
+   * mid-scrollback for the whole length of a turn.
+   */
+  async function refreshHistoryIfChanged(key: string): Promise<void> {
+    const gen = genRef.current;
+    try {
+      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/messages`);
+      if (!res.ok) return;
+      const body = (await res.json()) as { items?: HistoryMessage[] };
+      if (genRef.current !== gen) return;
+      const raw = JSON.stringify(body.items ?? []);
+      if (raw === lastHistoryRef.current) return;
+      lastHistoryRef.current = raw;
+      setMsgs(historyToMsgs(body.items ?? [], nextId));
+    } catch {
+      /* a dropped poll is not an error; the next one re-reads */
+    }
+  }
+
   /** Poll history every 3s while a reloaded turn is still in flight. */
   function startTurnPolling(key: string): void {
     stopTurnPolling();
@@ -634,6 +660,13 @@ export function ChatPane() {
         // "nothing is running" retires the state.
         if (active === true) {
           setRunningElsewhere(true);
+          // Keep the transcript moving while the turn runs. Without this the view
+          // is frozen until the turn ENDS — which is what a reader sees when the
+          // turn was started in ANOTHER browser (one fixed key means one
+          // conversation, so that is now the ordinary case) or after their own
+          // stream died. The runtime writes a running turn into the history as it
+          // goes, so re-reading it is what makes the output appear at all.
+          await refreshHistoryIfChanged(key);
           return;
         }
         stopTurnPolling();

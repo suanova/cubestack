@@ -236,6 +236,9 @@ interface Stubs {
   /** null → the agent API is unavailable (503 on /sessions). */
   sessions?: object[] | null;
   history?: object[];
+  /** Successive /messages bodies, the last one repeating. Lets a spec watch the
+   *  transcript update WHILE a turn runs, which is the no-local-stream case. */
+  historySequence?: object[][];
   turnActive?: boolean;
   /** The /turn read itself fails (502, as the route answers when it could not
    *  determine). "Could not check" is not the same as "nothing is running". */
@@ -273,6 +276,7 @@ async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
   // must still see nothing pending, or it would attach the card before the turn
   // that raises it has even started.
   let refusedAnswer = false;
+  let messagesRead = 0;
   const sessions = stubs.sessions === undefined ? [] : stubs.sessions;
   await page.route("**/api/cubepilot/**", async (route) => {
     const req = route.request();
@@ -339,6 +343,10 @@ async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
       }
       if (path.endsWith("/messages")) {
         captured.historyPaths.push(path);
+        if (stubs.historySequence?.length) {
+          const i = Math.min(messagesRead++, stubs.historySequence.length - 1);
+          return json({ items: stubs.historySequence[i] });
+        }
         return json({ items: stubs.history ?? [] });
       }
       if (path.endsWith("/api/v1/sessions")) {
@@ -573,6 +581,34 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     expect(
       captured.historyPaths.map((p) => decodeURIComponent(p)).some((p) => p.includes("/sessions/agent:main:conv-portal/messages")),
     ).toBe(true);
+  });
+
+  test("a turn running elsewhere updates the transcript while it runs", async ({ page }) => {
+    // This view has no stream — the turn was started in ANOTHER browser (one
+    // fixed key means one conversation, so that is now the ordinary case) or its
+    // own stream died. Re-reading the history is the only way its output can
+    // appear BEFORE the turn ends, and the runtime does write a running turn into
+    // it as it goes. Without the poll the view sits frozen until the turn is over,
+    // which reads as "the agent is running and producing nothing".
+    await stubAgent(page, {
+      sessions: [SESSION],
+      turnActive: true,
+      historySequence: [
+        [{ role: "user", content: "在跑吗?" }],
+        [
+          { role: "user", content: "在跑吗?" },
+          { role: "assistant", content: [{ type: "toolCall", id: "t1", name: "exec", arguments: { command: "kubectl get nodes" } }] },
+        ],
+      ],
+    });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="obj-cubepilot"]').click();
+    await expect(page.locator('[data-od-id="agent-status"]')).toContainText("仍在运行");
+
+    // No interaction at all: the 3s poll brings the tool call in on its own.
+    await expect(page.locator('[data-od-id="agent-bubble"] [data-od-id="tool-card"]')).toHaveCount(1, {
+      timeout: 15_000,
+    });
   });
 
   test("a turn that survived a reload says so, and offers Stop", async ({ page }) => {
