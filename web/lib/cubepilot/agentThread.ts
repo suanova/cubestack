@@ -354,8 +354,28 @@ export function fmtToolArgs(args: unknown): string | undefined {
   return typeof safe === "string" ? safe : JSON.stringify(safe);
 }
 
-// ── history ──────────────────────────────────────────────────────────────
+/** How much of a command the collapsed tool card keeps before cutting it. Wide
+ *  enough for a real `kubectl … | jq …` line, short enough that a pathological
+ *  one-liner cannot be poured into the DOM of every card in the thread. */
+export const TOOL_SUMMARY_CHARS = 160;
 
+/**
+ * The one line a collapsed tool card shows of what it ran.
+ *
+ * A command is routinely multi-line — a `kubectl` pipeline with a `jq` filter is
+ * eight lines — and the card's header is a single row, so this is the command's
+ * first non-empty line. Whatever is still too wide for the card is trimmed by the
+ * browser's own ellipsis, which costs the text nothing; only a line past
+ * TOOL_SUMMARY_CHARS is cut here, and that is what the trailing marker means. The
+ * whole command is one click away in the expanded card.
+ */
+export function toolSummary(args: string | undefined): string {
+  const line = args?.split("\n").map((l) => l.trim()).find((l) => l !== "");
+  if (!line) return "";
+  return line.length > TOOL_SUMMARY_CHARS ? `${line.slice(0, TOOL_SUMMARY_CHARS).trimEnd()}…` : line;
+}
+
+// ── history ──────────────────────────────────────────────────────────────
 /**
  * Fold the runtime's history document into messages.
  *

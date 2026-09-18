@@ -9,6 +9,8 @@ import {
   isExpiring,
   newAgentMsg,
   remainingSeconds,
+  TOOL_SUMMARY_CHARS,
+  toolSummary,
   turnStatus,
   waitingOnUser,
 } from "./agentThread";
@@ -404,6 +406,50 @@ describe("fmtToolArgs", () => {
     const out = fmtToolArgs({ headers: { authorization: "Bearer abc" }, nested: [{ apiKey: "k" }] });
     expect(out).not.toContain("Bearer abc");
     expect(out).toContain("••••••");
+  });
+});
+
+describe("toolSummary", () => {
+  // The collapsed card names what it ran. Without this the header said only
+  // "exec", and the reader had to open every card to find the command that
+  // produced the output they were scanning for.
+
+  it("is the command, for the common one-liner", () => {
+    expect(toolSummary("kubectl get pods -A")).toBe("kubectl get pods -A");
+  });
+
+  it("is the first line of a multi-line command, not all of them", () => {
+    // A pipeline written across lines would otherwise push the header apart.
+    expect(toolSummary("kubectl get pods -A -o json \\\n  | jq '.items' \\\n  | head")).toBe(
+      "kubectl get pods -A -o json \\",
+    );
+  });
+
+  it("skips leading blank lines rather than showing an empty header", () => {
+    expect(toolSummary("\n\n   \nkubectl get nodes")).toBe("kubectl get nodes");
+  });
+
+  it("marks a line it had to cut, and says nothing else", () => {
+    const long = "kubectl get pods -A -o jsonpath=" + "x".repeat(400);
+    const out = toolSummary(long);
+    expect(out).toHaveLength(TOOL_SUMMARY_CHARS + 1);
+    expect(out.endsWith("…")).toBe(true);
+    // The marker is ours, not the command's: what precedes it is verbatim.
+    expect(long.startsWith(out.slice(0, -1))).toBe(true);
+  });
+
+  it("does not cut a line that only looks long because of its width", () => {
+    // Truncation for display is the browser's job; cutting here would take
+    // characters a wide card could have shown.
+    const line = "kubectl ".repeat(10).trim();
+    expect(line.length).toBeLessThan(TOOL_SUMMARY_CHARS);
+    expect(toolSummary(line)).toBe(line);
+  });
+
+  it("is empty when there is nothing to name", () => {
+    expect(toolSummary(undefined)).toBe("");
+    expect(toolSummary("")).toBe("");
+    expect(toolSummary("   \n  ")).toBe("");
   });
 });
 

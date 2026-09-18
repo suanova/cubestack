@@ -745,6 +745,12 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     const card = page.locator('[data-od-id="tool-card"]').first();
     await expect(card.locator('[data-od-id="tool-card-head"]')).toHaveAttribute("aria-expanded", "false");
     await expect(card.locator('[data-od-id="tool-output"]')).toHaveCount(0);
+    // The command is named on the closed card. The header used to carry only the
+    // tool's name, so a reader scanning a thread of `exec` cards had to open each
+    // one — and close it again — to find the command behind the output they were
+    // looking for.
+    await expect(card.locator('[data-od-id="tool-card-command"]')).toHaveText("ceph df");
+    await expect(card.locator('[data-od-id="tool-card-head"]')).toContainText("shell");
 
     await card.locator('[data-od-id="tool-card-head"]').click();
     await expect(card.locator('[data-od-id="tool-output"]')).toContainText("POOL USED");

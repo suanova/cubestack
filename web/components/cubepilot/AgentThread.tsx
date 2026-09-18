@@ -21,6 +21,7 @@ import ReactMarkdown from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 
+import { toolSummary } from "@/lib/cubepilot/agentThread";
 import type { AgentApproval, AgentBlock, AgentMsg, AgentQuestion, ThreadMsg } from "@/lib/cubepilot/agentThread";
 import { useI18n } from "@/lib/i18n";
 
@@ -85,6 +86,11 @@ function ToolCard({
     : block.done
       ? { variant: "ok" as const, label: t("cubepilot.chat.toolDone"), pulse: false }
       : { variant: "neutral" as const, label: t("cubepilot.chat.toolStopped"), pulse: false };
+  // What it ran, on the header itself: "exec" alone names the tool and not the
+  // work, and a reader had to open every card — and close it again — to find out
+  // which command produced the output they were scanning for. The card is still
+  // collapsed by default; this is the label on the closed drawer.
+  const summary = toolSummary(block.args);
   return (
     <Box
       data-od-id="tool-card"
@@ -112,10 +118,38 @@ function ToolCard({
         }}
       >
         <Box sx={{ color: "var(--violet-text)", display: "flex", flex: "none" }}>{Icons.tool({ size: 13 })}</Box>
-        <Box sx={{ ...monoSx, fontSize: 11.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        <Box sx={{ ...monoSx, fontSize: 11.5, fontWeight: 600, flex: "none", whiteSpace: "nowrap" }}>
           {block.name}
         </Box>
-        <Pill variant={pill.variant} dot pulse={pill.pulse} sx={{ ml: "auto" }}>
+        {summary ? (
+          <Box
+            component="span"
+            data-od-id="tool-card-command"
+            // The full summary on hover, for a command the row is too narrow to
+            // finish. Not the whole args: a multi-line command would put eight
+            // lines in a tooltip, and the open card is where that belongs.
+            title={summary}
+            sx={{
+              ...monoSx,
+              fontSize: 11.5,
+              fontWeight: 400,
+              color: "text.secondary",
+              // Shrinks before anything else: the tool's name and its status must
+              // both stay whole, and only the command has a longer form behind a
+              // click.
+              minWidth: 0,
+              flex: "1 1 auto",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {summary}
+          </Box>
+        ) : (
+          <Box component="span" sx={{ flex: "1 1 auto" }} />
+        )}
+        <Pill variant={pill.variant} dot pulse={pill.pulse} sx={{ flex: "none" }}>
           {pill.label}
         </Pill>
         <Box component="span" aria-hidden sx={{ ...monoSx, fontSize: 10, color: "text.secondary", flex: "none" }}>
