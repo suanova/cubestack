@@ -16,7 +16,7 @@
 // to the work it let through, not in the composer.
 
 import { Box } from "@mui/material";
-import { ReactNode, useState } from "react";
+import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkBreaks from "remark-breaks";
 
@@ -420,14 +420,10 @@ export function AgentThread({
   msgs: ThreadMsg[];
   sessionKey: string | null;
   // `now` dates a running turn's status line (Task 7) and the countdown of any
-  // question on a card. The two decision dispatchers and the composer slot are
-  // part of this component's interface with the pane but are not read: the dock
-  // owns the cards that can still be answered, and the ones this component draws
-  // are settled, which is to say controls-free.
+  // question on a card. There are no decision dispatchers and no composer slot
+  // to pass: the dock owns every card that can still be answered, and the ones
+  // this component draws are settled, which is to say controls-free.
   now: number;
-  onDecideApproval: (msgId: number, callId: string, decision: "approve" | "reject" | "allow-always") => void;
-  onAnswerQuestion: (msgId: number, callId: string, answers: Record<string, string[]>, cancel: boolean) => void;
-  composerSlot?: ReactNode;
 }) {
   const [openedTools, setOpenedTools] = useState<Record<string, boolean>>({});
   return (

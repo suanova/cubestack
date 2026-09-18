@@ -59,12 +59,14 @@ import { CopyBtn, ParamsPanel, SampleParams } from "./Playground";
 import { AgentThread } from "./AgentThread";
 import { Btn, Card, CpTextArea, Icons, Pill, monoSx, useToast } from "./ui";
 
-// The portal tokens have no violet; one hue + color-mix against var(--fg)
-// adapts to the theme (dark violet on light, light violet on dark).
-const VIOLET = "oklch(0.55 0.2 290)";
-const VIOLET_BORDER = `color-mix(in oklch, ${VIOLET} 55%, var(--border))`;
-const VIOLET_TEXT = `color-mix(in oklch, ${VIOLET} 75%, var(--fg))`;
-const VIOLET_SOFT = `color-mix(in oklch, ${VIOLET} 9%, transparent)`;
+// The agent's identity colour is the violet globals.css derives from --accent,
+// so the object list reads that token rather than hardcoding its own hue. The
+// mix percentages are the prototype's (chat.html:169,163): the selected row's
+// border is the strong 55%, deliberately not the agent bubble's --violet-bd
+// (42%) — a row carries no tinted fill of its own, so the border alone has to
+// say "selected".
+const VIOLET_BORDER = "color-mix(in oklch, var(--violet) 55%, var(--border))";
+const VIOLET_SOFT = "color-mix(in oklch, var(--violet) 9%, transparent)";
 const ACCENT_FILL = "color-mix(in oklch, var(--accent) 82%, var(--fg))";
 
 // The object list is a draggable pane: the column width is component state,
@@ -256,6 +258,17 @@ export function ChatPane() {
 
   const inputEl = useRef<HTMLTextAreaElement | null>(null);
   const threadEl = useRef<HTMLDivElement | null>(null);
+  // The thread always follows the newest content. requestAnimationFrame so the
+  // new block is laid out before the scroll is measured; there is deliberately
+  // no "user scrolled up" suppression, matching the reference.
+  useEffect(() => {
+    const el = threadEl.current;
+    if (!el) return;
+    const id = requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+    });
+    return () => cancelAnimationFrame(id);
+  }, [msgs]);
   /** The composer's sampling-params chip; anchors the params popover. */
   const paramsChipRef = useRef<HTMLButtonElement | null>(null);
   // Guards against in-flight fetch/stream from a previous object.
@@ -1241,9 +1254,9 @@ export function ChatPane() {
                   borderRadius: 999,
                   border: 1,
                   flex: "none",
-                  color: VIOLET_TEXT,
+                  color: "var(--violet-text)",
                   borderColor: VIOLET_BORDER,
-                  bgcolor: `color-mix(in oklch, ${VIOLET} 10%, transparent)`,
+                  bgcolor: "color-mix(in oklch, var(--violet) 10%, transparent)",
                 }}
               >
                 {t("cubepilot.chat.badgeAgent")}
@@ -1330,7 +1343,7 @@ export function ChatPane() {
                   placeItems: "center",
                   color: "#fff",
                   flex: "none",
-                  bgcolor: isAgent ? VIOLET : ACCENT_FILL,
+                  bgcolor: isAgent ? "var(--violet-solid)" : ACCENT_FILL,
                 }}
               >
                 {isAgent ? Icons.spark({ size: 15 }) : Icons.cube({ size: 15 })}
@@ -1452,13 +1465,7 @@ export function ChatPane() {
                 turn looks like — drawing it here as well would print every
                 message twice (AgentThread draws the user's too). */}
             {isAgent ? (
-              <AgentThread
-                msgs={agentMsgs}
-                sessionKey={agentSessionKey}
-                now={now}
-                onDecideApproval={(msgId, callId, decision) => void decideApproval(callId, decision)}
-                onAnswerQuestion={(msgId, callId, answers, cancel) => void submitQuestion(callId, answers, cancel)}
-              />
+              <AgentThread msgs={agentMsgs} sessionKey={agentSessionKey} now={now} />
             ) : (
               msgs.map((m) =>
                 m.role === "model" ? (

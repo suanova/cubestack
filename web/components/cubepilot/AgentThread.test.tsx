@@ -21,8 +21,6 @@ type ToolBlock = Extract<AgentBlock, { kind: "tool" }>;
 const S1 = "agent:main:conv-1";
 const S2 = "agent:main:conv-2";
 
-const noop = (): void => {};
-
 /** A settled agent turn; a case overrides only what it is about. */
 function agentMsg(id: number, blocks: AgentBlock[], over: Partial<AgentMsg> = {}): AgentMsg {
   return { id, role: "agent", blocks, approvals: [], questions: [], phase: "done", phaseAt: 0, ...over };
@@ -39,7 +37,7 @@ function tool(over: Partial<ToolBlock> = {}): ToolBlock {
 }
 
 function view(msgs: ThreadMsg[], sessionKey: string | null) {
-  return h(AgentThread, { msgs, sessionKey, now: 0, onDecideApproval: noop, onAnswerQuestion: noop });
+  return h(AgentThread, { msgs, sessionKey, now: 0 });
 }
 
 const roots: Root[] = [];
