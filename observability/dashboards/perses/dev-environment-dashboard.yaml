@@ -1,186 +1,187 @@
-kind: Dashboard
+apiVersion: perses.dev/v1alpha2
+kind: PersesDashboard
 metadata:
     name: dev-environment-dashboard
-    version: 0
-    project: cubestack
+    namespace: monitoring
 spec:
-    display:
-        name: Dev Environment
-        description: "Dev Environment: GPU, CPU, memory, network and storage usage per instance"
-    variables:
-    -   kind: ListVariable
-        spec:
-            # The dev pool's instances (dev-test-1, dev-demo-1, ...) are the GPU
-            # machines that host Dev Environments. They are scoped by usage so
-            # the dropdown lists only them — the GPU Overview's `node` and `gpu`
-            # dropdowns (which include the inference machines) are the cluster
-            # view; this dashboard is the dev-pool view.
-            display:
+    config:
+        display:
+            name: Dev Environment
+            description: "Dev Environment: GPU, CPU, memory, network and storage usage per instance"
+        variables:
+        -   kind: ListVariable
+            spec:
+                # The dev pool's instances (dev-test-1, dev-demo-1, ...) are the GPU
+                # machines that host Dev Environments. They are scoped by usage so
+                # the dropdown lists only them — the GPU Overview's `node` and `gpu`
+                # dropdowns (which include the inference machines) are the cluster
+                # view; this dashboard is the dev-pool view.
+                display:
+                    name: instance
+                    hidden: false
+                defaultValue: $__all
+                allowAllValue: true
+                allowMultiple: false
+                customAllValue: .*
+                sort: alphabetical-asc
+                plugin:
+                    kind: PrometheusLabelValuesVariable
+                    spec:
+                        datasource:
+                            kind: PrometheusDatasource
+                            name: prometheus-datasource
+                        labelName: instance
+                        matchers:
+                        - DCGM_FI_DEV_GPU_UTIL{usage="devEnvironment"}
                 name: instance
-                hidden: false
-            defaultValue: $__all
-            allowAllValue: true
-            allowMultiple: false
-            customAllValue: .*
-            sort: alphabetical-asc
-            plugin:
-                kind: PrometheusLabelValuesVariable
+        panels:
+            "0":
+                kind: Panel
                 spec:
-                    datasource:
-                        kind: PrometheusDatasource
-                        name: prometheus-datasource
-                    labelName: instance
-                    matchers:
-                    - DCGM_FI_DEV_GPU_UTIL{usage="devEnvironment"}
-            name: instance
-    panels:
-        "0":
-            kind: Panel
+                    display:
+                        name: GPU Usage
+                    plugin:
+                        kind: TimeSeriesChart
+                        spec:
+                            legend:
+                                mode: list
+                                position: bottom
+                    queries:
+                    -   kind: TimeSeriesQuery
+                        spec:
+                            plugin:
+                                kind: PrometheusTimeSeriesQuery
+                                spec:
+                                    datasource:
+                                        kind: PrometheusDatasource
+                                        name: prometheus-datasource
+                                    minStep: ''
+                                    query: avg by (instance) (DCGM_FI_DEV_GPU_UTIL{instance=~"$instance", usage="devEnvironment"})
+                                    seriesNameFormat: '{{instance}}'
+            "1":
+                kind: Panel
+                spec:
+                    display:
+                        name: CPU Usage
+                    plugin:
+                        kind: TimeSeriesChart
+                        spec:
+                            legend:
+                                mode: list
+                                position: bottom
+                    queries:
+                    -   kind: TimeSeriesQuery
+                        spec:
+                            plugin:
+                                kind: PrometheusTimeSeriesQuery
+                                spec:
+                                    datasource:
+                                        kind: PrometheusDatasource
+                                        name: prometheus-datasource
+                                    minStep: ''
+                                    query: node_cpu_usage{instance=~"$instance", usage="devEnvironment"}
+                                    seriesNameFormat: '{{instance}}'
+            "2":
+                kind: Panel
+                spec:
+                    display:
+                        name: Memory Usage
+                    plugin:
+                        kind: TimeSeriesChart
+                        spec:
+                            legend:
+                                mode: list
+                                position: bottom
+                    queries:
+                    -   kind: TimeSeriesQuery
+                        spec:
+                            plugin:
+                                kind: PrometheusTimeSeriesQuery
+                                spec:
+                                    datasource:
+                                        kind: PrometheusDatasource
+                                        name: prometheus-datasource
+                                    minStep: ''
+                                    query: node_memory_usage{instance=~"$instance", usage="devEnvironment"}
+                                    seriesNameFormat: '{{instance}}'
+            "3":
+                kind: Panel
+                spec:
+                    display:
+                        name: Network Usage
+                    plugin:
+                        kind: TimeSeriesChart
+                        spec:
+                            legend:
+                                mode: list
+                                position: bottom
+                    queries:
+                    -   kind: TimeSeriesQuery
+                        spec:
+                            plugin:
+                                kind: PrometheusTimeSeriesQuery
+                                spec:
+                                    datasource:
+                                        kind: PrometheusDatasource
+                                        name: prometheus-datasource
+                                    minStep: ''
+                                    query: node_network_usage{instance=~"$instance", usage="devEnvironment"}
+                                    seriesNameFormat: '{{instance}}'
+            "4":
+                kind: Panel
+                spec:
+                    display:
+                        name: Storage Usage
+                    plugin:
+                        kind: TimeSeriesChart
+                        spec:
+                            legend:
+                                mode: list
+                                position: bottom
+                    queries:
+                    -   kind: TimeSeriesQuery
+                        spec:
+                            plugin:
+                                kind: PrometheusTimeSeriesQuery
+                                spec:
+                                    datasource:
+                                        kind: PrometheusDatasource
+                                        name: prometheus-datasource
+                                    minStep: ''
+                                    query: node_storage_usage{instance=~"$instance", usage="devEnvironment"}
+                                    seriesNameFormat: '{{instance}}'
+        layouts:
+        -   kind: Grid
             spec:
-                display:
-                    name: GPU Usage
-                plugin:
-                    kind: TimeSeriesChart
-                    spec:
-                        legend:
-                            mode: list
-                            position: bottom
-                queries:
-                -   kind: TimeSeriesQuery
-                    spec:
-                        plugin:
-                            kind: PrometheusTimeSeriesQuery
-                            spec:
-                                datasource:
-                                    kind: PrometheusDatasource
-                                    name: prometheus-datasource
-                                minStep: ''
-                                query: avg by (instance) (DCGM_FI_DEV_GPU_UTIL{instance=~"$instance", usage="devEnvironment"})
-                                seriesNameFormat: '{{instance}}'
-        "1":
-            kind: Panel
-            spec:
-                display:
-                    name: CPU Usage
-                plugin:
-                    kind: TimeSeriesChart
-                    spec:
-                        legend:
-                            mode: list
-                            position: bottom
-                queries:
-                -   kind: TimeSeriesQuery
-                    spec:
-                        plugin:
-                            kind: PrometheusTimeSeriesQuery
-                            spec:
-                                datasource:
-                                    kind: PrometheusDatasource
-                                    name: prometheus-datasource
-                                minStep: ''
-                                query: node_cpu_usage{instance=~"$instance", usage="devEnvironment"}
-                                seriesNameFormat: '{{instance}}'
-        "2":
-            kind: Panel
-            spec:
-                display:
-                    name: Memory Usage
-                plugin:
-                    kind: TimeSeriesChart
-                    spec:
-                        legend:
-                            mode: list
-                            position: bottom
-                queries:
-                -   kind: TimeSeriesQuery
-                    spec:
-                        plugin:
-                            kind: PrometheusTimeSeriesQuery
-                            spec:
-                                datasource:
-                                    kind: PrometheusDatasource
-                                    name: prometheus-datasource
-                                minStep: ''
-                                query: node_memory_usage{instance=~"$instance", usage="devEnvironment"}
-                                seriesNameFormat: '{{instance}}'
-        "3":
-            kind: Panel
-            spec:
-                display:
-                    name: Network Usage
-                plugin:
-                    kind: TimeSeriesChart
-                    spec:
-                        legend:
-                            mode: list
-                            position: bottom
-                queries:
-                -   kind: TimeSeriesQuery
-                    spec:
-                        plugin:
-                            kind: PrometheusTimeSeriesQuery
-                            spec:
-                                datasource:
-                                    kind: PrometheusDatasource
-                                    name: prometheus-datasource
-                                minStep: ''
-                                query: node_network_usage{instance=~"$instance", usage="devEnvironment"}
-                                seriesNameFormat: '{{instance}}'
-        "4":
-            kind: Panel
-            spec:
-                display:
-                    name: Storage Usage
-                plugin:
-                    kind: TimeSeriesChart
-                    spec:
-                        legend:
-                            mode: list
-                            position: bottom
-                queries:
-                -   kind: TimeSeriesQuery
-                    spec:
-                        plugin:
-                            kind: PrometheusTimeSeriesQuery
-                            spec:
-                                datasource:
-                                    kind: PrometheusDatasource
-                                    name: prometheus-datasource
-                                minStep: ''
-                                query: node_storage_usage{instance=~"$instance", usage="devEnvironment"}
-                                seriesNameFormat: '{{instance}}'
-    layouts:
-    -   kind: Grid
-        spec:
-            items:
-            -   x: 0
-                "y": 0
-                width: 12
-                height: 8
-                content:
-                    $ref: '#/spec/panels/0'
-            -   x: 12
-                "y": 0
-                width: 12
-                height: 8
-                content:
-                    $ref: '#/spec/panels/1'
-            -   x: 0
-                "y": 8
-                width: 12
-                height: 8
-                content:
-                    $ref: '#/spec/panels/2'
-            -   x: 12
-                "y": 8
-                width: 12
-                height: 8
-                content:
-                    $ref: '#/spec/panels/3'
-            -   x: 0
-                "y": 16
-                width: 24
-                height: 8
-                content:
-                    $ref: '#/spec/panels/4'
-    duration: 1h
+                items:
+                -   x: 0
+                    "y": 0
+                    width: 12
+                    height: 8
+                    content:
+                        $ref: '#/spec/panels/0'
+                -   x: 12
+                    "y": 0
+                    width: 12
+                    height: 8
+                    content:
+                        $ref: '#/spec/panels/1'
+                -   x: 0
+                    "y": 8
+                    width: 12
+                    height: 8
+                    content:
+                        $ref: '#/spec/panels/2'
+                -   x: 12
+                    "y": 8
+                    width: 12
+                    height: 8
+                    content:
+                        $ref: '#/spec/panels/3'
+                -   x: 0
+                    "y": 16
+                    width: 24
+                    height: 8
+                    content:
+                        $ref: '#/spec/panels/4'
+        duration: 1h

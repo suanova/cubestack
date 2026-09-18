@@ -98,7 +98,7 @@ describe("dashboards landing page", () => {
     // The dropdown is present with the localized label.
     expect(container.textContent).toContain("选择看板");
     // Default selection = first dashboard; its panels render below.
-    expect(fetchDashboard).toHaveBeenCalledWith("perses-dev", "metax-gpu");
+    expect(fetchDashboard).toHaveBeenCalledWith("monitoring", "metax-gpu");
     expect(viewerText(container)).toContain("dashboard:metax-gpu");
     // The select's current value is the first dashboard's display name, and the
     // description is read straight off the dashboard resource (spec.display).
@@ -121,7 +121,7 @@ describe("dashboards landing page", () => {
     );
     await act(async () => {});
 
-    expect(fetchDashboard).toHaveBeenLastCalledWith("perses-dev", "kubernetes-cluster-resources-overview");
+    expect(fetchDashboard).toHaveBeenLastCalledWith("monitoring", "kubernetes-cluster-resources-overview");
     expect(viewerText(container)).toContain("dashboard:kubernetes-cluster-resources-overview");
     expect(container.textContent).toContain("Cluster Overview");
 
@@ -135,7 +135,7 @@ describe("dashboards landing page", () => {
     const { container, root } = renderPage(Promise.resolve({ dashboard: "nope-dashboard" }));
     await act(async () => {});
 
-    expect(fetchDashboard).toHaveBeenLastCalledWith("perses-dev", "metax-gpu");
+    expect(fetchDashboard).toHaveBeenLastCalledWith("monitoring", "metax-gpu");
     expect(viewerText(container)).toContain("dashboard:metax-gpu");
 
     act(() => root.unmount());
@@ -164,7 +164,7 @@ describe("dashboards landing page", () => {
     });
     await act(async () => {});
 
-    expect(fetchDashboard).toHaveBeenLastCalledWith("perses-dev", "kubernetes-cluster-resources-overview");
+    expect(fetchDashboard).toHaveBeenLastCalledWith("monitoring", "kubernetes-cluster-resources-overview");
     expect(viewerText(container)).toContain("dashboard:kubernetes-cluster-resources-overview");
     // The description follows the selection, straight from the list payload.
     expect(container.textContent).toContain("Cluster resource usage at a glance");

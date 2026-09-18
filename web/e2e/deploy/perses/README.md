@@ -51,9 +51,13 @@ Service:
 PERSES_SERVER_URL=http://perses.<namespace>.svc:8080
 ```
 
-The dashboards live in project `perses-dev` (see
-`provisioning/project.yaml`). The portal's `NEXT_PUBLIC_PERSES_PROJECT` env
-(defaults to `perses-dev`) must match.
+The dashboards live in project `monitoring` (see
+`provisioning/project.yaml`). The portal resolves the project server-side:
+set the `PERSES_PROJECT` env var on the deployment (helm:
+`env.PERSES_PROJECT`) to the project the dashboards live in — the
+`/api/perses` proxy substitutes it into the client's request paths, so no
+portal rebuild is needed. It defaults to `monitoring`, matching this
+provisioning.
 
 ## Image version
 

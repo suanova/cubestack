@@ -5,9 +5,13 @@
 
 export const PERSES_PROXY_BASE_PATH = "/api/perses";
 
-// Project the provisioned dashboards live in on the Perses server. Overridable
-// at build time; must match e2e/deploy/perses/provisioning/project.yaml.
-export const PERSES_PROJECT = process.env.NEXT_PUBLIC_PERSES_PROJECT ?? "perses-dev";
+// Project the provisioned dashboards live in on the Perses server. This is
+// the build-time default baked into the client bundle; the deployment's
+// actual project comes from the PERSES_PROJECT env var (helm: env.PERSES_PROJECT)
+// and is applied server-side — the /api/perses proxy substitutes it into the
+// request path, so changing projects never requires a rebuild. Must match the
+// namespace the PersesDashboard CRs live in (namespace = project).
+export const PERSES_PROJECT = process.env.NEXT_PUBLIC_PERSES_PROJECT ?? "monitoring";
 
 declare global {
   interface Window {
