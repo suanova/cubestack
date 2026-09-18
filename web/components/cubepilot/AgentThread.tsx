@@ -41,9 +41,18 @@ const userBubbleSx = {
 } as const;
 
 /** An agent turn, left-aligned, bordered in the agent's own hue
- *  (prototype chat.html:210 — the same 42% mix globals.css names --violet-bd). */
+ *  (prototype chat.html:210 — the same 42% mix globals.css names --violet-bd).
+ *
+ *  minWidth is a FLOOR, and it is load-bearing. A bubble with only maxWidth is
+ *  shrink-to-fit, so a turn whose whole content is one collapsed tool card
+ *  collapses to that card: measured at 193px inside a 1442px thread, held for
+ *  as long as the model took to write its closing text, then jumping to 1153px.
+ *  The card looked broken for those seconds. The floor keeps the transcript's
+ *  left edge stable while the turn is still producing; `min()` stops it from
+ *  beating maxWidth on a narrow screen, where 82% is the smaller of the two. */
 const agentBubbleSx = {
   alignSelf: "flex-start",
+  minWidth: "min(560px, 82%)",
   maxWidth: "82%",
   p: "11px 14px",
   borderRadius: "var(--radius)",
