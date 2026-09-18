@@ -30,15 +30,15 @@ spec:
         {{- with .Values.gateway.name }}
         - --gateway-name={{ . }}
         {{- end }}
-        {{- with .Values.gateway.namespace }}
-        - --gateway-namespace={{ . }}
-        {{- end }}
+        - --gateway-namespace={{ .Release.Namespace }}
         {{- if .Values.gateway.domain }}
         - --gateway-domain={{ .Values.gateway.domain }}
         {{- end }}
         {{- with .Values.gateway.dataplaneNamespace }}
         - --gateway-dataplane-namespace={{ . }}
         {{- end }}
+        - --l4-port-range-start={{ .Values.l4PortRange.start }}
+        - --l4-port-range-end={{ .Values.l4PortRange.end }}
         command:
         - /manager
         image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"

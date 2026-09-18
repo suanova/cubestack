@@ -61,15 +61,23 @@ const (
 	// controller-managed host-key Secret holds the ed25519 host keypair, and the
 	// authorized-keys source holds the content the workload mounts as
 	// authorized_keys — the user's Secret when spec.ssh.keysSecret names one, at
-	// the data key its selector names, else a controller-generated one.
-	sshHostKeyKey        = "ssh_host_ed25519_key"
-	sshHostPubKeyKey     = "ssh_host_ed25519_key.pub"
+	// the data key its selector names, else the controller-generated one at
+	// sshClientPubKeyKey.
+	sshHostKeyKey    = "ssh_host_ed25519_key"
+	sshHostPubKeyKey = "ssh_host_ed25519_key.pub"
+
+	// sshAuthorizedKeysKey is the copy of the login public key older controller
+	// versions wrote into the generated Secret as the entry to mount. The mount
+	// takes sshClientPubKeyKey itself now, and a leftover copy is deleted on
+	// sight: it would otherwise look like the entry to edit, and editing it
+	// changes nothing. It is still the conventional data key in a user's own keys
+	// Secret, which spec.ssh.keysSecret names for itself.
 	sshAuthorizedKeysKey = "authorized_keys"
 
 	// The generated login keypair, written only into the controller-generated
 	// authorized-keys Secret: the private key its owner can retrieve through
-	// status.sshKeysSecret, and the public half that authorizes it. Only
-	// sshAuthorizedKeysKey is ever mounted, so the private key never reaches the
+	// status.sshKeysSecret, and the public half the workload mounts. Only
+	// sshClientPubKeyKey is ever mounted, so the private key never reaches the
 	// container.
 	sshClientKeyKey    = "id_ed25519"
 	sshClientPubKeyKey = "id_ed25519.pub"

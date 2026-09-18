@@ -313,8 +313,32 @@ type PortSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 
-	// Type is the exposure form: http (web over sub path) / tcp (port range +
-	// TCPRoute) / udp (UDPRoute).
+	// Type is the exposure form.
+	//
+	// http publishes the port as a sub path of the Gateway's HTTP listener —
+	// /dev/<namespace>/<name>/port/<this port's name>/ — and the request
+	// reaches the container in cleartext. It is not a way to expose a port that
+	// serves TLS: the container would receive a plain HTTP request where it
+	// expects a TLS handshake, and the Gateway does not re-encrypt to it.
+	//
+	// tcp publishes the port over L4 instead — a listener of the environment's
+	// own, on a port from the platform's L4 range, plus a TCPRoute — with
+	// nothing above it interpreting the stream.
+	//
+	// A port that serves TLS is exposed as tcp, and as tcp only: the handshake
+	// crosses the Gateway untouched and the client validates the certificate
+	// the container itself presents, so the address in status.endpoints is
+	// reached by prefixing the scheme — an app terminating TLS on 8443 is
+	// published with type tcp and containerPort 8443, and reached at
+	// https://<address>. The platform neither terminates nor re-originates TLS,
+	// and what it publishes is an address, not a hostname: matching an endpoint
+	// by SNI (a TLSRoute on a shared TLS listener) is not implemented, so the
+	// certificate has to cover the address the client dials.
+	//
+	// udp publishes the port over L4 the same way, as a listener and a UDPRoute
+	// of its own, and the address in status.endpoints is reached by prefixing
+	// udp://. tcp and udp draw on the same pool, and a number is held by one
+	// protocol only: the two cannot be published on the same port number.
 	// +kubebuilder:validation:Enum=http;tcp;udp
 	// +kubebuilder:default=http
 	// +optional
@@ -376,13 +400,24 @@ type DevEnvironmentStatus struct {
 	// SSHKeysSecret is the Secret the environment's SSH authorized_keys come
 	// from: the user-provided one from spec.ssh.keysSecret, or a
 	// controller-generated one. It is recorded in status so the user can retrieve
-	// generated keys. The key named here is the data entry mounted at
-	// /run/ssh/authorized_keys (the volume renames it); rotating that entry reaches
-	// a running container without a restart. In the generated case the same Secret
-	// also carries the private key to log in with, as id_ed25519. The environment's
-	// host key is not here: it lives in the separate <env>-ssh-host-key Secret.
+	// generated keys. Which data entry holds what depends on the case: with a
+	// keysSecret of its own, the authorized_keys content is the entry that
+	// selector names, and the Secret is mounted as it is. The generated Secret
+	// instead holds a login keypair: id_ed25519, the private half to log in with,
+	// and id_ed25519.pub, which is what the container mounts as authorized_keys.
+	// The environment's host key is not here: it lives in the separate
+	// <env>-ssh-host-key Secret.
 	// +optional
-	SSHKeysSecret *corev1.SecretKeySelector `json:"sshKeysSecret,omitempty"`
+	SSHKeysSecret *corev1.SecretReference `json:"sshKeysSecret,omitempty"`
+
+	// JupyterAuthSecret is the Secret the environment's Jupyter token comes from,
+	// for a jupyter environment: the managed <env>-auth Secret the controller
+	// generates, holding the token under the data key "token". It is recorded in
+	// status so the user can retrieve the token, which the web route requires.
+	// Absent for every other environment type, which serves no authenticated web
+	// path.
+	// +optional
+	JupyterAuthSecret *corev1.SecretReference `json:"jupyterAuthSecret,omitempty"`
 
 	// LastActivityTime is the last activity time, used for idle timeout
 	// determination.
@@ -410,14 +445,28 @@ type Endpoint struct {
 	Name string `json:"name"`
 
 	// Address is the access address: a URL for web (e.g.
-	// http://<gw-ip>:80/dev/<ns>/<env>/), or a host:port for SSH and tcp/udp
-	// ports (e.g. ssh://user@<gw-ip>:<port>).
+	// http://<gw-ip>:<port>/dev/<ns>/<env>/), or a host:port for SSH and tcp/udp
+	// ports (e.g. ssh://user@<gw-ip>:<port>). The port is the one the address is
+	// reachable on, which is not ListenerPort when the Gateway's dataplane
+	// Service is a NodePort Service.
 	Address string `json:"address"`
+
+	// ListenerPort is the Gateway listener port the endpoint is published on: the
+	// port the environment's ListenerSet declares, or the Gateway's HTTP listener
+	// port for the web endpoint. The controller reuses it across reconciles, so
+	// the environment's listener allocation is stable for as long as the exposure
+	// exists. It is not necessarily the port in Address: a NodePort dataplane
+	// renumbers each listener onto a port from the cluster's node-port range, and
+	// that renumbering is not part of the allocation — a dataplane Service
+	// recreated with different nodePorts changes Address while this does not.
+	// Address says where the endpoint is reachable now, not where it will stay.
+	// +optional
+	ListenerPort int32 `json:"listenerPort,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Namespaced
+// +kubebuilder:resource:scope=Namespaced,shortName=devenv
 
 // DevEnvironment is the Schema for the devenvironments API.
 //

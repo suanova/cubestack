@@ -3,14 +3,27 @@ image:
   tag: latest
 
 # Platform Gateway the operator publishes InferenceService routes to
-# (spec.route.publish: true). Each key maps to one manager flag; an empty
-# value omits the flag, keeping the manager default (an empty name or domain
-# leaves publishing off — RouteReady=False, GatewayNotConfigured). Set
+# (spec.route.publish: true), and that DevEnvironment ListenerSets attach to.
+# The chart creates that Gateway in the release namespace and tells the manager
+# that same namespace, so the release can be installed anywhere. Set
 # gateway.domain to enable publishing:
 #   helm install ... --set gateway.domain=example.com
+#
+# The chart creates only the Gateway, not its dataplane: how the proxy is
+# exposed (Service type) and which proxy image runs are properties of the
+# EnvoyProxy the GatewayClass references, which the platform owns. The class
+# gateway.className names must therefore carry one. See the chart README.
 gateway:
-  name: cubestack-gateway       # --gateway-name
-  namespace: cubestack-system   # --gateway-namespace
+  # Name of the Gateway the chart creates, and the --gateway-name the manager
+  # receives, so the Gateway the operator publishes through is always the one
+  # the chart created. An empty value still creates the conventionally named
+  # Gateway but omits the flag, which leaves publishing off.
+  name: cubestack-gateway
+  # GatewayClass the Gateway asks to be served by. Not a manager flag: only
+  # the cluster's Gateway controller reads it, and it must name a class that
+  # controller has established (`eg` is the one Envoy Gateway installs) and
+  # that carries an EnvoyProxy configured for this cluster.
+  className: eg
   domain: ""                    # --gateway-domain
   # Namespace the Gateway's dataplane (proxy) pods run in — not the namespace
   # of the Gateway object itself. Read by the DevEnvironment controller: it is
@@ -18,6 +31,17 @@ gateway:
   # through the Gateway can reach the environment pod. Empty keeps environment
   # pods default-deny inbound.
   dataplaneNamespace: envoy-gateway-system  # --gateway-dataplane-namespace
+
+# External L4 port pool each DevEnvironment draws from. A port is allocated to
+# an environment's ssh exposure and to every spec.ports[] entry of type tcp;
+# each allocated port becomes a listener the environment's own ListenerSet
+# declares on the platform Gateway, so the range must be one the Gateway's
+# Service carries (a LoadBalancer forwards it, a NodePort needs the ports
+# published as nodePorts). The pool is cluster-wide: widen it as the number of
+# environments grows.
+l4PortRange:
+  start: 20000  # --l4-port-range-start
+  end: 20999    # --l4-port-range-end
 
 replicaCount: 1
 

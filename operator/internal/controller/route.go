@@ -303,6 +303,20 @@ func routeParentsTo(refs []gatewayv1.ParentReference, routeNamespace, gatewayNam
 	return false
 }
 
+// listenerSetParentsToGateway reports whether a ListenerSet contributes its
+// listeners to the named Gateway — the same question routeParentsTo answers,
+// asked of the single parentRef a ListenerSet carries. It delegates rather than
+// restating the rule so that a ListenerSet and a route cannot disagree about
+// which Gateway they are attached to; only the ref type differs.
+func listenerSetParentsToGateway(ls *gatewayv1.ListenerSet, gatewayName, gatewayNamespace string) bool {
+	return routeParentsTo([]gatewayv1.ParentReference{{
+		Group:     ls.Spec.ParentRef.Group,
+		Kind:      ls.Spec.ParentRef.Kind,
+		Name:      ls.Spec.ParentRef.Name,
+		Namespace: ls.Spec.ParentRef.Namespace,
+	}}, ls.Namespace, gatewayName, gatewayNamespace)
+}
+
 // endpointPort extracts the port from the reachable internal endpoint
 // "<svc>.<ns>.svc:<port>" reported by checkEndpoint.
 func endpointPort(internal string) (int32, error) {

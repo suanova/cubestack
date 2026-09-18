@@ -1,0 +1,36 @@
+# The platform Gateway every published route attaches to. Its name and
+# namespace are what the DevEnvironment controller hardcodes
+# (cmd/main.go, devenvironment_controller.go), so the metadata.name below is
+# deliberately unprefixed here and becomes cubestack-gateway via the
+# namePrefix in config/default.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: gateway
+spec:
+  # The GatewayClass owns the dataplane: Envoy Gateway derives the proxy
+  # Deployment and its Service from the EnvoyProxy the class references (in its
+  # spec.parametersRef), and only from there. Nothing here can set the proxy's
+  # Service type or image, so this Gateway must name a class that carries an
+  # EnvoyProxy setting both — a class with no parametersRef yields Envoy
+  # Gateway's defaults: a LoadBalancer Service, which never gets an address on a
+  # cluster with no load-balancer controller, and an image pulled from
+  # docker.io. See the chart README for the class the platform must provide.
+  gatewayClassName: eg
+  # ListenerSets contributed by tenant namespaces (one per DevEnvironment,
+  # see the L4 port pool) are rejected unless the Gateway opts in: the API
+  # default is "None", which refuses every one of them. "All" admits them and
+  # leaves who may publish to RBAC — anyone able to create a ListenerSet in
+  # their own namespace can contribute a listener.
+  allowedListeners:
+    namespaces:
+      from: All
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+      # Routes from every namespace may attach; allowedRoutes.kinds is left
+      # unset so the API derives them from the protocol (HTTPRoute, GRPCRoute).
+      allowedRoutes:
+        namespaces:
+          from: All

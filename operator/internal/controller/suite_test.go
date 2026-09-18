@@ -113,8 +113,8 @@ var _ = BeforeSuite(func() {
 			GatewayNamespace:          testNamespace,
 			GatewayDataplaneNamespace: testGatewayDataplaneNamespace,
 			HTTPPort:                  80,
-			SSHPortRangeStart:         testSSHPortRangeStart,
-			SSHPortRangeEnd:           20100,
+			L4PortRangeStart:          testL4PortRangeStart,
+			L4PortRangeEnd:            20100,
 		},
 	}).SetupWithManager(testMgr)
 	Expect(err).NotTo(HaveOccurred())

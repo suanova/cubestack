@@ -394,3 +394,49 @@ var _ = Describe("routeParentsTo", func() {
 		Expect(routeParentsTo([]gatewayv1.ParentReference{foreign}, testNamespace, testGatewayName, testGatewayNamespace)).To(BeFalse())
 	})
 })
+
+var _ = Describe("listenerSetParentsToGateway", func() {
+	// A ListenerSet carries one parentRef rather than a list, and its namespace
+	// defaults to the ListenerSet's own — the same rule routeParentsTo applies to
+	// a route's parentRefs, which is why the two share it.
+	set := func(namespace string, mut func(*gatewayv1.ParentGatewayReference)) *gatewayv1.ListenerSet {
+		ls := &gatewayv1.ListenerSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "de-l4-l4", Namespace: testNamespace},
+			Spec: gatewayv1.ListenerSetSpec{
+				ParentRef: gatewayv1.ParentGatewayReference{
+					Group: ptrTo(gatewayv1.Group(gatewayAPIGroup)),
+					Kind:  ptrTo(gatewayv1.Kind(gatewayKind)),
+					Name:  gatewayv1.ObjectName(testGatewayName),
+				},
+			},
+		}
+		if namespace != "" {
+			ls.Spec.ParentRef.Namespace = ptrTo(gatewayv1.Namespace(namespace))
+		}
+		if mut != nil {
+			mut(&ls.Spec.ParentRef)
+		}
+		return ls
+	}
+
+	It("matches a ListenerSet contributing to the configured Gateway", func() {
+		Expect(listenerSetParentsToGateway(set(testGatewayNamespace, nil), testGatewayName, testGatewayNamespace)).To(BeTrue())
+	})
+
+	It("applies the API's defaults to an unset namespace, group and kind", func() {
+		ls := set("", func(ref *gatewayv1.ParentGatewayReference) {
+			ref.Group, ref.Kind = nil, nil
+		})
+		Expect(listenerSetParentsToGateway(ls, testGatewayName, testNamespace)).To(BeTrue())
+	})
+
+	It("ignores a ListenerSet on another Gateway", func() {
+		Expect(listenerSetParentsToGateway(set(testGatewayNamespace, func(ref *gatewayv1.ParentGatewayReference) {
+			ref.Name = "other-gw"
+		}), testGatewayName, testGatewayNamespace)).To(BeFalse())
+	})
+
+	It("ignores a ListenerSet in another namespace", func() {
+		Expect(listenerSetParentsToGateway(set("somewhere-else", nil), testGatewayName, testGatewayNamespace)).To(BeFalse())
+	})
+})

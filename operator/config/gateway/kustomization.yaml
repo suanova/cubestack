@@ -1,0 +1,5 @@
+# The platform Gateway. It becomes a chart template of its own
+# (gateway-cubestack-gateway.yaml). Its dataplane parameters are not here: they
+# come from the EnvoyProxy the GatewayClass references.
+resources:
+- gateway.yaml

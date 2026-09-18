@@ -61,13 +61,22 @@ grep -q 'image: "{{ .Values.image' "${OUT}" || { echo "image rewrite no-op'd —
 sed -i 's|namespace: cubestack-system|namespace: {{ .Release.Namespace }}|g' "${OUT}"
 
 # Rewrite the manager's platform-Gateway args into values-driven Go template
-# conditionals: --gateway-name / --gateway-namespace (literals from the
-# config/manager base) become {{- with .Values.gateway.* }} blocks and the
-# flags deliberately absent from the kustomize base, see
-# config/manager/manager.yaml — the domain and the dataplane namespace — are
-# injected as {{- if/with .Values.gateway.* }} blocks. Each flag renders only
-# while its value is non-empty, so the empty defaults reproduce the
-# unconfigured state (no gateway flags at all).
+# conditionals: --gateway-name (a literal from the config/manager base) becomes
+# a {{- with .Values.gateway.name }} block, and the flags deliberately absent
+# from the kustomize base, see config/manager/manager.yaml — the domain and the
+# dataplane namespace — are injected as {{- if/with .Values.gateway.* }} blocks.
+# Each flag renders only while its value is non-empty, so an empty name
+# reproduces the unconfigured state (publishing off).
+#
+# --gateway-namespace is the exception: it renders unconditionally as the
+# release namespace, because that is where this chart creates the Gateway.
+# Passing a value there could only aim the manager at a Gateway the chart did
+# not create, and no value at all would leave it looking in cubestack-system
+# after an install elsewhere.
+#
+# The DevEnvironment L4 port pool flags are rewritten the same way, but
+# unconditionally: the pool always has a range, so .Values.l4PortRange.start/end
+# are always passed.
 awk '
 /^[[:space:]]*- --gateway-name=cubestack-gateway$/ {
   if (gateway_name++) { print "duplicate --gateway-name line in kustomize output" > "/dev/stderr"; exit 1 }
@@ -75,9 +84,7 @@ awk '
   print ind "{{- with .Values.gateway.name }}"
   print ind "- --gateway-name={{ . }}"
   print ind "{{- end }}"
-  print ind "{{- with .Values.gateway.namespace }}"
-  print ind "- --gateway-namespace={{ . }}"
-  print ind "{{- end }}"
+  print ind "- --gateway-namespace={{ .Release.Namespace }}"
   print ind "{{- if .Values.gateway.domain }}"
   print ind "- --gateway-domain={{ .Values.gateway.domain }}"
   print ind "{{- end }}"
@@ -91,6 +98,18 @@ awk '
   if (gateway_namespace++) { print "duplicate --gateway-namespace line in kustomize output" > "/dev/stderr"; exit 1 }
   next
 }
+/^[[:space:]]*- --l4-port-range-start=[0-9]+$/ {
+  if (l4_start++) { print "duplicate --l4-port-range-start line in kustomize output" > "/dev/stderr"; exit 1 }
+  ind = substr($0, 1, index($0, "-") - 1)
+  print ind "- --l4-port-range-start={{ .Values.l4PortRange.start }}"
+  next
+}
+/^[[:space:]]*- --l4-port-range-end=[0-9]+$/ {
+  if (l4_end++) { print "duplicate --l4-port-range-end line in kustomize output" > "/dev/stderr"; exit 1 }
+  ind = substr($0, 1, index($0, "-") - 1)
+  print ind "- --l4-port-range-end={{ .Values.l4PortRange.end }}"
+  next
+}
 { print }
 END {
   # Fail loudly if the needles above matched nothing (e.g. the args in
@@ -99,6 +118,10 @@ END {
   # stays green.
   if (gateway_name != 1 || gateway_namespace != 1) {
     print "gateway args not found in kustomize output — update needle in update-helm-resources.sh" > "/dev/stderr"
+    exit 1
+  }
+  if (l4_start != 1 || l4_end != 1) {
+    print "l4 port range args not found in kustomize output — update needle in update-helm-resources.sh" > "/dev/stderr"
     exit 1
   }
 }
@@ -130,17 +153,44 @@ END { flush() }
 ' "${OUT}"
 rm -f "${OUT}"
 
-# --- 3. Validate the values-driven gateway args (route publishing) ---
+# --- 2d. The Gateway takes its name, and its class, from values ---
+# These rewrites run after the split rather than in section 2 on purpose: the
+# splitter names each file after its metadata.name, so templating the name
+# there would produce {{ .Values... }} filenames. The file keeps the name the
+# defaults imply and only its contents follow --set.
+GW_TPL="${TEMPLATES}/gateway-cubestack-gateway.yaml"
+if [ ! -f "${GW_TPL}" ]; then
+  echo "gateway-cubestack-gateway.yaml missing — did config/gateway or its namePrefix change? See update-helm-resources.sh"; exit 1
+fi
+# .Values.gateway.name drives both the Gateway's metadata.name and the manager's
+# --gateway-name (section 2), so the Gateway the operator publishes through is
+# always the Gateway the chart created.
+#
+# The `| default` is for a release upgraded with --reuse-values, whose stored
+# values carry no value for this key at all: an empty name drops --gateway-name
+# (publishing off, section 2) but the object still needs a name.
+GW_NAME='{{ .Values.gateway.name | default "cubestack-gateway" }}'
+sed -i "s#^  name: cubestack-gateway\$#  name: ${GW_NAME}#" "${GW_TPL}"
+gw_hits="$(grep -c 'name: {{ .Values.gateway.name' "${GW_TPL}" || true)"
+[ "${gw_hits}" = 1 ] || { echo "expected 1 templated name in gateway-cubestack-gateway.yaml (metadata.name), found ${gw_hits} — update needle in update-helm-resources.sh"; exit 1; }
+# The GatewayClass the Gateway joins. Not a manager flag: the operator never
+# reads it, only Envoy Gateway does, so unlike the name above there is no
+# second reader to keep in step.
+sed -i 's#^  gatewayClassName: eg$#  gatewayClassName: {{ .Values.gateway.className | default "eg" }}#' "${GW_TPL}"
+grep -q '^  gatewayClassName: {{ .Values.gateway.className' "${GW_TPL}" || { echo "gatewayClassName rewrite no-op'd — update needle in update-helm-resources.sh"; exit 1; }
+
+# --- 3. Validate the values-driven chart content (manager gateway args, Gateway name/class) ---
 # The manager's platform-Gateway args are injected into the deployment
 # template from .Values.gateway (section 2 rewrite). Assert the rendered args
-# for every value combination that changes behavior: defaults pass
-# name/namespace (the platform conventions) and the dataplane namespace but no
-# domain; an explicit domain is passed verbatim; an emptied name/namespace or
-# dataplane namespace drops its flag; and emptying all four reproduces the
-# pre-entry state — no gateway flags at all (RouteReady=False,
-# GatewayNotConfigured, and environments left default-deny inbound). A silent
-# no-op here would ship a chart whose publish feature cannot be enabled by
-# values.
+# for every value combination that changes behavior: defaults pass name and
+# the dataplane namespace but no domain; an explicit domain is passed
+# verbatim; an emptied name or dataplane namespace drops its flag; and
+# emptying those reproduces the publish-off state — no --gateway-name, no
+# --gateway-domain, no --gateway-dataplane-namespace (RouteReady=False,
+# GatewayNotConfigured, and environments left default-deny inbound). The
+# namespace is not in that set: it always renders, because the chart always
+# creates the Gateway it points at. A silent no-op here would ship a chart
+# whose publish feature cannot be enabled by values.
 command -v helm >/dev/null 2>&1 || { echo "helm not found — required to validate the rendered chart (section 3 of update-helm-resources.sh)"; exit 1; }
 # expect_render <case> <present|absent> <grep pattern (anchored at the arg line)> [helm --set args...]
 expect_render() {
@@ -154,27 +204,71 @@ expect_render() {
     [ "${presence}" = absent ] || { echo "gateway args render check failed: ${what} did not render ${pattern}"; exit 1; }
   fi
 }
-GW_ARG='^[[:space:]]*- --gateway-'
 # Defaults: the convention values are passed; domain stays unset (publish off).
-expect_render defaults present '^[[:space:]]*- --gateway-name=cubestack-gateway$'
-expect_render defaults present '^[[:space:]]*- --gateway-namespace=cubestack-system$'
-expect_render defaults absent  '^[[:space:]]*- --gateway-domain='
+# --namespace cubestack-system keeps these renders comparable to a real install
+# of this chart; without it .Release.Namespace is helm's "default".
+expect_render defaults present '^[[:space:]]*- --gateway-name=cubestack-gateway$' --namespace cubestack-system
+expect_render defaults present '^[[:space:]]*- --gateway-namespace=cubestack-system$' --namespace cubestack-system
+expect_render defaults absent  '^[[:space:]]*- --gateway-domain=' --namespace cubestack-system
 # The dataplane namespace is passed by default: it is what lets the DevEnvironment
 # controller admit the Gateway's proxies into environment pods.
-expect_render defaults present '^[[:space:]]*- --gateway-dataplane-namespace=envoy-gateway-system$'
+expect_render defaults present '^[[:space:]]*- --gateway-dataplane-namespace=envoy-gateway-system$' --namespace cubestack-system
 # Setting the domain enables route publishing.
 expect_render domain-set present '^[[:space:]]*- --gateway-domain=example\.com$' --set gateway.domain=example.com
-# Emptied name/namespace drop their flags while the other keeps rendering; a
-# custom name is passed verbatim.
-expect_render name-empty absent '^[[:space:]]*- --gateway-name=' --set gateway.name=
-expect_render name-empty present '^[[:space:]]*- --gateway-namespace=cubestack-system$' --set gateway.name=
-expect_render namespace-empty absent '^[[:space:]]*- --gateway-namespace=' --set gateway.namespace=
-expect_render namespace-empty present '^[[:space:]]*- --gateway-name=cubestack-gateway$' --set gateway.namespace=
+# An emptied name drops --gateway-name (publishing off) while the namespace
+# keeps rendering; a custom name is passed verbatim.
+expect_render name-empty absent '^[[:space:]]*- --gateway-name=' --namespace cubestack-system --set gateway.name=
+expect_render name-empty present '^[[:space:]]*- --gateway-namespace=cubestack-system$' --namespace cubestack-system --set gateway.name=
 expect_render name-custom present '^[[:space:]]*- --gateway-name=my-gateway$' --set gateway.name=my-gateway
 # Emptied dataplane namespace drops its flag alone, leaving environments default-deny.
 expect_render dataplane-empty absent '^[[:space:]]*- --gateway-dataplane-namespace=' --set gateway.dataplaneNamespace=
 expect_render dataplane-empty present '^[[:space:]]*- --gateway-name=cubestack-gateway$' --set gateway.dataplaneNamespace=
-# All four empty: reproduce the unconfigured state (no gateway flags at all).
-expect_render all-empty absent "${GW_ARG}" \
-  --set gateway.name= --set gateway.namespace= --set gateway.domain= --set gateway.dataplaneNamespace=
+# The manager is told the release namespace whatever the release namespace is:
+# the Gateway object is in that same namespace (.Release.Namespace), so an
+# install outside cubestack-system would otherwise leave every environment
+# looking for a Gateway in a namespace the chart never wrote to.
+expect_render ns-release present '^[[:space:]]*- --gateway-namespace=cubestack-prod$' --namespace cubestack-prod
+# All the optional flags empty: reproduce the unconfigured state. Only the
+# namespace line is left, and it is asserted present rather than skipped.
+expect_render all-empty absent '^[[:space:]]*- --gateway-(name|domain|dataplane-namespace)=' \
+  --set gateway.name= --set gateway.domain= --set gateway.dataplaneNamespace=
+expect_render all-empty present '^[[:space:]]*- --gateway-namespace=default$' \
+  --set gateway.name= --set gateway.domain= --set gateway.dataplaneNamespace=
+# The L4 port pool always renders, and follows its values verbatim: the range
+# decides which ports the controller may allocate, so a value that did not
+# reach the manager would make environments collide on ports the chart's
+# gateway does not carry.
+expect_render defaults present '^[[:space:]]*- --l4-port-range-start=20000$'
+expect_render defaults present '^[[:space:]]*- --l4-port-range-end=20999$'
+expect_render l4-range-custom present '^[[:space:]]*- --l4-port-range-start=30000$' --set l4PortRange.start=30000
+expect_render l4-range-custom present '^[[:space:]]*- --l4-port-range-end=30999$' --set l4PortRange.end=30999
+
+# The chart ships the platform Gateway (config/gateway). .Values.gateway.name
+# drives both its name and the manager's --gateway-name, so the Gateway the
+# operator publishes through is always the Gateway the chart created, and
+# .Values.gateway.className decides which controller adopts it. Assert the
+# object renders and that those values reach it. Nothing here asserts
+# readiness — the Gateway stays inert until a cluster runs an Envoy Gateway
+# controller with a GatewayClass of that name, which is a prerequisite; the
+# dataplane the class's EnvoyProxy configures is a prerequisite too, and is
+# deliberately not templated here.
+expect_render defaults present '^  name: cubestack-gateway$'
+expect_render defaults present '^  gatewayClassName: eg$'
+expect_render class-custom present '^  gatewayClassName: my-class$' --set gateway.className=my-class
+# The Gateway has to be in the namespace the manager was told to look in, and
+# --show-only keeps that assertion about this object rather than about whichever
+# object happens to render a namespace line first.
+expect_render ns-gateway present '^  namespace: cubestack-prod$' --namespace cubestack-prod --show-only templates/gateway-cubestack-gateway.yaml
+# An older release upgraded with --reuse-values carries none of these keys: the
+# template's `| default` is what keeps the object valid there. An emptied name
+# falls back to the convention for the object while the dropped flag above is
+# what turns publishing off.
+expect_render name-custom present '^  name: my-gateway$' --set gateway.name=my-gateway
+expect_render name-empty present '^  name: cubestack-gateway$' --set gateway.name=
+# The chart must not ship a dataplane of its own. The proxy Service type and
+# the proxy image live on the EnvoyProxy the GatewayClass references, and a
+# Gateway that references one of its own would silently replace the class's
+# whole provider config instead of merging with it.
+expect_render defaults absent '^[[:space:]]*kind: EnvoyProxy$'
+expect_render defaults absent '^[[:space:]]*parametersRef:'
 echo "chart resources regenerated under ${CHART}"

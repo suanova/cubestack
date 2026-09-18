@@ -53,10 +53,10 @@ spec:
   # SSH access. The controller always mints a per-environment Secret holding an
   # ed25519 host key, mounted at /etc/ssh/ssh_host_ed25519_key — its presence is
   # what enables ssh in the image. In addition it mounts authorized_keys at
-  # /run/ssh/authorized_keys — the selected entry renamed by the volume — taken
-  # from keysSecret below when it is set, and from a generated login keypair
-  # otherwise (whose private half status.sshKeysSecret then lets the user
-  # retrieve, as id_ed25519). That mount is a whole-Secret directory mount rather
+  # /run/ssh/authorized_keys, renamed by the volume from the entry it takes:
+  # keysSecret below when it is set, else id_ed25519.pub from the generated login
+  # keypair (whose private half status.sshKeysSecret then lets the user retrieve,
+  # as id_ed25519). That mount is a whole-Secret directory mount rather
   # than a subPath file, so kubelet delivers a rotation to the running container
   # without a restart. A keysSecret has to carry the
   # label ai.cubestack.io/ssh-keys-delegated: "true": the referenced Secret is
@@ -70,7 +70,7 @@ spec:
     enabled: true                # enable extra SSH for jupyter/vscode types
     keysSecret:
       name: dev-alice-ssh-keys   # must be labeled ai.cubestack.io/ssh-keys-delegated: "true"
-      key: keys                  # Secret.data[keys] holds the authorized_keys content
+      key: authorized_keys       # Secret.data[authorized_keys] holds the authorized_keys content
 
   # Network
   network:

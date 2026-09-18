@@ -33,7 +33,7 @@ images are final** — they cannot be solved inside the images themselves.
 | 5 | SSH key mount | `assets.go:60-77`: Secret data keys `ssh_host_ed25519_key`(+`.pub`) and the authorized-keys entry, the two in **separate Secrets** — the controller's `<env>-ssh-host-key`, and `<env>-ssh-authorized-keys` or the user's `spec.ssh.keysSecret`; `::desiredPodSpec` mounts the host key as a read-only `subPath` file and the authorized keys as a whole-Secret directory mount at `/run/ssh` whose `items` rename the selected entry to `authorized_keys`, both with default mode 0644; the host key is minted as an **OpenSSH-format** private key (`::generateSSHKeyPair`) and is **never rotated** (persistence provided by the Secret) | The operator mounts those two entries **as Secret volumes** — `ssh_host_ed25519_key` → `/etc/ssh/ssh_host_ed25519_key` and `authorized_keys` → `/run/ssh/authorized_keys` — and sshd reads them **in place: no staging, no copy, no chmod**. Both paths are absolute and outside `$HOME`: a claim mounts over the home, and a mount target created beneath it is root-owned and unwritable (Gap A). A root-owned `0644` private key is accepted because OpenSSH enforces that check only on files **owned by the uid reading them**, which a Secret volume file never is. The two use different volume kinds because only the authorized keys change while an environment runs: a `subPath` file is frozen at container start, an ordinary Secret mount is not, so rotating a user's keys updates the running container instead of restarting it | ✅ implemented (#173, mount path moved out of `$HOME` with the workspace-ownership change; the authorized keys became a directory mount to drop the restart on key rotation). The private key must be in OpenSSH's own format: sshd **rejects PKCS#8 Ed25519** ("invalid format"), which is what the controller used to mint and why the reworked images had no working host key |
 | 6 | sshd listening on :22 as uid 1000 | the ssh Service maps `sshServicePort` 22 → `sshContainerPort` 2222; `desiredSecurityContext` grants no capabilities | sshd listens on the unprivileged **2222**. Binding a port <1024 as non-root needs `NET_BIND_SERVICE`, which this closes **by port choice rather than by granting a privilege** — no capability, no `securityContext.sysctls` reliance, nothing for a Restricted PSA to drop. The operator publishes it as the Service's 22 and probes the container port | ✅ Gap B closed, no capability needed; implemented in #173 |
 | 7 | `JUPYTER_TOKEN` | `jupyterTokenEnv="JUPYTER_TOKEN"` (:144), injected only for the jupyter type, from `<env>-auth` Secret `data[token]` | The jupyter server must authenticate with this env value | ✅ (jupyter-server reads `JUPYTER_TOKEN` natively, see §3.B4) |
-| 8 | `base_url` = `/dev/<ns>/<env>/` | HTTPRoute forwards the prefix **unchanged** (no URLRewrite filter); the controller never injects the prefix into the container — yet the route design states "container serves under that base_url" | Jupyter must serve under that prefix via `ServerApp.base_url`, but nothing hands the prefix to the container | 🚩 **Gap C** |
+| 8 | `base_url` = `/dev/<ns>/<env>/` | HTTPRoute forwards the prefix **unchanged** (no URLRewrite filter); the controller injects the prefix into the container as `NOTEBOOK_ARGS=--ServerApp.base_url=<prefix>` (`::withNotebookBaseURL`), replacing a `base_url` the environment declares while keeping that variable's other flags | Jupyter must serve under that prefix via `ServerApp.base_url`, which the injected flag supplies | ✅ Gap C closed: the controller injects the flag and drops a conflicting `base_url` the environment declares; a `NOTEBOOK_ARGS` fed by `valueFrom` cannot be rewritten, so it fails the environment instead of publishing a 404 |
 | 9 | Runtime-mode inference | Single-container pod; `type` and `image` are independent axes; the controller injects no `type`/mode env | The same image must decide by itself whether to run jupyter or sshd (e.g. inferred from whether `JUPYTER_TOKEN` is injected / ssh keys are mounted) | ✅ defined by the images: `CUBESTACK_IMAGE` is baked per image and an optional injected `CUBESTACK_TYPE` wins when present (see Gap D) |
 | 10 | Multi-service in one container | `sshExposed` adds a 22 Service and mounts keys for jupyter/vscode types, sharing the main container | jupyter type + `ssh.enabled` ⇒ the same process group must run jupyter *and* sshd. The entrypoint starts sshd in the background and hands off to the stock launcher. **The mounted host key is the ssh-enabled signal** — images ship no host key of their own, so `ssh` mode fails fast without it and jupyter simply stays ssh-less | ✅ handled by entrypoint script |
 | 11 | GPU extended resource | `::gpuResource`: nvidia `nvidia.com/gpu` / metax `metax-tech.com/gpu`, written to requests and limits at `resources.gpuCount`. With `gpuCount: 0` the key is **omitted entirely** — a zero request would still pin the pod to a node advertising that resource | The image is device-agnostic; `nvidia-smi`/`mx-smi` come from driver injection. A CPU image must not need either | ✅ see §3 |
@@ -216,8 +216,7 @@ longer passes `--cap-add` — it proved nothing. The check belongs in-cluster or
 
 The HTTPRoute (`::desiredHTTPRoute`) forwards the `/dev/<ns>/<env>/` prefix unchanged to the 8888
 backend (no rewrite), so jupyter must serve that prefix with `ServerApp.base_url` set, or relative
-asset URLs and 404s break. Today the controller injects only `JUPYTER_TOKEN`; the prefix has no
-source. Two options:
+asset URLs and 404s break. The prefix had no source beyond the route that publishes it. Two options:
 
 1. The controller injects the prefix through jupyter's own knob —
    `NOTEBOOK_ARGS=--ServerApp.base_url=/dev/<ns>/<env>/`. The stock launcher appends `NOTEBOOK_ARGS` to
@@ -228,8 +227,21 @@ source. Two options:
 **Recommendation: option 1** (consistent with the route design's "container serves under that
 base_url" semantics, no per-environment gateway rewriting, and no image-side logic — an earlier draft
 had the image read a `CUBESTACK_BASE_URL` env, which the stock-native overlay deliberately does not
-do); the Gateway must still pass websockets through. This is a controller change and is listed as
-"to close".
+do); the Gateway must still pass websockets through.
+
+**Closed as recommended (option 1)**: `::desiredPodSpec` runs `::withNotebookBaseURL` for the jupyter
+type, which adds or extends `NOTEBOOK_ARGS`. The prefix comes from `::webPath`, the same function
+`::desiredHTTPRoute` matches on and `::buildEndpoints` publishes, so the served prefix and the
+published one cannot drift: the route is the controller's, so the prefix is too. A `base_url` the
+environment declares of its own is therefore dropped and the injected one appended, with every other
+`NOTEBOOK_ARGS` flag kept. `JUPYTER_TOKEN` sets the precedent — a value the controller owns is not
+left to the user to disagree with.
+
+The one declaration the controller cannot rewrite is a `NOTEBOOK_ARGS` fed by `valueFrom`: its value
+is unreadable while reconciling (reading it would mean watching whatever it reads), so whether it
+hides a conflicting `base_url` is unknowable. `::unsupportedNotebookArgsReason` fails such an
+environment — `Phase: Failed`, `Ready=False` with the reason `NotebookArgsUnusable`, nothing
+provisioned — rather than publishing an address that 404s.
 
 ### Gap D — explicit runtime mode (optional)
 
@@ -468,7 +480,7 @@ platform's own publishing target, so they do not dictate the project below.
 |---|---|---|---|
 | A workspace writability check (uid 1000 writing the home mount: `/home/ubuntu` self-authored, `/home/jovyan` jupyter) | workspace storage (cephfs-ephemeral) | **Closed controller-side**: an init container sets the claim root's mode and chowns it — recursively, but only when the owner does not already match — to the container's own identity on the way in, measured on `cephfs-ephemeral`, so the storage class needs no change (Gap A) | — |
 | B non-root sshd binding :22 | controller | **Closed image-side**: sshd listens on 2222 and the Service publishes it as 22, so no capability is ever granted. Retargeting `targetPort`/probe is #173 | base image ssh acceptance |
-| C injecting jupyter `base_url` | controller | Inject `NOTEBOOK_ARGS=--ServerApp.base_url=/dev/<ns>/<env>/` (merge, don't clobber a user value) — the stock launcher honours it, so no image change | jupyter image acceptance, e2e |
+| C injecting jupyter `base_url` | controller | **Closed controller-side**: `::withNotebookBaseURL` injects `NOTEBOOK_ARGS=--ServerApp.base_url=/dev/<ns>/<env>/` (replaces a `base_url` the environment declares, keeps its other flags; a `valueFrom`-fed `NOTEBOOK_ARGS` is refused) — the stock launcher honours it, so no image change | — |
 | D mode env (optional) | controller | Inject `CUBESTACK_TYPE`, entrypoint reads it first | vscode hook |
 
 ---
