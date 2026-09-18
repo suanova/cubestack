@@ -100,6 +100,13 @@ function sseBody(events: object[]): string {
   return events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("");
 }
 
+/** Seed the conversation key this browser remembers, as a returning visitor has.
+ *  The pane restores from THIS, not from the runtime's session list — see the
+ *  spec that asserts the list is never read. Must run before the first goto. */
+async function seedConversationKey(page: Page, key: string): Promise<void> {
+  await page.addInitScript((k) => window.localStorage.setItem("cubestack.cubepilot.session", k), key);
+}
+
 /** A turn parked on a write approval.
  *
  *  It carries NO terminal, and must not: a turn waiting on a human has not
@@ -206,6 +213,15 @@ interface Captured {
   approvalPosts: Array<{ path: string; body: { decision?: string } }>;
   questionPosts: Array<{ path: string; body: { id?: string; answers?: Record<string, string[]>; cancel?: boolean } }>;
   pendingPaths: string[];
+  /** Every GET the pane made for a session's history, in order. Restoring the
+   *  right session is a claim about WHICH key was read — the stub answers every
+   *  key with the same body, so the path is the only evidence. */
+  historyPaths: string[];
+  /** How many times the pane asked for the runtime's session LIST. The pane has
+   *  one conversation surface and remembers its own key, so this must stay 0:
+   *  choosing from that list is what picked a cron/task session and broke the
+   *  page open. */
+  sessionListCalls: number;
   configPuts: Array<{ selectedModel?: string; userInstructions?: string }>;
   confirmPuts: Array<{ confirmPolicy?: string; allowlist?: AllowlistRule[] }>;
   /** Every POST the pane made to the agent API, in the order it made them. The
@@ -251,7 +267,7 @@ function confirmAfterPut(body: { confirmPolicy?: string; allowlist?: AllowlistRu
 
 /** Stub every endpoint the three panes touch with CR-shaped responses. */
 async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
-  const captured: Captured = { approvalPosts: [], questionPosts: [], pendingPaths: [], configPuts: [], confirmPuts: [], llmPosts: [], agentPosts: [] };
+  const captured: Captured = { approvalPosts: [], questionPosts: [], pendingPaths: [], historyPaths: [], sessionListCalls: 0, configPuts: [], confirmPuts: [], llmPosts: [], agentPosts: [] };
   let config = stubs.config ?? CONFIG_READY;
   let confirm = stubs.confirm ?? CONFIRM;
   // The pending list reflects the post-refusal world only once an answer has
@@ -323,8 +339,12 @@ async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
           body: sseBody(stubs.turnEvents ?? TURN_APPROVAL),
         });
       }
-      if (path.endsWith("/messages")) return json({ items: stubs.history ?? [] });
+      if (path.endsWith("/messages")) {
+        captured.historyPaths.push(path);
+        return json({ items: stubs.history ?? [] });
+      }
       if (path.endsWith("/api/v1/sessions")) {
+        captured.sessionListCalls++;
         return sessions === null ? json({ error: "agent API unavailable" }, 503) : json({ sessions });
       }
       if (path.endsWith("/turn")) {
@@ -503,6 +523,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
       history: HISTORY,
       pendingApproval: PENDING_APPROVAL,
     });
+    await seedConversationKey(page, SESSION_KEY);
     await page.goto("/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
 
@@ -525,11 +546,65 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     expect(decoded.some((p) => p.includes(`/api/v1/sessions/${SESSION_KEY}/question/pending`))).toBe(true);
   });
 
+  test("restores the key this browser remembers, and never reads the session list", async ({ page }) => {
+    // The runtime's session list also carries its OWN sessions — scheduled-task
+    // runs and cron firings — whose keys belong to a run. Choosing from that
+    // list is what picked one and made the gateway refuse with
+    // "…is owned by …:run:…, not …" on opening the page. The pane keeps its own
+    // key instead, so the list is not something it may consult at all.
+    const captured = await stubAgent(page, {
+      sessions: [
+        { sessionKey: "agent:main:cron:ad53bca9-1f9e", title: "cron" },
+        { sessionKey: "agent:main:task-admin-task-abc", title: "task" },
+        SESSION,
+      ],
+      history: HISTORY,
+    });
+    await seedConversationKey(page, SESSION_KEY);
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="obj-cubepilot"]').click();
+
+    await expect(page.locator('[data-od-id="chat-thread"]')).toContainText("上次巡检的结论?");
+
+    // The list is never read — that is the whole point of holding our own key.
+    expect(captured.sessionListCalls).toBe(0);
+    const decoded = captured.historyPaths.map((p) => decodeURIComponent(p));
+    expect(decoded.some((p) => p.includes(`/sessions/${SESSION_KEY}/messages`))).toBe(true);
+    expect(decoded.some((p) => p.includes(":cron:") || p.includes(":task-"))).toBe(false);
+  });
+
+  test("a browser with no remembered key greets, and remembers the one the server mints", async ({ page }) => {
+    const captured = await stubAgent(page, {
+      sessions: [SESSION],
+      history: HISTORY,
+      turnEvents: TURN_TOOL_THEN_TEXT,
+    });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="obj-cubepilot"]').click();
+
+    // Nothing stored means nothing to restore: the greeting, not the history.
+    // (It also says the greeting is an EMPTY conversation, not a 404 rendered as
+    // "history unavailable".)
+    const thread = page.locator('[data-od-id="chat-thread"]');
+    await expect(thread).not.toContainText("上次巡检的结论?");
+    expect(captured.historyPaths).toEqual([]);
+    expect(captured.sessionListCalls).toBe(0);
+
+    // The first send lets the SERVER mint the session — the client cannot, since
+    // `crypto.randomUUID` does not exist outside a secure context and this portal
+    // is served over plain http — and the id it reports is what we remember.
+    await page.locator('[data-od-id="chat-input"]').fill("看看集群");
+    await page.locator('[data-od-id="send-btn"]').click();
+    await expect(page.locator('[data-od-id="agent-bubble"]').last()).toContainText("使用率 71%。");
+    const stored = await page.evaluate(() => window.localStorage.getItem("cubestack.cubepilot.session"));
+    expect(stored).toBe(SESSION_KEY);
+  });
   test("a turn that survived a reload says so, and offers Stop", async ({ page }) => {
     // A turn started elsewhere (or left running across a reload) has no stream
     // in this view, so the only thing that can say it is still going is the
     // server's /turn answer — and Stop is then the only control that ends it.
     await stubAgent(page, { sessions: [SESSION], history: HISTORY, turnActive: true });
+    await seedConversationKey(page, SESSION_KEY);
     await page.goto("/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
 
@@ -546,6 +621,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     // be on the wire BEFORE the message, which is a claim about their order and
     // not about either request alone.
     const captured = await stubAgent(page, { sessions: [SESSION], history: HISTORY, turnActive: true });
+    await seedConversationKey(page, SESSION_KEY);
     await page.goto("/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
 
@@ -569,6 +645,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
 
   test("a failed turn check says so and offers no Stop", async ({ page }) => {
     await stubAgent(page, { sessions: [SESSION], history: HISTORY, turnCheckFails: true });
+    await seedConversationKey(page, SESSION_KEY);
     await page.goto("/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
 

@@ -169,6 +169,42 @@ interface AgentMeta {
   skills: SkillInfo[];
 }
 
+/**
+ * This browser's conversation key, remembered across reloads.
+ *
+ * The portal has exactly one conversation surface, so it holds one stable
+ * session instead of choosing from the runtime's session list — see
+ * `restoreAgentSession` for why choosing from that list is unsafe. Absent means
+ * "this browser has never held a conversation yet"; the server mints the key on
+ * the first send and `message_start` hands it back for us to remember.
+ */
+const SESSION_KEY_STORAGE = "cubestack.cubepilot.session";
+
+function readStoredSessionKey(): string | null {
+  try {
+    return localStorage.getItem(SESSION_KEY_STORAGE);
+  } catch {
+    return null; // private mode / storage disabled
+  }
+}
+
+function storeSessionKey(key: string): void {
+  try {
+    localStorage.setItem(SESSION_KEY_STORAGE, key);
+  } catch {
+    /* private mode: the conversation still works for this tab */
+  }
+}
+
+/** Drop the remembered key, so the next send starts a fresh session. */
+function forgetSessionKey(): void {
+  try {
+    localStorage.removeItem(SESSION_KEY_STORAGE);
+  } catch {
+    /* private mode */
+  }
+}
+
 export function ChatPane() {
   const { t } = useI18n();
   const { showToast, toastView } = useToast();
@@ -433,44 +469,42 @@ export function ChatPane() {
   }
 
   /**
-   * Restore the user's latest session after a (re)select: history, an
+   * Restore this browser's conversation after a (re)select: history, an
    * in-flight turn (history polling), and any pending HITL cards.
+   *
+   * The key is this browser's own, remembered in localStorage — deliberately
+   * NOT picked from the runtime's session list. That list also carries the
+   * runtime's own sessions (scheduled-task runs `agent:main:task-…`, cron
+   * firings `agent:main:cron:…`) whose keys belong to a run, and restoring one
+   * of those makes the gateway refuse with "…is owned by …:run:…, not …" — which
+   * is what a user saw on opening this page. A key we minted ourselves cannot
+   * reach them. (The reference's floating widget works the same way: it binds a
+   * fixed `agent:main:conv-assistant`.)
+   *
+   * No stored key means this browser has never held a conversation: the first
+   * send lets the SERVER mint one and `message_start` hands it back for us to
+   * remember. Minting it here would need `crypto.randomUUID`, which does not
+   * exist outside a secure context — and this portal is served over plain http
+   * on an IP.
    */
   async function restoreAgentSession(meta: AgentMeta): Promise<void> {
     const gen = genRef.current;
-    try {
-      const res = await fetch("/api/cubepilot/pilot/api/v1/sessions");
-      if (genRef.current !== gen) return;
-      if (!res.ok) {
-        // 503 while the instance is warming up: nothing to restore yet.
-        const err = (await res.json().catch(() => null)) as { error?: string } | null;
-        setMsgs(greetingMsgs(meta.status, meta.config, meta.skills));
-        setAgentNotice(err?.error ? t("cubepilot.chat.sessionsUnavailable", { error: err.error }) : "");
-        return;
-      }
-      const body = (await res.json()) as { sessions?: Array<{ sessionKey: string; title?: string }> };
-      if (genRef.current !== gen) return;
-      const first = body.sessions?.[0];
-      if (!first) {
-        setMsgs(greetingMsgs(meta.status, meta.config, meta.skills));
-        return;
-      }
-      setAgentSessionKey(first.sessionKey);
-      await loadAgentHistory(first.sessionKey);
-      if (genRef.current !== gen) return;
-      const running = await checkTurnElsewhere(first.sessionKey, gen);
-      if (genRef.current !== gen) return;
-      if (running) {
-        setAgentNotice(t("cubepilot.chat.turnActive"));
-        startTurnPolling(first.sessionKey);
-      }
-      await restorePendingHitl(first.sessionKey);
-    } catch (e) {
-      if (genRef.current === gen) {
-        setMsgs(greetingMsgs(meta.status, meta.config, meta.skills));
-        setAgentNotice(t("cubepilot.chat.sessionsUnavailable", { error: String(e) }));
-      }
+    const key = readStoredSessionKey();
+    if (!key) {
+      // Nothing stored: greet, and let the first send create the session.
+      setMsgs(greetingMsgs(meta.status, meta.config, meta.skills));
+      return;
     }
+    setAgentSessionKey(key);
+    await loadAgentHistory(key);
+    if (genRef.current !== gen) return;
+    const running = await checkTurnElsewhere(key, gen);
+    if (genRef.current !== gen) return;
+    if (running) {
+      setAgentNotice(t("cubepilot.chat.turnActive"));
+      startTurnPolling(key);
+    }
+    await restorePendingHitl(key);
   }
 
   /**
@@ -522,6 +556,13 @@ export function ChatPane() {
     const gen = genRef.current;
     try {
       const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/messages`);
+      // 404 is "this conversation has not started", which is an ordinary empty
+      // thread and NOT a failure (docs/cubepilot/api.md §4.3). Reporting it would
+      // make a brand-new conversation look like an erased one.
+      if (res.status === 404) {
+        if (genRef.current === gen) setMsgs([]);
+        return;
+      }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const body = (await res.json()) as { items?: HistoryMessage[] };
       if (genRef.current !== gen) return;
@@ -671,7 +712,11 @@ export function ChatPane() {
     if (isModel) {
       if (svc) setMsgs([{ id: nextId(), role: "model", text: t("cubepilot.playground.cleared"), notice: true }]);
     } else {
-      // A cleared agent thread starts a fresh server session on next send.
+      // A cleared agent thread forgets this browser's key and starts a fresh
+      // server session on the next send. Rotating is the only way to start
+      // over: the history lives in the runtime, so the only way to address a
+      // session with none is to point at a different key.
+      forgetSessionKey();
       setAgentSessionKey(null);
       setAgentNotice("");
       setMsgs(greetingMsgs(agentStatus, agentConfig, agentSkills));
@@ -698,7 +743,12 @@ export function ChatPane() {
    *  only what the event means to the PANE: which session it belongs to, and that
    *  the model-side "thinking" indicator is over. */
   function handleAgentEvent(evt: AgentSseEvent, msgId: number): void {
-    if (evt.type === "message_start") setAgentSessionKey(evt.sessionId);
+    if (evt.type === "message_start") {
+      // The server mints the key for a first message; remember it so the next
+      // visit restores THIS conversation. See SESSION_KEY_STORAGE.
+      setAgentSessionKey(evt.sessionId);
+      storeSessionKey(evt.sessionId);
+    }
     if (evt.type !== "agent_thinking" && evt.type !== "message_start" && evt.type !== "message_done") setThinkingText(null);
     setMsgs((list) => list.map((x) => (x.id === msgId && x.role === "agent" ? applyAgentEvent(x, evt) : x)));
   }
