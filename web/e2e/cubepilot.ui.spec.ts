@@ -140,7 +140,7 @@ const TURN_TOOL_THEN_TEXT = [
 /** A reply carrying the Markdown an agent actually emits. */
 const TURN_MARKDOWN = [
   { type: "message_start", sessionId: SESSION_KEY },
-  { type: "message_delta", sessionId: SESSION_KEY, delta: "可以这样查:\n\n```sh\nkubectl get pods -A\n```\n\n然后:\n\n- 检查节点\n- 检查 DevicePlugin\n" },
+  { type: "message_delta", sessionId: SESSION_KEY, delta: "可以这样查:\n\n```sh\nkubectl get pods -A\n```\n\n然后:\n\n- 检查节点\n- 检查 DevicePlugin\n\n| 服务 | 状态 |\n|---|---|\n| qwen38 | Ready |\n" },
   { type: "message_done", sessionId: SESSION_KEY },
 ];
 
@@ -628,6 +628,13 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     // so the single-string form fails with a strict-mode violation rather than a
     // text mismatch, and could never pass.
     await expect(bubble.locator("li")).toContainText(["检查节点", "检查 DevicePlugin"]);
+    // A GFM table must become a real table, not its raw pipe syntax. Without
+    // remark-gfm it renders as the literal `| 服务 | 状态 |` line — and the
+    // agent's inspection answers lead with exactly such a table, so this is the
+    // assertion that would have caught the regression.
+    await expect(bubble.locator("table")).toContainText("qwen38");
+    await expect(bubble.locator("th")).toContainText(["服务", "状态"]);
+    await expect(bubble).not.toContainText("| 服务 |");
   });
 
   test("a pending approval docks above the composer, and lands in the thread once decided", async ({ page }) => {

@@ -19,6 +19,7 @@ import { Box } from "@mui/material";
 import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkBreaks from "remark-breaks";
+import remarkGfm from "remark-gfm";
 
 import type { AgentApproval, AgentBlock, AgentMsg, AgentQuestion, ThreadMsg } from "@/lib/cubepilot/agentThread";
 import { useI18n } from "@/lib/i18n";
@@ -195,7 +196,13 @@ function AgentMarkdown({ text }: { text: string }) {
       }}
     >
       <ReactMarkdown
-        remarkPlugins={[remarkBreaks]}
+        // remarkGfm MUST come first and MUST be present: without it a GFM table
+        // renders as its raw pipe syntax, and the agent's answers are full of
+        // them — its inspection replies lead with a service table. The renderer
+        // this replaced (Markdown.tsx) handled tables, so omitting this was a
+        // regression, not a simplification. remarkBreaks keeps single newlines
+        // as breaks; chat text relies on it.
+        remarkPlugins={[remarkGfm, remarkBreaks]}
         components={{
           p: ({ children }) => <Box component="p" sx={{ m: "8px 0" }}>{children}</Box>,
           ul: ({ children }) => <Box component="ul" sx={{ m: "8px 0", pl: "20px" }}>{children}</Box>,
@@ -204,6 +211,31 @@ function AgentMarkdown({ text }: { text: string }) {
           h1: ({ children }) => <Box component="h4" sx={{ m: "14px 0 6px", fontSize: 15, fontWeight: 650, lineHeight: 1.4 }}>{children}</Box>,
           h2: ({ children }) => <Box component="h5" sx={{ m: "14px 0 6px", fontSize: 14, fontWeight: 650, lineHeight: 1.4 }}>{children}</Box>,
           h3: ({ children }) => <Box component="h6" sx={{ m: "14px 0 6px", fontSize: 14, fontWeight: 650, lineHeight: 1.4 }}>{children}</Box>,
+          // Tables carry the same treatment as Markdown.tsx's, so the chat and
+          // the task reports render a table the same way.
+          table: ({ children }) => (
+            <Box sx={{ overflowX: "auto", my: "8px" }}>
+              <Box component="table" sx={{ borderCollapse: "collapse", fontSize: 12.5, width: "100%" }}>
+                {children}
+              </Box>
+            </Box>
+          ),
+          thead: ({ children }) => <Box component="thead">{children}</Box>,
+          tbody: ({ children }) => <Box component="tbody">{children}</Box>,
+          tr: ({ children }) => <Box component="tr">{children}</Box>,
+          th: ({ children }) => (
+            <Box
+              component="th"
+              sx={{ textAlign: "left", borderBottom: "1px solid var(--border)", px: "10px", py: "6px", color: "text.secondary", fontWeight: 600 }}
+            >
+              {children}
+            </Box>
+          ),
+          td: ({ children }) => (
+            <Box component="td" sx={{ borderBottom: "1px solid var(--border)", px: "10px", py: "6px", verticalAlign: "top" }}>
+              {children}
+            </Box>
+          ),
           a: ({ children, href }) => (
             <Box
               component="a"
