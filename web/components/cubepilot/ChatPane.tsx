@@ -1255,7 +1255,10 @@ export function ChatPane() {
                   border: 1,
                   flex: "none",
                   color: "var(--violet-text)",
-                  borderColor: VIOLET_BORDER,
+                  // The prototype draws this badge at 42% (chat.html:174) while
+                  // the selected row beside it uses 55% (chat.html:163) — the
+                  // pill sits on a 10% fill, so its border stays light.
+                  borderColor: "var(--violet-bd)",
                   bgcolor: "color-mix(in oklch, var(--violet) 10%, transparent)",
                 }}
               >
