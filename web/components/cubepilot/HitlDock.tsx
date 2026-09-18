@@ -58,6 +58,13 @@ export function ApprovalCard({
         ? t("cubepilot.chat.approvalRejected")
         : t("cubepilot.chat.approvalStopped");
   const tone = approval.state === "approved" ? "ok" : approval.state === "rejected" ? "danger" : "neutral";
+  // A settled card is a RECORD, so it collapses to its one-line header and opens
+  // only if the reader wants the command back — the shape a tool card already
+  // has. An open card is a CONTROL and is never collapsed: its buttons are the
+  // reason the turn is waiting on the user, and a collapsed control is one they
+  // have to go looking for.
+  const [expanded, setExpanded] = useState(false);
+  const showBody = open || expanded;
   return (
     <Box
       data-od-id="approval-item"
@@ -73,37 +80,74 @@ export function ApprovalCard({
         minWidth: 0,
       }}
     >
-      <Box sx={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+      <Box
+        data-od-id="approval-head"
+        {...(open
+          ? {}
+          : {
+              component: "button" as const,
+              type: "button" as const,
+              onClick: () => setExpanded((v) => !v),
+              "aria-expanded": expanded,
+              title: expanded ? t("cubepilot.chat.collapseTool") : t("cubepilot.chat.expandTool"),
+            })}
+        sx={{
+          display: "flex",
+          alignItems: "center",
+          gap: "8px",
+          flexWrap: "wrap",
+          ...(open
+            ? {}
+            : {
+                width: "100%",
+                border: 0,
+                bgcolor: "transparent",
+                color: "text.primary",
+                fontFamily: "inherit",
+                textAlign: "left" as const,
+                p: 0,
+                cursor: "pointer",
+              }),
+        }}
+      >
         <Box sx={{ fontSize: 12, fontWeight: 600 }}>{t("cubepilot.chat.approvalTitle")}</Box>
         {approval.level ? <Pill variant={approval.level === "write" ? "warn" : "neutral"}>{approval.level}</Pill> : null}
-        {open ? null : <Pill variant={tone}>{label}</Pill>}
+        {open ? null : <Pill variant={tone} sx={{ ml: "auto" }}>{label}</Pill>}
+        {open ? null : (
+          <Box component="span" aria-hidden sx={{ ...monoSx, fontSize: 10, color: "text.secondary", flex: "none" }}>
+            {expanded ? "▾" : "▸"}
+          </Box>
+        )}
       </Box>
       {/* What the write is, and why the agent wants it: the part that scrolls
           when the dock cannot give the card its full height. What the command
           itself is must stay readable, so the box scrolls rather than growing
           the composer by a screenful. */}
-      <Box sx={{ maxHeight: 160, overflow: "auto", display: "flex", flexDirection: "column", gap: "7px" }}>
-        {approval.command ? (
-          <Box
-            component="pre"
-            sx={{
-              m: 0,
-              ...monoSx,
-              fontSize: 11.5,
-              lineHeight: 1.6,
-              whiteSpace: "pre-wrap",
-              wordBreak: "break-all",
-              bgcolor: "var(--surface)",
-              border: "1px solid var(--border)",
-              borderRadius: 5,
-              p: "7px 10px",
-            }}
-          >
-            {approval.command}
-          </Box>
+      {showBody ? (
+        <Box sx={{ maxHeight: 160, overflow: "auto", display: "flex", flexDirection: "column", gap: "7px" }}>
+          {approval.command ? (
+            <Box
+              component="pre"
+              data-od-id="approval-command"
+              sx={{
+                m: 0,
+                ...monoSx,
+                fontSize: 11.5,
+                lineHeight: 1.6,
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-all",
+                bgcolor: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: 5,
+                p: "7px 10px",
+              }}
+            >
+              {approval.command}
+            </Box>
         ) : null}
         {approval.message ? <Box sx={{ fontSize: 12, color: "text.secondary" }}>{approval.message}</Box> : null}
       </Box>
+      ) : null}
       {/* The decision row is the control this card exists for, so it sits
           outside the scroller above. */}
       {open ? (

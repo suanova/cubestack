@@ -16,7 +16,7 @@
 // to the work it let through, not in the composer.
 
 import { Box } from "@mui/material";
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
@@ -329,6 +329,33 @@ function AgentBubble({
   // or failed turn is labelled as a reply, so a mid-turn snapshot can never
   // read as the result disappearing.
   const settled = msg.phase === "done" && !msg.stopped && !msg.error && !msg.transportLost;
+
+  // What this turn was let through — the cards it settled — sits between the
+  // tool log and the closing answer, not under it. The reference draws them
+  // there (ChatThread.tsx: tool cards, the resolved confirm, the resolved
+  // questions, the superseded disclosure, then the answer panel), and it reads
+  // the right way round: a record of "this write was allowed" belongs to the
+  // work it permitted, not as a footnote to the conclusion. Putting it last also
+  // pushed the answer panel up the screen, which is what a user noticed.
+  //
+  // The dock carries a card only while it is open; the same components draw
+  // both, so a decided card looks the same in either place.
+  const lastToolIndex = msg.blocks.reduce((acc, b, i) => (b.kind === "tool" ? i : acc), -1);
+  const settledCards = (
+    <>
+      {msg.approvals.filter(settledApproval).map((a) => (
+        <Box key={a.callId} sx={{ mt: "9px" }}>
+          <ApprovalCard approval={a} />
+        </Box>
+      ))}
+      {msg.questions.filter(settledQuestion).map((q) => (
+        <Box key={q.callId} sx={{ mt: "9px" }}>
+          <QuestionCard question={q} now={now} />
+        </Box>
+      ))}
+    </>
+  );
+
   return (
     <Box data-od-id="agent-bubble" sx={agentBubbleSx}>
       <Box
@@ -384,9 +411,12 @@ function AgentBubble({
           const key = `${sessionKey ?? ""}-${b.callId || `p${mi}-${bi}`}`;
           const open = openedTools[key] ?? running;
           return (
-            <Box key={bi} data-od-block="tool" sx={{ mt: bi > 0 ? "8px" : 0 }}>
-              <ToolCard block={b} running={running} open={open} onToggle={() => onToggleTool(key, !open)} />
-            </Box>
+            <Fragment key={bi}>
+              <Box data-od-block="tool" sx={{ mt: bi > 0 ? "8px" : 0 }}>
+                <ToolCard block={b} running={running} open={open} onToggle={() => onToggleTool(key, !open)} />
+              </Box>
+              {bi === lastToolIndex ? settledCards : null}
+            </Fragment>
           );
         }
         const isPanel = ranTools && endsWithText && bi === lastTextIndex;
@@ -435,20 +465,10 @@ function AgentBubble({
           </Box>
         );
       })}
-      {/* What this turn was let through: the cards it settled, kept next to the
-          work they belong to. The dock carries a card only while it is open, and
-          the same components draw both, so a decided card looks the same in both
-          places. */}
-      {msg.approvals.filter(settledApproval).map((a) => (
-        <Box key={a.callId} sx={{ mt: "9px" }}>
-          <ApprovalCard approval={a} />
-        </Box>
-      ))}
-      {msg.questions.filter(settledQuestion).map((q) => (
-        <Box key={q.callId} sx={{ mt: "9px" }}>
-          <QuestionCard question={q} now={now} />
-        </Box>
-      ))}
+      {/* A turn with no tool blocks has no "after the last tool" to hang the
+          settled cards on; the end of the bubble is where they read as the
+          turn's own record. */}
+      {lastToolIndex < 0 ? settledCards : null}
     </Box>
   );
 }

@@ -734,7 +734,42 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     await page.locator('[data-od-id="hitl-dock"] [data-od-id="approval-approve"]').click();
     // Decided: it moves into the thread as a record.
     await expect(page.locator('[data-od-id="hitl-dock"] [data-od-id="approval-item"]')).toHaveCount(0);
+    const record = page.locator('[data-od-id="agent-bubble"] [data-od-id="approval-item"]');
+    await expect(record).toHaveCount(1);
+
+    // A settled card is a RECORD, so it is collapsed to its one-line header and
+    // the command is one click away, exactly like a tool card. A card that keeps
+    // its full height after it has been decided is a screenful the reader has to
+    // scroll past for nothing.
+    await expect(record.locator('[data-od-id="approval-command"]')).toHaveCount(0);
+    await record.locator('[data-od-id="approval-head"]').click();
+    await expect(record.locator('[data-od-id="approval-command"]')).toHaveCount(1);
+  });
+
+  test("a settled card sits with the work it permitted, not under the answer", async ({ page }) => {
+    // The reference draws the tool log, the resolved cards, then the answer
+    // panel. Reversed, the card pushed the conclusion up the screen and read as
+    // a footnote to it rather than as part of the work it let through.
+    await stubAgent(page, { sessions: [SESSION], turnEvents: TURN_APPROVAL });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="obj-cubepilot"]').click();
+    await page.locator('[data-od-id="chat-input"]').fill("调整 OSD");
+    await page.locator('[data-od-id="send-btn"]').click();
+    await page.locator('[data-od-id="hitl-dock"] [data-od-id="approval-approve"]').click();
     await expect(page.locator('[data-od-id="agent-bubble"] [data-od-id="approval-item"]')).toHaveCount(1);
+
+    // Document order is the assertion: the card comes after the tool block it
+    // permitted and before the closing text.
+    const order = await page
+      .locator('[data-od-id="agent-bubble"]')
+      .last()
+      .evaluate((b) =>
+        [...b.querySelectorAll("[data-od-block], [data-od-id='approval-item']")].map(
+          (e) => e.getAttribute("data-od-block") ?? "approval",
+        ),
+      );
+    expect(order.indexOf("approval")).toBeGreaterThan(order.indexOf("tool"));
+    expect(order.indexOf("approval")).toBeLessThan(order.lastIndexOf("text"));
   });
 
   test("an approval resolved without a decision reads Stopped, not Rejected", async ({ page }) => {
