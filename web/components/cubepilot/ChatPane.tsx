@@ -267,6 +267,10 @@ export function ChatPane() {
   /** The 1s ticker's clock. A question's countdown is derived from it, so it has
    *  to move for the card to lock itself up when the gateway's timeout runs out. */
   const [now, setNow] = useState(() => Date.now());
+  /** A "clear this conversation" is in flight. The server answers only once the
+   *  session's turn has been stopped and its stream released, so the wait can run
+   *  to tens of seconds with nothing else on the page moving. */
+  const [clearing, setClearing] = useState(false);
 
   // Only while a turn is unfinished: the countdown is the one thing on this page
   // that needs a second-by-second clock, and an idle page must not re-render
@@ -797,6 +801,44 @@ export function ChatPane() {
     if (!isModel) return;
     cancelInflight();
     if (svc) setMsgs([{ id: nextId(), role: "model", text: t("cubepilot.playground.cleared"), notice: true }]);
+  }
+
+  /**
+   * Start this conversation over (cubepilot #214).
+   *
+   * The agent's transcript lives in the runtime under one fixed key, so a local
+   * "clear" means nothing here — the next read brings the same conversation
+   * back. The only thing that does mean something for a fixed key is deleting it
+   * server-side, which is what this does; the server stops any turn still running
+   * on it and waits for its stream to release before answering.
+   *
+   * It asks first. The record is gone for good, and there is no undo to offer
+   * afterwards — so the question is the last moment the choice can be made.
+   *
+   * A 409 means a turn is still active: the composer's Stop is the control for
+   * that, and the server's own message says so. A 504 means the delete may have
+   * landed anyway; the call is idempotent, so trying again is the whole recovery.
+   */
+  async function clearAgentSession(): Promise<void> {
+    const key = agentSessionKey;
+    if (!key || clearing) return;
+    if (!window.confirm(t("cubepilot.chat.clearConfirm"))) return;
+    setClearing(true);
+    try {
+      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}`, { method: "DELETE" });
+      const body = (await res.json().catch(() => null)) as { error?: string } | null;
+      if (!res.ok) throw new Error(body?.error || `HTTP ${res.status}`);
+      // Everything on screen described the session that is now gone: its
+      // stream, its poll and its cards all belong to it, and none of them can
+      // be asked to forget it. Tearing them down and restoring is the path a
+      // fresh page takes, and it greets when there is no history left to draw.
+      cancelInflight();
+      await restoreAgentSession(await loadAgentMeta());
+    } catch (e) {
+      showToast(t("cubepilot.failed", { error: e instanceof Error ? e.message : String(e) }), "error");
+    } finally {
+      setClearing(false);
+    }
   }
 
   function copyText(text: string, which: "endpoint"): void {
@@ -1572,6 +1614,21 @@ export function ChatPane() {
             {isModel ? (
               <Btn variant="secondary" small onClick={clearChat} data-od-id="clear-chat">
                 {t("cubepilot.playground.clear")}
+              </Btn>
+            ) : null}
+            {/* The agent side's own clear. Its transcript is not here — it is in
+                the runtime under one fixed key — so this one DELETEs the session
+                rather than dropping a local copy, which is why it is a different
+                control with a different question in front of it. */}
+            {isAgent ? (
+              <Btn
+                variant="secondary"
+                small
+                onClick={() => void clearAgentSession()}
+                disabled={clearing || !agentSessionKey}
+                data-od-id="clear-agent"
+              >
+                {t(clearing ? "cubepilot.chat.clearing" : "cubepilot.chat.clear")}
               </Btn>
             ) : null}
           </Box>

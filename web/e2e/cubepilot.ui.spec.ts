@@ -238,6 +238,8 @@ interface Captured {
    *  would run alongside the next one and the older answer could land last,
    *  putting the transcript backwards. */
   maxHistoryInFlight: number;
+  /** Every DELETE the pane made for a session, in order. */
+  sessionDeletes: string[];
   /** How many times the pane asked whether the session's turn is running. The
    *  pane watches the conversation for as long as it is on screen, not only while
    *  it believes a turn is in flight — the conversation can move without this
@@ -299,7 +301,7 @@ function confirmAfterPut(body: { confirmPolicy?: string; allowlist?: AllowlistRu
 
 /** Stub every endpoint the three panes touch with CR-shaped responses. */
 async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
-  const captured: Captured = { approvalPosts: [], questionPosts: [], pendingPaths: [], historyPaths: [], sessionListCalls: 0, maxHistoryInFlight: 0, turnReads: 0, configPuts: [], confirmPuts: [], llmPosts: [], agentPosts: [] };
+  const captured: Captured = { approvalPosts: [], questionPosts: [], pendingPaths: [], historyPaths: [], sessionListCalls: 0, maxHistoryInFlight: 0, sessionDeletes: [], turnReads: 0, configPuts: [], confirmPuts: [], llmPosts: [], agentPosts: [] };
   let config = stubs.config ?? CONFIG_READY;
   let confirm = stubs.confirm ?? CONFIRM;
   // The pending list reflects the post-refusal world only once an answer has
@@ -310,6 +312,8 @@ async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
   let messagesRead = 0;
   let turnReads = 0;
   let historyInFlight = 0;
+  /** Set by a DELETE: the session and its transcript are gone. */
+  let sessionGone = false;
   const sessions = stubs.sessions === undefined ? [] : stubs.sessions;
   await page.route("**/api/cubepilot/**", async (route) => {
     const req = route.request();
@@ -367,6 +371,15 @@ async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
     // ── the agent API proxy ──
     if (path.includes("/api/cubepilot/pilot/")) {
       if (method === "POST") captured.agentPosts.push(path);
+      // Clearing the conversation (cubepilot #214): DELETE names the session
+      // itself. The stub models what the real one does — the transcript is gone
+      // afterwards — because a pane that deleted server-side but kept drawing
+      // the old history would pass any assertion that only checked the request.
+      if (method === "DELETE") {
+        captured.sessionDeletes.push(path);
+        sessionGone = true;
+        return json({ deleted: true, archived: [] });
+      }
       if (path.endsWith("/messages") && method === "POST") {
         return route.fulfill({
           status: 200,
@@ -375,6 +388,9 @@ async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
         });
       }
       if (path.endsWith("/messages")) {
+        // A cleared session has no conversation: the route answers 404, which
+        // the pane reads as "this one has not started" and greets.
+        if (sessionGone) return json({ error: "no such session" }, 404);
         captured.historyPaths.push(path);
         historyInFlight++;
         captured.maxHistoryInFlight = Math.max(captured.maxHistoryInFlight, historyInFlight);
@@ -742,6 +758,37 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     // The answer is its own block: merging it into the narration above would
     // print the conclusion inside the sentence introducing the tool call.
     await expect(bubble).toContainText("共 1 个节点。");
+  });
+
+  test("clears the conversation: asks first, deletes it, and starts fresh", async ({ page }) => {
+    // The transcript is in the runtime under one fixed key, so a local "clear"
+    // would bring the same conversation back on the next read — the button only
+    // means something because cubepilot #214 deletes the session itself. It is
+    // destructive and there is no undo, so the question comes first: that is the
+    // last moment the choice can be made.
+    const captured = await stubAgent(page, { sessions: [SESSION], history: HISTORY });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="obj-cubepilot"]').click();
+    await expect(page.locator('[data-od-id="chat-thread"]')).toContainText("上次巡检的结论?");
+
+    // Declining sends nothing at all.
+    page.once("dialog", (d) => void d.dismiss());
+    await page.locator('[data-od-id="clear-agent"]').click();
+    await expect(page.locator('[data-od-id="chat-thread"]')).toContainText("上次巡检的结论?");
+    expect(captured.sessionDeletes).toEqual([]);
+
+    page.once("dialog", (d) => void d.accept());
+    await page.locator('[data-od-id="clear-agent"]').click();
+
+    await expect.poll(() => captured.sessionDeletes.length).toBe(1);
+    // The key is the whole tail of the path, percent-encoded: the API's DELETE
+    // names the session, and `agent:main:conv-portal` is what it has to name.
+    expect(decodeURIComponent(captured.sessionDeletes[0])).toContain(`/api/v1/sessions/${SESSION_KEY}`);
+
+    // And the pane starts over rather than keeping a transcript the server no
+    // longer has: the thread is the greeting a first-time visitor gets.
+    await expect(page.locator('[data-od-id="chat-thread"]')).not.toContainText("上次巡检的结论?");
+    await expect(page.locator('[data-od-id="chat-thread"]')).toContainText("收到。");
   });
 
   test("a turn that survived a reload says so, and offers Stop", async ({ page }) => {
