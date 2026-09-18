@@ -19,7 +19,7 @@ spec:
           expr: |
             sum by (namespace, devenv) (
               label_replace(
-                kube_pod_container_resource_requests{resource=~"nvidia_com_gpu|metax_tech_com_gpu"}
+                kube_pod_container_resource_requests{resource=~"nvidia.com/gpu|nvidia_com_gpu|metax-tech.com/gpu|metax_tech_com_gpu"}
                 * on(namespace, pod) group_left(label_ai_cubestack_io_dev_environment)
                 kube_pod_labels{label_ai_cubestack_io_dev_environment!=""},
                 "devenv", "$1", "label_ai_cubestack_io_dev_environment", "(.*)"
@@ -160,20 +160,21 @@ spec:
 
         # Per-DevEnvironment PVC bound status (min = all PVCs must be bound)
         # Requires join: pod → PVC → bound status
+        # 注意: 同一个 PVC 可能被多个 pod/volume 引用, 引用侧必须放在 join 左侧
+        # (PromQL many-to-one 要求右侧按 on() 标签唯一)
         - record: cubestack_devenv_pvc_bound:min
           expr: |
             min by (namespace, devenv) (
               label_replace(
-                label_replace(
-                  kube_persistentvolumeclaim_status_phase{phase="Bound"} * 0 + 1,
-                  "pod", "$1", "pod", "(.*)"
+                (
+                  kube_pod_spec_volumes_persistentvolumeclaims_info
+                  * on(namespace, persistentvolumeclaim) group_left()
+                  kube_persistentvolumeclaim_status_phase{phase="Bound"}
                 )
-                * on(namespace, persistentvolumeclaim) group_left(pod)
-                kube_pod_spec_volumes_persistentvolumeclaims_info,
-                "dummy", "", "", ""
+                * on(namespace, pod) group_left(label_ai_cubestack_io_dev_environment)
+                kube_pod_labels{label_ai_cubestack_io_dev_environment!=""},
+                "devenv", "$1", "label_ai_cubestack_io_dev_environment", "(.*)"
               )
-              * on(namespace, pod) group_left(label_ai_cubestack_io_dev_environment)
-              kube_pod_labels{label_ai_cubestack_io_dev_environment!=""}
             )
 
         # Per-DevEnvironment PVC requested capacity
@@ -181,14 +182,13 @@ spec:
           expr: |
             sum by (namespace, devenv) (
               label_replace(
-                label_replace(
-                  kube_persistentvolumeclaim_resource_requests_storage_bytes,
-                  "pod", "$1", "pod", "(.*)"
+                (
+                  kube_pod_spec_volumes_persistentvolumeclaims_info
+                  * on(namespace, persistentvolumeclaim) group_left()
+                  kube_persistentvolumeclaim_resource_requests_storage_bytes
                 )
-                * on(namespace, persistentvolumeclaim) group_left(pod)
-                kube_pod_spec_volumes_persistentvolumeclaims_info,
-                "dummy", "", "", ""
+                * on(namespace, pod) group_left(label_ai_cubestack_io_dev_environment)
+                kube_pod_labels{label_ai_cubestack_io_dev_environment!=""},
+                "devenv", "$1", "label_ai_cubestack_io_dev_environment", "(.*)"
               )
-              * on(namespace, pod) group_left(label_ai_cubestack_io_dev_environment)
-              kube_pod_labels{label_ai_cubestack_io_dev_environment!=""}
             )

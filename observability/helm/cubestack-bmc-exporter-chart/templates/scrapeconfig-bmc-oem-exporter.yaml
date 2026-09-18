@@ -1,0 +1,27 @@
+{{- if and .Values.scrapeConfigs.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1alpha1") }}
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: ScrapeConfig
+metadata:
+  name: {{ include "cubestack-bmc-exporter.fullname" . }}-bmc-oem-exporter
+  labels:
+    {{- include "cubestack-bmc-exporter.labels" . | nindent 4 }}
+    # Must match the stack's scrapeConfigSelector (default: its helm release name).
+    release: {{ .Values.scrapeConfigs.releaseLabel }}
+spec:
+  metricsPath: {{ .Values.scrapeConfigs.bmcOem.metricsPath }}
+  scrapeInterval: {{ .Values.scrapeConfigs.interval }}
+  scrapeTimeout: {{ .Values.scrapeConfigs.bmcOem.timeout }}
+  staticConfigs:
+    {{- range .Values.bmc.hosts }}
+    - targets:
+        - {{ include "cubestack-bmc-exporter.fullname" $ }}-bmc-oem-exporter.{{ $.Release.Namespace }}.svc:9622
+      labels:
+        job: bmc-oem-exporter
+        # __param_<name> labels become URL query parameters at scrape time.
+        __param_target: {{ . }}
+    {{- end }}
+  relabelings:
+    # Make instance the BMC IP so metrics from different BMCs are distinguishable.
+    - sourceLabels: [__param_target]
+      targetLabel: instance
+{{- end }}

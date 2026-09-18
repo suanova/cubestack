@@ -40,7 +40,6 @@ export default function CubepilotPage() {
         // The chat tab fills to the window bottom (its floating composer is
         // pinned to the viewport's bottom edge), so no page bottom padding.
         paddingBottom: tab === "chat" ? 0 : "64px",
-        maxWidth: 1240,
         mx: "auto",
         width: "100%",
       }}

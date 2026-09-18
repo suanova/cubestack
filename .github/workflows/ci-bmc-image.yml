@@ -1,0 +1,103 @@
+name: CI BMC Exporter Image
+
+# Push-only so the image job never appears in pull request checks. Builds both
+# exporter images from source (static binaries, FROM scratch) and pushes them to
+# Harbor, same pattern as ci-portal-image.yml / ci-operator-image.yml.
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: ci-bmc-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    permissions:
+      contents: read
+      pull-requests: read
+    runs-on: ubuntu-latest
+    outputs:
+      bmc: ${{ steps.filter.outputs.bmc }}
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Full history so paths-filter can diff against the base ref without fetching
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Detect changed paths
+        uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3
+        id: filter
+        with:
+          filters: |
+            bmc:
+              - 'observability/bmc-oem-exporter/**'
+              - 'observability/deploy/**'
+              - '.github/workflows/ci-bmc-image.yml'
+
+  build-push-images:
+    # Push the exporter images only when a merge lands on main with
+    # exporter-content-relevant changes.
+    needs: changes
+    if: needs.changes.outputs.bmc == 'true'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Setup Go
+        uses: ./.github/actions/setup-go
+        with:
+          go-version-file: observability/bmc-oem-exporter/go.mod
+      - name: Log in to Harbor
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: harbor.isuanova.com
+          username: ${{ vars.CI_BOT_NAME }}
+          password: ${{ secrets.CI_BOT_PASSWORD }}
+      - name: Build and push images
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          set -euo pipefail
+          SHA_TAG="${GITHUB_SHA}"
+          WORK="$(mktemp -d)"
+
+          # bmc-oem-exporter: the Dockerfile builds the static binary from repo
+          # source (multi-stage, FROM scratch).
+          docker build -t "harbor.isuanova.com/suanova/bmc-oem-exporter:${SHA_TAG}" observability/bmc-oem-exporter
+
+          # idrac-exporter v1.6.2: static binary from upstream source, FROM scratch.
+          GOBIN="${WORK}" CGO_ENABLED=0 go install github.com/mrlhansen/idrac_exporter/cmd/idrac_exporter@v1.6.2
+          cp observability/deploy/bmc/Dockerfile.idrac-exporter "${WORK}/Dockerfile"
+          docker build -t "harbor.isuanova.com/suanova/idrac-exporter:${SHA_TAG}" "${WORK}"
+
+          # Push the immutable, commit-addressed tags. Safe for any commit that
+          # ever landed on main, even if a newer commit now exists.
+          for IMAGE in bmc-oem-exporter idrac-exporter; do
+            docker push "harbor.isuanova.com/suanova/${IMAGE}:${SHA_TAG}"
+          done
+
+          # Only refresh the mutable `latest` tags if this run's commit is still
+          # the head of main. An older run can finish after a newer main commit;
+          # pushing its image as `latest` would mislabel which commit is newest.
+          CURRENT_MAIN="$(
+            curl -fsSL \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/branches/main" \
+              | jq -r .commit.sha
+          )"
+          if [ "${CURRENT_MAIN}" = "${SHA_TAG}" ]; then
+            for IMAGE in bmc-oem-exporter idrac-exporter; do
+              docker tag "harbor.isuanova.com/suanova/${IMAGE}:${SHA_TAG}" "harbor.isuanova.com/suanova/${IMAGE}:latest"
+              docker push "harbor.isuanova.com/suanova/${IMAGE}:latest"
+            done
+          else
+            echo "Skipping 'latest': ${SHA_TAG} is no longer the head of main (current: ${CURRENT_MAIN})"
+          fi

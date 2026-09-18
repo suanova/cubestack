@@ -27,14 +27,23 @@ go.work
 *.swo
 *~
 
-# Kubeconfig might contain secrets
+# Kubeconfig might contain secrets (any naming variant)
 *.kubeconfig
+*-kubeconfig.yaml
+kubeconfig*.yaml
 
 # Superpowers workflow artifacts (personal workflow, not team-shared)
 docs/superpowers/
 
-# Claude Code per-user local settings (not team-shared)
-.claude/settings.local.json
+# Claude Code per-user artifacts (not team-shared)
+.claude/
+observability/.claude/
+
+# Personal scratch / collected-metrics workspace (not team-shared)
+tmp/
+
+# Personal progress notes (team-shared copy would go elsewhere)
+observability/docs/bmc-progress.md
 
 # CodeGraph (not team-shared)
 .codegraph

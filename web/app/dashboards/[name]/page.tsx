@@ -57,7 +57,7 @@ export default function DashboardPage({ params }: { params: Promise<{ name: stri
   const title = dashboard?.spec.display?.name ?? name ?? "";
 
   return (
-    <Box sx={{ p: 3, maxWidth: 1240, mx: "auto", width: "100%" }}>
+    <Box sx={{ p: 3, mx: "auto", width: "100%" }}>
       <Typography
         sx={{
           fontSize: 22,

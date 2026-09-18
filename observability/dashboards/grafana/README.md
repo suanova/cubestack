@@ -29,6 +29,7 @@ Grafana UI → Dashboards → Import → Upload JSON file，或通过 installer 
 | `workload-troubleshooting.json` | KSM + cAdvisor 定制 | `k8s-workload-cubestack` | Namespace → Workload → Pod → Container 定向排障 |
 | `nvidia-dcgm.json` | NVIDIA DCGM Exporter 定制 | `nvidia-dcgm-cubestack` | GPU Util / Memory / Temp / Power / Health（需 NVIDIA GPU 环境） |
 | `vllm.json` | vLLM 官方指标定制 | `vllm-cubestack` | vLLM Runtime 性能指标（需 vLLM 环境） |
+| `bmc-hardware.json` | idrac_exporter 社区 BMC overview 定制 + bmc-oem-exporter PCIe 指标 | `bmc-hardware-cubestack` | C500 带外统一健康视图：系统/温度/风扇/电源/GPU 功耗/PCIe 设备/硬盘/内存（instance 变量切换 BMC；两套健康值约定阈值分开配） |
 
 ---
 
@@ -37,3 +38,7 @@ Grafana UI → Dashboards → Import → Upload JSON file，或通过 installer 
 - **文件名**：`<name>[-<community-id>].json`，全小写，用 `-` 分隔
 - **uid**：社区原版保留原 uid；定制版格式 `<name>-cubestack[-<version>]`
 - **tags**：所有 dashboard 必须包含 `cubestack`；社区原版保留原有 tags；定制版补充内容相关 tags
+
+## 面板说明
+
+`bmc-hardware.json` 每个面板的含义与异常判读见 `../../docs/bmc-dashboard-panels.md`。

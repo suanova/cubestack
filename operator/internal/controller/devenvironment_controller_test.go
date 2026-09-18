@@ -18,6 +18,7 @@ package controller
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/pem"
@@ -1260,6 +1261,74 @@ var _ = Describe("DevEnvironment pod spec rendering", func() {
 			env.Spec.Type = aiv1alpha1.DevEnvironmentTypeJupyter
 			Expect(podTemplateAnnotations(env)).To(BeNil())
 		})
+	})
+})
+
+// countingClient counts the writes a reconciler issues. "Issued no write"
+// cannot be observed on the stored object: the API server re-defaults a no-op
+// update, finds nothing changed and keeps the resourceVersion. The call itself
+// still runs the optimistic-concurrency check, and that is what surfaces as a
+// conflict when it races another writer — so the assertion has to be on the
+// call, not on the resource.
+type countingClient struct {
+	client.Client
+	updates int
+}
+
+func (c *countingClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+	c.updates++
+	return c.Client.Update(ctx, obj, opts...)
+}
+
+var _ = Describe("DevEnvironment apply is idempotent", func() {
+	It("issues no write when the stored resources already match", func() {
+		env := validDevEnvironment("de-idem")
+		Expect(k8sClient.Create(ctx, env)).To(Succeed())
+		defer deleteEnv(env.Name)
+
+		stored := &aiv1alpha1.DevEnvironment{}
+		Expect(k8sClient.Get(ctx, envKey(env.Name), stored)).To(Succeed())
+
+		counter := &countingClient{Client: k8sClient}
+		r := &DevEnvironmentReconciler{Client: counter, Scheme: testScheme, Config: DevEnvironmentControllerConfig{
+			GatewayName:               testDevEnvGatewayName,
+			GatewayNamespace:          testNamespace,
+			GatewayDataplaneNamespace: testGatewayDataplaneNamespace,
+		}}
+		gw := &gatewayv1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: testDevEnvGatewayName, Namespace: testNamespace}}
+
+		// Creating the environment enqueues the reconciler the suite runs, so a
+		// helper's Get may find nothing and then lose the Create to it. That
+		// race is not what this spec is about: ignore the loser's
+		// AlreadyExists and compare against whatever is stored.
+		apply := func() {
+			Expect(client.IgnoreAlreadyExists(r.applyService(ctx, stored))).To(Succeed())
+			Expect(client.IgnoreAlreadyExists(r.applyNetworkPolicy(ctx, stored))).To(Succeed())
+			_, err := r.applyHTTPRoute(ctx, stored, gw)
+			Expect(client.IgnoreAlreadyExists(err)).To(Succeed())
+			_, err = r.applyTCPRoute(ctx, stored, gw, sshPortName, sshServicePort)
+			Expect(client.IgnoreAlreadyExists(err)).To(Succeed())
+		}
+
+		apply() // every object is created
+		Expect(counter.updates).To(BeZero())
+		// The second pass is only meaningful against objects an API server
+		// actually stored: assert they are there rather than letting a failed
+		// create make the comparison below vacuous.
+		Expect(k8sClient.Get(ctx, envKey(env.Name), &corev1.Service{})).To(Succeed())
+		Expect(k8sClient.Get(ctx, envKey(env.Name), &networkingv1.NetworkPolicy{})).To(Succeed())
+		Expect(k8sClient.Get(ctx, client.ObjectKey{
+			Name: webRouteName(stored), Namespace: testNamespace,
+		}, &gatewayv1.HTTPRoute{})).To(Succeed())
+		Expect(k8sClient.Get(ctx, client.ObjectKey{
+			Name: tcpRouteName(stored, sshServicePort), Namespace: testNamespace,
+		}, &gatewayv1.TCPRoute{})).To(Succeed())
+
+		// The objects are now stored by a real API server. Nothing the
+		// controller owns has changed, so the second pass must not write: a
+		// write here means the server's own defaults read as drift.
+		apply()
+		Expect(counter.updates).To(BeZero())
 	})
 })
 

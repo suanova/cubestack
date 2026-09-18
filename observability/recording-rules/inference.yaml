@@ -15,15 +15,15 @@ spec:
       interval: 60s
       rules:
         # Per-InferenceService GPU allocated count
-        # Requires: kube_pod_labels has label_cubestack_io_inference_service (KSM allowlist)
+        # Requires: kube_pod_labels has label_ai_cubestack_io_inference_service (KSM allowlist)
         - record: cubestack_inference_gpu_allocated:sum
           expr: |
             sum by (namespace, inference_service) (
               label_replace(
-                kube_pod_container_resource_requests{resource=~"nvidia_com_gpu|metax_tech_com_gpu"}
-                * on(namespace, pod) group_left(label_cubestack_io_inference_service)
-                kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-inference"},
-                "inference_service", "$1", "label_cubestack_io_inference_service", "(.*)"
+                kube_pod_container_resource_requests{resource=~"nvidia.com/gpu|nvidia_com_gpu|metax-tech.com/gpu|metax_tech_com_gpu"}
+                * on(namespace, pod) group_left(label_ai_cubestack_io_inference_service)
+                kube_pod_labels{label_ai_cubestack_io_inference_service!=""},
+                "inference_service", "$1", "label_ai_cubestack_io_inference_service", "(.*)"
               )
             )
 
@@ -131,11 +131,11 @@ spec:
               label_replace(
                 label_replace(
                   sglang_num_running_reqs
-                  * on(namespace, pod) group_left(label_cubestack_io_inference_service, label_cubestack_io_role)
-                  kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-inference"},
-                  "inference_service", "$1", "label_cubestack_io_inference_service", "(.*)"
+                  * on(namespace, pod) group_left(label_ai_cubestack_io_inference_service, label_ai_cubestack_io_role)
+                  kube_pod_labels{label_ai_cubestack_io_inference_service!=""},
+                  "inference_service", "$1", "label_ai_cubestack_io_inference_service", "(.*)"
                 ),
-                "role", "$1", "label_cubestack_io_role", "(.*)"
+                "role", "$1", "label_ai_cubestack_io_role", "(.*)"
               )
             )
 
@@ -146,11 +146,11 @@ spec:
               label_replace(
                 label_replace(
                   sglang_num_waiting_reqs
-                  * on(namespace, pod) group_left(label_cubestack_io_inference_service, label_cubestack_io_role)
-                  kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-inference"},
-                  "inference_service", "$1", "label_cubestack_io_inference_service", "(.*)"
+                  * on(namespace, pod) group_left(label_ai_cubestack_io_inference_service, label_ai_cubestack_io_role)
+                  kube_pod_labels{label_ai_cubestack_io_inference_service!=""},
+                  "inference_service", "$1", "label_ai_cubestack_io_inference_service", "(.*)"
                 ),
-                "role", "$1", "label_cubestack_io_role", "(.*)"
+                "role", "$1", "label_ai_cubestack_io_role", "(.*)"
               )
             )
 
@@ -161,11 +161,11 @@ spec:
               label_replace(
                 label_replace(
                   sglang_token_usage
-                  * on(namespace, pod) group_left(label_cubestack_io_inference_service, label_cubestack_io_role)
-                  kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-inference"},
-                  "inference_service", "$1", "label_cubestack_io_inference_service", "(.*)"
+                  * on(namespace, pod) group_left(label_ai_cubestack_io_inference_service, label_ai_cubestack_io_role)
+                  kube_pod_labels{label_ai_cubestack_io_inference_service!=""},
+                  "inference_service", "$1", "label_ai_cubestack_io_inference_service", "(.*)"
                 ),
-                "role", "$1", "label_cubestack_io_role", "(.*)"
+                "role", "$1", "label_ai_cubestack_io_role", "(.*)"
               )
             )
 
@@ -175,8 +175,8 @@ spec:
             avg by (namespace, inference_service) (
               label_replace(
                 sglang_cache_hit_rate
-                * on(namespace, pod) group_left(label_cubestack_io_inference_service)
-                kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-inference"},
-                "inference_service", "$1", "label_cubestack_io_inference_service", "(.*)"
+                * on(namespace, pod) group_left(label_ai_cubestack_io_inference_service)
+                kube_pod_labels{label_ai_cubestack_io_inference_service!=""},
+                "inference_service", "$1", "label_ai_cubestack_io_inference_service", "(.*)"
               )
             )

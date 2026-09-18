@@ -213,6 +213,26 @@ var _ = Describe("checkRoute", func() {
 		Expect(route.ResourceVersion).NotTo(Equal(oldRV))
 	})
 
+	It("sees no drift in the route a real API server stored", func() {
+		// Pins the default set routeSpecWithDefaults mirrors against what an
+		// actual API server writes: a default this list is missing makes the
+		// reconciler rewrite the route on every pass, which is the 409 race
+		// described in the routeNeedsUpdate spec.
+		name := "route-stored"
+		isvc := isvcForApply(name)
+		isvc.Spec.Route = &aiv1alpha1.RouteSpec{Publish: true, ModelName: "stored-model", TimeoutSeconds: ptrTo[int64](60)}
+		Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
+		r := routeReconciler()
+		hostname := publicHostname(isvc, testGatewayDomain)
+		_, err := r.checkRoute(ctx, mustGetISVC(ctx, name), routeProfile(name+"-prof"), readyEndpoint(name), hostname)
+		Expect(err).NotTo(HaveOccurred())
+
+		stored := &gatewayv1.HTTPRoute{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-route", Namespace: testNamespace}, stored)).To(Succeed())
+		desired := r.desiredHTTPRoute(mustGetISVC(ctx, name), routeProfile(name+"-prof"), 8001)
+		Expect(routeNeedsUpdate(stored, desired)).To(BeFalse())
+	})
+
 	It("does not report acceptance from a stale status after a spec update", func() {
 		// The route is accepted for generation 1; a spec change bumps the
 		// generation, and the pre-update status must not report RouteReady
@@ -249,6 +269,55 @@ var _ = Describe("checkRoute", func() {
 		cond := meta.FindStatusCondition(conditions, aiv1alpha1.ConditionRouteReady)
 		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
 		Expect(cond.Reason).To(Equal("NotPublished"))
+	})
+})
+
+var _ = Describe("routeNeedsUpdate", func() {
+	// storedRoute is the route as the API server persists it: the controller's
+	// desired object plus the Gateway API defaults (see the CRDs under
+	// testdata/gateway-crds).
+	storedRoute := func(desired *gatewayv1.HTTPRoute) *gatewayv1.HTTPRoute {
+		stored := desired.DeepCopy()
+		stored.Spec.ParentRefs[0].Group = ptrTo(gatewayv1.Group(gatewayAPIGroup))
+		stored.Spec.ParentRefs[0].Kind = ptrTo(gatewayv1.Kind(gatewayKind))
+		backend := &stored.Spec.Rules[0].BackendRefs[0].BackendRef
+		backend.Group = ptrTo(gatewayv1.Group(""))
+		backend.Kind = ptrTo(gatewayv1.Kind(serviceKind))
+		backend.Weight = ptrTo(int32(1))
+		stored.Spec.Rules[0].Matches = []gatewayv1.HTTPRouteMatch{{
+			Path: &gatewayv1.HTTPPathMatch{Type: ptrTo(gatewayv1.PathMatchPathPrefix), Value: ptrTo("/")},
+		}}
+		return stored
+	}
+	driftRoute := func() *gatewayv1.HTTPRoute {
+		return routeReconciler().desiredHTTPRoute(routeISVC("route-drift", true), routeProfile("route-drift-prof"), 8001)
+	}
+
+	It("does not treat the API server's defaults as drift", func() {
+		// Those defaults are server-owned. A comparison that counts them as
+		// drift makes checkRoute issue an update on every reconcile, and that
+		// write runs the optimistic-concurrency check against the gateway
+		// controller's status writes: the reconcile then fails with
+		// "the object has been modified" (409) although nothing had drifted.
+		Expect(routeNeedsUpdate(storedRoute(driftRoute()), driftRoute())).To(BeFalse())
+	})
+
+	It("still reports drift the controller owns", func() {
+		// The guard against "fixing" the above by never reporting drift: a
+		// changed timeout, hostname or backend port is ours and must update.
+		desired := driftRoute()
+
+		staleTimeout := storedRoute(desired)
+		staleTimeout.Spec.Rules[0].Timeouts.Request = ptrTo(gatewayv1.Duration("30s"))
+		Expect(routeNeedsUpdate(staleTimeout, desired)).To(BeTrue())
+
+		staleHostname := storedRoute(desired)
+		staleHostname.Spec.Hostnames = []gatewayv1.Hostname{"other.example.com"}
+		Expect(routeNeedsUpdate(staleHostname, desired)).To(BeTrue())
+
+		stalePort := storedRoute(desired)
+		stalePort.Spec.Rules[0].BackendRefs[0].Port = ptrTo(gatewayv1.PortNumber(9999))
+		Expect(routeNeedsUpdate(stalePort, desired)).To(BeTrue())
 	})
 })
 

@@ -18,7 +18,7 @@ spec:
         - record: cluster_node:cubestack_gpu_capacity:sum
           expr: |
             sum by (node) (
-              kube_node_status_allocatable{resource=~"nvidia_com_gpu|metax_tech_com_gpu"}
+              kube_node_status_allocatable{resource=~"nvidia.com/gpu|nvidia_com_gpu|metax-tech.com/gpu|metax_tech_com_gpu"}
             )
 
         # Per-node GPU allocated
@@ -26,7 +26,7 @@ spec:
           expr: |
             sum by (node) (
               label_replace(
-                kube_pod_container_resource_requests{resource=~"nvidia_com_gpu|metax_tech_com_gpu"},
+                kube_pod_container_resource_requests{resource=~"nvidia.com/gpu|nvidia_com_gpu|metax-tech.com/gpu|metax_tech_com_gpu"},
                 "node", "$1", "node", "(.*)"
               )
               * on(namespace, pod) group_left(node)
@@ -51,26 +51,36 @@ spec:
           expr: |
             max by (namespace, inference_service, uuid) (
               label_replace(
-                label_replace(
-                  mx_gpu_usage / 100,
-                  "namespace", "$1", "exported_namespace", "(.*)"
+                (
+                  label_replace(
+                    label_replace(
+                      mx_gpu_usage / 100,
+                      "namespace", "$1", "exported_namespace", "(.*)"
+                    ),
+                    "pod", "$1", "exported_pod", "(.*)"
+                  )
+                  * on(namespace, pod) group_left(label_ai_cubestack_io_inference_service)
+                  kube_pod_labels{label_ai_cubestack_io_inference_service!=""}
                 ),
-                "pod", "$1", "exported_pod", "(.*)"
+                "inference_service", "$1", "label_ai_cubestack_io_inference_service", "(.*)"
               )
-              * on(namespace, pod) group_left(label_cubestack_io_inference_service)
-              kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-inference"}
             )
             or
             max by (namespace, devenv, uuid) (
               label_replace(
-                label_replace(
-                  mx_gpu_usage / 100,
-                  "namespace", "$1", "exported_namespace", "(.*)"
+                (
+                  label_replace(
+                    label_replace(
+                      mx_gpu_usage / 100,
+                      "namespace", "$1", "exported_namespace", "(.*)"
+                    ),
+                    "pod", "$1", "exported_pod", "(.*)"
+                  )
+                  * on(namespace, pod) group_left(label_ai_cubestack_io_dev_environment)
+                  kube_pod_labels{label_ai_cubestack_io_dev_environment!=""}
                 ),
-                "pod", "$1", "exported_pod", "(.*)"
+                "devenv", "$1", "label_ai_cubestack_io_dev_environment", "(.*)"
               )
-              * on(namespace, pod) group_left(label_ai_cubestack_io_dev_environment)
-              kube_pod_labels{label_ai_cubestack_io_dev_environment!=""}
             )
 
         # GPU VRAM utilization per InferenceService or DevEnvironment (MetaX)
@@ -78,26 +88,36 @@ spec:
           expr: |
             max by (namespace, inference_service, uuid) (
               label_replace(
-                label_replace(
-                  mx_hbm_bw_util / 100,
-                  "namespace", "$1", "exported_namespace", "(.*)"
+                (
+                  label_replace(
+                    label_replace(
+                      mx_hbm_bw_util / 100,
+                      "namespace", "$1", "exported_namespace", "(.*)"
+                    ),
+                    "pod", "$1", "exported_pod", "(.*)"
+                  )
+                  * on(namespace, pod) group_left(label_ai_cubestack_io_inference_service)
+                  kube_pod_labels{label_ai_cubestack_io_inference_service!=""}
                 ),
-                "pod", "$1", "exported_pod", "(.*)"
+                "inference_service", "$1", "label_ai_cubestack_io_inference_service", "(.*)"
               )
-              * on(namespace, pod) group_left(label_cubestack_io_inference_service)
-              kube_pod_labels{label_app_kubernetes_io_part_of="cubestack-inference"}
             )
             or
             max by (namespace, devenv, uuid) (
               label_replace(
-                label_replace(
-                  mx_hbm_bw_util / 100,
-                  "namespace", "$1", "exported_namespace", "(.*)"
+                (
+                  label_replace(
+                    label_replace(
+                      mx_hbm_bw_util / 100,
+                      "namespace", "$1", "exported_namespace", "(.*)"
+                    ),
+                    "pod", "$1", "exported_pod", "(.*)"
+                  )
+                  * on(namespace, pod) group_left(label_ai_cubestack_io_dev_environment)
+                  kube_pod_labels{label_ai_cubestack_io_dev_environment!=""}
                 ),
-                "pod", "$1", "exported_pod", "(.*)"
+                "devenv", "$1", "label_ai_cubestack_io_dev_environment", "(.*)"
               )
-              * on(namespace, pod) group_left(label_ai_cubestack_io_dev_environment)
-              kube_pod_labels{label_ai_cubestack_io_dev_environment!=""}
             )
 
     - name: cubestack.gpu.per_card

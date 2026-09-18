@@ -327,12 +327,56 @@ func routeErr(check *routeCheck, err error) (*routeCheck, error) {
 
 // routeNeedsUpdate reports whether the controller-owned fields of an existing
 // HTTPRoute differ from the desired ones: the labels and the Spec. Server-side
-// fields (owner references, status) never count as drift. An identical route
-// is left untouched: updating it would bump the resourceVersion and, through
-// the Owns() watch, re-enqueue the service into an unbounded reconcile loop.
+// fields (owner references, status, the defaults the API server fills into the
+// spec) never count as drift. An identical route is left untouched: updating it
+// would bump the resourceVersion and, through the Owns() watch, re-enqueue the
+// service into an unbounded reconcile loop.
 func routeNeedsUpdate(existing, desired *gatewayv1.HTTPRoute) bool {
 	return !apiequality.Semantic.DeepEqual(existing.Labels, desired.Labels) ||
-		!apiequality.Semantic.DeepEqual(existing.Spec, desired.Spec)
+		!apiequality.Semantic.DeepEqual(existing.Spec, routeSpecWithDefaults(desired.Spec))
+}
+
+// routeSpecWithDefaults spells out the spec as the API server stores it, so the
+// comparison above does not read the server's own defaults as drift. The
+// Gateway API defaults the parentRef group and kind, the backendRef group, kind
+// and weight, and an empty match list (a PathPrefix "/"). A stored route
+// therefore differs from the spec we build, and a comparison that counts that
+// as drift makes checkRoute issue an update on every reconcile — a write that
+// runs the optimistic-concurrency check against the gateway controller's status
+// writes and fails the reconcile with "the object has been modified" (409),
+// although nothing had drifted. The defaults mirrored here are pinned by the
+// spec that stores a route through envtest and expects no drift.
+func routeSpecWithDefaults(spec gatewayv1.HTTPRouteSpec) gatewayv1.HTTPRouteSpec {
+	out := *spec.DeepCopy()
+	for i := range out.ParentRefs {
+		if out.ParentRefs[i].Group == nil {
+			out.ParentRefs[i].Group = ptr(gatewayv1.Group(gatewayAPIGroup))
+		}
+		if out.ParentRefs[i].Kind == nil {
+			out.ParentRefs[i].Kind = ptr(gatewayv1.Kind(gatewayKind))
+		}
+	}
+	for i := range out.Rules {
+		rule := &out.Rules[i]
+		for j := range rule.BackendRefs {
+			ref := &rule.BackendRefs[j].BackendRef
+			if ref.Group == nil {
+				ref.Group = ptr(gatewayv1.Group(""))
+			}
+			if ref.Kind == nil {
+				ref.Kind = ptr(gatewayv1.Kind(serviceKind))
+			}
+			if ref.Weight == nil {
+				ref.Weight = ptr(int32(1))
+			}
+		}
+		if len(rule.Matches) == 0 {
+			rule.Matches = []gatewayv1.HTTPRouteMatch{{
+				Path: &gatewayv1.HTTPPathMatch{Type: ptr(gatewayv1.PathMatchPathPrefix), Value: ptr("/")},
+			}}
+		}
+	}
+	return out
 }
 
 // setRouteReadyCondition sets the RouteReady condition from the check:

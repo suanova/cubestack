@@ -1,0 +1,66 @@
+# BMC out-of-band monitoring: idrac_exporter (standard Redfish groups) +
+# bmc-oem-exporter (PCIeDevices OEM fields). One Deployment/Service/ScrapeConfig
+# per exporter, probing every BMC listed below via the ?target= multi-target
+# pattern. Install into the same namespace as the kube-prometheus-stack
+# Prometheus (ScrapeConfigs are picked up there).
+
+# BMC credentials, shared by both exporters.
+bmc:
+  username: ""
+  password: ""
+  # Redfish endpoint IPs. Host<->BMC IP mapping must be confirmed per
+  # environment (see docs/bmc-progress.md: the mapping is not by last octet).
+  hosts: []
+
+bmcOemExporter:
+  image:
+    repository: harbor.isuanova.com/suanova/bmc-oem-exporter
+    tag: latest
+    pullPolicy: IfNotPresent
+  # BMC 使用自签名证书。默认保持 TLS 校验(true 时跳过校验, 仅确认 BMC 自签后显式开启;
+  # 提供 BMC CA 的正式加固方案见 docs/bmc-oem-exporter-design.md)。
+  tlsInsecure: false
+  nodeSelector: {}
+  # 调度容忍: 钉在 control-plane 节点(nodeSelector)时需容忍 NoSchedule 污点
+  tolerations: []
+
+idracExporter:
+  image:
+    repository: harbor.isuanova.com/suanova/idrac-exporter
+    tag: latest
+    pullPolicy: IfNotPresent
+  nodeSelector: {}
+  # 调度容忍: 钉在 control-plane 节点(nodeSelector)时需容忍 NoSchedule 污点
+  tolerations: []
+  # Content of /etc/prometheus/idrac.yml (the exporter's default config path).
+  # Health value convention: 0=OK / 1=Warning / 2=Critical / -1=Unknown.
+  config:
+    timeout: 10
+    metrics:
+      system: true
+      sensors: true
+      power: true
+      events: false
+      storage: true
+      memory: true
+      network: true
+      oem: false
+
+scrapeConfigs:
+  # Requires the Prometheus Operator ScrapeConfig CRD (monitoring.coreos.com/v1alpha1).
+  enabled: true
+  # Label value matched by the Prometheus CR's scrapeConfigSelector. The
+  # kube-prometheus-stack default selector is the helm release name
+  # (scrapeConfigSelectorNilUsesHelmValues), so set this to the actual release
+  # name of the stack (test env / installer use "kube-prometheus").
+  releaseLabel: kube-prometheus
+  interval: 60s
+  bmcOem:
+    # Scrape paths verified against real H3C BMCs:
+    #   bmc-oem-exporter -> /probe?target=<ip>
+    #   idrac_exporter   -> /metrics?target=<ip>
+    metricsPath: /probe
+    timeout: 15s
+  idrac:
+    metricsPath: /metrics
+    timeout: 30s
