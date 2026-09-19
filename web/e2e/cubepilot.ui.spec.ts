@@ -261,6 +261,9 @@ interface Captured {
    *  would run alongside the next one and the older answer could land last,
    *  putting the transcript backwards. */
   maxHistoryInFlight: number;
+  /** Every POST that started a turn, with its body: which session it named is
+   *  the whole question — a body without `sessionId` lets the API mint one. */
+  messagePosts: Array<{ path: string; body: { content?: string; sessionId?: string } }>;
   /** Every DELETE the pane made for a session, in order. */
   sessionDeletes: string[];
   /** How many times the pane asked whether the session's turn is running. The
@@ -291,6 +294,12 @@ interface Stubs {
    *  period, which is what a reader on a slow link sees. */
   historyDelayMs?: number;
   turnActive?: boolean;
+  /** Makes the instance-status read slow, which keeps the pane inside its
+   *  "selecting CubePilot" window long enough to send during it. */
+  statusDelayMs?: number;
+  /** What the restore read of /question/pending finds. Absent → the read 404s,
+   *  which is the ordinary "nothing is pending". */
+  pendingQuestion?: object | null;
   /** Successive /turn answers, the last one repeating. Lets a spec watch the
    *  pane pick up a turn that STARTS after the conversation has settled — the
    *  conversation is the user's, not this tab's, so it can move without this
@@ -324,7 +333,7 @@ function confirmAfterPut(body: { confirmPolicy?: string; allowlist?: AllowlistRu
 
 /** Stub every endpoint the three panes touch with CR-shaped responses. */
 async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
-  const captured: Captured = { approvalPosts: [], questionPosts: [], pendingPaths: [], historyPaths: [], sessionListCalls: 0, maxHistoryInFlight: 0, sessionDeletes: [], turnReads: 0, configPuts: [], confirmPuts: [], llmPosts: [], agentPosts: [] };
+  const captured: Captured = { approvalPosts: [], questionPosts: [], pendingPaths: [], historyPaths: [], sessionListCalls: 0, maxHistoryInFlight: 0, sessionDeletes: [], messagePosts: [], turnReads: 0, configPuts: [], confirmPuts: [], llmPosts: [], agentPosts: [] };
   let config = stubs.config ?? CONFIG_READY;
   let confirm = stubs.confirm ?? CONFIRM;
   // The pending list reflects the post-refusal world only once an answer has
@@ -364,7 +373,10 @@ async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
       }
       return json({ config });
     }
-    if (path.endsWith("/api/cubepilot/agent/status")) return json(stubs.status ?? STATUS_READY);
+    if (path.endsWith("/api/cubepilot/agent/status")) {
+      if (stubs.statusDelayMs) await new Promise((r) => setTimeout(r, stubs.statusDelayMs));
+      return json(stubs.status ?? STATUS_READY);
+    }
     if (path.endsWith("/api/cubepilot/agent/confirm")) {
       if (method === "PUT") {
         const body = post() as { confirmPolicy?: string; allowlist?: AllowlistRule[] };
@@ -404,6 +416,7 @@ async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
         return json({ deleted: true, archived: [] });
       }
       if (path.endsWith("/messages") && method === "POST") {
+        captured.messagePosts.push({ path, body: post() as { content?: string; sessionId?: string } });
         return route.fulfill({
           status: 200,
           headers: { "content-type": "text/event-stream", "cache-control": "no-cache" },
@@ -446,6 +459,9 @@ async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
       }
       if (path.endsWith("/question/pending")) {
         captured.pendingPaths.push(path);
+        // A question the gateway is still holding, as the restore read sees it:
+        // the endpoint answers with the LIST of them, and this fixture is one.
+        if (stubs.pendingQuestion) return json({ questions: [stubs.pendingQuestion] });
         if (refusedAnswer) {
           if (stubs.pendingQuestionStatus) return json({ error: "no pending question" }, stubs.pendingQuestionStatus);
           if (stubs.pendingQuestionKept) return json({ questions: [PENDING_QUESTION] });
@@ -846,6 +862,91 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
       id: "q-free",
       answers: { note: ["没有", "副本数先按 2 来"], reason: ["业务要上线了"] },
     });
+  });
+
+  test("sends on the fixed key even before the restore finishes", async ({ page }) => {
+    // The composer is live the moment CubePilot is selected, and the restore
+    // behind it is asynchronous — metadata first, then history. Selecting used
+    // to clear the key during that window, so a send inside it went out with no
+    // `sessionId` at all and the API minted a session of its own: one user, two
+    // conversations, which is the whole thing the fixed key exists to prevent.
+    const captured = await stubAgent(page, { sessions: [SESSION], history: HISTORY, statusDelayMs: 4000 });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="obj-cubepilot"]').click();
+
+    await page.locator('[data-od-id="chat-input"]').fill("趁恢复还没完就发");
+    await page.locator('[data-od-id="send-btn"]').click();
+
+    await expect.poll(() => captured.messagePosts.length).toBe(1);
+    expect(captured.messagePosts[0].body.sessionId).toBe(SESSION_KEY);
+  });
+
+  test("restores a pending question with the countdown the gateway gave it", async ({ page }) => {
+    // The pending read reports what is LEFT of the gateway's deadline. Dropping
+    // it left a reloaded question with no deadline at all, so its countdown
+    // never ran and its controls stayed live past the point the gateway had
+    // given it — an answer that could only come back refused.
+    await stubAgent(page, { sessions: [SESSION], history: HISTORY, pendingQuestion: PENDING_QUESTION });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="obj-cubepilot"]').click();
+
+    const card = page.locator('[data-od-id="question-item"]');
+    await expect(card).toContainText("本次巡检覆盖哪些节点?");
+    // The live card's pill counts down from the remainder; a restored card with
+    // no deadline shows the awaiting label with no number.
+    await expect(card).toContainText(/等待回答 · \d+s/);
+  });
+
+  test("follows the transcript when its own stream is lost", async ({ page }) => {
+    // The pane's stream is its own view of the turn, and the run outlives it —
+    // a dropped connection is not the turn ending. It used to keep the frozen
+    // bubble instead: the header said the run was still going while everything
+    // the run produced afterwards went unseen. The transcript is the one source
+    // that still knows, so the pane follows it from there.
+    const captured = await stubAgent(page, {
+      sessions: [SESSION],
+      // Idle when the pane restores (so the composer is a Send), running from
+      // the next read on: the turn this pane starts is the one that is still
+      // going after its stream dies.
+      turnSequence: [false, true],
+      // No terminal: the stream just ends, which is what a lost transport is.
+      turnEvents: [{ type: "message_start", sessionId: SESSION_KEY }, { type: "agent_thinking", sessionId: SESSION_KEY }],
+      historySequence: [
+        [{ role: "user", content: "正在跑吗?" }],
+        [
+          { role: "user", content: "正在跑吗?" },
+          { role: "assistant", content: [{ type: "toolCall", id: "t1", name: "exec", arguments: { command: "kubectl get nodes" } }] },
+        ],
+      ],
+    });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="obj-cubepilot"]').click();
+    await page.locator('[data-od-id="chat-input"]').fill("看看集群");
+    await page.locator('[data-od-id="send-btn"]').click();
+
+    // The tool the run went on to make arrives from the transcript, through the
+    // follow loop the lost stream handed the turn to.
+    await expect(page.locator('[data-od-id="agent-bubble"] [data-od-id="tool-card"]')).toHaveCount(1, {
+      timeout: 20_000,
+    });
+    expect(captured.historyPaths.length).toBeGreaterThan(0);
+  });
+
+  test("keeps the AI assistant at the top of the object list", async ({ page }) => {
+    // The assistant is one entry; the models are the list that grows. Below them
+    // it slid further down with every model added, until reaching the one thing
+    // the page exists for meant scrolling for it — so it sits first, where it
+    // cannot be scrolled away from.
+    await stubAgent(page, { sessions: [SESSION] });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="cp-tab-chat"]').click();
+
+    const order = await page
+      .locator('[data-od-id^="obj-"]')
+      .evaluateAll((els) => els.map((e) => e.getAttribute("data-od-id")));
+    expect(order[0]).toBe("obj-cubepilot");
+    // And it is still followed by the models, rather than replacing them.
+    expect(order.slice(1).some((id) => id !== "obj-cubepilot")).toBe(true);
   });
 
   test("a turn that survived a reload says so, and offers Stop", async ({ page }) => {

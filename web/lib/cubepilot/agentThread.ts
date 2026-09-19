@@ -272,7 +272,14 @@ function replaceText(msg: AgentMsg, next: string): AgentMsg {
   return { ...msg, blocks };
 }
 
-function newQuestion(
+/** A card for a question the gateway is holding, live or restored.
+ *
+ *  The deadline is derived from the REMAINDER the server reports, not from an
+ *  absolute instant, so a countdown does not depend on this browser's clock
+ *  agreeing with the API's. Both paths build their card through here: a restored
+ *  card that skipped it had no deadline, so a reload left the question with no
+ *  countdown and its controls live past the point the gateway had given it. */
+export function newQuestion(
   callId: string,
   questions: AgentQuestionItem[],
   timeoutSeconds: number | undefined,

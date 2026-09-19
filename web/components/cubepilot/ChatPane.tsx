@@ -32,6 +32,7 @@ import {
   applyAgentEvent,
   historyToMsgs,
   newAgentMsg,
+  newQuestion,
   openApprovals,
   openQuestions,
   turnStatus,
@@ -272,10 +273,19 @@ export function ChatPane() {
    *  to tens of seconds with nothing else on the page moving. */
   const [clearing, setClearing] = useState(false);
 
-  // Only while a turn is unfinished: the countdown is the one thing on this page
-  // that needs a second-by-second clock, and an idle page must not re-render
-  // every second for nothing.
-  const anyLive = msgs.some((m) => m.role === "agent" && m.phase !== "done");
+  // Only while a turn is unfinished, or while a parked question still has a
+  // countdown to run: those are the only things on this page that need a
+  // second-by-second clock, and an idle page must not re-render every second for
+  // nothing. A question restored after a reload hangs off a turn that is `done`
+  // — it is parked, not running — so without the second clause its expiry never
+  // fires and its controls stay live past the deadline the gateway set.
+  const anyLive =
+    msgs.some((m) => m.role === "agent" && m.phase !== "done") ||
+    msgs.some(
+      (m) =>
+        m.role === "agent" &&
+        m.questions.some((q) => (q.state === "pending" || q.state === "submitting") && q.deadline !== undefined),
+    );
   useEffect(() => {
     if (!anyLive) return;
     const id = setInterval(() => setNow(Date.now()), 1000);
@@ -307,6 +317,16 @@ export function ChatPane() {
   /** The raw history document last rendered, so the follow loop can skip a
    *  re-render (and a re-scroll) when the server's copy has not moved. */
   const lastHistoryRef = useRef<string>("");
+  /** The follow loop's own generation, separate from `genRef`.
+   *
+   *  `genRef` is bumped by anything that invalidates in-flight work for the
+   *  object on screen — including a send, which starts a new stream. The follow
+   *  loop is not that work: it watches the SESSION, and a send does not end the
+   *  conversation. Riding on `genRef` meant the first message a user sent killed
+   *  the loop for good, so the pane went back to never noticing anything that
+   *  happened without it — the bug the loop exists to fix, reintroduced by the
+   *  send that follows it. */
+  const followGenRef = useRef(0);
   /** True from the moment this pane drives a turn until the server says that turn
    *  has stopped running. While it holds, this pane's own view of the turn is the
    *  truth — its stream wrote it — and the follow loop must not replace it with
@@ -344,6 +364,7 @@ export function ChatPane() {
 
   function cancelInflight(): void {
     genRef.current++;
+    followGenRef.current++;
     stopTurnPolling();
     // The turn and its follow state describe the session this pane is leaving.
     ownTurnRef.current = false;
@@ -464,7 +485,11 @@ export function ChatPane() {
     setObjKind("agent");
     setSvcId(null);
     setMsgs([]);
-    setAgentSessionKey(null);
+    // The key is NOT cleared. It is a literal, not a session this pane has to
+    // discover, and the composer is live from the line above while the restore
+    // below is asynchronous: a send in that window captured null, went out
+    // without a session id, and the API minted a session of its own — a second
+    // conversation for a user who is supposed to have exactly one.
     setAgentNotice("");
     void (async () => {
       const gen = genRef.current;
@@ -621,11 +646,15 @@ export function ChatPane() {
       if (res.status !== 404 && !res.ok) throw new Error(`HTTP ${res.status}`);
       if (res.ok && genRef.current === gen) {
         const { questions } = (await res.json()) as {
-          questions?: Array<{ id?: string; questions?: AgentQuestionItem[] }>;
+          questions?: Array<{ id?: string; questions?: AgentQuestionItem[]; timeoutSeconds?: number }>;
         };
         for (const q of questions ?? []) {
           if (!q.id) continue;
-          const card: AgentQuestion = { callId: q.id, questions: q.questions ?? [], state: "pending" };
+          // Through the same constructor the streamed card uses: the response
+          // carries what is LEFT of the gateway's deadline, and dropping it left
+          // a reloaded question with no countdown and its controls live past the
+          // point the gateway had given it.
+          const card = newQuestion(q.id, q.questions ?? [], q.timeoutSeconds, Date.now());
           attachToNewest((x) => ({ ...x, questions: [...x.questions, card] }));
         }
       }
@@ -696,13 +725,13 @@ export function ChatPane() {
    */
   function startFollowing(key: string): void {
     stopTurnPolling();
-    const gen = genRef.current;
+    const gen = followGenRef.current;
 
     const tickOnce = async (): Promise<void> => {
       const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/turn`);
-      if (!res.ok || genRef.current !== gen) return;
+      if (!res.ok || followGenRef.current !== gen) return;
       const { active } = (await res.json()) as { active?: boolean };
-      if (genRef.current !== gen) return;
+      if (followGenRef.current !== gen) return;
       if (ownTurnRef.current) {
         // A turn this pane started. Its stream is the state, and the history
         // document is no substitute: it holds no approval or question cards, so
@@ -739,17 +768,18 @@ export function ChatPane() {
     };
 
     const tick = async (): Promise<void> => {
-      if (genRef.current !== gen) return;
+      if (followGenRef.current !== gen) return;
       try {
         await tickOnce();
       } catch {
         /* keep polling */
       }
-      // The single place that decides whether the loop lives on: a stop, a
-      // session switch or a send all bump the generation, and a tick already in
-      // flight must not schedule a successor for a conversation this pane has
-      // left.
-      if (genRef.current === gen) {
+      // The single place that decides whether the loop lives on, and it asks the
+      // loop's OWN generation: a session switch, a clear or a stop bumps it, and
+      // a tick already in flight must not schedule a successor for a
+      // conversation this pane has left. A send is not one of those — the
+      // conversation outlives it.
+      if (followGenRef.current === gen) {
         turnPollRef.current = setTimeout(() => void tick(), FOLLOW_INTERVAL_MS);
       }
     };
@@ -935,6 +965,17 @@ export function ChatPane() {
       if (!gotDone && genRef.current === gen) {
         const reason = t("cubepilot.chat.streamLost");
         setMsgs((list) => list.map((x) => (x.id === msgId && x.role === "agent" ? { ...x, transportLost: reason } : x)));
+        // The stream WAS this pane's view of the turn, and it is gone. Hand the
+        // turn to the follow loop: from here the transcript is the only thing
+        // that can say what the run did, and while the run is still going the
+        // loop keeps reading it. Without this the pane sits on whatever the
+        // stream left behind, reporting "still running", while the run it is
+        // describing produces everything else unseen. The marker above is the
+        // one thing that gives way to that — the header's own line is what says
+        // the transport was lost, and the transcript replaces the frozen bubble
+        // with what actually happened.
+        ownTurnRef.current = false;
+        followingRef.current = true;
         // The id the STREAM reported when it has one: this closure's
         // `agentSessionKey` is the send-time render's, which names no session
         // for a first message.
@@ -1379,7 +1420,56 @@ export function ChatPane() {
       <Box sx={chatGridSx(listW)}>
         {/* ── objects ── */}
         <Box data-od-id="object-list" sx={{ "@media (max-width: 1180px)": { mb: "14px" } }}>
-          <Box sx={groupLabelSx}>{t("cubepilot.chat.objectsModels")}</Box>
+          <Box sx={{ ...groupLabelSx, mt: "18px" }}>{t("cubepilot.chat.objectsAgents")}</Box>
+          <Box
+            component="button"
+            type="button"
+            onClick={selectAgent}
+            aria-pressed={isAgent}
+            data-od-id="obj-cubepilot"
+            sx={{
+              width: "100%",
+              textAlign: "left",
+              fontFamily: "inherit",
+              color: "text.primary",
+              border: 1,
+              borderRadius: "var(--radius)",
+              p: "12px 14px",
+              mb: "8px",
+              cursor: "pointer",
+              background: isAgent ? VIOLET_SOFT : "background.default",
+              borderColor: isAgent ? VIOLET_BORDER : "divider",
+              "&:hover": { borderColor: isAgent ? VIOLET_BORDER : "text.primary" },
+            }}
+          >
+            <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
+              <Box sx={{ fontSize: 13.5, fontWeight: 600 }}>CubePilot</Box>
+              <Box
+                sx={{
+                  fontSize: 10,
+                  fontWeight: 600,
+                  px: "7px",
+                  py: "1px",
+                  borderRadius: 999,
+                  border: 1,
+                  flex: "none",
+                  color: "var(--violet-text)",
+                  // The prototype draws this badge at 42% (chat.html:174) while
+                  // the selected row beside it uses 55% (chat.html:163) — the
+                  // pill sits on a 10% fill, so its border stays light.
+                  borderColor: "var(--violet-bd)",
+                  bgcolor: "color-mix(in oklch, var(--violet) 10%, transparent)",
+                }}
+              >
+                {t("cubepilot.chat.badgeAgent")}
+              </Box>
+            </Box>
+            <Box sx={{ ...monoSx, fontSize: 11, color: "text.secondary", mt: "5px", lineHeight: 1.5 }} title={agentRoleLine}>
+              {agentRoleLine}
+            </Box>
+          </Box>
+        </Box>
+          <Box sx={{ ...groupLabelSx, mt: "18px" }}>{t("cubepilot.chat.objectsModels")}</Box>
           {models.map((m) => {
             const active = isModel && m.id === svcId;
             return (
@@ -1434,55 +1524,6 @@ export function ChatPane() {
             );
           })}
 
-          <Box sx={{ ...groupLabelSx, mt: "18px" }}>{t("cubepilot.chat.objectsAgents")}</Box>
-          <Box
-            component="button"
-            type="button"
-            onClick={selectAgent}
-            aria-pressed={isAgent}
-            data-od-id="obj-cubepilot"
-            sx={{
-              width: "100%",
-              textAlign: "left",
-              fontFamily: "inherit",
-              color: "text.primary",
-              border: 1,
-              borderRadius: "var(--radius)",
-              p: "12px 14px",
-              mb: "8px",
-              cursor: "pointer",
-              background: isAgent ? VIOLET_SOFT : "background.default",
-              borderColor: isAgent ? VIOLET_BORDER : "divider",
-              "&:hover": { borderColor: isAgent ? VIOLET_BORDER : "text.primary" },
-            }}
-          >
-            <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
-              <Box sx={{ fontSize: 13.5, fontWeight: 600 }}>CubePilot</Box>
-              <Box
-                sx={{
-                  fontSize: 10,
-                  fontWeight: 600,
-                  px: "7px",
-                  py: "1px",
-                  borderRadius: 999,
-                  border: 1,
-                  flex: "none",
-                  color: "var(--violet-text)",
-                  // The prototype draws this badge at 42% (chat.html:174) while
-                  // the selected row beside it uses 55% (chat.html:163) — the
-                  // pill sits on a 10% fill, so its border stays light.
-                  borderColor: "var(--violet-bd)",
-                  bgcolor: "color-mix(in oklch, var(--violet) 10%, transparent)",
-                }}
-              >
-                {t("cubepilot.chat.badgeAgent")}
-              </Box>
-            </Box>
-            <Box sx={{ ...monoSx, fontSize: 11, color: "text.secondary", mt: "5px", lineHeight: 1.5 }} title={agentRoleLine}>
-              {agentRoleLine}
-            </Box>
-          </Box>
-        </Box>
 
         {/* ── resizer: drag to resize the object list column ── */}
         <Box
