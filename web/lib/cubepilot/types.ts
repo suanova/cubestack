@@ -251,16 +251,12 @@ export type AgentSseEvent =
   // write was parked. That is NOT the same as an explicit false (a rejection),
   // so the field is optional rather than defaulting to false.
   | { type: "approval_resolved"; sessionId: string; callId: string; approved?: boolean }
-  | {
-      type: "question_pending";
-      sessionId: string;
-      callId: string;
-      // `isOther` says the gateway accepts free text alongside the options. The
-      // gateway sets it, cubepilot-api does not project it yet, so it is
-      // optional: absent means "no free-text entry", and the day the field
-      // starts arriving the entry appears without a client change.
-      question?: { questions?: AgentQuestionItem[]; timeoutSeconds?: number; isOther?: boolean };
-    }
+  // The gateway accepts free text alongside the options. It is a field of the
+  // QUESTION, not of the prompt: cubepilot projects it per item (api.md §4.6
+  // shows it inside the item object), and `ask_user` sets it on every question
+  // it asks. Reading it one level up — off the prompt — finds nothing, which is
+  // why the free-text entry never appeared.
+  | { type: "question_pending"; sessionId: string; callId: string; question?: { questions?: AgentQuestionItem[]; timeoutSeconds?: number } }
   | { type: "question_resolved"; sessionId: string; callId: string; message?: string };
 
 /** One question of an ask_user prompt (question.questions[]). */
@@ -270,6 +266,10 @@ export interface AgentQuestionItem {
   question: string;
   options?: AgentQuestionOption[];
   multiSelect?: boolean;
+  /** The human may answer in their own words. `ask_user` sets this on every
+   *  question it asks; a question with no options at all is free-text-only
+   *  whether or not the flag arrived. */
+  isOther?: boolean;
 }
 
 export interface AgentQuestionOption {

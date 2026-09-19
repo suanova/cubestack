@@ -327,9 +327,13 @@ export function QuestionCard({
                 })}
               </Box>
             ) : null}
-            {/* Only where the gateway accepts free text beside the options: the
-                options alone cannot express every answer. */}
-            {question.isOther ? (
+            {/* Where the human may answer in their own words: `ask_user` says so
+                per question, and a question offering no options is free-text-only
+                whether or not the flag arrived. Both are read off the ITEM — the
+                contract puts `isOther` on the question (api.md §4.6), and reading
+                it off the prompt above found nothing, so this entry never
+                appeared. */}
+            {item.isOther || (item.options?.length ?? 0) === 0 ? (
               <CpInput
                 aria-label={t("cubepilot.chat.questionOther")}
                 placeholder={t("cubepilot.chat.questionOther")}

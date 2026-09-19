@@ -155,6 +155,29 @@ const TURN_NARRATION = [
   { type: "message_done", sessionId: SESSION_KEY },
 ];
 
+/** An ask_user prompt the human may answer in their own words.
+ *
+ *  `isOther` is a field of the QUESTION, not of the prompt (api.md §4.6: it sits
+ *  inside the item object, beside `options`), and `ask_user` sets it on every
+ *  question it asks. The card read it one level up, off the prompt, where it
+ *  never arrives — so the free-text entry never appeared. The second question
+ *  carries no options at all: that is free-text-only whether or not the flag
+ *  arrived, which is the rule the reference applies. */
+const TURN_QUESTION_FREE_TEXT = [
+  { type: "message_start", sessionId: SESSION_KEY },
+  {
+    type: "question_pending",
+    sessionId: SESSION_KEY,
+    callId: "q-free",
+    question: {
+      questions: [
+        { questionId: "note", header: "补充说明", question: "还有什么要告诉我的?", options: [{ label: "没有" }], isOther: true },
+        { questionId: "reason", header: "原因", question: "为什么现在做?" },
+      ],
+    },
+  },
+];
+
 /** A reply carrying the Markdown an agent actually emits. */
 const TURN_MARKDOWN = [
   { type: "message_start", sessionId: SESSION_KEY },
@@ -789,6 +812,40 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     // longer has: the thread is the greeting a first-time visitor gets.
     await expect(page.locator('[data-od-id="chat-thread"]')).not.toContainText("上次巡检的结论?");
     await expect(page.locator('[data-od-id="chat-thread"]')).toContainText("收到。");
+  });
+
+  test("answers an ask_user question in the human's own words", async ({ page }) => {
+    const captured = await stubAgent(page, { turnEvents: TURN_QUESTION_FREE_TEXT });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="obj-cubepilot"]').click();
+    await page.locator('[data-od-id="chat-input"]').fill("生成升级前预检结论");
+    await page.locator('[data-od-id="send-btn"]').click();
+
+    const card = page.locator('[data-od-id="question-item"]');
+    await expect(card).toContainText("还有什么要告诉我的?");
+
+    // One free-text entry for the question that declares it, one for the
+    // question that offers nothing else to pick.
+    const free = card.getByLabel("其他…");
+    await expect(free).toHaveCount(2);
+
+    // Submit stays disabled until every question has an answer — and an option
+    // is not required for the one that has none.
+    const submit = page.locator('[data-od-id="question-submit"]');
+    await expect(submit).toBeDisabled();
+    await card.locator("button").filter({ hasText: "没有" }).click();
+    await expect(submit).toBeDisabled();
+    await free.first().fill("副本数先按 2 来");
+    await expect(submit).toBeDisabled();
+    await free.nth(1).fill("业务要上线了");
+    await expect(submit).toBeEnabled();
+    await submit.click();
+
+    expect(captured.questionPosts).toHaveLength(1);
+    expect(captured.questionPosts[0].body).toEqual({
+      id: "q-free",
+      answers: { note: ["没有", "副本数先按 2 来"], reason: ["业务要上线了"] },
+    });
   });
 
   test("a turn that survived a reload says so, and offers Stop", async ({ page }) => {
