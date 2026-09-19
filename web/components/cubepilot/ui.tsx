@@ -3,9 +3,9 @@
 // Shared UI kit for the 智能助手 (CubePilot) panes: cards, pills, buttons,
 // fields, switches and icons, styled after the static prototype
 // (public/copilot.html) and the reference views (cubepilot web/src/views).
-// Semantic hues match the tokens the other portal pages use (see
-// dev-environments/page.tsx); everything else derives from the platform
-// CSS variables in globals.css.
+// Semantic hues come from the derived tokens in globals.css (the prototypes'
+// palette); the other portal pages still carry their own hardcoded copies.
+// Everything else derives from the platform CSS variables in globals.css.
 
 import { Alert, Box, Snackbar, SxProps, Theme } from "@mui/material";
 import {
@@ -21,11 +21,13 @@ import {
   useState,
 } from "react";
 
-/** Status hues matching the semantic tokens the prototype derives in its CSS. */
-export const STATUS_OK = "#27c37b";
-export const STATUS_WARN = "#e0a13a";
-export const STATUS_ERR = "#e15c5c";
-export const VIOLET = "#8b5cf6";
+/** Status hues. These are the tokens globals.css derives from --accent, so a
+ *  change to the accent moves them too (the prototypes defined them the same
+ *  way). Anything that needs a tint mixes them the way Pill does below. */
+export const STATUS_OK = "var(--ok)";
+export const STATUS_WARN = "var(--warn)";
+export const STATUS_ERR = "var(--danger)";
+export const VIOLET = "var(--violet)";
 
 export const soft = (hex: string, pct = 13) => `color-mix(in oklch, ${hex} ${pct}%, transparent)`;
 

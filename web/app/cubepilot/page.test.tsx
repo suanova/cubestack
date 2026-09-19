@@ -66,6 +66,12 @@ function stubApi(config?: Record<string, unknown>) {
       if (url.includes("/api/cubepilot/pilot/api/v1/messages")) {
         // The agent turn: real SSE events (the client accumulates deltas,
         // pairs the tool result by callId, and renders the HITL card).
+        //
+        // The turn ends on the approval, with no terminal: a turn parked on a
+        // human has not ended, so the stream stays open (the stub cannot, so it
+        // just ends) and the card stays answerable. A `message_done` here would
+        // say the turn was over while the write was still parked, and a turn
+        // that really ends settles its parked cards.
         const events = [
           { type: "message_start", sessionId: "agent:main:conv-1" },
           { type: "agent_thinking", sessionId: "agent:main:conv-1" },
@@ -74,7 +80,6 @@ function stubApi(config?: Record<string, unknown>) {
           { type: "tool_result", sessionId: "agent:main:conv-1", callId: "call-1", output: "POOL USED: 71%" },
           { type: "message_delta", sessionId: "agent:main:conv-1", delta: "OSD 使用率 71%。" },
           { type: "approval_pending", sessionId: "agent:main:conv-1", callId: "app-1", name: "shell", command: "ceph osd set-noscrub", level: "write" },
-          { type: "message_done", sessionId: "agent:main:conv-1" },
         ];
         const enc = new TextEncoder();
         const stream = new ReadableStream({
@@ -312,13 +317,20 @@ describe("cubepilot page", () => {
       turnDone =
         text.includes("正在检查 Ceph 状态…") &&
         text.includes("OSD 使用率 71%。") &&
-        text.includes("POOL USED: 71%") &&
         text.includes("ceph osd set-noscrub") &&
         text.includes("写操作待审批");
     }
     expect(turnDone).toBe(true);
     expect(container.querySelector('[data-od-id="approval-approve"]')).not.toBeNull();
     expect(container.querySelector('[data-od-id="stop-btn"]')).toBeNull();
+
+    // The tool card rests collapsed once its call has returned, so what it
+    // produced is one click away — which is the point of the card. The e2e
+    // suite drives the same click on the same card.
+    act(() => {
+      (container.querySelector('[data-od-id="tool-card-head"]') as HTMLElement).click();
+    });
+    expect(container.querySelector('[data-od-id="tool-output"]')?.textContent).toContain("POOL USED: 71%");
 
     // Approve the write op: the card flips to its resolved state.
     const approve = container.querySelector('[data-od-id="approval-approve"]') as HTMLElement;

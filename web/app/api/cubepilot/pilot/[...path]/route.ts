@@ -7,6 +7,7 @@
 // endpoints; anything else is a 404.
 
 import { pilotFetch, resolvePilotBase } from "@/lib/cubepilot/pilotapi";
+import { upstreamPath } from "@/lib/cubepilot/pilotpath";
 import { withAuth } from "@/lib/auth/guard";
 
 export const runtime = "nodejs";
@@ -14,52 +15,6 @@ export const dynamic = "force-dynamic";
 
 type Ctx = { params: Promise<{ path: string[] }> };
 
-/**
- * Encode a session key (its "/"-separated segments) into one upstream path, or
- * null when it cannot be encoded. encodeURIComponent leaves "." and ".."
- * untouched, so a decoded request carrying %2e%2e would join into a path the
- * URL parser resolves away, escaping the /api/v1/sessions prefix.
- */
-const enc = (segments: string[]): string | null => {
-  if (segments.some((s) => s === "" || s === "." || s === "..")) return null;
-  return segments.map(encodeURIComponent).join("/");
-};
-
-/**
- * Maps an allowed request to its upstream path, or null when the shape is not
- * one of the client-facing chat/session endpoints. A session key may contain
- * slashes (the API matches session sub-resources by suffix), so the key is
- * everything between "sessions" and the tail segment.
- */
-function upstreamPath(method: string, segments: string[]): string | null {
-  if (segments[0] !== "api" || segments[1] !== "v1") return null;
-  const rest = segments.slice(2);
-  if (rest.length === 1 && rest[0] === "messages" && method === "POST") return "/api/v1/messages";
-  if (rest.length === 1 && rest[0] === "sessions" && method === "GET") return "/api/v1/sessions";
-  if (rest.length < 3 || rest[0] !== "sessions") return null;
-  const tail = rest[rest.length - 1];
-  if (tail === "pending") {
-    const action = rest[rest.length - 2];
-    // sessions/<key…>/<approval|question>/pending — the key is ≥1 segment.
-    if ((action === "approval" || action === "question") && method === "GET" && rest.length >= 4) {
-      const key = enc(rest.slice(1, -2));
-      return key === null ? null : `/api/v1/sessions/${key}/${action}/pending`;
-    }
-    return null;
-  }
-  const tailMethod: Record<string, string> = {
-    messages: "GET",
-    abort: "POST",
-    turn: "GET",
-    approval: "POST",
-    question: "POST",
-  };
-  if (tailMethod[tail] === method) {
-    const key = enc(rest.slice(1, -1));
-    return key === null ? null : `/api/v1/sessions/${key}/${tail}`;
-  }
-  return null;
-}
 
 async function proxy(req: Request, user: string, path: string): Promise<Response> {
   const base = resolvePilotBase();
@@ -102,6 +57,12 @@ export const GET = withAuth<Ctx>(async (req, session, ctx) => {
 
 export const POST = withAuth<Ctx>(async (req, session, ctx) => {
   const path = upstreamPath("POST", (await ctx.params).path);
+  if (!path) return Response.json({ error: "not found" }, { status: 404 });
+  return proxy(req, session.user, path);
+});
+
+export const DELETE = withAuth<Ctx>(async (req, session, ctx) => {
+  const path = upstreamPath("DELETE", (await ctx.params).path);
   if (!path) return Response.json({ error: "not found" }, { status: 404 });
   return proxy(req, session.user, path);
 });

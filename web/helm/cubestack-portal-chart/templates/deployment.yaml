@@ -10,6 +10,19 @@ metadata:
     helm.sh/chart: {{ include "cubestack-portal-chart.chart" . }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # maxUnavailable MUST be 0. Kubernetes' default is 25%, which on a
+      # single-replica deployment rounds up to 1 — it permits retiring the only
+      # pod before the replacement is ready, and the container needs a moment
+      # before it answers (a Next.js standalone server compiles its first route
+      # on the first request, which a 1s probe timeout calls a failure). The
+      # result is a service with no ready endpoint for tens of seconds on every
+      # deploy: a burst of 502s that users work around with port-forward.
+      # Zero unavailable forces the new pod to pass its probe first.
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "cubestack-portal-chart.name" . }}
@@ -121,6 +134,11 @@ spec:
             port: 3000
           initialDelaySeconds: 5
           periodSeconds: 5
+          # 1s (the default) is shorter than a cold start's first response, so the
+          # probe called a healthy container unready and stretched the rollout
+          # window. 3s still fails fast on a genuinely wedged process.
+          timeoutSeconds: 3
+          failureThreshold: 3
         resources:
           {{- toYaml .Values.resources | nindent 10 }}
         securityContext:

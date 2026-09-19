@@ -9,6 +9,7 @@ import {
   mergeRules,
   ownedRules,
   ruleKey,
+  validateRule,
 } from "./allowlist";
 
 // The platform defaults are hardcoded (reference: internal/allowlist) and must
@@ -97,5 +98,43 @@ describe("mergeRules / ownedRules / effectiveAllowlist", () => {
 
   it("works without any own rules", () => {
     expect(effectiveAllowlist(undefined)).toHaveLength(12);
+  });
+});
+
+describe("validateRule", () => {
+  it("accepts an ordinary rule", () => {
+    expect(validateRule({ pattern: "helm ls" })).toBeNull();
+    expect(validateRule({ pattern: "ceph df", argPattern: "^\\s*-s" })).toBeNull();
+    expect(validateRule({ pattern: "kubectl", argPattern: "(get|describe)\\b.*" })).toBeNull();
+  });
+
+  it("rejects an empty or whitespace-only pattern", () => {
+    expect(validateRule({ pattern: "" })).toContain("pattern is required");
+    expect(validateRule({ pattern: "   " })).toContain("pattern is required");
+  });
+
+  it("rejects '|' in the pattern: it is the rule-identity separator", () => {
+    const reason = validateRule({ pattern: "kubectl|rm" });
+    expect(reason).toContain("pattern must not contain '|'");
+  });
+
+  it("rejects an argPattern that is not a regular expression", () => {
+    expect(validateRule({ pattern: "x", argPattern: "([unclosed" })).toContain("not a valid regular expression");
+  });
+
+  it("rejects an argPattern Go accepts but JavaScript's RegExp does not, naming the construct", () => {
+    // Each assertion pins the CONSTRUCT, not just the rejection. Asserting only
+    // the substring "does not accept" is what let a mis-ordered screen report
+    // '(?P<n>.*)' as an inline-flag problem while the suite stayed green.
+    expect(validateRule({ pattern: "x", argPattern: "(?i)GET" })).toContain("inline flag group");
+    expect(validateRule({ pattern: "x", argPattern: "(?-i)GET" })).toContain("inline flag group");
+    expect(validateRule({ pattern: "x", argPattern: "(?P<n>.*)" })).toContain("named group");
+    expect(validateRule({ pattern: "x", argPattern: "[[:alpha:]]+" })).toContain("POSIX class");
+    expect(validateRule({ pattern: "x", argPattern: "\\p{L}+" })).toContain("Unicode property");
+    expect(validateRule({ pattern: "x", argPattern: "\\P{L}+" })).toContain("Unicode property");
+  });
+
+  it("accepts the JS spelling of a named group", () => {
+    expect(validateRule({ pattern: "x", argPattern: "(?<n>.*)" })).toBeNull();
   });
 });

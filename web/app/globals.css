@@ -17,6 +17,25 @@
   --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
   --radius: 8px;
 
+  /* Semantic hues, derived from the single accent hue rather than registered
+     as new colors (reference: the static prototypes in public/, which define
+     the same block). Kept here so the React app and the prototypes read the
+     same palette — the components had been hardcoding their own approximations,
+     which is why two violets and two greens were in use at once. */
+  --ok: oklch(from var(--accent) l c calc(h - 114));
+  --warn: oklch(from var(--accent) l c calc(h - 179));
+  --danger: oklch(from var(--accent) l c calc(h + 129));
+  --violet: oklch(from var(--accent) l c calc(h + 41));
+  --violet-solid: oklch(from var(--accent) calc(l - .04) c calc(h + 41));
+  --ok-t: color-mix(in oklch, var(--ok) 13%, transparent);
+  --warn-t: color-mix(in oklch, var(--warn) 15%, transparent);
+  --danger-t: color-mix(in oklch, var(--danger) 13%, transparent);
+  --ok-text: color-mix(in oklch, var(--ok) 58%, var(--fg));
+  --warn-text: color-mix(in oklch, var(--warn) 52%, var(--fg));
+  --danger-text: color-mix(in oklch, var(--danger) 65%, var(--fg));
+  --violet-text: color-mix(in oklch, var(--violet) 66%, var(--fg));
+  --violet-bd: color-mix(in oklch, var(--violet) 42%, var(--border));
+
   color-scheme: light;
 }
 
@@ -28,6 +47,21 @@
   --border: #34373c;
   --accent: #1677ff;
   --accent-strong: color-mix(in oklch, var(--accent) 78%, #ffffff);
+
+  /* Same derived block, lifted so the hues stay legible on the dark surface. */
+  --ok: oklch(from var(--accent) calc(l + .1) c calc(h - 114));
+  --warn: oklch(from var(--accent) calc(l + .07) c calc(h - 179));
+  --danger: oklch(from var(--accent) calc(l + .1) c calc(h + 129));
+  --violet: oklch(from var(--accent) calc(l + .11) c calc(h + 41));
+  --violet-solid: oklch(from var(--accent) calc(l - .02) c calc(h + 41));
+  --ok-t: color-mix(in oklch, var(--ok) 24%, transparent);
+  --warn-t: color-mix(in oklch, var(--warn) 26%, transparent);
+  --danger-t: color-mix(in oklch, var(--danger) 24%, transparent);
+  --ok-text: color-mix(in oklch, var(--ok) 75%, var(--fg));
+  --warn-text: color-mix(in oklch, var(--warn) 85%, var(--fg));
+  --danger-text: color-mix(in oklch, var(--danger) 80%, var(--fg));
+  --violet-text: color-mix(in oklch, var(--violet) 82%, var(--fg));
+  --violet-bd: color-mix(in oklch, var(--violet) 42%, var(--border));
 
   color-scheme: dark;
 }

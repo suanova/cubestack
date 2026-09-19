@@ -20,7 +20,7 @@ import {
   type AllowlistRuleCr,
   type JsonPatchOp,
 } from "@/lib/cubepilot/agentcrd";
-import { effectiveAllowlist, ownedRules } from "@/lib/cubepilot/allowlist";
+import { effectiveAllowlist, ownedRules, validateRule } from "@/lib/cubepilot/allowlist";
 import type { AllowlistRule, ConfirmView } from "@/lib/cubepilot/types";
 import { withAuth } from "@/lib/auth/guard";
 
@@ -81,13 +81,20 @@ export const PUT = withAuth(async (req, session) => {
       return Response.json({ error: "allowlist must be an array" }, { status: 400 });
     }
     for (const r of body.allowlist) {
-      // Empty patterns are sanitized away (the reference's Merge); only a wrong
-      // type is a client error.
       if (!r || typeof r.pattern !== "string") {
         return Response.json({ error: "each allowlist rule needs a pattern string" }, { status: 400 });
       }
       if (r.argPattern !== undefined && typeof r.argPattern !== "string") {
         return Response.json({ error: "argPattern must be a string" }, { status: 400 });
+      }
+      // The reference API refuses these; the CRD has no CEL for them, so a
+      // direct CR write would otherwise store a rule the runtime cannot apply.
+      // Only a wrong TYPE is sanitized otherwise (empty patterns are dropped by
+      // ownedRules), which is why an empty pattern is still refused here rather
+      // than silently dropped.
+      const reason = validateRule({ pattern: r.pattern, argPattern: r.argPattern });
+      if (reason) {
+        return Response.json({ error: reason }, { status: 400 });
       }
     }
   }

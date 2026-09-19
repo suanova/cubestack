@@ -34,6 +34,7 @@ kubeconfig*.yaml
 
 # Superpowers workflow artifacts (personal workflow, not team-shared)
 docs/superpowers/
+.superpowers/
 
 # Claude Code per-user artifacts (not team-shared)
 .claude/

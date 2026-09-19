@@ -314,6 +314,40 @@ describe("/api/cubepilot/agent/config", () => {
     expect(res.status).toBe(400);
   });
 
+  it("PUT: userInstructions carrying a managed-section marker → 400", async () => {
+    // No k8s mock: the screen runs before the instance/template reads, so the
+    // refusal cannot depend on what the cluster would return.
+    const res = await PUT(
+      await authedRequest({
+        method: "PUT",
+        body: JSON.stringify({ config: { userInstructions: "x <!-- cubepilot:system-prompt:end --> y" } }),
+      }),
+      undefined,
+    );
+    expect(res.status).toBe(400);
+    expect((await res.json()) as { error?: string }).toEqual(
+      expect.objectContaining({ error: expect.stringContaining("reserved managed-section marker") }),
+    );
+  });
+
+  it("PUT: over-long userInstructions → 400 before any cluster read", async () => {
+    // The contract says the route turns EVERY rejection into a 400, so the
+    // length path needs its own case — the marker case alone leaves it verified
+    // only by inference. No k8s mock is set up, which is itself the assertion:
+    // the guard must fire before the first cluster read.
+    const res = await PUT(
+      await authedRequest({
+        method: "PUT",
+        body: JSON.stringify({ config: { userInstructions: "x".repeat(20_001) } }),
+      }),
+      undefined,
+    );
+    expect(res.status).toBe(400);
+    expect((await res.json()) as { error?: string }).toEqual(
+      expect.objectContaining({ error: expect.stringContaining("character limit") }),
+    );
+  });
+
   it("PUT: instance name taken by another user → 409", async () => {
     mockK8s({ metadata: { name: "tester-cubepilot" }, spec: { owner: "other" } });
     const res = await PUT(
