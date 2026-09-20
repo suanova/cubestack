@@ -1420,7 +1420,7 @@ export function ChatPane() {
       <Box sx={chatGridSx(listW)}>
         {/* ── objects ── */}
         <Box data-od-id="object-list" sx={{ "@media (max-width: 1180px)": { mb: "14px" } }}>
-          <Box sx={{ ...groupLabelSx, mt: "18px" }}>{t("cubepilot.chat.objectsAgents")}</Box>
+          <Box sx={groupLabelSx}>{t("cubepilot.chat.objectsAgents")}</Box>
           <Box
             component="button"
             type="button"
@@ -1468,7 +1468,6 @@ export function ChatPane() {
               {agentRoleLine}
             </Box>
           </Box>
-        </Box>
           <Box sx={{ ...groupLabelSx, mt: "18px" }}>{t("cubepilot.chat.objectsModels")}</Box>
           {models.map((m) => {
             const active = isModel && m.id === svcId;
@@ -1523,7 +1522,7 @@ export function ChatPane() {
               </Box>
             );
           })}
-
+        </Box>
 
         {/* ── resizer: drag to resize the object list column ── */}
         <Box

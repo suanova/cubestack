@@ -947,6 +947,11 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     expect(order[0]).toBe("obj-cubepilot");
     // And it is still followed by the models, rather than replacing them.
     expect(order.slice(1).some((id) => id !== "obj-cubepilot")).toBe(true);
+    // Every one of them is INSIDE the list. Moving the assistant to the top is a
+    // splice, and a splice that takes the container's closing tag with it drops
+    // the models out of the column they lay out in — the order still reads
+    // right while the page does not.
+    expect(await page.locator('[data-od-id="object-list"] [data-od-id^="obj-"]').count()).toBe(order.length);
   });
 
   test("a turn that survived a reload says so, and offers Stop", async ({ page }) => {
