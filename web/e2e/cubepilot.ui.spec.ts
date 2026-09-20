@@ -614,6 +614,11 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
 
     await expect(card).toContainText("已回答");
     await expect(page.locator('[data-od-id="question-submit"]')).toHaveCount(0);
+    // And the settled card is the RECORD of that answer: the option that was
+    // chosen is still marked as chosen. Starting the card's state empty meant a
+    // decided question read as a blank form — what was asked, and not what was
+    // answered.
+    await expect(card.locator('button[aria-pressed="true"]')).toContainText("仅 compute 节点");
     expect(captured.questionPosts).toHaveLength(1);
     expect(captured.questionPosts[0].body).toEqual({ id: "q-1", answers: { scope: ["仅 compute 节点"] } });
     expect(captured.questionPosts[0].path).toContain(`/api/v1/sessions/${ENC_KEY}/question`);

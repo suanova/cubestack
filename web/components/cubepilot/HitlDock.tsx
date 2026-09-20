@@ -17,6 +17,7 @@ import { useState } from "react";
 import {
   isExpiring,
   remainingSeconds,
+  seedAnswers,
   type AgentApproval,
   type AgentQuestion,
 } from "@/lib/cubepilot/agentThread";
@@ -196,9 +197,14 @@ export function QuestionCard({
   onAnswer?: AnswerHandler;
 }) {
   const { t } = useI18n();
-  const [picked, setPicked] = useState<Record<string, string[]>>({});
+  // Seeded once, from the answer the card already carries. The card is drawn
+  // twice in its life — live in the dock, then settled in the thread — and the
+  // settled copy is the record of what was decided: starting empty there left it
+  // showing the question with nothing chosen and nothing typed.
+  const [initial] = useState(() => seedAnswers(question));
+  const [picked, setPicked] = useState<Record<string, string[]>>(initial.picked);
   /** Free text per question, offered only where the gateway says so (`isOther`). */
-  const [other, setOther] = useState<Record<string, string>>({});
+  const [other, setOther] = useState<Record<string, string>>(initial.other);
 
   const settled = question.state === "answered" || question.state === "cancelled" || question.state === "expired";
   const busy = question.state === "submitting";

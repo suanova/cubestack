@@ -427,6 +427,36 @@ export function toolSummary(args: string | undefined): string {
   return line.length > TOOL_SUMMARY_CHARS ? `${line.slice(0, TOOL_SUMMARY_CHARS).trimEnd()}…` : line;
 }
 
+/**
+ * Split the answers a card already carries into the option labels that were
+ * chosen and the words the human typed.
+ *
+ * A card records its answer on the question (`answers`), and the card's own
+ * state starts empty — so without this a DECIDED question reads as a blank form:
+ * the reader sees what was asked and not what was answered, which is the one
+ * thing a record of a decision is for. An answer is one of the offered labels
+ * when it matches one; anything else is free text, because that is the only
+ * other thing it can be — a question with no options has nothing to match, so
+ * everything given to it is words.
+ */
+export function seedAnswers(q: AgentQuestion): {
+  picked: Record<string, string[]>;
+  other: Record<string, string>;
+} {
+  const picked: Record<string, string[]> = {};
+  const other: Record<string, string> = {};
+  for (const item of q.questions) {
+    const given = q.answers?.[item.questionId];
+    if (!given?.length) continue;
+    const labels = new Set((item.options ?? []).map((o) => o.label));
+    const chosen = given.filter((a) => labels.has(a));
+    const typed = given.find((a) => !labels.has(a));
+    if (chosen.length) picked[item.questionId] = chosen;
+    if (typed) other[item.questionId] = typed;
+  }
+  return { picked, other };
+}
+
 // ── history ──────────────────────────────────────────────────────────────
 /**
  * Fold the runtime's history document into messages.

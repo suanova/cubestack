@@ -9,12 +9,13 @@ import {
   isExpiring,
   newAgentMsg,
   remainingSeconds,
+  seedAnswers,
   TOOL_SUMMARY_CHARS,
   toolSummary,
   turnStatus,
   waitingOnUser,
 } from "./agentThread";
-import type { AgentBlock, AgentMsg, ThreadMsg } from "./agentThread";
+import type { AgentBlock, AgentMsg, AgentQuestion, ThreadMsg } from "./agentThread";
 import type { AgentSseEvent } from "./types";
 
 const T0 = 1_700_000_000_000;
@@ -367,6 +368,54 @@ describe("applyAgentEvent — phaseAt", () => {
     expect(b.phaseAt).toBe(T0 + 5_000);
     const c = applyAgentEvent(b, { type: "message_delta", sessionId: "s", delta: "y" }, T0 + 9_000);
     expect(c.phaseAt).toBe(T0 + 5_000);
+  });
+});
+
+describe("seedAnswers", () => {
+  // A settled card is the record of a decision. Its answer is on the question,
+  // and the card's own state starts empty — so without this a decided question
+  // reads as a blank form: what was asked, and not what was answered.
+  const q = (over: Partial<AgentQuestion> = {}): AgentQuestion => ({
+    callId: "q1",
+    questions: [
+      { questionId: "scope", question: "范围?", options: [{ label: "全部节点" }, { label: "仅 compute 节点" }] },
+    ],
+    state: "answered",
+    ...over,
+  });
+
+  it("puts a chosen label among the picked options", () => {
+    expect(seedAnswers(q({ answers: { scope: ["仅 compute 节点"] } }))).toEqual({
+      picked: { scope: ["仅 compute 节点"] },
+      other: {},
+    });
+  });
+
+  it("puts anything that is not a label in the free text", () => {
+    expect(seedAnswers(q({ answers: { scope: ["先别动,等我确认"] } }))).toEqual({
+      picked: {},
+      other: { scope: "先别动,等我确认" },
+    });
+  });
+
+  it("keeps both when the human picked one and wrote something", () => {
+    const out = seedAnswers(q({ answers: { scope: ["全部节点", "跳过 GPU 节点"] } }));
+    expect(out.picked.scope).toEqual(["全部节点"]);
+    expect(out.other.scope).toBe("跳过 GPU 节点");
+  });
+
+  it("treats every answer to an optionless question as words", () => {
+    // There is nothing to match, so it can only be free text.
+    const free: AgentQuestion = { ...q(), questions: [{ questionId: "why", question: "为什么?" }] };
+    expect(seedAnswers({ ...free, answers: { why: ["业务要上线了"] } })).toEqual({
+      picked: {},
+      other: { why: "业务要上线了" },
+    });
+  });
+
+  it("leaves an unanswered question empty", () => {
+    expect(seedAnswers(q())).toEqual({ picked: {}, other: {} });
+    expect(seedAnswers(q({ answers: { scope: [] } }))).toEqual({ picked: {}, other: {} });
   });
 });
 
