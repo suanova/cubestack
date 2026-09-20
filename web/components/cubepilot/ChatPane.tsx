@@ -789,21 +789,25 @@ export function ChatPane() {
 
   /** Load the gateway model catalog; on first load select the first model. */
   async function loadModels(): Promise<void> {
-    const gen = ++genRef.current;
     try {
       const res = await fetch("/api/cubepilot/playground/services");
       const body = (await res.json().catch(() => null)) as
         | { models?: GatewayModel[]; endpoint?: string | null; error?: string }
         | null;
-      if (genRef.current !== gen) return;
       if (!res.ok) throw new Error(body?.error || `HTTP ${res.status}`);
       setModels(body?.models ?? []);
       setEndpoint(body?.endpoint ?? null);
-      // First load: default to the first model. The `models` state is still
-      // the pre-fetch [] in this closure, so the object is passed directly.
-      selectModelService((body?.models ?? [])[0]);
+      // The catalog is global — the object list and the endpoint line, neither
+      // of which a selection changes — so it is applied whether or not the
+      // generation moved while it was in flight, exactly like the agent meta
+      // below. It used to ride on that generation, and the mount effect's
+      // selection then cancelled the fetch: the list came back empty.
+      //
+      // Nothing is selected here either. The object the page opens on is the
+      // assistant, chosen in the mount effect; which model is "first" is the
+      // gateway's order, not a choice.
     } catch (e) {
-      if (genRef.current === gen) showToast(t("cubepilot.failed", { error: String(e) }), "error");
+      showToast(t("cubepilot.failed", { error: String(e) }), "error");
     }
   }
 
@@ -813,6 +817,10 @@ export function ChatPane() {
   useEffect(() => {
     void loadModels();
     void loadAgentMeta();
+    // The page opens on the assistant. It is the one object here that is not a
+    // model, and it is the one this page's own entry is about; a model can be
+    // picked from the list below it.
+    selectAgent();
     // The policy that decides whether a durable approval is on offer: read once,
     // like the rest of the instance meta.
     void loadConfirmPolicy();

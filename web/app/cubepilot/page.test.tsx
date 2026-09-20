@@ -213,7 +213,16 @@ describe("cubepilot page", () => {
     const { container, root } = renderPage();
     await act(async () => {});
 
-    // Default object: the first gateway model (the prototype's selectModel(MODELS[0])).
+    // The page OPENS on the assistant, so the model side is reached by picking
+    // a model — what this test is about. (The default itself is asserted in the
+    // e2e suite, `opens on the assistant, not on a model`.)
+    expect(
+      (container.querySelector('[data-od-id="obj-cubepilot"]') as HTMLElement).getAttribute("aria-pressed"),
+    ).toBe("true");
+    act(() => {
+      (container.querySelector('[data-od-id="obj-glm-5.2-chat"]') as HTMLElement).click();
+    });
+    await act(async () => {});
     expect(
       (container.querySelector('[data-od-id="obj-glm-5.2-chat"]') as HTMLElement).getAttribute("aria-pressed"),
     ).toBe("true");

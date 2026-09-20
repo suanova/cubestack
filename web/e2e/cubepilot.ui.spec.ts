@@ -932,6 +932,20 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     expect(captured.historyPaths.length).toBeGreaterThan(0);
   });
 
+  test("opens on the assistant, not on a model", async ({ page }) => {
+    // The first thing the page showed on a reload was whichever model the
+    // gateway listed first — a choice nobody made, and not the object this page
+    // is about. The assistant is selected on mount; a model is one click away.
+    await stubAgent(page, { sessions: [SESSION], history: HISTORY });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="cp-tab-chat"]').click();
+
+    await expect(page.locator('[data-od-id="obj-cubepilot"]')).toHaveAttribute("aria-pressed", "true");
+    // And it is the ASSISTANT's conversation on screen: the greeting's own line
+    // is in the thread, which is what selecting it restores.
+    await expect(page.locator('[data-od-id="chat-thread"]')).toContainText("上次巡检的结论?");
+  });
+
   test("keeps the AI assistant at the top of the object list", async ({ page }) => {
     // The assistant is one entry; the models are the list that grows. Below them
     // it slid further down with every model added, until reaching the one thing
