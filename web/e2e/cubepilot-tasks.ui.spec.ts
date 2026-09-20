@@ -85,9 +85,6 @@ const REPORT_OK: Report = {
   startedAt: "2026-09-13T06:00:00Z",
   finishedAt: "2026-09-13T06:04:00Z",
   content: "# 集群日常巡检报告\n\n**范围**: all\n\n- GPU 健康:⚠️ gpu-nvidia-02 GPU#3 温度 88°C(**P1**)\n- 存储容量:⚠️ osd-07 使用率 84%(**P1**)\n",
-  p0: 0,
-  p1: 2,
-  p2: 1,
 };
 
 const REPORT_FAILED: Report = {
@@ -99,9 +96,6 @@ const REPORT_FAILED: Report = {
   startedAt: "2026-09-12T22:01:00Z",
   finishedAt: "2026-09-12T22:01:22Z",
   content: "升级预检失败:etcd 碎片率超过阈值,已中止。",
-  p0: 1,
-  p1: 0,
-  p2: 0,
 };
 
 const REPORT_RUNNING: Report = {
@@ -113,9 +107,6 @@ const REPORT_RUNNING: Report = {
   startedAt: "2026-09-15T03:00:00Z",
   finishedAt: "",
   content: "",
-  p0: 0,
-  p1: 0,
-  p2: 0,
 };
 
 interface Captured {
@@ -296,7 +287,7 @@ test.describe("cubepilot tasks tab (CR-backed data)", () => {
     await expect(page.locator('[data-od-id="cp-tasks-run-now"]')).toBeEnabled();
   });
 
-  test("shows a task's run history, severity split and report body, and exports it", async ({ page }) => {
+  test("shows a task's run history and report body, and exports it", async ({ page }) => {
     await openTasks(page, { tasks: [TASK_DAILY], reports: { [TASK_DAILY.id]: [REPORT_OK, REPORT_FAILED] } });
 
     await page.locator(`[data-od-id="cp-task-row-${TASK_DAILY.id}"]`).click();
@@ -306,11 +297,11 @@ test.describe("cubepilot tasks tab (CR-backed data)", () => {
     await expect(report).toContainText("上次运行");
     await expect(report).toContainText(/(09-13 )?06:00/);
     await expect(report).toContainText("耗时 4m 0s");
-    await expect(report).toContainText("严重度统计");
-    await expect(report).toContainText("3 项");
-    await expect(report).toContainText("P0 0");
-    await expect(report).toContainText("P1 2");
-    await expect(report).toContainText("P2 1");
+    // No severity stat: the TaskRun CRD's status carries no counts, and nothing
+    // writes them — `P0/P1/P2` is a convention the agent is asked to use in the
+    // report's prose. The box that read them showed zero forever, so it is gone,
+    // and this is what says it must not come back.
+    await expect(report).not.toContainText("严重度统计");
     await expect(report).toContainText("运行次数");
     await expect(report).toContainText("成功");
     // The Markdown body of the newest run is rendered.

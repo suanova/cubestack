@@ -77,9 +77,6 @@ export interface Report {
   /** Set once finished; empty while running. */
   finishedAt: string;
   content: string;
-  p0: number;
-  p1: number;
-  p2: number;
 }
 
 /**

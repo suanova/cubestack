@@ -78,7 +78,6 @@ describe("/api/cubepilot/tasks/[id]/reports", () => {
             phase: "Completed",
             startedAt: "2026-09-12T06:00:00Z",
             finishedAt: "2026-09-12T06:04:00Z",
-            summary: { total: 26, abnormal: 2, p0: 0, p1: 2, p2: 2 },
             content: "# 集群日常巡检报告\n\n**24 / 26 项通过**",
           },
         }),
@@ -89,7 +88,6 @@ describe("/api/cubepilot/tasks/[id]/reports", () => {
             phase: "Failed",
             startedAt: "2026-09-13T06:00:00Z",
             finishedAt: "2026-09-13T06:01:22Z",
-            summary: { total: 20, abnormal: 1, p0: 1, p1: 0, p2: 0 },
             content: "# 巡检失败",
             error: "pre-check timed out",
           },
@@ -115,11 +113,11 @@ describe("/api/cubepilot/tasks/[id]/reports", () => {
       startedAt: "2026-09-13T06:00:00Z",
       finishedAt: "2026-09-13T06:01:22Z",
       content: "# 巡检失败",
-      p0: 1,
-      p1: 0,
-      p2: 0,
     });
-    expect(body.reports[1]).toMatchObject({ status: "success", p1: 2, p2: 2, trigger: "Cron" });
+    // No severity counts on the projection: the CRD's status carries none, and
+    // a `summary` written into it would be pruned by the API server.
+    expect(latest).not.toHaveProperty("p0");
+    expect(body.reports[1]).toMatchObject({ status: "success", trigger: "Cron" });
   });
 
   it("reports a Pending run as running with a creationTimestamp start", async () => {

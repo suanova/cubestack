@@ -489,7 +489,7 @@ export function TasksPane() {
 
               {selectedReport ? (
                 <Box data-od-id="cp-tasks-report">
-                  <Box sx={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "14px", mb: "16px" }}>
+                  <Box sx={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "14px", mb: "16px" }}>
                     <StatBox
                       label={t("cubepilot.tasks.stat.lastRun")}
                       value={<Box component="span" sx={{ fontSize: 18 }}>{fmtTime(selectedReport.startedAt)}</Box>}
@@ -498,18 +498,6 @@ export function TasksPane() {
                           ? t("cubepilot.tasks.stat.inProgress")
                           : t("cubepilot.tasks.stat.duration", { duration: fmtDuration(selectedReport.startedAt, selectedReport.finishedAt || new Date().toISOString()) })
                       }
-                    />
-                    <StatBox
-                      label={t("cubepilot.tasks.stat.severity")}
-                      badge={<Pill variant="warn">{t("cubepilot.tasks.stat.severityCount", { count: selectedReport.p0 + selectedReport.p1 + selectedReport.p2 })}</Pill>}
-                      value={
-                        <Box sx={{ display: "flex", gap: "10px", alignItems: "center", fontSize: 13, mt: "2px" }}>
-                          <SevDot color="#e15c5c" label={`P0 ${selectedReport.p0}`} />
-                          <SevDot color="#e0a13a" label={`P1 ${selectedReport.p1}`} />
-                          <SevDot color="#1677ff" label={`P2 ${selectedReport.p2}`} />
-                        </Box>
-                      }
-                      sub={t("cubepilot.tasks.stat.severitySub")}
                     />
                     <StatBox
                       label={t("cubepilot.tasks.stat.runs")}
@@ -824,11 +812,3 @@ function StatBox({ label, value, sub, badge }: { label: string; value: ReactNode
   );
 }
 
-function SevDot({ color, label }: { color: string; label: string }) {
-  return (
-    <Box component="span" sx={{ display: "inline-flex", alignItems: "center", gap: "5px", fontSize: 12 }}>
-      <Box component="span" sx={{ width: 7, height: 7, borderRadius: "50%", bgcolor: color, flex: "none" }} />
-      {label}
-    </Box>
-  );
-}

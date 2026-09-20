@@ -66,7 +66,6 @@ export interface TaskRunCr {
   };
   status?: {
     phase?: string;
-    summary?: { total?: number; abnormal?: number; p0?: number; p1?: number; p2?: number };
     content?: string;
     startedAt?: string;
     finishedAt?: string;
@@ -157,7 +156,11 @@ export function reportFromCr(cr: TaskRunCr, fallbackTaskName: string): Report {
   const phase = cr.status?.phase ?? "";
   // Pending / Running must not be presented as a finished success.
   const status = phase === "Completed" ? "success" : phase === "Failed" || phase === "Cancelled" ? "failed" : "running";
-  const s = cr.status?.summary;
+  // No severity counts: the CRD's status carries none (content / error /
+  // finishedAt / phase / skillRevision / startedAt / templateRevision), and
+  // nothing writes one. `P0/P1/P2` is a convention the agent is asked to use IN
+  // the report prose -- a classification of findings, not a field -- so a stat
+  // derived from it would read zero forever.
   return {
     id: cr.metadata?.name ?? "",
     taskId: cr.spec?.creatorTaskRef?.name ?? "",
@@ -167,9 +170,6 @@ export function reportFromCr(cr: TaskRunCr, fallbackTaskName: string): Report {
     startedAt: cr.status?.startedAt ?? cr.metadata?.creationTimestamp ?? "",
     finishedAt: cr.status?.finishedAt ?? "",
     content: cr.status?.content ?? "",
-    p0: s?.p0 ?? 0,
-    p1: s?.p1 ?? 0,
-    p2: s?.p2 ?? 0,
   };
 }
 
