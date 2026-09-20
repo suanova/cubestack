@@ -243,7 +243,21 @@ export type AgentSseEvent =
   | { type: "tool_call"; sessionId: string; name: string; callId?: string; arguments?: unknown }
   | { type: "tool_result"; sessionId: string; callId?: string; name?: string; output?: string }
   | { type: "message_done"; sessionId: string; error?: string; stopped?: boolean }
-  | { type: "approval_pending"; sessionId: string; callId: string; name?: string; command?: string; level?: string; message?: string }
+  // A session can hold several pending approvals at once — one turn can have
+  // two writes held back — so the card carries the gateway's stamps: createdAtMs
+  // orders them (arrival order is not stable across a reload), and expiresAtMs
+  // is the deadline the gateway gave that one.
+  | {
+      type: "approval_pending";
+      sessionId: string;
+      callId: string;
+      name?: string;
+      command?: string;
+      level?: string;
+      message?: string;
+      createdAtMs?: number;
+      expiresAtMs?: number;
+    }
   // `approved` is absent when nobody decided — the turn was stopped while the
   // write was parked. That is NOT the same as an explicit false (a rejection),
   // so the field is optional rather than defaulting to false.
@@ -255,6 +269,20 @@ export type AgentSseEvent =
   // why the free-text entry never appeared.
   | { type: "question_pending"; sessionId: string; callId: string; question?: { questions?: AgentQuestionItem[]; timeoutSeconds?: number } }
   | { type: "question_resolved"; sessionId: string; callId: string; message?: string };
+
+/** One entry of GET /api/v1/sessions/{key}/approval/pending — a write the gateway
+ *  is still holding for this session. The list is oldest first, and a session
+ *  can hold several at once. */
+export interface PendingApproval {
+  sessionId?: string;
+  approvalId: string;
+  tool?: string;
+  command?: string;
+  level?: string;
+  message?: string;
+  createdAtMs?: number;
+  expiresAtMs?: number;
+}
 
 /** One question of an ask_user prompt (question.questions[]). */
 export interface AgentQuestionItem {

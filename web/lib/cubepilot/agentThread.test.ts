@@ -167,6 +167,41 @@ describe("applyAgentEvent — approvals", () => {
     ]);
   });
 
+  it("holds several at once, each keeping the gateway's stamps", () => {
+    // One turn can have two writes held back. They are two cards, not one: the
+    // platform used to keep only the newest, so a decision aimed at either of
+    // them settled that one.
+    const m = fold([
+      { ...pending, callId: "a1", createdAtMs: 1000, expiresAtMs: 60000 },
+      { ...pending, callId: "a2", command: "kubectl rollout restart deploy/y", createdAtMs: 2000 },
+    ]);
+    expect(m.approvals.map((a) => a.callId)).toEqual(["a1", "a2"]);
+    expect(m.approvals[0].createdAtMs).toBe(1000);
+    expect(m.approvals[0].expiresAtMs).toBe(60000);
+    expect(m.approvals[1].createdAtMs).toBe(2000);
+  });
+
+  it("does not double an approval the turn already carries", () => {
+    // The stream pushes it and a reload reads the pending list; two accounts of
+    // one approval are two cards unless the id is the key.
+    const m = fold([pending, pending]);
+    expect(m.approvals).toHaveLength(1);
+  });
+
+  it("keeps the state a card already has when the same approval arrives again", () => {
+    // Skipping rather than replacing: the copy already there is the one the
+    // user's own click moved.
+    const m = fold([
+      pending,
+      { type: "approval_resolved", sessionId: "s", callId: "a1", approved: true },
+      { ...pending, createdAtMs: 5000 },
+    ]);
+    expect(m.approvals).toHaveLength(1);
+    expect(m.approvals[0].state).toBe("approved");
+    // ...and the late copy did not overwrite the record either.
+    expect(m.approvals[0].createdAtMs).toBeUndefined();
+  });
+
   it("resolves to approved on an explicit true", () => {
     const m = fold([pending, { type: "approval_resolved", sessionId: "s", callId: "a1", approved: true }]);
     expect(m.approvals[0].state).toBe("approved");

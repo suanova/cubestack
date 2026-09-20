@@ -132,6 +132,34 @@ const TURN_APPROVAL = [
   },
 ];
 
+/** A turn holding TWO writes back at once (cubepilot #226): each has its own
+ *  approval id, and they are stamped so the client can order them. */
+const TURN_TWO_APPROVALS = [
+  { type: "message_start", sessionId: SESSION_KEY },
+  { type: "agent_thinking", sessionId: SESSION_KEY },
+  {
+    type: "approval_pending",
+    sessionId: SESSION_KEY,
+    callId: "app-1",
+    name: "exec",
+    command: "kubectl delete pod alpha",
+    level: "write",
+    message: "删除属于写操作",
+    createdAtMs: 1_700_000_000_000,
+    expiresAtMs: 1_700_000_600_000,
+  },
+  {
+    type: "approval_pending",
+    sessionId: SESSION_KEY,
+    callId: "app-2",
+    name: "exec",
+    command: "kubectl delete pod beta",
+    level: "write",
+    message: "删除属于写操作",
+    createdAtMs: 1_700_000_001_000,
+  },
+];
+
 /** A turn whose narration continues after the tool call — the ordering case. */
 const TURN_TOOL_THEN_TEXT = [
   { type: "message_start", sessionId: SESSION_KEY },
@@ -244,7 +272,7 @@ const PENDING_APPROVAL = {
 /** What the stubbed endpoints were actually called with (contract checks). */
 interface Captured {
   llmPosts: Array<{ method: string; path: string; body: unknown }>;
-  approvalPosts: Array<{ path: string; body: { decision?: string } }>;
+  approvalPosts: Array<{ path: string; body: { approvalId?: string; decision?: string } }>;
   questionPosts: Array<{ path: string; body: { id?: string; answers?: Record<string, string[]>; cancel?: boolean } }>;
   pendingPaths: string[];
   /** Every GET the pane made for a session's history, in order. Restoring the
@@ -309,6 +337,11 @@ interface Stubs {
    *  determine). "Could not check" is not the same as "nothing is running". */
   turnCheckFails?: boolean;
   pendingApproval?: object | null;
+  /** Several at once, oldest first, as the pending read reports them. */
+  pendingApprovals?: object[];
+  /** What POST /approval answers with. 404 and 409 both mean "settled
+   *  elsewhere"; anything else is a failure the card reports. */
+  approvalPostStatus?: number;
   turnEvents?: object[];
   /** What POST /question answers with. 404/409 are the refusals that send the
    *  pane to the pending list instead of letting it guess at the outcome. */
@@ -454,8 +487,10 @@ async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
       }
       if (path.endsWith("/approval/pending")) {
         captured.pendingPaths.push(path);
-        const body = stubs.pendingApproval ?? null;
-        return body ? json({ approval: body }) : json({ error: "no pending request" }, 404);
+        // A LIST, oldest first: a session can hold several pending approvals at
+        // once. 404 is the ordinary "nothing pending" answer.
+        const list = stubs.pendingApprovals ?? (stubs.pendingApproval ? [stubs.pendingApproval] : []);
+        return list.length ? json({ approvals: list }) : json({ error: "no pending approval" }, 404);
       }
       if (path.endsWith("/question/pending")) {
         captured.pendingPaths.push(path);
@@ -471,9 +506,14 @@ async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
         return json({ error: "no pending question" }, 404);
       }
       if (path.endsWith("/approval") && method === "POST") {
-        const body = post() as { decision?: string };
+        const body = post() as { approvalId?: string; decision?: string };
         captured.approvalPosts.push({ path, body });
-        return json({ approved: body.decision !== "reject", decision: body.decision, approvalId: "app-1" });
+        // A refusal: 404 (gone) and 409 (decided elsewhere) are both "the card
+        // was settled underneath the click", which the pane closes neutrally.
+        if (stubs.approvalPostStatus) return json({ error: "approval already resolved" }, stubs.approvalPostStatus);
+        // The response names the approval it settled — the request's own id,
+        // which the pane checks against the card it came from.
+        return json({ approved: body.decision !== "reject", decision: body.decision, approvalId: body.approvalId });
       }
       if (path.endsWith("/question") && method === "POST") {
         captured.questionPosts.push({ path, body: post() as { id?: string; answers?: Record<string, string[]> } });
@@ -580,7 +620,9 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     // percent-encoded per segment, and the send button came back once the
     // turn finished.
     expect(captured.approvalPosts).toHaveLength(1);
-    expect(captured.approvalPosts[0].body).toEqual({ decision: "approve" });
+    // The body names the card it came from: a session can hold several pending
+    // approvals, so the endpoint takes no decision without one.
+    expect(captured.approvalPosts[0].body).toEqual({ approvalId: "app-1", decision: "approve" });
     expect(captured.approvalPosts[0].path).toContain(`/api/v1/sessions/${ENC_KEY}/approval`);
     await expect(page.locator('[data-od-id="send-btn"]')).toBeVisible();
     await expect(page.locator('[data-od-id="stop-btn"]')).toHaveCount(0);
@@ -971,6 +1013,73 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     // the models out of the column they lay out in — the order still reads
     // right while the page does not.
     expect(await page.locator('[data-od-id="object-list"] [data-od-id^="obj-"]').count()).toBe(order.length);
+  });
+
+  test("holds two approvals at once, and decides the one that was clicked", async ({ page }) => {
+    // One turn can have two writes held back. The platform used to keep only the
+    // newest record, so a click on either card settled that one: the user
+    // approved one command and a different one went through, and both cards read
+    // "approved". Each card now carries its own id, and the decision names it.
+    const captured = await stubAgent(page, { sessions: [SESSION], turnEvents: TURN_TWO_APPROVALS });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="obj-cubepilot"]').click();
+    await page.locator('[data-od-id="chat-input"]').fill("清理两个 pod");
+    await page.locator('[data-od-id="send-btn"]').click();
+
+    const cards = page.locator('[data-od-id="approval-item"]');
+    await expect(cards).toHaveCount(2);
+    // Oldest first, the order the gateway lists them in — createdAtMs is the
+    // only stable key a card restored after a reload has.
+    await expect(cards.nth(0)).toContainText("kubectl delete pod alpha");
+    await expect(cards.nth(1)).toContainText("kubectl delete pod beta");
+
+    await cards.nth(0).locator('[data-od-id="approval-approve"]').click();
+
+    // The request names the card it came from. Without the id the server cannot
+    // know which one, and refuses rather than picking.
+    await expect.poll(() => captured.approvalPosts.length).toBe(1);
+    expect(captured.approvalPosts[0].body).toMatchObject({ approvalId: "app-1", decision: "approve" });
+
+    // The decision settled that card and only that card: the other one is still
+    // waiting for the user, which is what was broken.
+    await expect(cards.nth(0)).toContainText("已批准");
+    await expect(cards.nth(0).locator('[data-od-id="approval-approve"]')).toHaveCount(0);
+    await expect(cards.nth(1).locator('[data-od-id="approval-approve"]')).toBeVisible();
+    await expect(cards.nth(1)).toContainText("写操作待审批");
+  });
+
+  test("closes a card neutrally when the approval was settled elsewhere", async ({ page }) => {
+    // 409 is the other client winning the race (404 is the record being gone).
+    // Neither is a decision the user made, so the card closes without claiming
+    // one — reporting their click as a rejection would attribute to them a
+    // decision the server refused.
+    await stubAgent(page, { sessions: [SESSION], turnEvents: TURN_APPROVAL, approvalPostStatus: 409 });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="obj-cubepilot"]').click();
+    await page.locator('[data-od-id="chat-input"]').fill("重启 portal");
+    await page.locator('[data-od-id="send-btn"]').click();
+
+    const card = page.locator('[data-od-id="approval-item"]');
+    await card.locator('[data-od-id="approval-approve"]').click();
+    await expect(card).toContainText("已停止");
+    await expect(card).not.toContainText("已拒绝");
+  });
+
+  test("restores several pending approvals", async ({ page }) => {
+    // The read after a reload answers with the list, and every entry in it is a
+    // card the user can act on — not just the newest one.
+    await stubAgent(page, {
+      sessions: [SESSION],
+      history: HISTORY,
+      pendingApprovals: [PENDING_APPROVAL, { ...PENDING_APPROVAL, approvalId: "app-10", command: "kubectl drain node-2", createdAtMs: 2000 }],
+    });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="obj-cubepilot"]').click();
+
+    const cards = page.locator('[data-od-id="approval-item"]');
+    await expect(cards).toHaveCount(2);
+    await expect(cards.nth(0)).toContainText("kubectl rollout restart deploy/portal");
+    await expect(cards.nth(1)).toContainText("kubectl drain node-2");
   });
 
   test("a turn that survived a reload says so, and offers Stop", async ({ page }) => {

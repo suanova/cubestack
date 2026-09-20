@@ -41,6 +41,11 @@ export interface AgentApproval {
   state: "pending" | "deciding" | "approved" | "rejected" | "stopped";
   /** Set when the decision POST failed; the card stays answerable. */
   error?: string;
+  /** The gateway's stamps for this approval, epoch ms. A session can hold
+   *  several at once, and a card that came back from a reload has no arrival
+   *  order to sit in, so createdAtMs is what orders them. */
+  createdAtMs?: number;
+  expiresAtMs?: number;
 }
 
 export type AgentQuestionState = "pending" | "submitting" | "answered" | "cancelled" | "expired";
@@ -88,6 +93,50 @@ export type ThreadMsg = { id: number; role: "user"; text: string } | AgentMsg;
 
 // ── event folding ────────────────────────────────────────────────────────
 
+/**
+ * Build one card, from whichever wire shape described it.
+ *
+ * Two channels describe the same thing — the `approval_pending` event on the
+ * stream and an entry of the pending read after a reload — and they name the id
+ * differently (`callId` and `approvalId`), so the caller normalises that and
+ * this holds the rest. One projection rather than one per call site: the stamps
+ * are the part that a reload depends on, and a second copy of this is where they
+ * would go missing again.
+ */
+export function newApproval(wire: {
+  approvalId: string;
+  name?: string;
+  command?: string;
+  level?: string;
+  message?: string;
+  createdAtMs?: number;
+  expiresAtMs?: number;
+}): AgentApproval {
+  return {
+    callId: wire.approvalId,
+    name: wire.name,
+    command: wire.command,
+    level: wire.level,
+    message: wire.message,
+    state: "pending",
+    ...(wire.createdAtMs !== undefined ? { createdAtMs: wire.createdAtMs } : {}),
+    ...(wire.expiresAtMs !== undefined ? { expiresAtMs: wire.expiresAtMs } : {}),
+  };
+}
+
+/**
+ * Add a card unless the turn already carries that approval.
+ *
+ * The same approval reaches the view twice in ordinary use — the stream pushes
+ * it, and a reload reads the pending list — and two accounts of one approval are
+ * two cards unless the id is the key. Skipping is right rather than replacing:
+ * the copy already there has whatever state the user's own click gave it.
+ */
+export function addApproval(msg: AgentMsg, card: AgentApproval): AgentMsg {
+  if (msg.approvals.some((a) => a.callId === card.callId)) return msg;
+  return { ...msg, approvals: [...msg.approvals, card] };
+}
+
 /** Fold one SSE event onto a message, returning a new message. */
 export function applyAgentEvent(msg: AgentMsg, evt: AgentSseEvent, now: number = Date.now()): AgentMsg {
   switch (evt.type) {
@@ -116,13 +165,18 @@ export function applyAgentEvent(msg: AgentMsg, evt: AgentSseEvent, now: number =
       return setPhase({ ...msg, blocks: attachToolResult(msg.blocks, evt.callId, evt.output ?? "") }, "tools", now);
     case "approval_pending":
       return setPhase(
-        {
-          ...msg,
-          approvals: [
-            ...msg.approvals,
-            { callId: evt.callId, name: evt.name, command: evt.command, level: evt.level, message: evt.message, state: "pending" },
-          ],
-        },
+        addApproval(
+          msg,
+          newApproval({
+            approvalId: evt.callId,
+            name: evt.name,
+            command: evt.command,
+            level: evt.level,
+            message: evt.message,
+            createdAtMs: evt.createdAtMs,
+            expiresAtMs: evt.expiresAtMs,
+          }),
+        ),
         "tools",
         now,
       );
