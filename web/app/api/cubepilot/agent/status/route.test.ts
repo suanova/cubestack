@@ -51,7 +51,6 @@ describe("/api/cubepilot/agent/status", () => {
         phase: "Ready",
         podName: "cubepilot-tester-abc12",
         pvcName: "pvc-tester",
-        lastActivity: "2026-09-13T02:00:00Z",
         message: "ready",
       },
     });
@@ -64,7 +63,6 @@ describe("/api/cubepilot/agent/status", () => {
     expect(body.user).toBe("tester");
     expect(body.podName).toBe("cubepilot-tester-abc12");
     expect(body.pvcName).toBe("pvc-tester");
-    expect(body.lastActivity).toBe("2026-09-13T02:00:00Z");
     // ~3 minutes since creation, clamped to a whole number of seconds.
     expect(Number(body.uptimeSeconds)).toBeGreaterThanOrEqual(170);
     expect(Number(body.uptimeSeconds)).toBeLessThan(200);

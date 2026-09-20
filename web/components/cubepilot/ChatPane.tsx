@@ -58,7 +58,6 @@ import type {
 } from "@/lib/cubepilot/types";
 import { useI18n } from "@/lib/i18n";
 
-import { fmtTime } from "./format";
 import { HitlDock, type ApprovalDecision } from "./HitlDock";
 import { CopyBtn, ParamsPanel, SampleParams } from "./Playground";
 import { AgentThread } from "./AgentThread";
@@ -1392,9 +1391,7 @@ export function ChatPane() {
     ? t("cubepilot.chat.agentMetaLoading")
     : !agentStatus.exists
       ? t("cubepilot.chat.agentNotProvisioned")
-      : [agentStatus.phase || t("cubepilot.chat.agentStarting"), agentStatus.lastActivity ? fmtTime(agentStatus.lastActivity) : ""]
-          .filter(Boolean)
-          .join(" · ");
+      : agentStatus.phase || t("cubepilot.chat.agentStarting");
 
   const objName = isAgent ? "CubePilot" : (svc?.id ?? "—");
   const objRole = isAgent ? agentRoleLine : svc ? t("cubepilot.chat.roleModel") : "";

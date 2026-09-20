@@ -32,7 +32,6 @@ export const GET = withAuth(async (_req, session) => {
       startedAt,
       uptimeSeconds,
       user: cr.spec?.owner ?? session.user,
-      lastActivity: cr.status?.lastActivity,
       message: cr.status?.message,
       modelConfigured: modelCondition ? modelCondition.status === "True" : undefined,
       modelMessage: modelCondition?.message,

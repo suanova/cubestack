@@ -51,7 +51,6 @@ export interface AgentInstanceCr {
     podName?: string;
     pvcName?: string;
     serviceName?: string;
-    lastActivity?: string;
     message?: string;
     conditions?: Array<{ type?: string; status?: string; message?: string }>;
   };

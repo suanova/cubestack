@@ -559,7 +559,6 @@ export function ConfigPane() {
               <>
                 <InstRow k={t("cubepilot.config.instId")} v={<Box component="span" sx={{ ...monoSx, fontSize: 12 }}>{status.id || "-"}</Box>} />
                 <InstRow k={t("cubepilot.config.instUptime")} v={fmtUptime(status.uptimeSeconds)} />
-                <InstRow k={t("cubepilot.config.instLastActivity")} v={status.lastActivity || "-"} />
                 <InstRow k={t("cubepilot.config.instPod")} v={<Box component="span" sx={{ ...monoSx, fontSize: 11.5 }}>{status.podName || "-"}</Box>} />
                 <InstRow k={t("cubepilot.config.instVolume")} v={<Box component="span" sx={{ ...monoSx, fontSize: 11.5 }}>{status.pvcName || "-"}</Box>} />
                 {status.message ? (

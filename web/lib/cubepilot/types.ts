@@ -148,7 +148,6 @@ export interface AgentStatus {
   startedAt?: string;
   uptimeSeconds?: number;
   user: string;
-  lastActivity?: string;
   message?: string;
   /** The operator's ModelConfigured condition: false = the AgentTemplate
    *  offers no usable provider (no endpoint, no model ids, or a missing

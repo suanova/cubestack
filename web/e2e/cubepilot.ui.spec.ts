@@ -50,7 +50,6 @@ const STATUS_READY = {
   phase: "Ready",
   uptimeSeconds: 7200,
   user: "admin",
-  lastActivity: new Date(Date.now() - 300_000).toISOString(),
   podName: "cubepilot-admin-7d9f",
   pvcName: "pvc-admin-cubepilot",
 };

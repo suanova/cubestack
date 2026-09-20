@@ -38,7 +38,6 @@ function stubApi(config?: Record<string, unknown>) {
           startedAt: new Date(Date.now() - 3600 * 1000).toISOString(),
           uptimeSeconds: 3600,
           user: "tester",
-          lastActivity: new Date(Date.now() - 300 * 1000).toISOString(),
           message: "ready",
           podName: "cubepilot-tester-abc12",
           pvcName: "pvc-tester",
