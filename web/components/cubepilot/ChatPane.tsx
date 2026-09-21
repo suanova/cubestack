@@ -15,14 +15,14 @@
 // (SSE).
 //
 // Agent side: the real CubePilot agent API (docs/cubepilot/api.md). The
-// conversation is the SSE stream of POST /api/v1/messages proxied through
-// /api/cubepilot/pilot; sessions, history, and the HITL approval/question
-// channels are the same proxy. Instance status, the model in use, and the
-// tool whitelist (platform skills) come from the agent CRs via the
-// /api/cubepilot/agent/* + /api/cubepilot/skills routes. On (re)select the
-// client restores the user's one fixed conversation (history + pending HITL
-// cards) — see SESSION_KEY — and polls history while a turn is still in flight
-// after a reload.
+// conversation is the SSE stream of POST /api/v1/sessions/{key}/messages
+// proxied through /api/cubepilot/pilot; history, the turn controls, and the
+// HITL approval/question collections are the same proxy, under the same key.
+// Instance status, the model in use, and the tool whitelist (platform skills)
+// come from the agent CRs via the /api/cubepilot/agent/* + /api/cubepilot/skills
+// routes. On (re)select the client restores the user's one fixed conversation
+// (history + pending HITL cards) — see SESSION_KEY — and polls history while a
+// turn is still in flight after a reload.
 
 import { Box, Popover, SxProps, Theme } from "@mui/material";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -645,26 +645,24 @@ export function ChatPane() {
       attachToNewest((x) => addApproval(x, card));
     };
     try {
-      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/approval/pending`);
+      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/approvals`);
       if (res.ok && genRef.current === gen) {
-        // A LIST: the gateway can be holding several for one session, and the
-        // oldest is not the only one this pane has to offer.
+        // A LIST, and an empty one is the ordinary answer for a session that is
+        // not parked — the collection exists and is empty, so a read that
+        // succeeded and found nothing never reaches the catch below.
         const { approvals } = (await res.json()) as { approvals?: PendingApproval[] };
         for (const a of approvals ?? []) {
           if (a.approvalId) attachApproval(a);
         }
       }
-      // 404 = no pending approval: silent by contract.
     } catch {
       /* silent */
     }
     try {
-      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/question/pending`);
-      // This endpoint's 404 IS "nothing is pending", not a failed read: its body
-      // is defined as {"error":"no pending question"}. Anything else is a read
-      // that failed, and it is thrown so that it is reported rather than folded
-      // into "idle".
-      if (res.status !== 404 && !res.ok) throw new Error(`HTTP ${res.status}`);
+      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/questions`);
+      // A failed read is thrown so that it is reported rather than folded into
+      // "idle"; an empty collection is not a failure, it is nothing pending.
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       if (res.ok && genRef.current === gen) {
         const { questions } = (await res.json()) as {
           questions?: Array<{ id?: string; questions?: AgentQuestionItem[]; timeoutSeconds?: number }>;
@@ -934,21 +932,27 @@ export function ChatPane() {
 
   async function sendAgent(text: string, gen: number, msgId: number): Promise<void> {
     let gotDone = false;
-    // The session this stream turned out to be for. A brand-new chat has no id
-    // at send time — the server mints one and reports it in `message_start` —
-    // and `agentSessionKey` is the value the RENDER that started this send
-    // captured, which is null for a first message. The stream-lost path below
-    // needs the id the stream actually reported, or a lost first stream skips
-    // the re-check and leaves the header saying "connection lost" with no Stop,
-    // while the next send goes straight to POST /messages and meets the 409 (or
-    // is steered into the running turn) that the stop-first route exists to
+    // The conversation is named by the path: a POST to a session's messages IS
+    // that session's first (or next) turn, so a send with no key has nothing to
+    // address. It cannot happen — the key starts as this pane's fixed
+    // SESSION_KEY and is only ever replaced by the canonical form the stream
+    // reported.
+    if (!agentSessionKey) return;
+    const sessionKey = agentSessionKey;
+    // The session this stream turned out to be for. The path names it, but the
+    // server canonicalises what it was given and reports that form in
+    // `message_start`, so the stream's own account is the one to keep. The
+    // stream-lost path below needs it, or a lost stream skips the re-check and
+    // leaves the header saying "connection lost" with no Stop, while the next
+    // send goes straight to the session's messages and meets the 409 (or is
+    // steered into the running turn) that the stop-first route exists to
     // prevent.
     let sessionOfTurn: string | null = null;
     try {
-      const res = await fetch("/api/cubepilot/pilot/api/v1/messages", {
+      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(sessionKey)}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content: text, ...(agentSessionKey ? { sessionId: agentSessionKey } : {}) }),
+        body: JSON.stringify({ content: text }),
       });
       if (!res.ok) {
         // Request-phase failure (400/409/503-warming): surfaced as an error
@@ -1012,10 +1016,9 @@ export function ChatPane() {
         // with what actually happened.
         ownTurnRef.current = false;
         followingRef.current = true;
-        // The id the STREAM reported when it has one: this closure's
-        // `agentSessionKey` is the send-time render's, which names no session
-        // for a first message.
-        const key = sessionOfTurn ?? agentSessionKey;
+        // The id the STREAM reported when it has one — the canonical form of
+        // the key this send addressed — and otherwise the one the path carried.
+        const key = sessionOfTurn ?? sessionKey;
         if (key) void checkTurnElsewhere(key, gen);
       }
     } catch (e) {
@@ -1054,7 +1057,7 @@ export function ChatPane() {
     // look like it landed immediately.
     patchApproval(callId, (a) => ({ ...a, state: "deciding", error: undefined }));
     try {
-      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(agentSessionKey)}/approval`, {
+      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(agentSessionKey)}/approvals/decision`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         // The id is required: a session can hold several pending approvals, and
@@ -1110,20 +1113,16 @@ export function ChatPane() {
   async function reopenOrExpireQuestion(callId: string): Promise<void> {
     if (!agentSessionKey) return;
     try {
-      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(agentSessionKey)}/question/pending`);
-      if (res.status === 404) {
-        // This endpoint's 404 IS the "gone" signal, not a failed read: its body
-        // is defined as {"error":"no pending question"} — "the question is not
-        // there", the same condition an empty list reports. Reading it as a
-        // refresh failure would park the card in pending for the rest of the
-        // session behind a retry that can never succeed.
-        patchQuestion(callId, (q) => ({ ...q, state: "expired", error: undefined }));
-        return;
-      }
+      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(agentSessionKey)}/questions`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const { questions } = (await res.json()) as {
         questions?: Array<{ id?: string; questions?: AgentQuestionItem[]; timeoutSeconds?: number }>;
       };
+      // Membership in the collection IS the open/closed signal — the gateway's
+      // own account of what is still waiting. A question that is absent is gone
+      // (expired or answered), which is the same condition the endpoint's 404
+      // used to report; a read that failed does not get here at all, so "gone"
+      // and "could not ask" stay two different answers.
       const still = (questions ?? []).find((q) => q.id === callId);
       if (still) {
         patchQuestion(callId, (q) => ({
@@ -1152,11 +1151,17 @@ export function ChatPane() {
     if (!agentSessionKey) return;
     patchQuestion(callId, (q) => ({ ...q, state: "submitting", answers: cancel ? q.answers : answers, error: undefined }));
     try {
-      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(agentSessionKey)}/question`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: callId, ...(cancel ? { cancel: true } : { answers }) }),
-      });
+      const res = await fetch(
+        `/api/cubepilot/pilot/api/v1/sessions/${enc(agentSessionKey)}/questions/${cancel ? "cancel" : "answer"}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          // Answer and cancel are two routes rather than one route with a flag:
+          // each body carries exactly the fields its route acts on, so a cancel
+          // cannot arrive carrying answers.
+          body: JSON.stringify(cancel ? { id: callId } : { id: callId, answers }),
+        },
+      );
       if (!res.ok) {
         const body = (await res.json().catch(() => null)) as { error?: string } | null;
         if (res.status === 404 || res.status === 409) {

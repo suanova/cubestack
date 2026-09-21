@@ -296,7 +296,10 @@ const PENDING_APPROVAL = {
 interface Captured {
   llmPosts: Array<{ method: string; path: string; body: unknown }>;
   approvalPosts: Array<{ path: string; body: { approvalId?: string; decision?: string } }>;
-  questionPosts: Array<{ path: string; body: { id?: string; answers?: Record<string, string[]>; cancel?: boolean } }>;
+  /** Every answer or cancel the pane sent, with its body. The two are separate
+   *  routes, so the path is what says which one was sent — an answer carries
+   *  `answers` and a cancel carries only the id. */
+  questionPosts: Array<{ path: string; body: { id?: string; answers?: Record<string, string[]> } }>;
   pendingPaths: string[];
   /** Every GET the pane made for a session's history, in order. Restoring the
    *  right session is a claim about WHICH key was read — the stub answers every
@@ -312,8 +315,9 @@ interface Captured {
    *  would run alongside the next one and the older answer could land last,
    *  putting the transcript backwards. */
   maxHistoryInFlight: number;
-  /** Every POST that started a turn, with its body: which session it named is
-   *  the whole question — a body without `sessionId` lets the API mint one. */
+  /** Every POST that started a turn, with its body. The key is in the PATH now
+   *  — that is what makes the request name a conversation, and what keeps a send
+   *  made before the restore finishes on the session the pane already shows. */
   messagePosts: Array<{ path: string; body: { content?: string; sessionId?: string } }>;
   /** Every DELETE the pane made for a session, in order. */
   sessionDeletes: string[];
@@ -348,7 +352,7 @@ interface Stubs {
   /** Makes the instance-status read slow, which keeps the pane inside its
    *  "selecting CubePilot" window long enough to send during it. */
   statusDelayMs?: number;
-  /** What the restore read of /question/pending finds. Absent → the read 404s,
+  /** What the restore read of /questions finds. Absent → an empty collection,
    *  which is the ordinary "nothing is pending". */
   pendingQuestion?: object | null;
   /** Successive /turn answers, the last one repeating. Lets a spec watch the
@@ -373,8 +377,9 @@ interface Stubs {
    *  open (the answer was not accepted) or an empty list (it is gone). */
   pendingQuestionKept?: boolean;
   pendingQuestionMissing?: boolean;
-  /** That read's own status, to drive the branch where it 404s — this endpoint's
-   *  404 means "no pending question", i.e. gone, not "the read failed". */
+  /** That read's own status, to drive the branch where it FAILS — an empty
+   *  collection is the "gone" signal, so a status here is the gateway being
+   *  unreadable and never a question that settled. */
   pendingQuestionStatus?: number;
 }
 
@@ -508,27 +513,28 @@ async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
         }
         return json({ active: stubs.turnActive ?? false });
       }
-      if (path.endsWith("/approval/pending")) {
+      if (path.endsWith("/approvals")) {
         captured.pendingPaths.push(path);
-        // A LIST, oldest first: a session can hold several pending approvals at
-        // once. 404 is the ordinary "nothing pending" answer.
+        // A collection, and an empty one IS the ordinary "nothing pending"
+        // answer: a session can hold several approvals at once, or none, and
+        // the route no longer answers 404 for the empty case.
         const list = stubs.pendingApprovals ?? (stubs.pendingApproval ? [stubs.pendingApproval] : []);
-        return list.length ? json({ approvals: list }) : json({ error: "no pending approval" }, 404);
+        return json({ approvals: list });
       }
-      if (path.endsWith("/question/pending")) {
+      if (path.endsWith("/questions")) {
         captured.pendingPaths.push(path);
         // A question the gateway is still holding, as the restore read sees it:
         // the endpoint answers with the LIST of them, and this fixture is one.
         if (stubs.pendingQuestion) return json({ questions: [stubs.pendingQuestion] });
         if (refusedAnswer) {
-          if (stubs.pendingQuestionStatus) return json({ error: "no pending question" }, stubs.pendingQuestionStatus);
+          if (stubs.pendingQuestionStatus) return json({ error: "could not read the gateway" }, stubs.pendingQuestionStatus);
           if (stubs.pendingQuestionKept) return json({ questions: [PENDING_QUESTION] });
           if (stubs.pendingQuestionMissing) return json({ questions: [] });
         }
-        // The endpoint's real 404 body: "the question is not there".
-        return json({ error: "no pending question" }, 404);
+        // "The question is not there" is an empty collection now, not a 404.
+        return json({ questions: [] });
       }
-      if (path.endsWith("/approval") && method === "POST") {
+      if (path.endsWith("/approvals/decision") && method === "POST") {
         const body = post() as { approvalId?: string; decision?: string };
         captured.approvalPosts.push({ path, body });
         // A refusal: 404 (gone) and 409 (decided elsewhere) are both "the card
@@ -538,13 +544,19 @@ async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
         // which the pane checks against the card it came from.
         return json({ approved: body.decision !== "reject", decision: body.decision, approvalId: body.approvalId });
       }
-      if (path.endsWith("/question") && method === "POST") {
+      if (path.endsWith("/questions/answer") && method === "POST") {
         captured.questionPosts.push({ path, body: post() as { id?: string; answers?: Record<string, string[]> } });
         if (stubs.questionPostStatus) {
           refusedAnswer = true;
           return json({ error: "question is no longer open" }, stubs.questionPostStatus);
         }
-        return json({ ok: true });
+        return json({ questionId: "q-1", cancelled: false });
+      }
+      // Answer and cancel are two routes, and each body carries only what its
+      // route acts on — a cancel has no `answers` field to send.
+      if (path.endsWith("/questions/cancel") && method === "POST") {
+        captured.questionPosts.push({ path, body: post() as { id?: string } });
+        return json({ questionId: "q-1", cancelled: true });
       }
       if (path.endsWith("/abort") && method === "POST") return json({ ok: true });
     }
@@ -646,7 +658,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     // The body names the card it came from: a session can hold several pending
     // approvals, so the endpoint takes no decision without one.
     expect(captured.approvalPosts[0].body).toEqual({ approvalId: "app-1", decision: "approve" });
-    expect(captured.approvalPosts[0].path).toContain(`/api/v1/sessions/${ENC_KEY}/approval`);
+    expect(captured.approvalPosts[0].path).toContain(`/api/v1/sessions/${ENC_KEY}/approvals/decision`);
     await expect(page.locator('[data-od-id="send-btn"]')).toBeVisible();
     await expect(page.locator('[data-od-id="stop-btn"]')).toHaveCount(0);
   });
@@ -686,7 +698,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     await expect(card.locator('button[aria-pressed="true"]')).toContainText("仅 compute 节点");
     expect(captured.questionPosts).toHaveLength(1);
     expect(captured.questionPosts[0].body).toEqual({ id: "q-1", answers: { scope: ["仅 compute 节点"] } });
-    expect(captured.questionPosts[0].path).toContain(`/api/v1/sessions/${ENC_KEY}/question`);
+    expect(captured.questionPosts[0].path).toContain(`/api/v1/sessions/${ENC_KEY}/questions/answer`);
   });
 
   test("restores the conversation, its history and a still-pending approval", async ({ page }) => {
@@ -711,10 +723,10 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     await expect(page.locator('[data-od-id="approval-approve"]')).toBeVisible();
     await expect(page.locator('[data-od-id="approval-reject"]')).toBeVisible();
     await expect(page.locator('[data-od-id="approval-allow"]')).toBeVisible();
-    // Restore re-reads both pending queues through the encoded session key.
+    // Restore re-reads both pending collections through the encoded session key.
     const decoded = captured.pendingPaths.map((p) => decodeURIComponent(p));
-    expect(decoded.some((p) => p.includes(`/api/v1/sessions/${SESSION_KEY}/approval/pending`))).toBe(true);
-    expect(decoded.some((p) => p.includes(`/api/v1/sessions/${SESSION_KEY}/question/pending`))).toBe(true);
+    expect(decoded.some((p) => p.includes(`/api/v1/sessions/${SESSION_KEY}/approvals`))).toBe(true);
+    expect(decoded.some((p) => p.includes(`/api/v1/sessions/${SESSION_KEY}/questions`))).toBe(true);
   });
 
   test("restores the one fixed conversation, and never reads the session list", async ({ page }) => {
@@ -937,9 +949,11 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
   test("sends on the fixed key even before the restore finishes", async ({ page }) => {
     // The composer is live the moment CubePilot is selected, and the restore
     // behind it is asynchronous — metadata first, then history. Selecting used
-    // to clear the key during that window, so a send inside it went out with no
-    // `sessionId` at all and the API minted a session of its own: one user, two
-    // conversations, which is the whole thing the fixed key exists to prevent.
+    // to clear the key during that window, so a send inside it named no session
+    // at all and the API minted one of its own: one user, two conversations,
+    // which is the whole thing the fixed key exists to prevent. The key is what
+    // the send's PATH carries, and the body carries nothing else: the route
+    // decodes bodies strictly, so a leftover `sessionId` field is a 400.
     const captured = await stubAgent(page, { sessions: [SESSION], history: HISTORY, statusDelayMs: 4000 });
     await page.goto("/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
@@ -948,7 +962,10 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     await page.locator('[data-od-id="send-btn"]').click();
 
     await expect.poll(() => captured.messagePosts.length).toBe(1);
-    expect(captured.messagePosts[0].body.sessionId).toBe(SESSION_KEY);
+    expect(decodeURIComponent(captured.messagePosts[0].path)).toBe(
+      `/api/cubepilot/pilot/api/v1/sessions/${SESSION_KEY}/messages`,
+    );
+    expect(captured.messagePosts[0].body).toEqual({ content: "趁恢复还没完就发" });
   });
 
   test("restores a pending question with the countdown the gateway gave it", async ({ page }) => {
@@ -1183,7 +1200,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     const posts = captured.agentPosts.map((p) => decodeURIComponent(p));
     expect(posts).toEqual([
       `/api/cubepilot/pilot/api/v1/sessions/${SESSION_KEY}/abort`,
-      "/api/cubepilot/pilot/api/v1/messages",
+      `/api/cubepilot/pilot/api/v1/sessions/${SESSION_KEY}/messages`,
     ]);
   });
 
@@ -1407,27 +1424,6 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     // Settled: the controls are gone and the record moved into the bubble.
     await expect(page.locator('[data-od-id="hitl-dock"] [data-od-id="question-item"]')).toHaveCount(0);
     await expect(page.locator('[data-od-id="agent-bubble"] [data-od-id="question-item"]')).toContainText("已超时");
-  });
-
-  test("a re-read that 404s settles the question as expired, not as a refresh failure", async ({ page }) => {
-    // This endpoint's 404 is defined as {"error":"no pending question"}, i.e.
-    // "the question is not there" — the same "gone" signal as an empty list, and
-    // NOT a failed refresh. Reading it as a failure parks the card in pending
-    // for the rest of the session behind a retry that can never succeed.
-    await stubAgent(page, { sessions: [SESSION], turnEvents: TURN_QUESTION, questionPostStatus: 409, pendingQuestionStatus: 404 });
-    await page.goto("/cubepilot");
-    await page.locator('[data-od-id="obj-cubepilot"]').click();
-    await page.locator('[data-od-id="chat-input"]').fill("巡检");
-    await page.locator('[data-od-id="send-btn"]').click();
-
-    const card = page.locator('[data-od-id="hitl-dock"] [data-od-id="question-item"]');
-    await expect(card).toContainText("等待回答");
-    await card.locator("button").filter({ hasText: "全部节点" }).click();
-    await card.locator('[data-od-id="question-submit"]').click();
-
-    await expect(page.locator('[data-od-id="agent-bubble"] [data-od-id="question-item"]')).toContainText("已超时");
-    await expect(page.locator('[data-od-id="hitl-dock"] [data-od-id="question-item"]')).toHaveCount(0);
-    await expect(page.locator('[data-od-id="question-item"]')).not.toContainText("无法刷新该问题");
   });
 
   test("a re-read that fails outright leaves the question answerable, the failure on the card", async ({ page }) => {

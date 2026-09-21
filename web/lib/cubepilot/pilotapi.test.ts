@@ -51,9 +51,9 @@ describe("pilotFetch", () => {
     process.env.CUBESTACK_PILOT_URL = "http://pilot.test:8080";
     const fetchMock = vi.fn().mockResolvedValue(new Response("{}"));
     vi.stubGlobal("fetch", fetchMock);
-    await pilotFetch("/api/v1/messages", "alice", { method: "POST", body: '{"content":"hi"}' });
+    await pilotFetch("/api/v1/sessions/agent%3Amain%3Aconv-1/messages", "alice", { method: "POST", body: '{"content":"hi"}' });
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe("http://pilot.test:8080/api/v1/messages");
+    expect(url).toBe("http://pilot.test:8080/api/v1/sessions/agent%3Amain%3Aconv-1/messages");
     const headers = init.headers as Record<string, string>;
     expect(headers["X-CubePilot-User"]).toBe("alice");
     expect(headers["Content-Type"]).toBe("application/json");

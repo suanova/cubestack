@@ -14,8 +14,9 @@ import CubepilotPage from "./page";
 function stubApi(config?: Record<string, unknown>) {
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (input: RequestInfo | URL) => {
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      const method = init?.method ?? "GET";
       const json = (body: unknown) => ({ ok: true, status: 200, json: async () => body });
       if (url.includes("/api/cubepilot/tasktemplates"))
         return json({ taskTemplates: [] });
@@ -58,11 +59,10 @@ function stubApi(config?: Record<string, unknown>) {
             { name: "gpu-health", displayName: "GPU 体检", description: "GPU", enabled: true },
           ],
         });
-      if (url.includes("/api/cubepilot/pilot/api/v1/sessions") && !url.includes("/approval"))
-        return json({ sessions: [] }); // fresh user → the greeting, not a restore
-      if (url.includes("/approval"))
-        return json({ approved: true, decision: "approve", approvalId: "app-1" });
-      if (url.includes("/api/cubepilot/pilot/api/v1/messages")) {
+      // A session sub-resource is decided by its tail, and the turn stream is
+      // matched first: the send and the transcript read are the SAME path, and
+      // only the method tells them apart.
+      if (url.endsWith("/messages") && method === "POST") {
         // The agent turn: real SSE events (the client accumulates deltas,
         // pairs the tool result by callId, and renders the HITL card).
         //
@@ -89,6 +89,17 @@ function stubApi(config?: Record<string, unknown>) {
         });
         return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
       }
+      if (url.endsWith("/approvals/decision"))
+        return json({ approved: true, decision: "approve", approvalId: "app-1" });
+      if (url.endsWith("/questions/answer")) return json({ questionId: "ask-1", cancelled: false });
+      if (url.endsWith("/questions/cancel")) return json({ questionId: "ask-1", cancelled: true });
+      // The two restore collections, and the empty list IS the answer for a
+      // session with nothing parked.
+      if (url.endsWith("/approvals")) return json({ approvals: [] });
+      if (url.endsWith("/questions")) return json({ questions: [] });
+      // Everything else under a session: the list is empty for a fresh user (the
+      // greeting, not a restore), and `items` covers the transcript read.
+      if (url.includes("/api/cubepilot/pilot/api/v1/sessions")) return json({ sessions: [], items: [] });
       if (url.includes("/api/cubepilot/playground/services"))
         return json({
           models: [{ id: "glm-5.2-chat", ownedBy: "cubestack" }],

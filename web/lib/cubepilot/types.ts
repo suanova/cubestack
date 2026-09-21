@@ -224,7 +224,8 @@ export interface HistoryMessage {
   toolCallId?: string;
 }
 
-/** One SSE event of POST /api/v1/messages (data lines; type discriminates). */
+/** One SSE event of POST /api/v1/sessions/{key}/messages (data lines; type
+ *  discriminates). */
 export type AgentSseEvent =
   | { type: "message_start"; sessionId: string }
   | { type: "agent_thinking"; sessionId: string }
@@ -269,9 +270,9 @@ export type AgentSseEvent =
   | { type: "question_pending"; sessionId: string; callId: string; question?: { questions?: AgentQuestionItem[]; timeoutSeconds?: number } }
   | { type: "question_resolved"; sessionId: string; callId: string; message?: string };
 
-/** One entry of GET /api/v1/sessions/{key}/approval/pending — a write the gateway
+/** One entry of GET /api/v1/sessions/{key}/approvals — a write the gateway
  *  is still holding for this session. The list is oldest first, and a session
- *  can hold several at once. */
+ *  can hold several at once. An empty list is the ordinary "nothing pending". */
 export interface PendingApproval {
   sessionId?: string;
   approvalId: string;

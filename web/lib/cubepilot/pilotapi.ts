@@ -39,8 +39,9 @@ export function resolvePilotBase(): string | null {
 
 /**
  * fetch() against the agent API. `path` must start with "/" (e.g.
- * "/api/v1/messages"). The caller's identity is attached as X-CubePilot-User;
- * a JSON content type is set for POSTs with a body unless already present.
+ * "/api/v1/sessions/{key}/messages"). The caller's identity is attached as
+ * X-CubePilot-User; a JSON content type is set for POSTs with a body unless
+ * already present.
  */
 export async function pilotFetch(path: string, user: string, init: RequestInit = {}): Promise<Response> {
   const base = resolvePilotBase();
