@@ -155,7 +155,7 @@ export function ApprovalCard({
         <Box sx={{ display: "flex", gap: "7px", flexWrap: "wrap" }}>
           <Btn
             small
-            variant="primary"
+            variant="ok"
             disabled={deciding}
             onClick={() => onDecide?.(approval.callId, "approve")}
             data-od-id="approval-approve"

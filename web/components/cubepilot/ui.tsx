@@ -269,7 +269,7 @@ export function Pill({
   );
 }
 
-type BtnVariant = "primary" | "secondary" | "ghost";
+type BtnVariant = "primary" | "secondary" | "ghost" | "ok";
 
 export function Btn({
   variant = "secondary",
@@ -321,6 +321,16 @@ export function Btn({
       color: "text.primary",
       borderColor: "divider",
       "&:hover:not([data-disabled])": { borderColor: "var(--fg)" },
+    },
+    // The affirmative answer, in the palette's own green rather than the
+    // accent. The card it is used on asks one question -- let this run, or
+    // don't -- and the pill that replaces the button once it is answered is
+    // already green, so the accent would be the only blue in that story.
+    ok: {
+      bgcolor: "var(--ok-solid)",
+      color: "#fff",
+      borderColor: "var(--ok-solid)",
+      "&:hover:not([data-disabled])": { bgcolor: "color-mix(in oklch, var(--ok-solid) 82%, black)" },
     },
     ghost: {
       bgcolor: "transparent",
