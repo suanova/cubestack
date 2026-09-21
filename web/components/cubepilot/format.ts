@@ -35,8 +35,11 @@ export function fmtDuration(a?: string, b?: string): string {
  *  version of them divided MINUTES by 60 and labelled the result "d" — so every
  *  uptime over an hour read 24x longer than it was (a four-day-old instance
  *  showed "102d"). */
-export function fmtUptime(totalSeconds?: number): string {
+export function fmtSeconds(totalSeconds?: number): string {
   if (totalSeconds == null) return "-";
+  // Under a minute is just seconds: "0m 26s" is what a countdown about to expire
+  // reads as, and that is exactly when someone is watching it.
+  if (totalSeconds < 60) return totalSeconds + "s";
   const minutes = Math.floor(totalSeconds / 60);
   if (minutes < 60) return minutes + "m " + (totalSeconds % 60) + "s";
   const hours = Math.floor(minutes / 60);

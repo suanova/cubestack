@@ -144,8 +144,10 @@ const TURN_TWO_APPROVALS = [
     command: "kubectl delete pod alpha",
     level: "write",
     message: "删除属于写操作",
-    createdAtMs: 1_700_000_000_000,
-    expiresAtMs: 1_700_000_600_000,
+    // Stamped relative to now: an absolute instant in the past is an approval
+    // the gateway has already dropped, and its card is locked on arrival.
+    createdAtMs: Date.now(),
+    expiresAtMs: Date.now() + 10 * 60_000,
   },
   {
     type: "approval_pending",
@@ -155,7 +157,29 @@ const TURN_TWO_APPROVALS = [
     command: "kubectl delete pod beta",
     level: "write",
     message: "删除属于写操作",
-    createdAtMs: 1_700_000_001_000,
+    // A second LATER than the first: the dock orders by this stamp, oldest
+    // first, so the two cards read in the order the gateway raised them.
+    createdAtMs: Date.now() + 1_000,
+  },
+];
+
+/** A turn parked on a write that carries the gateway's expiry stamp. */
+const TURN_APPROVAL_EXPIRING = [
+  { type: "message_start", sessionId: SESSION_KEY },
+  { type: "agent_thinking", sessionId: SESSION_KEY },
+  {
+    type: "approval_pending",
+    sessionId: SESSION_KEY,
+    callId: "app-1",
+    name: "exec",
+    command: "kubectl delete pod x",
+    level: "write",
+    message: "删除属于写操作",
+    // 20 minutes and 5 seconds out, as a fixed instant the spec's clock is
+    // pinned near: the countdown is a live number, so the assertion is on its
+    // shape rather than an exact reading.
+    createdAtMs: Date.now(),
+    expiresAtMs: Date.now() + 20 * 60_000 + 5_000,
   },
 ];
 
@@ -1079,6 +1103,46 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     await expect(cards).toHaveCount(2);
     await expect(cards.nth(0)).toContainText("kubectl rollout restart deploy/portal");
     await expect(cards.nth(1)).toContainText("kubectl drain node-2");
+  });
+
+  test("counts a held write down to its expiry", async ({ page }) => {
+    // The gateway drops a held write after thirty minutes and the run it was
+    // gating dies with it — which is how a command ends up "interrupted" with
+    // nothing the user did. The countdown is what says the choice is not open
+    // forever; the reference draws no timer here at all.
+    await stubAgent(page, { sessions: [SESSION], turnEvents: TURN_APPROVAL_EXPIRING });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="obj-cubepilot"]').click();
+    await page.locator('[data-od-id="chat-input"]').fill("删掉那个 pod");
+    await page.locator('[data-od-id="send-btn"]').click();
+
+    const card = page.locator('[data-od-id="approval-item"]');
+    await expect(card).toContainText("kubectl delete pod x");
+    // "剩余 20m 4s" — a two-unit duration, not "1204s", and it is live: the
+    // assertion is on the shape because the number moves.
+    await expect(card.locator('[data-od-id="approval-countdown"]')).toContainText(/剩余 \d+m \d+s/);
+  });
+
+  test("draws no empty bubble for a turn parked on a card", async ({ page }) => {
+    // After a reload the pane has the card and no words of the turn that raised
+    // it — `ask_user` draws no tool card either, so a question asked before the
+    // agent said anything left a bare "CUBEPILOT" label over an empty box, which
+    // reads as a rendering fault. The card is the surface; there is no bubble.
+    await stubAgent(page, {
+      sessions: [SESSION],
+      history: HISTORY,
+      pendingApprovals: [{ ...PENDING_APPROVAL, expiresAtMs: Date.now() + 20 * 60_000 }],
+    });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="obj-cubepilot"]').click();
+
+    await expect(page.locator('[data-od-id="approval-item"]')).toContainText("kubectl rollout restart deploy/portal");
+    // The restored thread is the HISTORY — three bubbles' worth of it — and the
+    // restored card hangs on its newest turn. What must not appear is an extra,
+    // empty one.
+    const bubbles = page.locator('[data-od-id="agent-bubble"]');
+    await expect(bubbles).toHaveCount(1);
+    await expect(bubbles.first()).toContainText("上次巡检:2 个节点 NotReady");
   });
 
   test("a turn that survived a reload says so, and offers Stop", async ({ page }) => {

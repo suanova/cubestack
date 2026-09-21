@@ -208,7 +208,7 @@ export function CardHead({
   );
 }
 
-type PillVariant = "ok" | "warn" | "danger" | "neutral" | "accent";
+type PillVariant = "ok" | "warn" | "danger" | "neutral" | "accent" | "violet";
 
 const PILL_COLORS: Record<PillVariant, string> = {
   ok: STATUS_OK,
@@ -216,6 +216,9 @@ const PILL_COLORS: Record<PillVariant, string> = {
   danger: STATUS_ERR,
   neutral: "var(--muted)",
   accent: "var(--accent)",
+  // The agent's own hue: the card that asks on its behalf is violet, so its
+  // status chip is too (the approval card's is amber for the same reason).
+  violet: "var(--violet)",
 };
 
 export function Pill({
@@ -224,16 +227,18 @@ export function Pill({
   dot = false,
   pulse = false,
   sx,
+  ...rest
 }: {
   variant?: PillVariant;
   children: ReactNode;
   dot?: boolean;
   pulse?: boolean;
   sx?: SxProps<Theme>;
-}) {
+} & HTMLAttributes<HTMLSpanElement>) {
   const c = PILL_COLORS[variant];
   return (
     <Box
+      {...rest}
       component="span"
       sx={{
         display: "inline-flex",

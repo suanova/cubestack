@@ -259,6 +259,30 @@ describe("AgentThread", () => {
     expect(container.querySelector('[data-od-id="agent-error"]')).toBeNull();
   });
 
+  it("draws no bubble at all for a turn parked on a card with nothing else to say", () => {
+    // `ask_user` deliberately draws no tool card, so a question asked before the
+    // agent said anything left a bare "CUBEPILOT" label over an empty box —
+    // which reads as a rendering fault. The card below the thread is the
+    // surface; the header says what the turn is waiting for. Same for a held
+    // write with no narration.
+    const parked = render(
+      [agentMsg(1, [], { phase: "tools", questions: [{ callId: "q1", questions: [], state: "pending" }] })],
+      S1,
+    );
+    expect(parked.container.querySelector('[data-od-id="agent-bubble"]')).toBeNull();
+
+    const held = render([agentMsg(1, [], { phase: "tools", approvals: [{ callId: "a1", state: "pending" }] })], S1);
+    expect(held.container.querySelector('[data-od-id="agent-bubble"]')).toBeNull();
+
+    // A turn that produced SOMETHING keeps its bubble, parked or not: that is
+    // the record of what it did before it stopped.
+    const spoke = render(
+      [agentMsg(1, [text("先查一下。")], { phase: "tools", approvals: [{ callId: "a1", state: "pending" }] })],
+      S1,
+    );
+    expect(spoke.container.querySelector('[data-od-id="agent-bubble"]')).not.toBeNull();
+  });
+
   it("shows the thinking indicator while the turn has nothing to show yet", () => {
     const { container } = render([agentMsg(1, [], { phase: "thinking" })], S1);
 

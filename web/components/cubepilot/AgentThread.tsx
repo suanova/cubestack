@@ -21,7 +21,7 @@ import ReactMarkdown from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 
-import { toolSummary } from "@/lib/cubepilot/agentThread";
+import { toolSummary, waitingOnUser } from "@/lib/cubepilot/agentThread";
 import type { AgentApproval, AgentBlock, AgentMsg, AgentQuestion, ThreadMsg } from "@/lib/cubepilot/agentThread";
 import { useI18n } from "@/lib/i18n";
 
@@ -375,11 +375,28 @@ function AgentBubble({
   // The dock carries a card only while it is open; the same components draw
   // both, so a decided card looks the same in either place.
   const lastToolIndex = msg.blocks.reduce((acc, b, i) => (b.kind === "tool" ? i : acc), -1);
+  // Whether this bubble has anything to draw at all — its own blocks, a card it
+  // settled, or a line about how the turn ended.
+  const hasBody =
+    msg.blocks.length > 0 ||
+    msg.approvals.some(settledApproval) ||
+    msg.questions.some(settledQuestion) ||
+    !!msg.error ||
+    !!msg.transportLost ||
+    !!msg.stopped;
+  // A turn that is still going and has produced nothing yet says so. A turn
+  // PARKED on a card does not: the card below is the surface, and `ask_user`
+  // deliberately draws no tool card, so a question asked before the agent said
+  // anything left this bubble as a bare "CUBEPILOT" label over an empty box —
+  // which reads as a rendering fault, which is what it is. Such a turn carries
+  // no bubble; the header already says what it is waiting for.
+  const showsThinking = msg.phase !== "done" && waitingOnUser([msg]) === null && !hasBody;
+  if (!hasBody && !showsThinking) return null;
   const settledCards = (
     <>
       {msg.approvals.filter(settledApproval).map((a) => (
         <Box key={a.callId} sx={{ mt: "9px" }}>
-          <ApprovalCard approval={a} />
+          <ApprovalCard approval={a} now={now} />
         </Box>
       ))}
       {msg.questions.filter(settledQuestion).map((q) => (
@@ -434,7 +451,7 @@ function AgentBubble({
           turn that is thinking. The header's "Thinking… {secs}s" answers a
           different question — whether the turn is still going — and does not
           stand in for it. */}
-      {msg.phase === "thinking" && msg.blocks.length === 0 ? (
+      {showsThinking ? (
         <Box data-od-id="agent-thinking" sx={{ fontSize: 12.5, color: "text.secondary" }}>
           {t("cubepilot.chat.thinkingAgent")}
         </Box>

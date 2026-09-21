@@ -24,7 +24,7 @@ import { useI18n } from "@/lib/i18n";
 
 import { ruleKey } from "@/lib/cubepilot/allowlist";
 
-import { fmtUptime } from "./format";
+import { fmtSeconds } from "./format";
 import { Btn, Card, CardHead, CpInput, CpTextArea, Icons, Pill, inputSx, monoSx, useToast } from "./ui";
 
 /** The policy the select shows: the override when it is one we offer, else the
@@ -558,7 +558,7 @@ export function ConfigPane() {
             {status ? (
               <>
                 <InstRow k={t("cubepilot.config.instId")} v={<Box component="span" sx={{ ...monoSx, fontSize: 12 }}>{status.id || "-"}</Box>} />
-                <InstRow k={t("cubepilot.config.instUptime")} v={fmtUptime(status.uptimeSeconds)} />
+                <InstRow k={t("cubepilot.config.instUptime")} v={fmtSeconds(status.uptimeSeconds)} />
                 <InstRow k={t("cubepilot.config.instPod")} v={<Box component="span" sx={{ ...monoSx, fontSize: 11.5 }}>{status.podName || "-"}</Box>} />
                 <InstRow k={t("cubepilot.config.instVolume")} v={<Box component="span" sx={{ ...monoSx, fontSize: 11.5 }}>{status.pvcName || "-"}</Box>} />
                 {status.message ? (

@@ -15,6 +15,8 @@ import { Box } from "@mui/material";
 import { useState } from "react";
 
 import {
+  approvalExpiring,
+  approvalSecondsLeft,
   isExpiring,
   remainingSeconds,
   seedAnswers,
@@ -24,6 +26,7 @@ import {
 import type { AgentQuestionItem } from "@/lib/cubepilot/types";
 import { useI18n } from "@/lib/i18n";
 
+import { fmtSeconds } from "./format";
 import { Btn, CpInput, Pill, STATUS_WARN, monoSx } from "./ui";
 
 export type ApprovalDecision = "approve" | "reject" | "allow-always";
@@ -38,16 +41,26 @@ export type AnswerHandler = (callId: string, answers: Record<string, string[]>, 
  *  the dock is the only place a live card is drawn, and it always passes them. */
 export function ApprovalCard({
   approval,
+  now,
   allowAlwaysOk = false,
   onDecide,
 }: {
   approval: AgentApproval;
+  /** The dock's 1 Hz ticker: the countdown below is a live number. */
+  now: number;
   allowAlwaysOk?: boolean;
   onDecide?: ApprovalHandler;
 }) {
   const { t } = useI18n();
   const open = approval.state === "pending" || approval.state === "deciding";
   const deciding = approval.state === "deciding";
+  // The gateway expires a held write (thirty minutes) and the run it was gating
+  // dies with it — which is how a command ends up "interrupted" with nothing the
+  // user did. A countdown is what says the choice is not open forever. The
+  // reference draws no timer here at all; this is ours, from the stamp the
+  // approval now carries.
+  const secsLeft = approvalSecondsLeft(approval, now);
+  const expiring = approvalExpiring(approval, now);
   // A settle nobody decided is NOT a rejection: it comes either from a decision
   // that lost its race with the server's own settle (404) or from the server
   // closing the record when the turn ended, and in both cases the user made no
@@ -66,6 +79,7 @@ export function ApprovalCard({
   // have to go looking for.
   const [expanded, setExpanded] = useState(false);
   const showBody = open || expanded;
+  const locked = deciding || expiring;
   return (
     <Box
       data-od-id="approval-item"
@@ -113,6 +127,11 @@ export function ApprovalCard({
       >
         <Box sx={{ fontSize: 12, fontWeight: 600 }}>{t("cubepilot.chat.approvalTitle")}</Box>
         {approval.level ? <Pill variant={approval.level === "write" ? "warn" : "neutral"}>{approval.level}</Pill> : null}
+        {open && secsLeft !== undefined ? (
+          <Pill variant={expiring ? "warn" : "violet"} data-od-id="approval-countdown">
+            {expiring ? t("cubepilot.chat.questionExpiring") : t("cubepilot.chat.approvalExpiresIn", { time: fmtSeconds(secsLeft) })}
+          </Pill>
+        ) : null}
         {open ? null : <Pill variant={tone} sx={{ ml: "auto" }}>{label}</Pill>}
         {open ? null : (
           <Box component="span" aria-hidden sx={{ ...monoSx, fontSize: 10, color: "text.secondary", flex: "none" }}>
@@ -156,13 +175,13 @@ export function ApprovalCard({
           <Btn
             small
             variant="ok"
-            disabled={deciding}
+            disabled={locked}
             onClick={() => onDecide?.(approval.callId, "approve")}
             data-od-id="approval-approve"
           >
             {deciding ? t("cubepilot.chat.approvalDeciding") : t("cubepilot.chat.approvalApprove")}
           </Btn>
-          <Btn small disabled={deciding} onClick={() => onDecide?.(approval.callId, "reject")} data-od-id="approval-reject">
+          <Btn small disabled={locked} onClick={() => onDecide?.(approval.callId, "reject")} data-od-id="approval-reject">
             {t("cubepilot.chat.approvalReject")}
           </Btn>
           {/* Only under an Allowlist policy: with None nothing is held back, and
@@ -170,7 +189,7 @@ export function ApprovalCard({
               mean nothing either way. The pane hides it when the policy could
               not be read. */}
           {allowAlwaysOk ? (
-            <Btn small disabled={deciding} onClick={() => onDecide?.(approval.callId, "allow-always")} data-od-id="approval-allow">
+            <Btn small disabled={locked} onClick={() => onDecide?.(approval.callId, "allow-always")} data-od-id="approval-allow">
               {t("cubepilot.chat.approvalAllowAlways")}
             </Btn>
           ) : null}
@@ -230,10 +249,15 @@ export function QuestionCard({
     : expiring
       ? { variant: "warn" as const, label: t("cubepilot.chat.questionExpiring") }
       : {
-          variant: "accent" as const,
-          // Built from two pieces rather than one interpolated key: the seconds
-          // are a live number, not a sentence.
-          label: secs === undefined ? t("cubepilot.chat.questionAwaiting") : `${t("cubepilot.chat.questionAwaiting")} · ${secs}s`,
+          // The card's own hue. It was the accent, which put a blue chip on a
+          // violet card while the sibling approval card's chip is amber to match
+          // ITS card — one rule for the pair rather than two.
+          variant: "violet" as const,
+          // Built from two pieces rather than one interpolated key: the time is
+          // a live number, not a sentence. Formatted like every other duration
+          // on the page ("13m 22s"), not as raw seconds — a fifteen-minute
+          // question read "802s".
+          label: secs === undefined ? t("cubepilot.chat.questionAwaiting") : `${t("cubepilot.chat.questionAwaiting")} · ${fmtSeconds(secs)}`,
         };
 
   const toggle = (item: AgentQuestionItem, label: string): void => {
@@ -296,7 +320,11 @@ export function QuestionCard({
             </Box>
             <Box sx={{ fontSize: 12.5 }}>{item.question}</Box>
             {item.options && item.options.length > 0 ? (
-              <Box role="group" aria-label={item.question} sx={{ display: "flex", flexWrap: "wrap", gap: "6px", mt: "2px" }}>
+              // A column, not a wrapping row: these labels are phrases of
+              // varying length ("全部节点(含 GPU 节点)"), so a row breaks into a
+              // ragged grid, and each option already carries its description on
+              // a second line. The reference wraps — this is ours.
+              <Box role="group" aria-label={item.question} sx={{ display: "flex", flexDirection: "column", gap: "6px", mt: "2px" }}>
                 {item.options.map((o) => {
                   const active = (picked[item.questionId] ?? []).includes(o.label);
                   return (
@@ -421,7 +449,7 @@ export function HitlDock({
       }}
     >
       {approvals.map((a) => (
-        <ApprovalCard key={key(a.callId)} approval={a} allowAlwaysOk={allowAlwaysOk} onDecide={onDecide} />
+        <ApprovalCard key={key(a.callId)} approval={a} now={now} allowAlwaysOk={allowAlwaysOk} onDecide={onDecide} />
       ))}
       {questions.map((q) => (
         <QuestionCard key={key(q.callId)} question={q} now={now} onAnswer={onAnswer} />

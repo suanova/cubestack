@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   applyAgentEvent,
+  approvalExpiring,
+  approvalSecondsLeft,
   attachToolResult,
   fmtToolArgs,
   historyToMsgs,
@@ -15,7 +17,7 @@ import {
   turnStatus,
   waitingOnUser,
 } from "./agentThread";
-import type { AgentBlock, AgentMsg, AgentQuestion, ThreadMsg } from "./agentThread";
+import type { AgentApproval, AgentBlock, AgentMsg, AgentQuestion, ThreadMsg } from "./agentThread";
 import type { AgentSseEvent } from "./types";
 
 const T0 = 1_700_000_000_000;
@@ -403,6 +405,33 @@ describe("applyAgentEvent — phaseAt", () => {
     expect(b.phaseAt).toBe(T0 + 5_000);
     const c = applyAgentEvent(b, { type: "message_delta", sessionId: "s", delta: "y" }, T0 + 9_000);
     expect(c.phaseAt).toBe(T0 + 5_000);
+  });
+});
+
+describe("approval expiry", () => {
+  // The gateway drops a held write thirty minutes after it was raised, and the
+  // run it was gating dies with it. The stamp rides on both wire shapes; the
+  // reference draws no timer at all, so these are the rules for ours.
+
+  const at = (expiresAtMs?: number): AgentApproval => ({ callId: "a1", state: "pending", ...(expiresAtMs !== undefined ? { expiresAtMs } : {}) });
+
+  it("counts down to the stamp the gateway gave it", () => {
+    expect(approvalSecondsLeft(at(1_000_000 + 90_000), 1_000_000)).toBe(90);
+    expect(approvalSecondsLeft(at(1_000_000), 1_000_000)).toBe(0);
+  });
+
+  it("says nothing when the approval carries no stamp", () => {
+    expect(approvalSecondsLeft(at(), 1_000_000)).toBeUndefined();
+  });
+
+  it("is expiring once the stamp passes, and only while it is open", () => {
+    expect(approvalExpiring(at(999), 1_000_000)).toBe(true);
+    // Two seconds out, and the countdown rounds to whole seconds the way the
+    // question's does — so the boundary is sub-second, not "any time in the
+    // future".
+    expect(approvalExpiring(at(1_002_000), 1_000_000)).toBe(false);
+    // A decided card has no countdown to run out of, whatever the stamp says.
+    expect(approvalExpiring({ ...at(999), state: "approved" }, 1_000_000)).toBe(false);
   });
 });
 

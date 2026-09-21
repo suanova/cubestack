@@ -414,6 +414,28 @@ export function isExpiring(q: AgentQuestion, now: number): boolean {
   return left === 0;
 }
 
+/** Seconds until an approval's own expiry, or undefined when it carries none.
+ *
+ *  `expiresAtMs` is an absolute instant the gateway stamped (a question's
+ *  deadline is derived here from the remainder it was sent), so this is the same
+ *  arithmetic over a different field. The gateway expires a held write after
+ *  thirty minutes and the run it was gating dies with it, which is worth showing
+ *  the reader — the reference does not, and its approval card has no countdown
+ *  at all. */
+export function approvalSecondsLeft(a: AgentApproval, now: number): number | undefined {
+  if (a.expiresAtMs === undefined) return undefined;
+  return Math.max(0, Math.round((a.expiresAtMs - now) / 1000));
+}
+
+/** The approval's expiry has already passed locally, so the gateway has dropped
+ *  the record and a click can only 404. Withdraw the controls rather than let a
+ *  decision go nowhere — the same reasoning as `isExpiring`, and the same
+ *  wording problem: this is NOT "expired", which only the gateway can say. */
+export function approvalExpiring(a: AgentApproval, now: number): boolean {
+  if (a.state !== "pending" && a.state !== "deciding") return false;
+  return approvalSecondsLeft(a, now) === 0;
+}
+
 // ── tool-argument display ────────────────────────────────────────────────
 
 /** Keys whose value must never reach the thread. Matched case-insensitively at

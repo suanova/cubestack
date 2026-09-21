@@ -287,6 +287,13 @@ export function ChatPane() {
       (m) =>
         m.role === "agent" &&
         m.questions.some((q) => (q.state === "pending" || q.state === "submitting") && q.deadline !== undefined),
+    ) ||
+    // ...and for a held write with an expiry of its own: the gateway drops the
+    // record when it passes, so its card counts down too.
+    msgs.some(
+      (m) =>
+        m.role === "agent" &&
+        m.approvals.some((a) => (a.state === "pending" || a.state === "deciding") && a.expiresAtMs !== undefined),
     );
   useEffect(() => {
     if (!anyLive) return;
@@ -597,9 +604,16 @@ export function ChatPane() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const body = (await res.json()) as { items?: HistoryMessage[] };
       if (genRef.current !== gen) return true;
-      lastHistoryRef.current = JSON.stringify(body.items ?? []);
-      const restored = historyToMsgs(body.items ?? [], nextId);
-      setMsgs(restored);
+      const items = body.items ?? [];
+      lastHistoryRef.current = JSON.stringify(items);
+      const restored = historyToMsgs(items, nextId);
+      // An empty document never replaces what is on screen. Read on its own it
+      // means "this conversation has not started", and the caller greets — but
+      // this same read is what the follow loop takes when a turn it was watching
+      // ENDS, and there the view already holds that turn's output and its cards.
+      // Empty then means the runtime has not written it yet, or is a read that
+      // raced the writer; adopting it deletes the turn in exchange for nothing.
+      if (restored.length > 0) setMsgs(restored);
       return restored.length > 0;
     } catch {
       if (genRef.current === gen) setAgentNotice(t("cubepilot.chat.historyUnavailable"));
@@ -698,10 +712,17 @@ export function ChatPane() {
       // stream is writing to with it — every later event would be applied to an
       // id no longer in the list, and the turn would show nothing at all.
       if (ownTurnRef.current) return;
-      const raw = JSON.stringify(body.items ?? []);
+      // An empty read is not something to adopt. A turn's transcript is never
+      // empty once it has said anything, so an empty one means the runtime has
+      // not written it yet — and replacing the view with it would delete the
+      // stream's own output (and the cards it raised) in exchange for nothing.
+      // Skipping costs one stale tick; adopting costs the turn.
+      const items = body.items ?? [];
+      if (items.length === 0) return;
+      const raw = JSON.stringify(items);
       if (raw === lastHistoryRef.current) return;
       lastHistoryRef.current = raw;
-      setMsgs(historyToMsgs(body.items ?? [], nextId));
+      setMsgs(historyToMsgs(items, nextId));
     } catch {
       /* a dropped poll is not an error; the next one re-reads */
     }
