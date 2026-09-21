@@ -29,8 +29,13 @@
   --violet-solid: oklch(from var(--accent) calc(l - .04) c calc(h + 41));
   /* The same move for the affirmative green: --ok carries the hue at the
      accent's own lightness, which is a TEXT colour here (--ok-text, --ok-t). A
-     solid fill wants it a shade down, or white on it reads washed out. */
-  --ok-solid: oklch(from var(--accent) calc(l - .04) c calc(h - 114));
+     solid fill wants it a shade down, or white on it reads washed out.
+     Chroma comes down with it, and only here among the derived solids: equal
+     oklch chroma is not equal apparent saturation, and green at the accent's
+     own chroma reads as a loud, electric fill beside the platform's blue. The
+     lower chroma is also DARKER for the same lightness, so the white text gains
+     contrast rather than losing it (~4.6:1, against ~4.1:1 for the accent). */
+  --ok-solid: oklch(from var(--accent) calc(l - .05) calc(c * .75) calc(h - 114));
   --ok-t: color-mix(in oklch, var(--ok) 13%, transparent);
   --warn-t: color-mix(in oklch, var(--warn) 15%, transparent);
   --danger-t: color-mix(in oklch, var(--danger) 13%, transparent);
@@ -58,7 +63,7 @@
   --danger: oklch(from var(--accent) calc(l + .1) c calc(h + 129));
   --violet: oklch(from var(--accent) calc(l + .11) c calc(h + 41));
   --violet-solid: oklch(from var(--accent) calc(l - .02) c calc(h + 41));
-  --ok-solid: oklch(from var(--accent) calc(l - .02) c calc(h - 114));
+  --ok-solid: oklch(from var(--accent) calc(l - .03) calc(c * .75) calc(h - 114));
   --ok-t: color-mix(in oklch, var(--ok) 24%, transparent);
   --warn-t: color-mix(in oklch, var(--warn) 26%, transparent);
   --danger-t: color-mix(in oklch, var(--danger) 24%, transparent);
