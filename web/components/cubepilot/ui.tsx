@@ -322,15 +322,17 @@ export function Btn({
       borderColor: "divider",
       "&:hover:not([data-disabled])": { borderColor: "var(--fg)" },
     },
-    // The affirmative answer, in the palette's own green rather than the
-    // accent. The card it is used on asks one question -- let this run, or
-    // don't -- and the pill that replaces the button once it is answered is
-    // already green, so the accent would be the only blue in that story.
+    // The affirmative answer, in the green the platform already speaks: the same
+    // tint / border / text recipe the status pills use (ok / Ready / 已完成), a
+    // step stronger than theirs because a button is a far larger area than a
+    // 12px chip and the same 13% would leave the primary action looking like the
+    // quietest thing on the card. A solid fill is the other end -- the accent's
+    // own weight, which this card's two other buttons do not have either.
     ok: {
-      bgcolor: "var(--ok-solid)",
-      color: "#fff",
-      borderColor: "var(--ok-solid)",
-      "&:hover:not([data-disabled])": { bgcolor: "color-mix(in oklch, var(--ok-solid) 82%, black)" },
+      bgcolor: "color-mix(in oklch, var(--ok) 22%, transparent)",
+      color: "var(--ok-text)",
+      borderColor: "color-mix(in oklch, var(--ok) 45%, transparent)",
+      "&:hover:not([data-disabled])": { bgcolor: "color-mix(in oklch, var(--ok) 32%, transparent)" },
     },
     ghost: {
       bgcolor: "transparent",
