@@ -106,7 +106,9 @@ function stubCluster() {
       return Promise.resolve({
         items: [
           { spec: { resources: { gpu: { count: 2 } } }, status: { phase: { name: "Running" } } },
-          { spec: { resources: { gpu: { count: 2 } } }, status: { phase: { name: "Running" } } },
+          // A gpu block with no count asks for one card (the CRD default), so it
+          // contributes 1 — not 0, which would understate committed quota.
+          { spec: { resources: { gpu: {} } }, status: { phase: { name: "Running" } } },
           // No gpu block at all: an environment that requests no accelerator
           // contributes nothing to the committed-GPU total.
           { spec: { resources: { cpu: "16" } }, status: { phase: { name: "Stopped" } } },
@@ -153,10 +155,10 @@ describe("overview route", () => {
       gpu: {
         vendors: 2,
         totalCards: 20, // 16 nvidia + 4 metax
-        compute: 4, // the two GPU devenv count (stopped included); the CPU one adds nothing
+        compute: 3, // 2 + the count-less block's default of 1; the CPU-only env adds nothing
         inference: 8, // 4 + 4
-        allocated: 12,
-        free: 8,
+        allocated: 11,
+        free: 9,
       },
       inference: { total: 2, ready: 1, scaling: 1 },
       devenv: { total: 3, running: 2, stopped: 1 },

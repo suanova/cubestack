@@ -197,10 +197,11 @@ export const GET = withAuth(async () => {
     let devenvStopped = 0;
     for (const env of devenvs) {
       // Compute-pool allocation counts every DevEnvironment (running and
-      // stopped) — the platform's committed GPU quota.
-      // An environment with no accelerator carries no gpu block at all, so
-      // there is no count to read and nothing to add.
-      computeGpus += env.spec?.resources?.gpu?.count ?? 0;
+      // stopped) — the platform's committed GPU quota. A gpu block with no count
+      // asks for one card, per the CRD default, which is the same default the
+      // list API applies; only an absent block means no accelerator at all.
+      const gpu = env.spec?.resources?.gpu;
+      computeGpus += gpu ? (gpu.count ?? 1) : 0;
       const phase = env.status?.phase?.name;
       if (phase === "Running") devenvRunning += 1;
       else if (phase === "Stopped") devenvStopped += 1;
