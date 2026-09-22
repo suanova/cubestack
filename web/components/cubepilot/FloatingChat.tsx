@@ -743,7 +743,10 @@ export function FloatingChat() {
     // The stop landed: nothing is running any more, and the turn it ended
     // exists only in the history the abort has just persisted.
     setRunningElsewhere(false);
-    stopTurnPolling();
+    // The panel is still open, so the conversation must still be watched:
+    // a turn started elsewhere later on has to be noticed by this surface
+    // too. Restarting also retires any tick that is already in flight.
+    startFollowing(SESSION_KEY);
     genRef.current++;
     await loadAgentHistory(SESSION_KEY);
   }
@@ -778,7 +781,10 @@ export function FloatingChat() {
         }
         if (res.ok) {
           setRunningElsewhere(false);
-          stopTurnPolling();
+          // The panel is still open, so the conversation must still be
+          // watched. This loop is also what retires `ownTurnRef` once the
+          // turn the send below starts has ended — nothing else does.
+          startFollowing(SESSION_KEY);
           await loadAgentHistory(SESSION_KEY);
           if (genRef.current !== gen) return;
         }
