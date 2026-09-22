@@ -53,3 +53,7 @@ observability/docs/bmc-progress.md
 .gocache/
 .golangci-cache/
 .xdgcache/
+# Node deps and the caches a tool run leaves in them. web/ has its own rule;
+# this one is for a tool run FROM the repo root, which is how a vitest results
+# file under node_modules/.vite ended up committed.
+/node_modules/
