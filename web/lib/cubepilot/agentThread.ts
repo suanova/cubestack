@@ -652,6 +652,25 @@ export function turnStatus(msg: AgentMsg, now: number): StatusLine {
   return { tone: "run", key: "cubepilot.chat.statusThinking", vars: { secs } };
 }
 
+/**
+ * Whether a restored transcript replaces what is on screen.
+ *
+ * An empty document never does: read on its own it means "this conversation has
+ * not started", and the same read is what the follow loop takes when a turn it was
+ * watching ends — adopting it then deletes that turn's output and cards in
+ * exchange for nothing, because the runtime simply has not written them yet.
+ *
+ * Neither does ANY document over a thread that was handed over from the other
+ * surface. That thread is the one the reader was just looking at, so it can be
+ * AHEAD of the runtime — a turn still streaming, or one the writer has not caught
+ * up with — and the pane's own restore is its first read, which makes that read the
+ * one chance to drop it. Later reads (the follow loop) see the handoff spent and
+ * adopt as usual.
+ */
+export function adoptsRestoredThread(restored: unknown[], handedOver: boolean): boolean {
+  return restored.length > 0 && !handedOver;
+}
+
 /** True when the turn is parked on a human, in any part of the transcript. */
 export function waitingOnUser(msgs: ThreadMsg[]): "approval" | "question" | null {
   const agentMsgs = msgs.filter((m) => m.role === "agent");

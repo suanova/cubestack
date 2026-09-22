@@ -100,14 +100,20 @@ interface Captured {
  *  `historyOnce` answers the FIRST transcript read with those items and every
  *  later one with the runtime's "this conversation has not started". That is how
  *  the handoff is provable: whichever surface reads second cannot supply the
- *  thread, so a thread on screen came from the handoff. */
+ *  thread, so a thread on screen came from the handoff.
+ *
+ *  `staleHistory` is served for every read once the test calls `serveStale()`.
+ *  That flip is what makes the case deterministic: reads before it (the widget's
+ *  restore and its follow tick) carry the thread, and the reads after it — the
+ *  pane's own restore, and the follow loop's — carry an older copy. */
 async function stubFloatingChat(
   page: Page,
   turnEvents: object[],
-  stubs: { historyOnce?: object[] } = {},
-): Promise<Captured> {
+  stubs: { historyOnce?: object[]; staleHistory?: object[] } = {},
+): Promise<Captured & { serveStale: () => void }> {
   const captured: Captured = { messagePosts: [] };
   let historyReads = 0;
+  let stale = false;
   await page.route("**/api/overview", (route) => route.fulfill({ json: overviewSummary() }));
   await page.route("**/api/cubepilot/**", async (route) => {
     const req = route.request();
@@ -139,6 +145,7 @@ async function stubFloatingChat(
             body: sseBody(turnEvents),
           });
         }
+        if (stale && stubs.staleHistory) return json({ items: stubs.staleHistory });
         if (stubs.historyOnce && ++historyReads === 1) return json({ items: stubs.historyOnce });
         return json({ error: "no such session" }, 404);
       }
@@ -157,7 +164,7 @@ async function stubFloatingChat(
     }
     return json({ error: `unstubbed ${method} ${path}` }, 404);
   });
-  return captured;
+  return { ...captured, serveStale: () => { stale = true; } };
 }
 
 test.beforeEach(async ({ context, page }) => {
@@ -279,6 +286,36 @@ test.describe("global floating AI chat", () => {
     // Polled: the name arrives with the agent selection, which the pane makes
     // after its own mount (the same element serves the model playground, unnamed).
     await expect.poll(() => vtName(page, '[data-od-id="chat-thread"]')).toBe("agent-chat");
+  });
+
+  test("a stale history read does not replace the thread that was handed over", async ({ page }) => {
+    // The handed thread is what the reader was looking at, so it can be AHEAD of
+    // the runtime: a turn still streaming, or one the writer has not caught up
+    // with. The pane's own restore must not overwrite it with an older copy — the
+    // assertion runs after that read has landed, and later reads answer 404 so
+    // nothing can put it back.
+    const captured = await stubFloatingChat(page, TURN_DONE, {
+      historyOnce: [
+        { role: "user", content: "上次巡检的结论?" },
+        { role: "assistant", content: [{ type: "text", text: "刚跑完的那次巡检结论。" }] },
+      ],
+      staleHistory: [{ role: "user", content: "很早以前的那次提问" }],
+    });
+    await page.goto("/");
+    await page.click('[data-od-id="fchat-fab"]');
+    await expect(page.locator('[data-od-id="fchat-panel"]')).toContainText("刚跑完的那次巡检结论。");
+
+    // From here every transcript read — the pane's own restore first among them —
+    // answers with the older copy, so what survives is decided by the guard alone.
+    captured.serveStale();
+    await page.click('[data-od-id="fchat-expand"]');
+    await expect(page).toHaveURL(/\/cubepilot/);
+    const thread = page.locator('[data-od-id="chat-thread"]');
+    // The stale read has landed by now; the handed thread is still what is on
+    // screen.
+    await page.waitForTimeout(2000);
+    await expect(thread).toContainText("刚跑完的那次巡检结论。");
+    await expect(thread).not.toContainText("很早以前的那次提问");
   });
 
   test("opens on the newest message, not the oldest", async ({ page }) => {

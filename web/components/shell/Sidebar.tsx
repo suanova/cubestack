@@ -13,7 +13,7 @@ import type { MouseEvent as ReactMouseEvent } from "react";
 
 import { IconName, NavIcon } from "@/components/shell/NavIcons";
 import { offerHandoffFromFloatingChat } from "@/components/cubepilot/agentHandoff";
-import { getTabSnapshot } from "@/components/cubepilot/tabStore";
+import { getTabSnapshot, setStoredTab } from "@/components/cubepilot/tabStore";
 import { withViewTransition } from "@/components/cubepilot/viewTransition";
 import { MessageKey, useI18n } from "@/lib/i18n";
 import { isActive } from "@/lib/nav";
@@ -84,7 +84,7 @@ function NavLink({
     );
   }
   // The two navigations that ARE a conversation changing size: entering the
-  // 智能助手 chat page, and leaving it while its agent pane is on screen. Both go
+  // assistant's chat page, and leaving it while its agent pane is on screen. Both go
   // through a view transition (the panel thread growing into the pane, the pane
   // collapsing back into the launcher) and the entry also hands over whatever the
   // floating panel is showing. Every other link navigates as it always did.
@@ -97,7 +97,13 @@ function NavLink({
           // window, download): those must keep working, un-transitioned.
           if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
           event.preventDefault();
-          if (entersChat) offerHandoffFromFloatingChat();
+          if (entersChat) {
+            // The module opens on whichever tab was last used, and the reader
+            // asked for the assistant: landing on 自动化任务 with the thread
+            // handed over behind it would answer a different request.
+            setStoredTab("chat");
+            offerHandoffFromFloatingChat();
+          }
           withViewTransition(
             () => router.push(item.href as string),
             entersChat

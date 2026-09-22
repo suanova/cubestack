@@ -1,5 +1,5 @@
 // One-shot handoff of the agent conversation from the floating surface to the
-// 智能助手 chat pane.
+// assistant's chat pane.
 //
 // Both surfaces drive the same session (SESSION_KEY), so the pane restores the
 // same thread on its own — asynchronously, behind a metadata read. Until that

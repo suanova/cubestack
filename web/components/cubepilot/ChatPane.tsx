@@ -31,6 +31,7 @@ import type { PointerEvent as ReactPointerEvent } from "react";
 
 import {
   addApproval,
+  adoptsRestoredThread,
   applyAgentEvent,
   historyToMsgs,
   newAgentMsg,
@@ -260,6 +261,12 @@ export function ChatPane() {
   /** Whether what is on screen was seeded by a handoff, so the restore below
    *  does not greet over it. Read and cleared by restoreAgentSession. */
   const seededRef = useRef(false);
+  /** The thread that handoff carried, kept for this effect's own second run. The
+   *  offer is consumed on the first, and React's development double-invoke would
+   *  otherwise leave the pane seeded but never reconciled with the runtime: the
+   *  first run's restore is spent by the cleanup's generation bump, and the second
+   *  finds the offer gone. */
+  const handoffSeedRef = useRef<ThreadMsg[] | null>(null);
   /** A turn is running for this session with no stream of this pane's own — one
    *  another tab started, or one that outlived a reload. The card header says
    *  so and the composer's Stop is the control that ends it. */
@@ -681,7 +688,14 @@ export function ChatPane() {
       // ENDS, and there the view already holds that turn's output and its cards.
       // Empty then means the runtime has not written it yet, or is a read that
       // raced the writer; adopting it deletes the turn in exchange for nothing.
-      if (restored.length > 0) setMsgs(restored);
+      //
+      // A handed-over thread is the same argument with more force: it is what the
+      // other surface was showing, so it can be AHEAD of the runtime — a turn
+      // still streaming, or a just-finished one the writer has not caught up
+      // with. This is that thread's only read (the follow loop's later ones see
+      // the seed consumed and adopt as usual), and replacing it here would drop
+      // the very thing the reader carried across.
+      if (adoptsRestoredThread(restored, seededRef.current)) setMsgs(restored);
       return restored.length > 0;
     } catch {
       if (genRef.current === gen) setAgentNotice(t("cubepilot.chat.historyUnavailable"));
@@ -934,11 +948,14 @@ export function ChatPane() {
     // made before this pane existed — expanding from another page IS that case —
     // is still pending, and this is where it is claimed.
     const handed = takeAgentHandoff();
-    if (handed) selectAgent(handed);
+    if (handed) handoffSeedRef.current = handed;
+    const seed = handed ?? handoffSeedRef.current;
+    if (seed) selectAgent(seed);
     else if (!seededRef.current) selectAgent();
-    // The `seededRef` guard is for the development double-invoke of this effect:
-    // the second run takes nothing (the offer is one-shot) and would otherwise
-    // re-select plainly, wiping the thread the first run just painted.
+    // `handoffSeedRef` is what makes the second run carry the same thread: without
+    // it, that run would take nothing (the offer is one-shot) and either re-select
+    // plainly — wiping what the first run painted — or, with the guard alone, skip
+    // the restore entirely and leave the pane unreconciled.
     // The policy that decides whether a durable approval is on offer: read once,
     // like the rest of the instance meta.
     void loadConfirmPolicy();

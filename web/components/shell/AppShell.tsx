@@ -35,7 +35,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   // The login page has no app chrome: it renders standalone within the shared
   // layout (theme/locale bootstrap + MUI provider) but without sidebar/topbar.
   const bare = pathname === "/login";
-  // The floating AI chat is global EXCEPT the 智能助手 chat tab while the agent is
+  // The floating AI chat is global EXCEPT the assistant's chat tab while the agent is
   // selected — there it would draw one thread twice. Every other page, the
   // module's other tabs, and the model playgrounds all get it.
   const showingAgent = cubepilotTab === "chat" && paneObject !== "model";

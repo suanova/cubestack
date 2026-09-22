@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  adoptsRestoredThread,
   applyAgentEvent,
   approvalExpiring,
   approvalSecondsLeft,
@@ -653,5 +654,27 @@ describe("attachToolResult", () => {
 
   it("drops an orphan result when there is nothing to attach it to", () => {
     expect(attachToolResult([], undefined, "ORPHAN")).toEqual([]);
+  });
+});
+
+describe("adoptsRestoredThread", () => {
+  it("adopts a restored transcript when nothing was handed over", () => {
+    expect(adoptsRestoredThread([{ role: "user" }], false)).toBe(true);
+  });
+
+  it("never adopts an empty one, handed over or not", () => {
+    // Read on its own an empty document means "this conversation has not
+    // started"; the same read is what the follow loop takes when a watched turn
+    // ends, where the runtime simply has not written it yet.
+    expect(adoptsRestoredThread([], false)).toBe(false);
+    expect(adoptsRestoredThread([], true)).toBe(false);
+  });
+
+  it("does not adopt one over a thread that was handed over", () => {
+    // The handed thread is what the reader was looking at a moment ago, so it can
+    // be AHEAD of the runtime — a turn still streaming, or one the writer has not
+    // caught up with. This read is that thread's first, so adopting here is the
+    // one chance to drop what was carried across.
+    expect(adoptsRestoredThread([{ role: "user" }], true)).toBe(false);
   });
 });

@@ -1,4 +1,4 @@
-// Which object the 智能助手 chat tab is currently showing: the CubePilot agent, or
+// Which object the assistant's chat tab is currently showing: the CubePilot agent, or
 // one of the inference models.
 //
 // The shell needs it for exactly one decision — whether the floating chat would be
