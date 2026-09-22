@@ -10,9 +10,10 @@ import { seedSession } from "./auth";
 const OPTIONS = {
   namespaces: [{ name: "project-a" }, { name: "default" }],
   images: [
-    { tag: "base-cuda-12.4:v1.6", label: "base-cuda-12.4:v1.6 · CUDA 12.4 / PyTorch 2.5" },
-    { tag: "base-cuda-12.1:v1.6", label: "base-cuda-12.1:v1.6 · CUDA 12.1 / PyTorch 2.4" },
-    { tag: "base-maca-2.28:v1.3", label: "base-maca-2.28:v1.3 · MACA 2.28 (沐曦)" },
+    { tag: "harbor.isuanova.com/suanova/jupyter-minimal:latest", label: "suanova/jupyter-minimal · CPU · JupyterLab (jovyan)" },
+    { tag: "harbor.isuanova.com/suanova/ssh-ubuntu22.04:latest", label: "suanova/ssh-ubuntu22.04 · CPU · SSH (ubuntu)" },
+    { tag: "harbor.isuanova.com/suanova/base-cuda:latest", label: "suanova/base-cuda · NVIDIA CUDA (ubuntu)" },
+    { tag: "harbor.isuanova.com/suanova/base-maca:latest", label: "suanova/base-maca · Metax MACA (ubuntu)" },
   ],
 };
 
@@ -49,13 +50,17 @@ test.describe("dev environments landing (mocked data)", () => {
 
     const jupyter = page.locator('[data-od-id="dev-row-jupyter-nlp-ln"]');
     await expect(jupyter).toContainText("JUPYTER");
-    await expect(jupyter).toContainText("base-cuda-12.4:v1.6");
-    await expect(jupyter).toContainText("1×nvidia");
+    await expect(jupyter).toContainText("harbor.isuanova.com/suanova/base-cuda:latest");
+    await expect(jupyter).toContainText("1 × GPU");
     await expect(jupyter).toContainText("Running");
     await expect(jupyter).toContainText("project-a");
 
     const ssh = page.locator('[data-od-id="dev-row-ssh-dataset-prep"]');
     await expect(ssh).toContainText("SSH");
+    // A CPU image with no accelerator: spec.resources.gpu is absent, so the
+    // cell says so rather than inventing a card.
+    await expect(ssh).toContainText("harbor.isuanova.com/suanova/ssh-ubuntu22.04:latest");
+    await expect(ssh).toContainText("无加速卡");
     await expect(ssh).toContainText("Stopped");
     await expect(ssh.locator('[data-od-id="act-start-ssh-dataset-prep"]')).toBeVisible();
     await expect(ssh.locator('[data-od-id="act-del-ssh-dataset-prep"]')).toBeVisible();
@@ -87,7 +92,7 @@ test.describe("dev environments landing (mocked data)", () => {
     await expect(detail).toContainText("连接信息");
     await expect(detail).toContainText("https://dev.cubestack.local/ws/jupyter-nlp-ln");
     await expect(detail).toContainText("规格与状态");
-    await expect(detail).toContainText("base-cuda-12.4:v1.6");
+    await expect(detail).toContainText("harbor.isuanova.com/suanova/base-cuda:latest");
     await expect(detail).toContainText("1 × nvidia");
   });
 
@@ -111,6 +116,7 @@ test.describe("dev environments landing (mocked data)", () => {
   test("creates an environment through the wizard and selects it", async ({ page }) => {
     await stubOptions(page);
     let created: { name: string } | null = null;
+    const posts: Array<Record<string, unknown>> = [];
     await page.route("**/api/devenvironments?*", (route) =>
       route.fulfill({
         json: {
@@ -123,6 +129,7 @@ test.describe("dev environments landing (mocked data)", () => {
     await page.route("**/api/devenvironments", (route) => {
       if (route.request().method() === "POST") {
         const body = route.request().postDataJSON() as { name?: string };
+        posts.push(body);
         created = { name: body.name ?? "unknown" };
         return route.fulfill({ status: 201, contentType: "application/json", body: JSON.stringify({ created: true, name: created.name }) });
       }
@@ -149,5 +156,17 @@ test.describe("dev environments landing (mocked data)", () => {
     await page.locator('[data-od-id="wizard-create"]').click();
     await expect(page.locator('[data-od-id="dev-row-my-env"]')).toBeVisible();
     await expect(page.locator('[data-od-id="create-wizard"]')).toBeHidden();
+
+    // The wizard walks the untouched defaults through to the API: the catalog
+    // opens on the CPU jupyter image with no accelerator chosen, and `none` is
+    // the body's way of saying spec.resources.gpu stays absent.
+    expect(posts).toHaveLength(1);
+    expect(posts[0]).toMatchObject({
+      name: "my-env",
+      namespace: "project-a",
+      type: "jupyter",
+      image: "harbor.isuanova.com/suanova/jupyter-minimal:latest",
+      accelerator: "none",
+    });
   });
 });

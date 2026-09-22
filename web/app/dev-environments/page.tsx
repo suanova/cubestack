@@ -1,14 +1,15 @@
 "use client";
 
-// 开发环境 (Dev Environments) — rebuilt from the static prototype
-// (web/public/devenv.html) against the live cluster. Every value comes from
-// /api/devenvironments, which reads the operator's DevEnvironment CRs
-// directly; the prototype is only the visual reference, never a data source.
-// The CRD carries compute inline (gpuType/gpuCount/cpu/memory) — there is no
+// 开发环境 (Dev Environments) — every value comes from /api/devenvironments,
+// which reads the operator's DevEnvironment CRs directly.
+// The CRD carries compute inline (resources.gpu/cpu/memory) — there is no
 // ComputeProfile CR and no auto-stop schedule, so the wizard collects only the
 // fields the operator actually understands (spec.type / image / resources /
-// storage.size / lifecycle.idleTimeout). Start/stop toggles spec.running via a
-// PATCH; delete removes the CR.
+// storage.size / lifecycle.idleTimeout). The one shape that needs care is the
+// accelerator: spec.resources.gpu has no zero count, so "no GPU" is expressed
+// by omitting the block, which is also what keeps a CPU image out of the
+// controller's brand gate. Start/stop toggles spec.running via a PATCH; delete
+// removes the CR.
 
 import {
   Box,
@@ -429,6 +430,12 @@ function EnvTable({
           <tbody>
             {items.map((e) => {
               const sel = envKey(e) === selectedKey;
+              // The accelerator cell: "2 × nvidia", or the no-accelerator label
+              // when the environment carries no spec.resources.gpu block.
+              const gpu = e.resources.gpu;
+              const gpuText = gpu
+                ? `${gpu.count} × ${gpu.vendor === "metax" ? "metax" : "GPU"}`
+                : t("dev.gpu.none");
               return (
                 <tr
                   key={envKey(e)}
@@ -461,12 +468,12 @@ function EnvTable({
                   </td>
                   <td style={tdSx}>
                     <Box component="span" sx={{ fontFamily: "var(--font-mono)", fontSize: 12 }}>
-                      {e.resources.gpuCount}×{e.resources.gpuType} · {e.resources.cpu}C / {e.resources.memory}
+                      {gpuText} · {e.resources.cpu}C / {e.resources.memory}
                     </Box>
                   </td>
                   <td style={tdSx}>
                     <Box component="span" sx={{ fontFamily: "var(--font-mono)", fontSize: 12, whiteSpace: "nowrap" }}>
-                      {e.resources.gpuCount} × {e.resources.gpuType === "metax" ? "metax" : "GPU"}
+                      {gpuText}
                     </Box>
                   </td>
                   <td style={tdSx}>
@@ -657,14 +664,15 @@ function ConnectionCard({ e, onAct }: { e: DevEnvironmentSummary; onAct: (e: Dev
 
 function SpecCard({ e }: { e: DevEnvironmentSummary }) {
   const { t } = useI18n();
+  const gpu = e.resources.gpu;
   const rows: Array<[string, string]> = [
     [t("dev.spec.type"), e.type],
     [t("dev.spec.image"), e.image],
-    [t("dev.spec.gpu"), `${e.resources.gpuCount} × ${e.resources.gpuType}`],
+    [t("dev.spec.gpu"), gpu ? `${gpu.count} × ${gpu.vendor}` : t("dev.gpu.none")],
     [t("dev.spec.cpu"), `${e.resources.cpu}C / ${e.resources.memory}`],
     [t("dev.spec.storage"), e.storage ? `${e.storage.size} · ${e.storage.mountPath}` : t("dev.spec.idleOff")],
     [t("dev.spec.idle"), e.idleTimeout === 0 ? t("dev.spec.idleOff") : t("dev.spec.idleMin", { minutes: String(Math.round(e.idleTimeout / 60)) })],
-    [t("dev.spec.sshKey"), e.sshKeysSecret ?? t("dev.spec.sshKeyNone")],
+    [t("dev.spec.sshKey"), e.sshClientKeySecret ?? t("dev.spec.sshKeyNone")],
     [t("dev.spec.node"), e.namespace],
   ];
   return (
@@ -741,7 +749,7 @@ interface Draft {
   namespace: string;
   type: "jupyter" | "ssh" | "vscode";
   image: string;
-  gpuType: "nvidia" | "metax";
+  accelerator: "none" | "nvidia" | "metax";
   gpuCount: number;
   cpu: string;
   memory: string;
@@ -770,7 +778,9 @@ function CreateWizard({
     namespace: "",
     type: "jupyter",
     image: "",
-    gpuType: "nvidia",
+    // The image catalog opens on a CPU image, so the accelerator starts at
+    // "none" rather than defaulting the environment into a brand-gate failure.
+    accelerator: "none",
     gpuCount: 1,
     cpu: "16",
     memory: "64Gi",
@@ -809,8 +819,11 @@ function CreateWizard({
   const nameValid = DNS_LABEL_RE.test(draft.name.trim()) && draft.name.trim().length > 0;
   const step1Valid = nameValid && !!draft.namespace && !!draft.image;
   // Client-side validation mirrors the server (POST) rules so a user cannot
-  // advance or submit out-of-range / fractional GPU or storage values.
-  const gpuValid = Number.isInteger(draft.gpuCount) && draft.gpuCount >= 1 && draft.gpuCount <= 16;
+  // advance or submit out-of-range / fractional GPU or storage values. A card
+  // count is only asked for, and only checked, when an accelerator is wanted:
+  // "none" is sent as the absence of spec.resources.gpu, not as a count of 0.
+  const gpuRequested = draft.accelerator !== "none";
+  const gpuValid = !gpuRequested || (Number.isInteger(draft.gpuCount) && draft.gpuCount >= 1 && draft.gpuCount <= 16);
   const storageValid = Number.isInteger(draft.storageGi) && draft.storageGi >= 20 && draft.storageGi <= 800;
   const step2Valid = gpuValid && storageValid;
   const [gpuError, setGpuError] = useState(false);
@@ -844,7 +857,7 @@ function CreateWizard({
       name: draft.name.trim(),
       type: draft.type,
       image: draft.image,
-      gpuType: draft.gpuType,
+      accelerator: draft.accelerator,
       gpuCount: draft.gpuCount,
       cpu: draft.cpu,
       memory: draft.memory,
@@ -946,15 +959,18 @@ function CreateWizard({
             {step === 2 && (
               <Box data-step="2">
                 <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" }, gap: "0 14px" }}>
-                  <WizField label={t("dev.wizard.gpuType")}>
-                    <Select size="small" fullWidth value={draft.gpuType} onChange={(e) => setField("gpuType", e.target.value as Draft["gpuType"])}>
+                  <WizField label={t("dev.wizard.accelerator")}>
+                    <Select size="small" fullWidth value={draft.accelerator} onChange={(e) => setField("accelerator", e.target.value as Draft["accelerator"])}>
+                      <MenuItem value="none">{t("dev.wizard.accelerator.none")}</MenuItem>
                       <MenuItem value="nvidia">nvidia</MenuItem>
                       <MenuItem value="metax">metax</MenuItem>
                     </Select>
                   </WizField>
-                  <WizField label={t("dev.wizard.gpuCount")} error={gpuError} errorText={t("dev.wizard.errGpu")}>
-                    <TextField size="small" fullWidth type="number" inputProps={{ min: 1, max: 16 }} value={draft.gpuCount} onChange={(e) => setField("gpuCount", Number(e.target.value))} />
-                  </WizField>
+                  {gpuRequested ? (
+                    <WizField label={t("dev.wizard.gpuCount")} error={gpuError} errorText={t("dev.wizard.errGpu")}>
+                      <TextField size="small" fullWidth type="number" inputProps={{ min: 1, max: 16 }} value={draft.gpuCount} onChange={(e) => setField("gpuCount", Number(e.target.value))} />
+                    </WizField>
+                  ) : null}
                   <WizField label={t("dev.wizard.cpu")}>
                     <Select size="small" fullWidth value={draft.cpu} onChange={(e) => setField("cpu", e.target.value)}>
                       {CPU_OPTIONS.map((c) => (
@@ -993,8 +1009,10 @@ function CreateWizard({
                     [t("dev.wizard.namespace"), draft.namespace],
                     [t("dev.wizard.type"), draft.type],
                     [t("dev.wizard.image"), draft.image],
-                    [t("dev.wizard.gpuType"), draft.gpuType],
-                    [t("dev.wizard.gpuCount"), String(draft.gpuCount)],
+                    [
+                      t("dev.wizard.accelerator"),
+                      gpuRequested ? `${draft.gpuCount} × ${draft.accelerator}` : t("dev.wizard.accelerator.none"),
+                    ],
                     [t("dev.wizard.cpu"), `${draft.cpu}C`],
                     [t("dev.wizard.memory"), draft.memory],
                     [t("dev.wizard.storage"), `${draft.storageGi}Gi`],

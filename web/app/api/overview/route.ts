@@ -71,7 +71,7 @@ interface InferenceService {
   };
 }
 interface DevEnvironment {
-  spec?: { resources?: { gpuCount?: number } };
+  spec?: { resources?: { gpu?: { count?: number } } };
   status?: { phase?: { name?: string } };
 }
 interface RuntimeProfile {
@@ -198,7 +198,9 @@ export const GET = withAuth(async () => {
     for (const env of devenvs) {
       // Compute-pool allocation counts every DevEnvironment (running and
       // stopped) — the platform's committed GPU quota.
-      computeGpus += env.spec?.resources?.gpuCount ?? 0;
+      // An environment with no accelerator carries no gpu block at all, so
+      // there is no count to read and nothing to add.
+      computeGpus += env.spec?.resources?.gpu?.count ?? 0;
       const phase = env.status?.phase?.name;
       if (phase === "Running") devenvRunning += 1;
       else if (phase === "Stopped") devenvStopped += 1;

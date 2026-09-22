@@ -1,5 +1,6 @@
 import { getCoreClient, getCustomObjectsClient } from "@/lib/kubernetes";
 import { withAuth } from "@/lib/auth/guard";
+import { devImageFor } from "@/lib/devenvironments/images";
 
 // @kubernetes/client-node needs Node APIs (TLS, fs), not the Edge runtime.
 export const runtime = "nodejs";
@@ -16,9 +17,8 @@ const PLURAL_DEVENV = "devenvironments";
 
 /**
  * Shape of a single environment rendered by the /dev-environments page. This is
- * the read/display contract; everything is projected from the live cluster —
- * the prototype (web/public/devenv.html) is only the visual reference, never a
- * data source.
+ * the read/display contract; everything is projected from the live cluster's
+ * DevEnvironment CRs.
  */
 export interface DevEnvironmentSummary {
   // identity
@@ -30,8 +30,11 @@ export interface DevEnvironmentSummary {
   image: string;
   running: boolean;
   resources: {
-    gpuType: "nvidia" | "metax";
-    gpuCount: number;
+    // Null when the environment requests no accelerator — spec.resources.gpu
+    // is absent. The CRD deliberately has no "count: 0": omitting the block is
+    // the only way to ask for no GPU, and it is also what exempts an image
+    // from the brand gate.
+    gpu: { vendor: "nvidia" | "metax"; count: number } | null;
     cpu: string;
     memory: string;
   };
@@ -43,7 +46,10 @@ export interface DevEnvironmentSummary {
   phaseReason: string | null;
   endpoints: Array<{ name: string; address: string }>;
   conditions: Array<{ type: string; status: string; reason: string; message: string }>;
-  sshKeysSecret: string | null;
+  // The client keypair the controller minted for ssh login, so its owner can
+  // retrieve the private half. Absent when spec.ssh.authorizedKeysSecret names
+  // the user's own Secret — that holds public keys, not a client key.
+  sshClientKeySecret: string | null;
 }
 
 interface Condition {
@@ -57,8 +63,7 @@ interface Endpoint {
   address?: string;
 }
 interface DevEnvResources {
-  gpuType?: string;
-  gpuCount?: number;
+  gpu?: { vendor?: string; count?: number };
   cpu?: string;
   memory?: string;
 }
@@ -75,7 +80,7 @@ interface DevEnvStatus {
   phase?: { name?: string; reason?: string };
   endpoints?: Endpoint[];
   conditions?: Condition[];
-  sshKeysSecret?: { name?: string };
+  sshClientKeySecret?: { name?: string };
 }
 interface DevEnv {
   metadata?: { name?: string; namespace?: string; creationTimestamp?: string };
@@ -91,6 +96,7 @@ function num(v: unknown): number {
 function project(env: DevEnv): DevEnvironmentSummary {
   const spec = env.spec ?? {};
   const status = env.status ?? {};
+  const gpu = spec.resources?.gpu;
   return {
     name: env.metadata?.name ?? "?",
     namespace: env.metadata?.namespace ?? "",
@@ -99,8 +105,11 @@ function project(env: DevEnv): DevEnvironmentSummary {
     image: spec.image ?? "—",
     running: spec.running ?? false,
     resources: {
-      gpuType: spec.resources?.gpuType === "metax" ? "metax" : "nvidia",
-      gpuCount: num(spec.resources?.gpuCount) || 1,
+      // The vendor defaults to nvidia and the count to 1 exactly as the CRD
+      // does; an absent gpu block stays absent rather than becoming a GPU.
+      gpu: gpu
+        ? { vendor: gpu.vendor === "metax" ? "metax" : "nvidia", count: num(gpu.count) || 1 }
+        : null,
       cpu: spec.resources?.cpu ?? "—",
       memory: spec.resources?.memory ?? "—",
     },
@@ -121,7 +130,7 @@ function project(env: DevEnv): DevEnvironmentSummary {
       reason: c.reason ?? "",
       message: c.message ?? "",
     })),
-    sshKeysSecret: status.sshKeysSecret?.name ?? null,
+    sshClientKeySecret: status.sshClientKeySecret?.name ?? null,
   };
 }
 
@@ -152,13 +161,16 @@ export const GET = withAuth(async () => {
 
 const DNS_LABEL_RE = /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/;
 const DEVENV_TYPES = ["jupyter", "ssh", "vscode"] as const;
+// The accelerator is a single choice, "none" included, mirroring
+// spec.resources.gpu.vendor plus the absence of the block.
+const ACCELERATORS = ["none", "nvidia", "metax"] as const;
 
 interface CreateBody {
   namespace?: string;
   name?: string;
   type?: string;
   image?: string;
-  gpuType?: string;
+  accelerator?: string;
   gpuCount?: number;
   cpu?: string;
   memory?: string;
@@ -188,9 +200,15 @@ export const POST = withAuth(async (req) => {
     if (!body.type || !(DEVENV_TYPES as readonly string[]).includes(body.type)) {
       return ValidationError(`type 必须为 ${DEVENV_TYPES.join(" / ")} 之一。`);
     }
-    const gpuType = body.gpuType === "metax" || body.gpuType === "nvidia" ? body.gpuType : "nvidia";
-    const gpuCount = body.gpuCount;
-    if (gpuCount === undefined || !Number.isInteger(gpuCount) || gpuCount < 1 || gpuCount > 16) {
+    // "none" omits spec.resources.gpu entirely: the CRD has no zero count, and
+    // the absence of the block is what keeps the image out of the brand gate.
+    const accelerator = body.accelerator ?? "none";
+    if (!(ACCELERATORS as readonly string[]).includes(accelerator)) {
+      return ValidationError(`accelerator 必须为 ${ACCELERATORS.join(" / ")} 之一。`);
+    }
+    const gpuEnabled = accelerator !== "none";
+    const gpuCount = body.gpuCount ?? 1;
+    if (gpuEnabled && (!Number.isInteger(gpuCount) || gpuCount < 1 || gpuCount > 16)) {
       return ValidationError("gpuCount 需为 1–16 之间的整数。");
     }
     if (body.storageGi !== undefined && (body.storageGi < 20 || body.storageGi > 800)) {
@@ -223,6 +241,21 @@ export const POST = withAuth(async (req) => {
     );
     if (exists) return ValidationError(`环境 '${body.name}' 已存在。`);
 
+    // The image decides the account the environment runs as and, for the
+    // stock-derived jupyter image, the gid. Neither is discoverable from the
+    // cluster, so it is resolved here from the catalog rather than taken from
+    // the client. An image the platform does not publish resolves to nothing,
+    // leaving spec.runtime unset and the CRD's own defaults in force.
+    const published = devImageFor(body.image);
+    const runtime = published
+      ? {
+          user: published.user,
+          ...(published.runAsGroup !== undefined
+            ? { securityContext: { runAsGroup: published.runAsGroup } }
+            : {}),
+        }
+      : undefined;
+
     const cr = {
       apiVersion: `${GROUP}/${VERSION}`,
       kind: "DevEnvironment",
@@ -232,11 +265,11 @@ export const POST = withAuth(async (req) => {
         image: body.image,
         running: true,
         resources: {
-          gpuType,
-          gpuCount,
+          ...(gpuEnabled ? { gpu: { vendor: accelerator, count: gpuCount } } : {}),
           ...(body.cpu ? { cpu: body.cpu } : {}),
           ...(body.memory ? { memory: body.memory } : {}),
         },
+        ...(runtime ? { runtime } : {}),
         storage: body.storageGi !== undefined ? { size: `${body.storageGi}Gi` } : undefined,
         lifecycle: { idleTimeout },
       },

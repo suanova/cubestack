@@ -1,5 +1,6 @@
 import { getCoreClient } from "@/lib/kubernetes";
 import { withAuth } from "@/lib/auth/guard";
+import { DEV_IMAGES } from "@/lib/devenvironments/images";
 
 // @kubernetes/client-node needs Node APIs (TLS, fs), not the Edge runtime.
 export const runtime = "nodejs";
@@ -7,16 +8,13 @@ export const runtime = "nodejs";
 // This handler talks to the live cluster, so it must not be prerendered.
 export const dynamic = "force-dynamic";
 
-// The development image catalog offered by the create wizard. There is no
-// ComputeProfile CR in the operator (the DevEnvironment carries compute inline
-// via spec.resources) — the image list is the platform's known base images,
-// matching the prototype (public/devenv.html). Each entry pairs a tag with a
-// short description shown in the select.
-const IMAGES: Array<{ tag: string; label: string }> = [
-  { tag: "base-cuda-12.4:v1.6", label: "base-cuda-12.4:v1.6 · CUDA 12.4 / PyTorch 2.5" },
-  { tag: "base-cuda-12.1:v1.6", label: "base-cuda-12.1:v1.6 · CUDA 12.1 / PyTorch 2.4" },
-  { tag: "base-maca-2.28:v1.3", label: "base-maca-2.28:v1.3 · MACA 2.28 (沐曦)" },
-];
+// The catalog lives in lib/devenvironments/images.ts because the create route
+// derives the environment's runtime identity from the same list; the wizard
+// is sent only what it displays.
+const IMAGES: Array<{ tag: string; label: string }> = DEV_IMAGES.map(({ tag, label }) => ({
+  tag,
+  label,
+}));
 
 /** Catalog the create wizard needs, read from the live cluster. */
 export interface DevEnvOptionsResponse {

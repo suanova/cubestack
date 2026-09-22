@@ -29,10 +29,10 @@ function stubCluster() {
         },
         spec: {
           type: "jupyter",
-          image: "base-cuda-12.4:v1.6",
+          image: "harbor.isuanova.com/suanova/base-cuda:latest",
           running: true,
-          resources: { gpuType: "nvidia", gpuCount: 2, cpu: "16", memory: "64Gi" },
-          storage: { size: "200Gi", mountPath: "/workspace" },
+          resources: { gpu: { vendor: "nvidia", count: 2 }, cpu: "16", memory: "64Gi" },
+          storage: { size: "200Gi", mountPath: "/home/ubuntu" },
           lifecycle: { idleTimeout: 3600 },
         },
         status: {
@@ -42,7 +42,7 @@ function stubCluster() {
             { type: "PodScheduled", status: "True", reason: "Scheduled", message: "" },
             { type: "Ready", status: "True", reason: "Running", message: "" },
           ],
-          sshKeysSecret: { name: "jupyter-nlp-ln-ssh" },
+          sshClientKeySecret: { name: "jupyter-nlp-ln-ssh-client-key" },
         },
       },
       {
@@ -53,9 +53,10 @@ function stubCluster() {
         },
         spec: {
           type: "ssh",
-          image: "base-cuda-12.1:v1.6",
+          image: "harbor.isuanova.com/suanova/ssh-ubuntu22.04:latest",
           running: false,
-          resources: { gpuType: "metax", gpuCount: 1, cpu: "32", memory: "128Gi" },
+          // No count: the projection has to apply the CRD's default of 1.
+          resources: { gpu: { vendor: "metax" }, cpu: "32", memory: "128Gi" },
         },
         status: { phase: { name: "Stopped" } },
       },
@@ -98,13 +99,13 @@ describe("GET /api/devenvironments", () => {
       name: "jupyter-nlp-ln",
       namespace: "project-a",
       type: "jupyter",
-      image: "base-cuda-12.4:v1.6",
+      image: "harbor.isuanova.com/suanova/base-cuda:latest",
       running: true,
-      resources: { gpuType: "nvidia", gpuCount: 2, cpu: "16", memory: "64Gi" },
-      storage: { size: "200Gi", mountPath: "/workspace" },
+      resources: { gpu: { vendor: "nvidia", count: 2 }, cpu: "16", memory: "64Gi" },
+      storage: { size: "200Gi", mountPath: "/home/ubuntu" },
       idleTimeout: 3600,
       phase: "Running",
-      sshKeysSecret: "jupyter-nlp-ln-ssh",
+      sshClientKeySecret: "jupyter-nlp-ln-ssh-client-key",
       endpoints: [{ name: "jupyter", address: "https://dev.cubestack.local/ws/jupyter-nlp-ln" }],
     });
     expect(jupyter.conditions).toHaveLength(2);
@@ -113,6 +114,8 @@ describe("GET /api/devenvironments", () => {
     const [, ssh] = body.items;
     expect(ssh.phase).toBe("Stopped");
     expect(ssh.endpoints).toEqual([]);
+    // gpu.vendor is taken as written and gpu.count falls back to the CRD's 1.
+    expect(ssh.resources.gpu).toEqual({ vendor: "metax", count: 1 });
   });
 
   it("defaults absent spec fields so rendering never crashes", async () => {
@@ -134,7 +137,9 @@ describe("GET /api/devenvironments", () => {
       type: "ssh", // default type per the CRD
       image: "—",
       running: false,
-      resources: { gpuType: "nvidia", gpuCount: 1, cpu: "—", memory: "—" },
+      // No spec.resources.gpu block: the environment requests no accelerator,
+      // which is a state the UI must render rather than invent a GPU for.
+      resources: { gpu: null, cpu: "—", memory: "—" },
       storage: null,
       idleTimeout: 0,
       sshEnabled: false,
@@ -142,7 +147,7 @@ describe("GET /api/devenvironments", () => {
       phaseReason: null,
       endpoints: [],
       conditions: [],
-      sshKeysSecret: null,
+      sshClientKeySecret: null,
     });
   });
 });
@@ -159,14 +164,14 @@ describe("POST /api/devenvironments", () => {
 
   it("rejects a non-DNS-1123 name", async () => {
     const { POST } = await importRoute();
-    const res = await POST(await authedRequest({ method: "POST", body: JSON.stringify({ name: "Bad Name", namespace: "project-a", type: "jupyter", image: "img", gpuCount: 1 }) }), undefined);
+    const res = await POST(await authedRequest({ method: "POST", body: JSON.stringify({ name: "Bad Name", namespace: "project-a", type: "jupyter", image: "img", accelerator: "nvidia", gpuCount: 1 }) }), undefined);
     expect(res.status).toBe(400);
     expect(createNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
   it("rejects an unknown namespace", async () => {
     const { POST } = await importRoute();
-    const res = await POST(await authedRequest({ method: "POST", body: JSON.stringify({ name: "ok-name", namespace: "missing", type: "jupyter", image: "img", gpuCount: 1 }) }), undefined);
+    const res = await POST(await authedRequest({ method: "POST", body: JSON.stringify({ name: "ok-name", namespace: "missing", type: "jupyter", image: "img", accelerator: "nvidia", gpuCount: 1 }) }), undefined);
     expect(res.status).toBe(400);
     expect((await res.json()).error).toContain("不存在");
     expect(createNamespacedCustomObject).not.toHaveBeenCalled();
@@ -174,7 +179,7 @@ describe("POST /api/devenvironments", () => {
 
   it("rejects a duplicate env name in the namespace", async () => {
     const { POST } = await importRoute();
-    const res = await POST(await authedRequest({ method: "POST", body: JSON.stringify({ name: "jupyter-nlp-ln", namespace: "project-a", type: "jupyter", image: "img", gpuCount: 1 }) }), undefined);
+    const res = await POST(await authedRequest({ method: "POST", body: JSON.stringify({ name: "jupyter-nlp-ln", namespace: "project-a", type: "jupyter", image: "img", accelerator: "nvidia", gpuCount: 1 }) }), undefined);
     expect(res.status).toBe(400);
     expect((await res.json()).error).toContain("已存在");
     expect(createNamespacedCustomObject).not.toHaveBeenCalled();
@@ -182,7 +187,14 @@ describe("POST /api/devenvironments", () => {
 
   it("rejects an out-of-range gpuCount", async () => {
     const { POST } = await importRoute();
-    const res = await POST(await authedRequest({ method: "POST", body: JSON.stringify({ name: "ok-name", namespace: "project-a", type: "jupyter", image: "img", gpuCount: 0 }) }), undefined);
+    const res = await POST(await authedRequest({ method: "POST", body: JSON.stringify({ name: "ok-name", namespace: "project-a", type: "jupyter", image: "img", accelerator: "nvidia", gpuCount: 0 }) }), undefined);
+    expect(res.status).toBe(400);
+    expect(createNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
+  it("rejects an accelerator that is not one of the three choices", async () => {
+    const { POST } = await importRoute();
+    const res = await POST(await authedRequest({ method: "POST", body: JSON.stringify({ name: "ok-name", namespace: "project-a", type: "jupyter", image: "img", accelerator: "amd", gpuCount: 1 }) }), undefined);
     expect(res.status).toBe(400);
     expect(createNamespacedCustomObject).not.toHaveBeenCalled();
   });
@@ -198,8 +210,8 @@ describe("POST /api/devenvironments", () => {
           name: "jupyter-recsys",
           namespace: "project-a",
           type: "jupyter",
-          image: "base-cuda-12.4:v1.6",
-          gpuType: "metax",
+          image: "harbor.isuanova.com/suanova/base-cuda:latest",
+          accelerator: "nvidia",
           gpuCount: 4,
           cpu: "64",
           memory: "256Gi",
@@ -219,13 +231,94 @@ describe("POST /api/devenvironments", () => {
       metadata: { name: "jupyter-recsys", namespace: "project-a" },
       spec: {
         type: "jupyter",
-        image: "base-cuda-12.4:v1.6",
+        image: "harbor.isuanova.com/suanova/base-cuda:latest",
         running: true,
-        resources: { gpuType: "metax", gpuCount: 4, cpu: "64", memory: "256Gi" },
+        resources: { gpu: { vendor: "nvidia", count: 4 }, cpu: "64", memory: "256Gi" },
+        // Derived from the image, never sent by the client: the self-authored
+        // family runs as account ubuntu (uid/gid 1000, the platform default).
+        runtime: { user: "ubuntu" },
         storage: { size: "300Gi" },
         lifecycle: { idleTimeout: 1800 },
       },
     });
+  });
+
+  it("omits spec.resources.gpu entirely when no accelerator is requested", async () => {
+    createNamespacedCustomObject.mockResolvedValue({});
+    listClusterCustomObject.mockResolvedValue({ items: [] });
+    const { POST } = await importRoute();
+    const res = await POST(
+      await authedRequest({
+        method: "POST",
+        body: JSON.stringify({
+          name: "cpu-env",
+          namespace: "project-a",
+          type: "ssh",
+          image: "harbor.isuanova.com/suanova/ssh-ubuntu22.04:latest",
+          accelerator: "none",
+          // Ignored: the CRD has no zero count, so a stray count must not
+          // become a request for cards.
+          gpuCount: 8,
+          cpu: "16",
+        }),
+      }),
+      undefined,
+    );
+    expect(res.status).toBe(201);
+    const spec = createNamespacedCustomObject.mock.calls[0][0].body.spec;
+    // Absence is the only spelling of "no accelerator", and it is what keeps
+    // the image out of the controller's brand gate.
+    expect("gpu" in spec.resources).toBe(false);
+  });
+
+  it("derives spec.runtime from the image, because the layout is not discoverable", async () => {
+    createNamespacedCustomObject.mockResolvedValue({});
+    listClusterCustomObject.mockResolvedValue({ items: [] });
+    const { POST } = await importRoute();
+
+    await POST(
+      await authedRequest({
+        method: "POST",
+        body: JSON.stringify({ name: "jovyan-env", namespace: "project-a", type: "jupyter", image: "harbor.isuanova.com/suanova/jupyter-minimal:latest" }),
+      }),
+      undefined,
+    );
+    // The stock-derived image keeps docker-stacks' jovyan, whose gid (100) no
+    // other spec field implies — the platform default is 1000.
+    expect(createNamespacedCustomObject.mock.calls[0][0].body.spec.runtime).toEqual({
+      user: "jovyan",
+      securityContext: { runAsGroup: 100 },
+    });
+
+    createNamespacedCustomObject.mockClear();
+    await POST(
+      await authedRequest({
+        method: "POST",
+        body: JSON.stringify({ name: "ubuntu-env", namespace: "project-a", type: "ssh", image: "harbor.isuanova.com/suanova/ssh-ubuntu22.04:latest" }),
+      }),
+      undefined,
+    );
+    // 1000:1000 already is the platform default, so nothing overrides it.
+    expect(createNamespacedCustomObject.mock.calls[0][0].body.spec.runtime).toEqual({
+      user: "ubuntu",
+    });
+  });
+
+  it("leaves spec.runtime unset for an image the platform does not publish", async () => {
+    createNamespacedCustomObject.mockResolvedValue({});
+    listClusterCustomObject.mockResolvedValue({ items: [] });
+    const { POST } = await importRoute();
+    const res = await POST(
+      await authedRequest({
+        method: "POST",
+        body: JSON.stringify({ name: "byo-env", namespace: "project-a", type: "ssh", image: "harbor.local/ai-images/custom:1.0" }),
+      }),
+      undefined,
+    );
+    expect(res.status).toBe(201);
+    // A bring-your-own image states its own identity in the spec — the
+    // platform cannot guess it, so it leaves the CRD's defaults in force.
+    expect("runtime" in createNamespacedCustomObject.mock.calls[0][0].body.spec).toBe(false);
   });
 });
 
