@@ -45,16 +45,20 @@ export function withViewTransition(navigate: () => void, arrived?: () => boolean
   void doc.startViewTransition(async () => {
     navigate();
     if (!arrived) {
-      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      // Two macrotasks: enough for a route the shell has already prefetched.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
       return;
     }
-    // Polled rather than fixed: a destination that renders slowly still morphs,
-    // and a fast one is not held back by a sleep. The deadline keeps a route that
-    // never arrives (an error page, a guard that redirects) from hanging the
-    // transition open.
+    // Polled on TIMERS, not on animation frames. A frame-based wait looks right
+    // and hangs in practice: once a route change is underway the frames stop
+    // coming, the callback never resolves, and the transition sits in its
+    // "capturing the new state" phase — which the reader sees as no animation at
+    // all. Timers keep firing there. (Measured, not assumed: the frame version
+    // left `finished` pending past 2.5s on a 250ms transition.)
     const deadline = Date.now() + 600;
     while (Date.now() < deadline && !arrived()) {
-      await new Promise((resolve) => requestAnimationFrame(resolve));
+      await new Promise((resolve) => setTimeout(resolve, 16));
     }
   });
 }

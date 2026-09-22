@@ -566,6 +566,20 @@ export function FloatingChat() {
     return () => cancelAnimationFrame(id);
   }, [open]);
 
+  // The thread follows the newest content, exactly as the pane's does. `open` is
+  // in the deps because the panel is not rendered while it is closed: the element
+  // this scrolls only exists once the reader opens it, and a history restored in
+  // the meantime never changes `msgs` again — so without it a long conversation
+  // opened on its OLDEST turn.
+  useEffect(() => {
+    const el = threadEl.current;
+    if (!el) return;
+    const id = requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+    });
+    return () => cancelAnimationFrame(id);
+  }, [open, msgs]);
+
   // The surface lives for the whole visit: retire its in-flight work when the
   // shell unmounts it (entering the chat tab) or the session ends.
   /* eslint-disable react-hooks/exhaustive-deps */

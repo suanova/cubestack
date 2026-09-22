@@ -87,3 +87,29 @@ body {
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
+
+/* The cross-route morph between the floating chat and the full pane
+   (components/cubepilot/viewTransition.ts). The browser's default is a 250ms
+   cross-fade of the whole page plus an implicit box interpolation, which is easy
+   to miss entirely for a move this small; naming the group lets the two ends
+   morph deliberately — the panel growing into the thread, and back. */
+::view-transition-group(agent-chat) {
+  animation-duration: 420ms;
+  animation-timing-function: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+::view-transition-old(agent-chat),
+::view-transition-new(agent-chat) {
+  animation-duration: 300ms;
+  animation-timing-function: ease;
+}
+
+/* Readers who asked for less motion get no morph at all — the navigation is
+   plain, and the surfaces simply appear (viewTransition.ts skips the wrapper). */
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation: none !important;
+  }
+}

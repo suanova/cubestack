@@ -4,7 +4,7 @@ import { withViewTransition } from "./viewTransition";
 
 // The morph is the browser's, so what is worth testing is the wiring around it:
 // that a browser without View Transitions (or a reader who asked for less motion)
-// gets a plain navigation, and that the transition is not resolved before the
+// gets a plain navigation, and that the callback does not resolve before the
 // destination exists — a callback that returns early leaves the browser morphing
 // the old screen into itself, which looks like no animation at all.
 
@@ -30,6 +30,7 @@ function stubReducedMotion(reduce: boolean) {
 afterEach(() => {
   delete (document as unknown as Record<string, unknown>).startViewTransition;
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 describe("withViewTransition", () => {
@@ -62,45 +63,57 @@ describe("withViewTransition", () => {
   });
 
   it("waits for the destination marker before resolving the transition", async () => {
+    vi.useFakeTimers();
     stubReducedMotion(false);
     const { started } = stubTransition();
-    let arrived = false;
-    // Resolve on the third frame, the way a route that is still rendering does.
-    let frames = 0;
-    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
-      frames += 1;
-      if (frames === 3) arrived = true;
-      cb(0);
-      return frames;
-    });
+    let checks = 0;
 
     withViewTransition(
       () => {},
-      () => arrived,
+      () => ++checks >= 3,
     );
+    await vi.advanceTimersByTimeAsync(200);
     await started[0];
 
-    expect(frames).toBeGreaterThanOrEqual(3);
+    expect(checks).toBeGreaterThanOrEqual(3);
   });
 
-  it("gives up rather than holding a transition open for a destination that never arrives", async () => {
+  it("does not wait on animation frames, which stop once a route change is underway", async () => {
+    // The regression this exists for: a frame-based wait looked correct and hung
+    // in the app — with the frames gone the callback never resolved, the
+    // transition never left its "capturing" phase, and the reader saw no
+    // animation at all. Timers keep firing there.
     stubReducedMotion(false);
     const { started } = stubTransition();
-    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
-      cb(0);
-      return 1;
-    });
-    const now = vi.spyOn(Date, "now");
-    let clock = 0;
-    now.mockImplementation(() => (clock += 1000)); // every frame is a second
+    const raf = vi.fn();
+    vi.stubGlobal("requestAnimationFrame", raf);
 
     withViewTransition(
       () => {},
-      () => false,
+      () => false, // never arrives: only the deadline can end it
     );
     await started[0];
 
-    now.mockRestore();
-    expect(clock).toBeGreaterThan(600);
+    expect(raf).not.toHaveBeenCalled();
+  });
+
+  it("ends at its deadline rather than holding a transition open forever", async () => {
+    vi.useFakeTimers();
+    stubReducedMotion(false);
+    const { started } = stubTransition();
+    let checks = 0;
+
+    withViewTransition(
+      () => {},
+      () => {
+        checks += 1;
+        return false;
+      },
+    );
+    await vi.advanceTimersByTimeAsync(2000);
+    await started[0];
+
+    // Polled until the deadline, then given up on — never left pending.
+    expect(checks).toBeGreaterThan(5);
   });
 });

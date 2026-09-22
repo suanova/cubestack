@@ -278,6 +278,27 @@ test.describe("global floating AI chat", () => {
     await expect.poll(() => name('[data-od-id="chat-thread"]')).toBe("agent-chat");
   });
 
+  test("opens on the newest message, not the oldest", async ({ page }) => {
+    // A conversation longer than the panel must open where the reader left it —
+    // at the end. The pane has always done this; the panel restored its history
+    // with the scroll pinned to the top, so the first thing a reader saw after
+    // opening a long conversation was its oldest turn.
+    const long = Array.from({ length: 20 }, (_, i) => [
+      { role: "user", content: `第 ${i + 1} 个问题` },
+      { role: "assistant", content: [{ type: "text", text: `第 ${i + 1} 个回答` }] },
+    ]).flat();
+    await stubFloatingChat(page, TURN_DONE, { historyOnce: long });
+    await page.goto("/");
+    await page.click('[data-od-id="fchat-fab"]');
+
+    const thread = page.locator('[data-od-id="fchat-thread"]');
+    await expect(thread).toContainText("第 20 个回答");
+    // At the bottom: nothing left to scroll to. Asserted as "the distance to the
+    // end is zero" so the case cannot pass by the thread being too short to
+    // scroll at all — the fixture below overflows the panel.
+    await expect.poll(() => thread.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight)).toBeLessThan(8);
+  });
+
   test("opens the panel, greets from real data, and streams a turn to its end", async ({ page }) => {
     const captured = await stubFloatingChat(page, TURN_DONE);
     await page.goto("/");
