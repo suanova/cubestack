@@ -61,6 +61,7 @@ import { useI18n } from "@/lib/i18n";
 import { HitlDock, type ApprovalDecision } from "./HitlDock";
 import { CopyBtn, ParamsPanel, SampleParams } from "./Playground";
 import { AgentThread } from "./AgentThread";
+import { subscribeAgentHandoff, takeAgentHandoff } from "./agentHandoff";
 import { Btn, Card, CpTextArea, Icons, Pill, monoSx, useToast } from "./ui";
 
 // The agent's identity colour is the violet globals.css derives from --accent,
@@ -250,6 +251,12 @@ export function ChatPane() {
   // mint a NEW session and quietly leave the user with two conversations again.
   const [agentSessionKey, setAgentSessionKey] = useState<string | null>(SESSION_KEY);
   const [agentNotice, setAgentNotice] = useState("");
+  /** Set when the floating surface handed its thread over (its ⤢ opens this
+   *  pane); drives the chip that says where this conversation came from. */
+  const [handedOver, setHandedOver] = useState(false);
+  /** Whether what is on screen was seeded by a handoff, so the restore below
+   *  does not greet over it. Read and cleared by restoreAgentSession. */
+  const seededRef = useRef(false);
   /** A turn is running for this session with no stream of this pane's own — one
    *  another tab started, or one that outlived a reload. The card header says
    *  so and the composer's Stop is the control that ends it. */
@@ -489,11 +496,18 @@ export function ChatPane() {
     }
   }
 
-  function selectAgent(): void {
+  function selectAgent(seed?: ThreadMsg[]): void {
     cancelInflight();
     setObjKind("agent");
     setSvcId(null);
-    setMsgs([]);
+    // A handed-over thread is what the other surface was showing a moment ago, so
+    // it is painted as-is; the restore below then reconciles it with the runtime's
+    // copy, which is the same conversation one read behind at worst. Without it,
+    // an expansion draws a greeting or an empty thread until that read lands,
+    // which reads as "my conversation is gone" rather than "it got bigger".
+    seededRef.current = seed !== undefined;
+    setMsgs(seed ?? []);
+    if (seed !== undefined) setHandedOver(true);
     // The key is NOT cleared. It is a literal, not a session this pane has to
     // discover, and the composer is live from the line above while the restore
     // below is asynchronous: a send in that window captured null, went out
@@ -511,6 +525,31 @@ export function ChatPane() {
       }
     })();
   }
+
+  /** The floating surface's ⤢ hands its thread over and sends the reader here.
+   *  This pane is normally already mounted when that happens — the module's tabs
+   *  keep their panes alive — so it subscribes rather than reading at mount, and
+   *  goes through a ref because the subscription is installed once while
+   *  selectAgent closes over this render's state. */
+  const selectAgentLatestRef = useRef(selectAgent);
+  useEffect(() => {
+    selectAgentLatestRef.current = selectAgent;
+  });
+  useEffect(
+    () =>
+      subscribeAgentHandoff(() => {
+        const handed = takeAgentHandoff();
+        if (handed) selectAgentLatestRef.current(handed);
+      }),
+    [],
+  );
+  // The chip that says where this thread came from. It withdraws on its own: it
+  // explains an arrival, and an explanation that stays is chrome.
+  useEffect(() => {
+    if (!handedOver) return;
+    const timer = setTimeout(() => setHandedOver(false), 4500);
+    return () => clearTimeout(timer);
+  }, [handedOver]);
 
   /**
    * Restore this user's conversation after a (re)select: history, an in-flight
@@ -531,8 +570,11 @@ export function ChatPane() {
     if (genRef.current !== gen) return;
     // Nothing under this key yet: a conversation has not started, so greet. An
     // empty thread with no prompt is the one thing a first-time visitor must not
-    // see — it reads as a chat that lost its contents.
-    if (!hadHistory) setMsgs(greetingMsgs(meta.status, meta.config, meta.skills));
+    // see — it reads as a chat that lost its contents. A handed-over thread is
+    // the exception: it IS the conversation, and the read behind it may simply
+    // not have caught up yet.
+    if (!hadHistory && !seededRef.current) setMsgs(greetingMsgs(meta.status, meta.config, meta.skills));
+    seededRef.current = false;
     const running = await checkTurnElsewhere(key, gen);
     if (genRef.current !== gen) return;
     if (running) {
@@ -860,7 +902,17 @@ export function ChatPane() {
     // The page opens on the assistant. It is the one object here that is not a
     // model, and it is the one this page's own entry is about; a model can be
     // picked from the list below it.
-    selectAgent();
+    //
+    // …unless the floating surface handed this conversation over, which is the
+    // same assistant with the thread the reader was already looking at: an offer
+    // made before this pane existed — expanding from another page IS that case —
+    // is still pending, and this is where it is claimed.
+    const handed = takeAgentHandoff();
+    if (handed) selectAgent(handed);
+    else if (!seededRef.current) selectAgent();
+    // The `seededRef` guard is for the development double-invoke of this effect:
+    // the second run takes nothing (the offer is one-shot) and would otherwise
+    // re-select plainly, wiping the thread the first run just painted.
     // The policy that decides whether a durable approval is on offer: read once,
     // like the rest of the instance meta.
     void loadConfirmPolicy();
@@ -1493,7 +1545,7 @@ export function ChatPane() {
           <Box
             component="button"
             type="button"
-            onClick={selectAgent}
+            onClick={() => selectAgent()}
             aria-pressed={isAgent}
             data-od-id="obj-cubepilot"
             sx={{
@@ -1802,6 +1854,23 @@ export function ChatPane() {
           >
             {agentNotice ? (
               <Box sx={{ ...botMsgSx, fontSize: 12.5, color: "text.secondary", borderStyle: "dashed" }}>{agentNotice}</Box>
+            ) : null}
+            {handedOver ? (
+              <Box
+                data-od-id="handoff-chip"
+                sx={{
+                  alignSelf: "flex-start",
+                  px: "10px",
+                  py: "3px",
+                  borderRadius: "999px",
+                  fontSize: 12,
+                  color: "var(--accent-strong)",
+                  bgcolor: "color-mix(in oklch, var(--accent) 10%, transparent)",
+                  border: "1px solid color-mix(in oklch, var(--accent) 28%, transparent)",
+                }}
+              >
+                {t("cubepilot.chat.handedOver")}
+              </Box>
             ) : null}
             {/* The agent's side of the thread is AgentThread's to draw: its
                 bubbles, its text, its tool cards and the cards it settled. The

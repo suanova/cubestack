@@ -19,6 +19,7 @@
 // surface needs: restore on open, follow while open, stop-first on send.
 
 import { Box } from "@mui/material";
+import { useRouter } from "next/navigation";
 import { Fragment, useEffect, useRef, useState } from "react";
 
 import {
@@ -54,6 +55,8 @@ import { useI18n } from "@/lib/i18n";
 import { AgentThread } from "./AgentThread";
 import { HitlDock, type ApprovalDecision } from "./HitlDock";
 import { Btn, CpTextArea, Icons, Pill, monoSx, useToast } from "./ui";
+import { publishAgentHandoff } from "./agentHandoff";
+import { setStoredTab } from "./tabStore";
 
 // The same fixed conversation key the chat tab uses (see ChatPane): one
 // conversation per user, wherever they open it.
@@ -92,6 +95,7 @@ const QUICK_PROMPTS = ["fchat.qp1", "fchat.qp2"] as const;
 export function FloatingChat() {
   const { t } = useI18n();
   const { showToast, toastView } = useToast();
+  const router = useRouter();
 
   const [open, setOpen] = useState(false);
   const [msgs, setMsgs] = useState<ThreadMsg[]>([]);
@@ -524,6 +528,18 @@ export function FloatingChat() {
     // A turn this surface is streaming is NOT cancelled: the stream is the
     // state and it settles on its own (or hands off to the next restore).
     stopFollowing();
+  }
+
+  /** ⤢ opens this conversation in the full pane: the module's chat tab, with the
+   *  agent selected. It is the same session either surface would restore, so the
+   *  thread is handed over rather than left to be rediscovered — an expansion
+   *  that lands on a greeting reads as a lost conversation, not a bigger one. */
+  function expandToPane(): void {
+    publishAgentHandoff(msgs);
+    setStoredTab("chat");
+    stopFollowing();
+    setOpen(false);
+    router.push("/cubepilot");
   }
 
   // Focus the composer on open, so Enter starts talking immediately.
@@ -964,6 +980,28 @@ export function FloatingChat() {
               <Box sx={{ ...monoSx, fontSize: 10.5, color: "text.secondary", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                 {agentRoleLine(agentStatus, t)}
               </Box>
+            </Box>
+            <Box
+              component="button"
+              type="button"
+              data-od-id="fchat-expand"
+              aria-label={t("fchat.expand")}
+              title={t("fchat.expand")}
+              onClick={expandToPane}
+              sx={{
+                border: 0,
+                bgcolor: "transparent",
+                color: "text.secondary",
+                p: "4px",
+                borderRadius: "6px",
+                display: "grid",
+                placeItems: "center",
+                cursor: "pointer",
+                flex: "none",
+                "&:hover": { bgcolor: "action.hover", color: "text.primary" },
+              }}
+            >
+              {Icons.expand({ size: 16 })}
             </Box>
             <Box
               component="button"

@@ -63,6 +63,13 @@ export const Icons = {
       <path d="M18 6L6 18M6 6l12 12" />
     </Svg>
   ),
+  /** Expand: the corners of a box pushed outward. The floating chat's way to the
+   *  full-page pane, which is the same conversation with more room. */
+  expand: (p?: { size?: number }) => (
+    <Svg {...(p ?? {})}>
+      <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
+    </Svg>
+  ),
   run: (p?: { size?: number }) => (
     <Svg {...(p ?? {})}>
       <path d="M6 4l14 8-14 8z" />

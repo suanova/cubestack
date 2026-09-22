@@ -89,9 +89,19 @@ interface Captured {
 }
 
 /** Stub the endpoints the surface touches (plus /api/overview so a test that
- *  visits the landing page stays healthy). */
-async function stubFloatingChat(page: Page, turnEvents: object[]): Promise<Captured> {
+ *  visits the landing page stays healthy).
+ *
+ *  `historyOnce` answers the FIRST transcript read with those items and every
+ *  later one with the runtime's "this conversation has not started". That is how
+ *  the handoff is provable: whichever surface reads second cannot supply the
+ *  thread, so a thread on screen came from the handoff. */
+async function stubFloatingChat(
+  page: Page,
+  turnEvents: object[],
+  stubs: { historyOnce?: object[] } = {},
+): Promise<Captured> {
   const captured: Captured = { messagePosts: [] };
+  let historyReads = 0;
   await page.route("**/api/overview", (route) => route.fulfill({ json: overviewSummary() }));
   await page.route("**/api/cubepilot/**", async (route) => {
     const req = route.request();
@@ -123,6 +133,7 @@ async function stubFloatingChat(page: Page, turnEvents: object[]): Promise<Captu
             body: sseBody(turnEvents),
           });
         }
+        if (stubs.historyOnce && ++historyReads === 1) return json({ items: stubs.historyOnce });
         return json({ error: "no such session" }, 404);
       }
       // The pending collections: an empty one is the ordinary "nothing is
@@ -193,6 +204,38 @@ test.describe("global floating AI chat", () => {
     // …and switching back to the chat tab removes it again.
     await page.click('[data-od-id="cp-tab-chat"]');
     await expect(fab).toHaveCount(0);
+  });
+
+  test("expanding hands the conversation over, so the pane paints it before its own restore lands", async ({ page }) => {
+    // Both surfaces drive the same session, so the pane would restore the same
+    // thread by itself — but only behind a metadata read and a history read, and
+    // until those land a reader who just expanded a conversation sees a greeting,
+    // which reads as "it is gone" rather than "it got bigger".
+    //
+    // The stub makes that provable: only the FIRST transcript read answers (the
+    // widget's). Every later one is the runtime's "this conversation has not
+    // started", so a thread on screen after the expansion can only be the one the
+    // widget handed over.
+    await stubFloatingChat(page, TURN_DONE, {
+      historyOnce: [
+        { role: "user", content: "上次巡检的结论?" },
+        { role: "assistant", content: [{ type: "text", text: "2 个节点 NotReady,已在 09:20 恢复。" }] },
+      ],
+    });
+    await page.goto("/");
+    await page.click('[data-od-id="fchat-fab"]');
+    await expect(page.locator('[data-od-id="fchat-panel"]')).toContainText("上次巡检的结论?");
+
+    await page.click('[data-od-id="fchat-expand"]');
+
+    // The full pane, on the chat tab, holding the same conversation.
+    await expect(page).toHaveURL(/\/cubepilot/);
+    await expect(page.locator('[data-od-id="pane-chat"]')).toBeVisible();
+    await expect(page.locator('[data-od-id="chat-thread"]')).toContainText("2 个节点 NotReady,已在 09:20 恢复。");
+    // …and saying where it came from, which is the whole point of the move.
+    await expect(page.locator('[data-od-id="handoff-chip"]')).toBeVisible();
+    // The widget became the page: it is not drawn beside it.
+    await expect(page.locator('[data-od-id="fchat-fab"]')).toHaveCount(0);
   });
 
   test("opens the panel, greets from real data, and streams a turn to its end", async ({ page }) => {

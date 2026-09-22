@@ -4,6 +4,13 @@ import { act } from "react-dom/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { FloatingChat } from "./FloatingChat";
+import { takeAgentHandoff } from "./agentHandoff";
+
+// The widget's ⤢ navigates to the full pane — client-side, so the handed-over
+// thread survives the trip — and that needs the app router the unit environment
+// does not mount.
+const { push } = vi.hoisted(() => ({ push: vi.fn() }));
+vi.mock("next/navigation", () => ({ useRouter: () => ({ push }) }));
 
 // No JSX: the repo's tsconfig is Next's (jsx: preserve), which vitest's
 // import analysis cannot transform. Same approach as the other component
@@ -259,6 +266,37 @@ describe("floating chat (global AI assistant)", () => {
     expect(reported).toBe(true);
     // Nothing was read, so no card is invented either.
     expect(container.querySelector('[data-od-id="approval-approve"]')).toBeNull();
+    act(() => root.unmount());
+  });
+
+  it("hands the thread over and opens the full pane when expanded", async () => {
+    // Expanding is the widget's way of saying "same conversation, more room". It
+    // has to arrive on the chat tab (that is where the pane lives), and it has to
+    // carry the thread: the pane restores the same session, but asynchronously,
+    // and a greeting in the meantime reads as a lost conversation.
+    stubApi(TURN_DONE);
+    const { container, root } = renderChat();
+    await act(async () => {});
+    act(() => {
+      (container.querySelector('[data-od-id="fchat-fab"]') as HTMLElement).click();
+    });
+    await waitFor(root, () => (container.textContent ?? "").includes("会话审计已开启"));
+
+    const expand = container.querySelector('[data-od-id="fchat-expand"]') as HTMLElement;
+    expect(expand).not.toBeNull();
+    act(() => {
+      expand.click();
+    });
+
+    expect(push).toHaveBeenCalledWith("/cubepilot");
+    // The module's stored tab is what the page opens on.
+    expect(localStorage.getItem("cubestack.cubepilot.tab")).toBe("chat");
+    // What the reader was looking at travels with them.
+    const handed = takeAgentHandoff();
+    expect(handed).not.toBeNull();
+    expect((handed ?? []).length).toBeGreaterThan(0);
+    // The panel is gone: it just became the page.
+    expect(container.querySelector('[data-od-id="fchat-panel"]')).toBeNull();
     act(() => root.unmount());
   });
 
