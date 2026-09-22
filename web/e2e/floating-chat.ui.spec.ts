@@ -111,11 +111,12 @@ async function stubFloatingChat(page: Page, turnEvents: object[]): Promise<Captu
       return json({ models: [{ id: "qwen38-27b", ownedBy: "cubestack" }], endpoint: "http://ai-gateway.test:8080" });
 
     if (path.includes("/api/cubepilot/pilot/")) {
-      if (path.endsWith("/approval/pending")) return json({ error: "no pending approval" }, 404);
-      if (path.endsWith("/question/pending")) return json({ error: "no pending question" }, 404);
+      // The send and the transcript read are the SAME path, so the method is
+      // what tells them apart — matched first, or the 404 below would answer
+      // the send.
       if (path.endsWith("/messages")) {
         if (method === "POST") {
-          captured.messagePosts.push({ path, body: post() as { content?: string; sessionId?: string } });
+          captured.messagePosts.push({ path, body: post() as { content?: string } });
           return route.fulfill({
             status: 200,
             headers: { "content-type": "text/event-stream", "cache-control": "no-cache" },
@@ -124,11 +125,17 @@ async function stubFloatingChat(page: Page, turnEvents: object[]): Promise<Captu
         }
         return json({ error: "no such session" }, 404);
       }
+      // The pending collections: an empty one is the ordinary "nothing is
+      // parked".
+      if (path.endsWith("/approvals")) return json({ approvals: [] });
+      if (path.endsWith("/questions")) return json({ questions: [] });
       if (path.endsWith("/turn")) return json({ active: false });
-      if (path.endsWith("/approval") && method === "POST") {
+      if (path.endsWith("/approvals/decision") && method === "POST") {
         const body = post();
         return json({ approved: body.decision !== "reject", decision: body.decision, approvalId: body.approvalId });
       }
+      if (path.endsWith("/questions/answer")) return json({ questionId: "q-1", cancelled: false });
+      if (path.endsWith("/questions/cancel")) return json({ questionId: "q-1", cancelled: true });
       if (path.endsWith("/abort") && method === "POST") return json({ ok: true });
     }
     return json({ error: `unstubbed ${method} ${path}` }, 404);
@@ -212,12 +219,16 @@ test.describe("global floating AI chat", () => {
     // The conversation is no longer fresh: the quick prompts are gone.
     await expect(panel.locator('[data-od-id="fchat-quick"]')).toHaveCount(0);
 
-    // The send named the ONE fixed conversation the chat tab owns.
+    // The send names the ONE fixed conversation the chat tab owns — in its
+    // path, with nothing else in the body: the route decodes strictly, so a
+    // leftover field would be a 400.
     await expect
       .poll(() => captured.messagePosts.length)
       .toBe(1);
-    expect(captured.messagePosts[0].body.sessionId).toBe(SESSION_KEY);
-    expect(captured.messagePosts[0].body.content).toBe("集群状态如何?");
+    expect(decodeURIComponent(captured.messagePosts[0].path)).toContain(
+      `/api/v1/sessions/${SESSION_KEY}/messages`,
+    );
+    expect(captured.messagePosts[0].body).toEqual({ content: "集群状态如何?" });
   });
 
   test("parks on the approval card its turn raises, and answers it", async ({ page }) => {

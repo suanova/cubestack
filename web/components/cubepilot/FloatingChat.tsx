@@ -321,10 +321,17 @@ export function FloatingChat() {
       });
     };
     try {
-      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/approval/pending`);
-      if (res.ok && genRef.current === gen) {
+      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/approvals`);
+      // A failed read is thrown so that it is reported rather than folded into
+      // "nothing is parked": an empty collection is the ordinary answer for a
+      // session that is not parked, and a read that could not be made is not
+      // that answer.
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (genRef.current === gen) {
         // A LIST, oldest first: a session can hold several pending approvals
-        // at once, and the oldest is not the only one this surface offers.
+        // at once, and the oldest is not the only one this surface offers. An
+        // empty one draws nothing, which is why the read above reports its
+        // failures rather than leaving this branch to say it silently.
         const { approvals } = (await res.json()) as { approvals?: PendingApproval[] };
         for (const a of approvals ?? []) {
           if (a.approvalId) {
@@ -336,15 +343,24 @@ export function FloatingChat() {
           }
         }
       }
-      // 404 = no pending approval: silent by contract.
-    } catch {
-      /* silent */
+    } catch (e) {
+      // The read failed, so whether a write is parked is simply unknown.
+      // Staying silent would leave a parked turn looking idle, with no card
+      // anywhere — and the card is the only place the decision can be made.
+      // Same reason the question read below reports its failures.
+      if (genRef.current === gen) {
+        setMsgs((m) => [
+          ...m,
+          { ...newAgentMsg(nextId()), phase: "done", error: t("cubepilot.chat.pendingApprovalUnavailable", { error: String(e) }) },
+        ]);
+      }
     }
     try {
-      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/question/pending`);
-      // This endpoint's 404 IS "nothing is pending", not a failed read.
-      if (res.status !== 404 && !res.ok) throw new Error(`HTTP ${res.status}`);
-      if (res.ok && genRef.current === gen) {
+      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/questions`);
+      // An empty collection is "nothing is pending", and a read that FAILED is
+      // thrown so that it is reported rather than folded into "idle".
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (genRef.current === gen) {
         const { questions } = (await res.json()) as {
           questions?: Array<{ id?: string; questions?: AgentQuestionItem[]; timeoutSeconds?: number }>;
         };
@@ -538,10 +554,12 @@ export function FloatingChat() {
   async function sendAgent(text: string, gen: number, msgId: number): Promise<void> {
     let gotDone = false;
     try {
-      const res = await fetch("/api/cubepilot/pilot/api/v1/messages", {
+      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(SESSION_KEY)}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content: text, sessionId: SESSION_KEY }),
+        // The conversation is named by the path. Bodies are decoded strictly,
+        // so the key does not belong in the body as well.
+        body: JSON.stringify({ content: text }),
       });
       if (!res.ok) {
         // Request-phase failure (400/409/503-warming): surfaced as an error on
@@ -621,7 +639,7 @@ export function FloatingChat() {
     // look like it landed immediately.
     patchApproval(callId, (a) => ({ ...a, state: "deciding", error: undefined }));
     try {
-      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(SESSION_KEY)}/approval`, {
+      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(SESSION_KEY)}/approvals/decision`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         // The id is required: a session can hold several pending approvals,
@@ -660,15 +678,15 @@ export function FloatingChat() {
    *  refusal (404/409) does not say WHY, and guessing is what loses an answer. */
   async function reopenOrExpireQuestion(callId: string): Promise<void> {
     try {
-      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(SESSION_KEY)}/question/pending`);
-      if (res.status === 404) {
-        patchQuestion(callId, (q) => ({ ...q, state: "expired", error: undefined }));
-        return;
-      }
+      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(SESSION_KEY)}/questions`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const { questions } = (await res.json()) as {
         questions?: Array<{ id?: string; questions?: AgentQuestionItem[]; timeoutSeconds?: number }>;
       };
+      // Membership in the collection IS the open/closed signal — the gateway's
+      // own account of what is still waiting. A question that is absent is gone
+      // (expired or answered); a read that failed does not get here at all, so
+      // "gone" and "could not ask" stay two different answers.
       const still = (questions ?? []).find((q) => q.id === callId);
       if (still) {
         patchQuestion(callId, (q) => ({
@@ -688,11 +706,17 @@ export function FloatingChat() {
   async function submitQuestion(callId: string, answers: Record<string, string[]>, cancel: boolean): Promise<void> {
     patchQuestion(callId, (q) => ({ ...q, state: "submitting", answers: cancel ? q.answers : answers, error: undefined }));
     try {
-      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(SESSION_KEY)}/question`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: callId, ...(cancel ? { cancel: true } : { answers }) }),
-      });
+      const res = await fetch(
+        `/api/cubepilot/pilot/api/v1/sessions/${enc(SESSION_KEY)}/questions/${cancel ? "cancel" : "answer"}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          // Answer and cancel are two routes rather than one route with a flag:
+          // each body carries exactly the fields its route acts on, so a cancel
+          // cannot arrive carrying answers.
+          body: JSON.stringify(cancel ? { id: callId } : { id: callId, answers }),
+        },
+      );
       if (!res.ok) {
         const body = (await res.json().catch(() => null)) as { error?: string } | null;
         if (res.status === 404 || res.status === 409) {
