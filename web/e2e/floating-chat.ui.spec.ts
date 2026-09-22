@@ -80,6 +80,12 @@ const TURN_APPROVAL = [
   },
 ];
 
+/** The computed view-transition name of an element. The morph's two ends carry
+ *  the same one and nothing else does, so this is how the wiring is asserted —
+ *  the animation itself is the browser's and is not observable from a test. */
+const vtName = (page: Page, selector: string) =>
+  page.locator(selector).evaluate((el) => getComputedStyle(el).viewTransitionName);
+
 function sseBody(events: object[]): string {
   return events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("");
 }
@@ -261,21 +267,18 @@ test.describe("global floating AI chat", () => {
     // the pane's thread, with never more than one of them on screen at a time.
     await stubFloatingChat(page, TURN_DONE);
     await page.goto("/");
-    const name = (selector: string) =>
-      page.locator(selector).evaluate((el) => getComputedStyle(el).viewTransitionName);
-
-    expect(await name('[data-od-id="fchat-fab"]')).toBe("agent-chat");
+    expect(await vtName(page, '[data-od-id="fchat-fab"]')).toBe("agent-chat");
 
     await page.click('[data-od-id="fchat-fab"]');
     // Open: the panel takes the name, the launcher gives it up.
-    expect(await name('[data-od-id="fchat-panel"]')).toBe("agent-chat");
-    expect(await name('[data-od-id="fchat-fab"]')).toBe("none");
+    expect(await vtName(page, '[data-od-id="fchat-panel"]')).toBe("agent-chat");
+    expect(await vtName(page, '[data-od-id="fchat-fab"]')).toBe("none");
 
     await page.goto("/cubepilot");
     await expect(page.locator('[data-od-id="chat-thread"]')).toBeVisible();
     // Polled: the name arrives with the agent selection, which the pane makes
     // after its own mount (the same element serves the model playground, unnamed).
-    await expect.poll(() => name('[data-od-id="chat-thread"]')).toBe("agent-chat");
+    await expect.poll(() => vtName(page, '[data-od-id="chat-thread"]')).toBe("agent-chat");
   });
 
   test("opens on the newest message, not the oldest", async ({ page }) => {
@@ -307,13 +310,21 @@ test.describe("global floating AI chat", () => {
     await stubFloatingChat(page, TURN_DONE);
     await page.goto("/cubepilot");
     await expect(page.locator('[data-od-id="fchat-fab"]')).toHaveCount(0);
+    // With the assistant selected, the thread is the named end of the morph…
+    await expect.poll(() => vtName(page, '[data-od-id="chat-thread"]')).toBe("agent-chat");
 
     await page.click('[data-od-id="obj-qwen38-27b"]');
     await expect(page.locator('[data-od-id="fchat-fab"]')).toBeVisible();
+    // …and with a model selected it is the launcher: the same two ends the route
+    // change morphs between, so switching objects inside the page reads as the
+    // same move rather than as one surface blinking out.
+    await expect.poll(() => vtName(page, '[data-od-id="fchat-fab"]')).toBe("agent-chat");
+    expect(await vtName(page, '[data-od-id="chat-thread"]')).toBe("none");
 
     // …and it goes away again when the assistant is what is on screen.
     await page.click('[data-od-id="obj-cubepilot"]');
     await expect(page.locator('[data-od-id="fchat-fab"]')).toHaveCount(0);
+    await expect.poll(() => vtName(page, '[data-od-id="chat-thread"]')).toBe("agent-chat");
   });
 
   test("opens the panel, greets from real data, and streams a turn to its end", async ({ page }) => {

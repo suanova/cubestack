@@ -26,6 +26,7 @@
 
 import { Box, Popover, SxProps, Theme } from "@mui/material";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import type { PointerEvent as ReactPointerEvent } from "react";
 
 import {
@@ -63,7 +64,7 @@ import { CopyBtn, ParamsPanel, SampleParams } from "./Playground";
 import { AgentThread } from "./AgentThread";
 import { subscribeAgentHandoff, takeAgentHandoff } from "./agentHandoff";
 import { setPaneObject } from "./paneObject";
-import { AGENT_CHAT_TRANSITION } from "./viewTransition";
+import { AGENT_CHAT_TRANSITION, withViewTransition } from "./viewTransition";
 import { Btn, Card, CpTextArea, Icons, Pill, monoSx, useToast } from "./ui";
 
 // The agent's identity colour is the violet globals.css derives from --accent,
@@ -535,6 +536,21 @@ export function ChatPane() {
     setPaneObject(objKind);
     return () => setPaneObject(null);
   }, [objKind]);
+
+  /** Switch what the pane shows as ONE view transition, so whichever surface sits
+   *  on the other side of the switch morphs with it: selecting the assistant pulls
+   *  the floating launcher into this thread, and selecting a model sends the thread
+   *  back into the corner. It is the same pair of elements the route change morphs,
+   *  for the same reason — the two are one conversation, and one of them is about to
+   *  become the other.
+   *
+   *  The commit has to happen inside the transition's callback, which is what
+   *  flushSync is for; the launcher appears or disappears one effect later (the
+   *  shell reads the selection from the store), so the arrival probe is what waits
+   *  for that half. */
+  function switchObject(select: () => void, arrived: () => boolean): void {
+    withViewTransition(() => flushSync(select), arrived);
+  }
 
   /** The floating surface's ⤢ hands its thread over and sends the reader here.
    *  This pane is normally already mounted when that happens — the module's tabs
@@ -1555,7 +1571,7 @@ export function ChatPane() {
           <Box
             component="button"
             type="button"
-            onClick={() => selectAgent()}
+            onClick={() => switchObject(() => selectAgent(), () => !document.querySelector('[data-od-id="fchat-fab"]'))}
             aria-pressed={isAgent}
             data-od-id="obj-cubepilot"
             sx={{
@@ -1607,7 +1623,7 @@ export function ChatPane() {
                 key={m.id}
                 component="button"
                 type="button"
-                onClick={() => selectModel(m.id)}
+                onClick={() => switchObject(() => selectModel(m.id), () => !!document.querySelector('[data-od-id="fchat-fab"]'))}
                 aria-pressed={active}
                 title={m.id}
                 data-od-id={`obj-${m.id}`}
