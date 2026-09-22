@@ -102,7 +102,7 @@ $(info "What the overview should show against this KinD cluster")
                     node extended resources drive these.
   推理服务          total 1 (dsv4-flash-pd) · ready 0 · scaling 0
   开发环境          total 1 (dev-llm-alice) · running 0 · stopped 0
-  GPU 分配          计算池 1 (reads spec.resources.gpuCount directly) ·
+  GPU 分配          计算池 1 (reads spec.resources.gpu.count directly) ·
                     推理池 0 · 已分配 1 · 空闲 0
 
   Caveats (honest empty states, not bugs):

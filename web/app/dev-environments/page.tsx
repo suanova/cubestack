@@ -468,7 +468,7 @@ function EnvTable({
                   </td>
                   <td style={tdSx}>
                     <Box component="span" sx={{ fontFamily: "var(--font-mono)", fontSize: 12 }}>
-                      {gpuText} · {e.resources.cpu}C / {e.resources.memory}
+                      {gpuText} · {t("dev.cpu.cores", { n: e.resources.cpu })} / {e.resources.memory}
                     </Box>
                   </td>
                   <td style={tdSx}>
@@ -669,7 +669,7 @@ function SpecCard({ e }: { e: DevEnvironmentSummary }) {
     [t("dev.spec.type"), e.type],
     [t("dev.spec.image"), e.image],
     [t("dev.spec.gpu"), gpu ? `${gpu.count} × ${gpu.vendor}` : t("dev.gpu.none")],
-    [t("dev.spec.cpu"), `${e.resources.cpu}C / ${e.resources.memory}`],
+    [t("dev.spec.cpu"), `${t("dev.cpu.cores", { n: e.resources.cpu })} / ${e.resources.memory}`],
     [t("dev.spec.storage"), e.storage ? `${e.storage.size} · ${e.storage.mountPath}` : t("dev.spec.idleOff")],
     [t("dev.spec.idle"), e.idleTimeout === 0 ? t("dev.spec.idleOff") : t("dev.spec.idleMin", { minutes: String(Math.round(e.idleTimeout / 60)) })],
     [t("dev.spec.sshKey"), e.sshClientKeySecret ?? t("dev.spec.sshKeyNone")],
@@ -757,8 +757,15 @@ interface Draft {
   idle: number;
 }
 
-const CPU_OPTIONS = ["16", "32", "64"];
-const MEM_OPTIONS = ["64Gi", "128Gi", "256Gi"];
+// CPU is picked in cores and memory follows it: the platform offers 1x, 2x or 4x
+// the core count in GiB, so the two selects cannot be driven into a pairing the
+// platform does not have (1 core / 1Gi, 2 cores / 8Gi, ...).
+const CPU_OPTIONS = ["1", "2", "4", "8", "16"];
+const MEM_TIER = [1, 2, 4];
+
+function memoryOptions(cpu: string): string[] {
+  return MEM_TIER.map((tier) => `${Number(cpu) * tier}Gi`);
+}
 
 function CreateWizard({
   open,
@@ -782,8 +789,8 @@ function CreateWizard({
     // "none" rather than defaulting the environment into a brand-gate failure.
     accelerator: "none",
     gpuCount: 1,
-    cpu: "16",
-    memory: "64Gi",
+    cpu: "2",
+    memory: "4Gi",
     storageGi: 200,
     idle: 0,
   });
@@ -815,6 +822,15 @@ function CreateWizard({
   }, [open]);
 
   const setField = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft((prev) => ({ ...prev, [key]: value }));
+
+  // Changing the core count changes which memory sizes are legal, so the memory
+  // is re-derived rather than left pointing at a total that is no longer on the
+  // list. The 1x/2x/4x ratio the user picked is what carries over.
+  const setCpu = (cpu: string) =>
+    setDraft((prev) => {
+      const tier = MEM_TIER.find((t) => `${Number(prev.cpu) * t}Gi` === prev.memory) ?? 2;
+      return { ...prev, cpu, memory: `${Number(cpu) * tier}Gi` };
+    });
 
   const nameValid = DNS_LABEL_RE.test(draft.name.trim()) && draft.name.trim().length > 0;
   const step1Valid = nameValid && !!draft.namespace && !!draft.image;
@@ -858,7 +874,9 @@ function CreateWizard({
       type: draft.type,
       image: draft.image,
       accelerator: draft.accelerator,
-      gpuCount: draft.gpuCount,
+      // A card count is only meaningful with an accelerator: sending the stale
+      // default alongside "none" would describe a GPU the user did not ask for.
+      ...(gpuRequested ? { gpuCount: draft.gpuCount } : {}),
       cpu: draft.cpu,
       memory: draft.memory,
       storageGi: draft.storageGi,
@@ -972,15 +990,15 @@ function CreateWizard({
                     </WizField>
                   ) : null}
                   <WizField label={t("dev.wizard.cpu")}>
-                    <Select size="small" fullWidth value={draft.cpu} onChange={(e) => setField("cpu", e.target.value)}>
+                    <Select size="small" fullWidth value={draft.cpu} onChange={(e) => setCpu(e.target.value)}>
                       {CPU_OPTIONS.map((c) => (
-                        <MenuItem key={c} value={c}>{c}C</MenuItem>
+                        <MenuItem key={c} value={c}>{t("dev.cpu.cores", { n: c })}</MenuItem>
                       ))}
                     </Select>
                   </WizField>
-                  <WizField label={t("dev.wizard.memory")}>
+                  <WizField label={t("dev.wizard.memory")} hint={t("dev.wizard.memoryHint")}>
                     <Select size="small" fullWidth value={draft.memory} onChange={(e) => setField("memory", e.target.value)}>
-                      {MEM_OPTIONS.map((m) => (
+                      {memoryOptions(draft.cpu).map((m) => (
                         <MenuItem key={m} value={m}>{m}</MenuItem>
                       ))}
                     </Select>
@@ -1013,7 +1031,7 @@ function CreateWizard({
                       t("dev.wizard.accelerator"),
                       gpuRequested ? `${draft.gpuCount} × ${draft.accelerator}` : t("dev.wizard.accelerator.none"),
                     ],
-                    [t("dev.wizard.cpu"), `${draft.cpu}C`],
+                    [t("dev.wizard.cpu"), t("dev.cpu.cores", { n: draft.cpu })],
                     [t("dev.wizard.memory"), draft.memory],
                     [t("dev.wizard.storage"), `${draft.storageGi}Gi`],
                     [t("dev.wizard.idle"), draft.idle === 0 ? t("dev.spec.idleOff") : t("dev.spec.idleMin", { minutes: String(draft.idle / 60) })],

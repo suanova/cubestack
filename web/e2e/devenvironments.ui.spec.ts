@@ -167,6 +167,11 @@ test.describe("dev environments landing (mocked data)", () => {
       type: "jupyter",
       image: "harbor.isuanova.com/suanova/jupyter-minimal:latest",
       accelerator: "none",
+      // Not just "ignored server-side": the stale default must not be sent at
+      // all, or the request describes a card nobody asked for.
+      cpu: "2",
+      memory: "4Gi",
     });
+    expect(posts[0]).not.toHaveProperty("gpuCount");
   });
 });
