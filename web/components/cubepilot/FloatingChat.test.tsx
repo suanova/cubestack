@@ -295,8 +295,9 @@ describe("floating chat (global AI assistant)", () => {
     const handed = takeAgentHandoff();
     expect(handed).not.toBeNull();
     expect((handed ?? []).length).toBeGreaterThan(0);
-    // The panel is gone: it just became the page.
-    expect(container.querySelector('[data-od-id="fchat-panel"]')).toBeNull();
+    // The panel stays on screen here: it is the element the view transition morphs
+    // FROM, and in the app it is the route change that removes this whole surface.
+    expect(container.querySelector('[data-od-id="fchat-panel"]')).not.toBeNull();
     act(() => root.unmount());
   });
 

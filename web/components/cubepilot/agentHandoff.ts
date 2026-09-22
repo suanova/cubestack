@@ -39,3 +39,24 @@ export function subscribeAgentHandoff(listener: () => void): () => void {
     listeners.delete(listener);
   };
 }
+
+/** While its panel is open the floating surface registers a reader for the thread
+ *  it is showing, so an entry point that cannot see it — the sidebar's own link to
+ *  the chat page — can still offer what it holds. Null when no panel is open. */
+let floatingThread: (() => ThreadMsg[]) | null = null;
+
+export function registerFloatingThread(provider: (() => ThreadMsg[]) | null): void {
+  floatingThread = provider;
+}
+
+/** offerHandoffFromFloatingChat offers the floating panel's thread, when a panel
+ *  is open and has one. Every entry into the chat page calls this before
+ *  navigating, so the conversation the reader was looking at arrives with them
+ *  whichever way they got there. With no panel open there is nothing to hand
+ *  over, and the pane restores exactly as it always did — which is also why this
+ *  offers nothing rather than an empty thread: an empty offer would paint a
+ *  greeting the pane is about to replace anyway. */
+export function offerHandoffFromFloatingChat(): void {
+  const msgs = floatingThread?.() ?? null;
+  if (msgs && msgs.length > 0) publishAgentHandoff(msgs);
+}

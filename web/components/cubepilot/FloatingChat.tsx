@@ -55,8 +55,9 @@ import { useI18n } from "@/lib/i18n";
 import { AgentThread } from "./AgentThread";
 import { HitlDock, type ApprovalDecision } from "./HitlDock";
 import { Btn, CpTextArea, Icons, Pill, monoSx, useToast } from "./ui";
-import { publishAgentHandoff } from "./agentHandoff";
+import { offerHandoffFromFloatingChat, registerFloatingThread } from "./agentHandoff";
 import { setStoredTab } from "./tabStore";
+import { AGENT_CHAT_TRANSITION, withViewTransition } from "./viewTransition";
 
 // The same fixed conversation key the chat tab uses (see ChatPane): one
 // conversation per user, wherever they open it.
@@ -533,14 +534,30 @@ export function FloatingChat() {
   /** ⤢ opens this conversation in the full pane: the module's chat tab, with the
    *  agent selected. It is the same session either surface would restore, so the
    *  thread is handed over rather than left to be rediscovered — an expansion
-   *  that lands on a greeting reads as a lost conversation, not a bigger one. */
+   *  that lands on a greeting reads as a lost conversation, not a bigger one —
+   *  and the navigation runs inside a view transition, so the panel is seen
+   *  growing into the thread it becomes. */
   function expandToPane(): void {
-    publishAgentHandoff(msgs);
+    offerHandoffFromFloatingChat();
     setStoredTab("chat");
-    stopFollowing();
-    setOpen(false);
-    router.push("/cubepilot");
+    // The panel is deliberately left open: it is the element the browser morphs
+    // FROM, so it has to still be on screen when the transition captures the
+    // outgoing state. Entering the chat tab is what unmounts this whole surface,
+    // and its unmount cleanup retires the follow loop.
+    withViewTransition(
+      () => router.push("/cubepilot"),
+      () => !!document.querySelector('[data-od-id="pane-chat"]'),
+    );
   }
+
+  // While the panel is open, publish what it holds to whoever asks: the sidebar's
+  // own link to the chat page cannot see this component, and the conversation is
+  // as much the reader's when they leave through the nav as when they leave
+  // through ⤢.
+  useEffect(() => {
+    registerFloatingThread(open ? () => msgs : null);
+    return () => registerFloatingThread(null);
+  }, [open, msgs]);
 
   // Focus the composer on open, so Enter starts talking immediately.
   useEffect(() => {
@@ -900,6 +917,11 @@ export function FloatingChat() {
           right: "20px",
           bottom: "20px",
           zIndex: 40,
+          // The morph's far end when the reader LEAVES the chat page: the pane's
+          // thread collapses into this launcher. Named only while closed, because
+          // the panel below carries the same name when it is open and one element
+          // may carry it at a time.
+          ...(open ? {} : { viewTransitionName: AGENT_CHAT_TRANSITION }),
           width: "52px",
           height: "52px",
           borderRadius: "50%",
@@ -928,6 +950,8 @@ export function FloatingChat() {
             right: "20px",
             bottom: "84px",
             zIndex: 40,
+            // The morph's near end: the panel grows into the pane's thread on ⤢.
+            ...(open ? { viewTransitionName: AGENT_CHAT_TRANSITION } : {}),
             width: "min(460px, calc(100vw - 40px))",
             height: "min(680px, calc(100dvh - 120px))",
             display: "flex",

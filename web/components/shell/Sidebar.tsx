@@ -8,9 +8,13 @@
 
 import { Box, SxProps, Theme, Typography } from "@mui/material";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
+import type { MouseEvent as ReactMouseEvent } from "react";
 
 import { IconName, NavIcon } from "@/components/shell/NavIcons";
+import { offerHandoffFromFloatingChat } from "@/components/cubepilot/agentHandoff";
+import { getTabSnapshot } from "@/components/cubepilot/tabStore";
+import { withViewTransition } from "@/components/cubepilot/viewTransition";
 import { MessageKey, useI18n } from "@/lib/i18n";
 import { isActive } from "@/lib/nav";
 
@@ -46,6 +50,7 @@ function NavLink({
   label: string;
 }) {
   const active = item.href !== undefined && isActive(item.href, pathname);
+  const router = useRouter();
   const sx: SxProps<Theme> = {
     display: "flex",
     alignItems: "center",
@@ -78,12 +83,36 @@ function NavLink({
       </Box>
     );
   }
+  // The two navigations that ARE a conversation changing size: entering the
+  // 智能助手 chat page, and leaving it while its agent pane is on screen. Both go
+  // through a view transition (the panel thread growing into the pane, the pane
+  // collapsing back into the launcher) and the entry also hands over whatever the
+  // floating panel is showing. Every other link navigates as it always did.
+  const entersChat = item.href === "/cubepilot";
+  const leavesChatPane = pathname === "/cubepilot" && getTabSnapshot() === "chat";
+  const onClick =
+    entersChat || leavesChatPane
+      ? (event: ReactMouseEvent<HTMLAnchorElement>) => {
+          // Anything but a plain left click is the browser's (new tab, new
+          // window, download): those must keep working, un-transitioned.
+          if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
+          event.preventDefault();
+          if (entersChat) offerHandoffFromFloatingChat();
+          withViewTransition(
+            () => router.push(item.href as string),
+            entersChat
+              ? () => !!document.querySelector('[data-od-id="pane-chat"]')
+              : () => !!document.querySelector('[data-od-id="fchat-fab"]'),
+          );
+        }
+      : undefined;
   return (
     <Box
       component={Link}
       href={item.href}
       data-od-id={item.dataOdId}
       aria-current={active ? "page" : undefined}
+      onClick={onClick}
       sx={{
         ...sx,
         textDecoration: "none",

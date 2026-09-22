@@ -1,6 +1,12 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { publishAgentHandoff, subscribeAgentHandoff, takeAgentHandoff } from "./agentHandoff";
+import {
+  offerHandoffFromFloatingChat,
+  publishAgentHandoff,
+  registerFloatingThread,
+  subscribeAgentHandoff,
+  takeAgentHandoff,
+} from "./agentHandoff";
 import { newAgentMsg, type ThreadMsg } from "@/lib/cubepilot/agentThread";
 
 // The handoff is the one thing that makes "the widget grew into the page" land on
@@ -42,5 +48,38 @@ describe("agent handoff", () => {
     const msgs = thread();
     publishAgentHandoff(msgs);
     expect(takeAgentHandoff()).toBe(msgs);
+  });
+});
+
+describe("offering from the floating panel", () => {
+  afterEach(() => {
+    registerFloatingThread(null);
+  });
+
+  it("offers nothing when no panel is open", () => {
+    // The ordinary case: most visits to the chat page are not an expansion, and
+    // an empty offer would paint a greeting over the pane's own restore.
+    offerHandoffFromFloatingChat();
+    expect(takeAgentHandoff()).toBeNull();
+  });
+
+  it("offers nothing for a panel that has not said anything yet", () => {
+    registerFloatingThread(() => []);
+    offerHandoffFromFloatingChat();
+    expect(takeAgentHandoff()).toBeNull();
+  });
+
+  it("offers what the open panel is showing", () => {
+    const msgs = thread();
+    registerFloatingThread(() => msgs);
+    offerHandoffFromFloatingChat();
+    expect(takeAgentHandoff()).toBe(msgs);
+  });
+
+  it("stops offering once the panel is gone", () => {
+    registerFloatingThread(() => thread());
+    registerFloatingThread(null);
+    offerHandoffFromFloatingChat();
+    expect(takeAgentHandoff()).toBeNull();
   });
 });

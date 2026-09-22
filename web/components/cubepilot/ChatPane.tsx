@@ -62,6 +62,7 @@ import { HitlDock, type ApprovalDecision } from "./HitlDock";
 import { CopyBtn, ParamsPanel, SampleParams } from "./Playground";
 import { AgentThread } from "./AgentThread";
 import { subscribeAgentHandoff, takeAgentHandoff } from "./agentHandoff";
+import { AGENT_CHAT_TRANSITION } from "./viewTransition";
 import { Btn, Card, CpTextArea, Icons, Pill, monoSx, useToast } from "./ui";
 
 // The agent's identity colour is the violet globals.css derives from --accent,
@@ -1839,6 +1840,11 @@ export function ChatPane() {
             data-od-id="chat-thread"
             aria-live="polite"
             sx={{
+              // The far end of the floating panel's morph, and only for the agent:
+              // this is the same conversation that panel shows, so the widget can
+              // be seen growing into it (and collapsing back out of it). The model
+              // playground below is a different surface and stays unnamed.
+              ...(isAgent ? { viewTransitionName: AGENT_CHAT_TRANSITION } : {}),
               // 480px basis keeps the thread sized when the card has no
               // definite height (narrow layout); otherwise it flex-fills and
               // scrolls inside its own scrollbar.

@@ -238,6 +238,46 @@ test.describe("global floating AI chat", () => {
     await expect(page.locator('[data-od-id="fchat-fab"]')).toHaveCount(0);
   });
 
+  test("the sidebar's own link to the chat page hands the thread over too", async ({ page }) => {
+    // ⤢ is not the only way in, and the conversation belongs to the reader, not to
+    // one button: leaving through the nav has to carry the same thread.
+    await stubFloatingChat(page, TURN_DONE, {
+      historyOnce: [{ role: "user", content: "上次巡检的结论?" }, { role: "assistant", content: [{ type: "text", text: "2 个节点 NotReady。" }] }],
+    });
+    await page.goto("/");
+    await page.click('[data-od-id="fchat-fab"]');
+    await expect(page.locator('[data-od-id="fchat-panel"]')).toContainText("上次巡检的结论?");
+
+    await page.click('[data-od-id="nav-copilot"]');
+
+    await expect(page).toHaveURL(/\/cubepilot/);
+    await expect(page.locator('[data-od-id="handoff-chip"]')).toBeVisible();
+    await expect(page.locator('[data-od-id="chat-thread"]')).toContainText("2 个节点 NotReady。");
+  });
+
+  test("the two surfaces carry one view-transition name, so the morph has something to move between", async ({ page }) => {
+    // The animation itself is the browser's and cannot be asserted here; what this
+    // pins is the wiring it needs — the same name on the launcher, the panel and
+    // the pane's thread, with never more than one of them on screen at a time.
+    await stubFloatingChat(page, TURN_DONE);
+    await page.goto("/");
+    const name = (selector: string) =>
+      page.locator(selector).evaluate((el) => getComputedStyle(el).viewTransitionName);
+
+    expect(await name('[data-od-id="fchat-fab"]')).toBe("agent-chat");
+
+    await page.click('[data-od-id="fchat-fab"]');
+    // Open: the panel takes the name, the launcher gives it up.
+    expect(await name('[data-od-id="fchat-panel"]')).toBe("agent-chat");
+    expect(await name('[data-od-id="fchat-fab"]')).toBe("none");
+
+    await page.goto("/cubepilot");
+    await expect(page.locator('[data-od-id="chat-thread"]')).toBeVisible();
+    // Polled: the name arrives with the agent selection, which the pane makes
+    // after its own mount (the same element serves the model playground, unnamed).
+    await expect.poll(() => name('[data-od-id="chat-thread"]')).toBe("agent-chat");
+  });
+
   test("opens the panel, greets from real data, and streams a turn to its end", async ({ page }) => {
     const captured = await stubFloatingChat(page, TURN_DONE);
     await page.goto("/");
