@@ -381,6 +381,11 @@ interface Stubs {
    *  collection is the "gone" signal, so a status here is the gateway being
    *  unreadable and never a question that settled. */
   pendingQuestionStatus?: number;
+  /** The same for the approval read, and for the same reason: an empty
+   *  collection is "nothing is parked", so a status here is a read that could
+   *  not be made — which must be visible, since the write it hides cannot be
+   *  unblocked from a pane that draws nothing. */
+  pendingApprovalStatus?: number;
 }
 
 /** Apply the requested change to the stored posture, as the route does. */
@@ -515,6 +520,7 @@ async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
       }
       if (path.endsWith("/approvals")) {
         captured.pendingPaths.push(path);
+        if (stubs.pendingApprovalStatus) return json({ error: "could not read the gateway" }, stubs.pendingApprovalStatus);
         // A collection, and an empty one IS the ordinary "nothing pending"
         // answer: a session can hold several approvals at once, or none, and
         // the route no longer answers 404 for the empty case.
@@ -727,6 +733,21 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     const decoded = captured.pendingPaths.map((p) => decodeURIComponent(p));
     expect(decoded.some((p) => p.includes(`/api/v1/sessions/${SESSION_KEY}/approvals`))).toBe(true);
     expect(decoded.some((p) => p.includes(`/api/v1/sessions/${SESSION_KEY}/questions`))).toBe(true);
+  });
+
+  test("reports a pending-approval read that failed, not a conversation that looks idle", async ({ page }) => {
+    // The gateway may be holding a write this pane cannot see, and a pane that
+    // draws nothing leaves the user with no card to unblock it — the same
+    // reasoning the question read follows. An empty collection is the ordinary
+    // "nothing is parked" and says nothing; a read that FAILED is not that, and
+    // the two are only tellable apart if the failure is said out loud.
+    await stubAgent(page, { sessions: [SESSION], history: HISTORY, pendingApprovalStatus: 502 });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="obj-cubepilot"]').click();
+
+    await expect(page.locator('[data-od-id="chat-thread"]')).toContainText("无法确认是否有待审批的写操作");
+    // Nothing was read, so no card is invented either.
+    await expect(page.locator('[data-od-id="approval-item"]')).toHaveCount(0);
   });
 
   test("restores the one fixed conversation, and never reads the session list", async ({ page }) => {

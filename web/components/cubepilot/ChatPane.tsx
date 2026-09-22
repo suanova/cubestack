@@ -646,7 +646,12 @@ export function ChatPane() {
     };
     try {
       const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/approvals`);
-      if (res.ok && genRef.current === gen) {
+      // A failed read is thrown so that it is reported rather than folded into
+      // "nothing is parked": an empty collection is the ordinary answer for a
+      // session that is not parked, and a read that could not be made is not
+      // that answer.
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (genRef.current === gen) {
         // A LIST, and an empty one is the ordinary answer for a session that is
         // not parked — the collection exists and is empty, so a read that
         // succeeded and found nothing never reaches the catch below.
@@ -655,8 +660,17 @@ export function ChatPane() {
           if (a.approvalId) attachApproval(a);
         }
       }
-    } catch {
-      /* silent */
+    } catch (e) {
+      // The read failed, so whether a write is parked is simply unknown. Staying
+      // silent would leave a parked turn looking idle, with no card anywhere —
+      // and the card is the only place the decision can be made. Same reason the
+      // question read below reports its failures.
+      if (genRef.current === gen) {
+        setMsgs((m) => [
+          ...m,
+          { ...newAgentMsg(nextId()), phase: "done", error: t("cubepilot.chat.pendingApprovalUnavailable", { error: String(e) }) },
+        ]);
+      }
     }
     try {
       const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/questions`);
