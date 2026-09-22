@@ -360,6 +360,15 @@ const zhCN = {
   "cubepilot.chat.expandTool": "展开查看输出",
   "cubepilot.chat.collapseTool": "收起输出",
 
+  // 全局浮动 AI 聊天(右下角)— the compact surface of the same CubePilot
+  // conversation the 智能助手 chat tab owns (one fixed session key).
+  "fchat.title": "CubeStack AI 智算 Copilot",
+  "fchat.open": "打开 AI 助手",
+  "fchat.close": "收起 AI 助手",
+  "fchat.tryAsk": "💡 试着问我:",
+  "fchat.qp1": "集群现在有哪些推理服务?状态如何?",
+  "fchat.qp2": "帮我检查各 GPU 节点的显存使用率",
+
   // 自动化任务 tab
   "cubepilot.tasks.title": "自动化任务",
   "cubepilot.tasks.desc": "定时 AI 任务 · 预置与自定义模板 · 以创建者身份运行 · 报告可查询导出",
@@ -894,6 +903,15 @@ const zhTW: Dictionary = {
   "cubepilot.chat.earlier": "更早的內容 ({count})",
   "cubepilot.chat.expandTool": "展開查看輸出",
   "cubepilot.chat.collapseTool": "收起輸出",
+
+  // 全域浮動 AI 聊天(右下角)— the compact surface of the same CubePilot
+  // conversation the 智能助手 chat tab owns (one fixed session key).
+  "fchat.title": "CubeStack AI 智算 Copilot",
+  "fchat.open": "開啟 AI 助手",
+  "fchat.close": "收合 AI 助手",
+  "fchat.tryAsk": "💡 試著問我:",
+  "fchat.qp1": "叢集現在有哪些推理服務?狀態如何?",
+  "fchat.qp2": "幫我檢查各 GPU 節點的顯存使用率",
   "cubepilot.tasks.title": "自動化任務",
   "cubepilot.tasks.desc": "定時 AI 任務 · 預設與自訂範本 · 以建立者身分執行 · 報告可查詢匯出",
   "cubepilot.tasks.new": "新增任務",
@@ -1418,6 +1436,15 @@ const en: Dictionary = {
   "cubepilot.chat.earlier": "Earlier content ({count})",
   "cubepilot.chat.expandTool": "Show output",
   "cubepilot.chat.collapseTool": "Hide output",
+
+  // Global floating AI chat (bottom-right) — the compact surface of the same
+  // CubePilot conversation the AI Assistant chat tab owns (one fixed session key).
+  "fchat.title": "CubeStack AI Copilot",
+  "fchat.open": "Open the AI assistant",
+  "fchat.close": "Close the AI assistant",
+  "fchat.tryAsk": "💡 Try asking:",
+  "fchat.qp1": "What inference services are running in the cluster right now, and how healthy are they?",
+  "fchat.qp2": "Check the GPU memory usage across the cluster nodes",
   "cubepilot.tasks.title": "Scheduled Tasks",
   "cubepilot.tasks.desc": "Scheduled AI tasks · preset & custom templates · runs as the creator · reports viewable & exportable",
   "cubepilot.tasks.new": "New Task",
