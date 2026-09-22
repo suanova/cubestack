@@ -299,6 +299,23 @@ test.describe("global floating AI chat", () => {
     await expect.poll(() => thread.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight)).toBeLessThan(8);
   });
 
+  test("comes back on the chat tab when a MODEL is what that tab shows", async ({ page }) => {
+    // The chat tab IS the conversation only while the assistant is what it shows.
+    // A model playground is a different chat, so the assistant belongs there —
+    // hiding it would take it away exactly when a reader might want to ask about
+    // what the model just said.
+    await stubFloatingChat(page, TURN_DONE);
+    await page.goto("/cubepilot");
+    await expect(page.locator('[data-od-id="fchat-fab"]')).toHaveCount(0);
+
+    await page.click('[data-od-id="obj-qwen38-27b"]');
+    await expect(page.locator('[data-od-id="fchat-fab"]')).toBeVisible();
+
+    // …and it goes away again when the assistant is what is on screen.
+    await page.click('[data-od-id="obj-cubepilot"]');
+    await expect(page.locator('[data-od-id="fchat-fab"]')).toHaveCount(0);
+  });
+
   test("opens the panel, greets from real data, and streams a turn to its end", async ({ page }) => {
     const captured = await stubFloatingChat(page, TURN_DONE);
     await page.goto("/");

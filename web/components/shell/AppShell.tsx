@@ -10,6 +10,11 @@ import { usePathname } from "next/navigation";
 import { ReactNode, useMemo, useSyncExternalStore } from "react";
 
 import { FloatingChat } from "@/components/cubepilot/FloatingChat";
+import {
+  getPaneObjectSnapshot,
+  getServerPaneObjectSnapshot,
+  subscribePaneObject,
+} from "@/components/cubepilot/paneObject";
 import { getServerTabSnapshot, getTabSnapshot, subscribeTab } from "@/components/cubepilot/tabStore";
 import { Sidebar } from "@/components/shell/Sidebar";
 import { Topbar } from "@/components/shell/Topbar";
@@ -22,15 +27,19 @@ export function AppShell({ children }: { children: ReactNode }) {
   // The 智能助手 tab the user has open: the floating chat must not sit on top
   // of the very page it is a copy of.
   const cubepilotTab = useSyncExternalStore(subscribeTab, getTabSnapshot, getServerTabSnapshot);
+  // …and which object that tab is showing. The chat tab IS the conversation only
+  // while the ASSISTANT is what it shows: a model playground is a different chat,
+  // so the floating assistant belongs there — it is not a copy of anything.
+  const paneObject = useSyncExternalStore(subscribePaneObject, getPaneObjectSnapshot, getServerPaneObjectSnapshot);
 
   // The login page has no app chrome: it renders standalone within the shared
   // layout (theme/locale bootstrap + MUI provider) but without sidebar/topbar.
   const bare = pathname === "/login";
-  // The floating AI chat is global EXCEPT the 智能助手 chat tab: that tab IS
-  // the conversation, so drawing the floating copy of it beside the full pane
-  // would show one thread twice. Every other page — and the module's other
-  // tabs, which have no chat of their own — get it.
-  const showFloatingChat = !(pathname === "/cubepilot" && cubepilotTab === "chat");
+  // The floating AI chat is global EXCEPT the 智能助手 chat tab while the agent is
+  // selected — there it would draw one thread twice. Every other page, the
+  // module's other tabs, and the model playgrounds all get it.
+  const showingAgent = cubepilotTab === "chat" && paneObject !== "model";
+  const showFloatingChat = !(pathname === "/cubepilot" && showingAgent);
 
   return (
     <ThemeProvider theme={theme}>

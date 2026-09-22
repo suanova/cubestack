@@ -62,6 +62,7 @@ import { HitlDock, type ApprovalDecision } from "./HitlDock";
 import { CopyBtn, ParamsPanel, SampleParams } from "./Playground";
 import { AgentThread } from "./AgentThread";
 import { subscribeAgentHandoff, takeAgentHandoff } from "./agentHandoff";
+import { setPaneObject } from "./paneObject";
 import { AGENT_CHAT_TRANSITION } from "./viewTransition";
 import { Btn, Card, CpTextArea, Icons, Pill, monoSx, useToast } from "./ui";
 
@@ -526,6 +527,14 @@ export function ChatPane() {
       }
     })();
   }
+
+  // The shell reads this to decide whether its floating assistant would be a
+  // second copy of what is on screen: it would while the AGENT is selected, and it
+  // would not while a MODEL is, so the selection has to leave the pane.
+  useEffect(() => {
+    setPaneObject(objKind);
+    return () => setPaneObject(null);
+  }, [objKind]);
 
   /** The floating surface's ⤢ hands its thread over and sends the reader here.
    *  This pane is normally already mounted when that happens — the module's tabs
