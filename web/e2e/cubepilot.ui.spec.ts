@@ -352,6 +352,9 @@ interface Stubs {
   /** Makes the instance-status read slow, which keeps the pane inside its
    *  "selecting CubePilot" window long enough to send during it. */
   statusDelayMs?: number;
+  /** Makes the agent-config read slow, which is what the card's own warning has
+   *  to survive: the catalog arrives one gateway round-trip late. */
+  configDelayMs?: number;
   /** What the restore read of /questions finds. Absent → an empty collection,
    *  which is the ordinary "nothing is pending". */
   pendingQuestion?: object | null;
@@ -427,6 +430,7 @@ async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
 
     // ── REST: agent CR projections ──
     if (path.endsWith("/api/cubepilot/agent/config")) {
+      if (method === "GET" && stubs.configDelayMs) await new Promise((r) => setTimeout(r, stubs.configDelayMs));
       if (method === "PUT") {
         const body = post() as { config?: { selectedModel?: string; userInstructions?: string } };
         captured.configPuts.push(body.config ?? {});
@@ -1516,15 +1520,23 @@ test.describe("cubepilot config (AgentInstance CR + AgentTemplate catalog)", () 
     const pane = page.locator('[data-od-id="cp-config-pane"]');
     await expect(pane).toBeVisible();
 
-    // Model from the CR; the options are the models the gateway serves.
-    // The agent runs them through the platform provider, and the platform
-    // prefix stays out of the labels.
+    // Model from the CR; the options are the TEMPLATE'S PROVIDERS — one group per
+    // provider, bare ids as labels and the "<provider>/<id>" ref as the value. An
+    // external provider is a first-class choice here: reading this list from the
+    // gateway's served ids instead is what hid every provider the user added, and
+    // what made the card claim the template declared none while the gateway list
+    // was still in flight.
     const modelSelect = page.locator('[data-od-id="cp-config-model-select"]');
     await expect(modelSelect).toBeEnabled();
     await expect(modelSelect).toHaveValue("cubestack/qwen38-27b");
     await expect(modelSelect.locator("option")).toHaveCount(2);
+    await expect(modelSelect.locator("optgroup")).toHaveCount(2);
     await expect(modelSelect).toContainText("qwen38-27b");
-    await expect(modelSelect).toContainText("system-only");
+    // The external provider's model, which the gateway stub does NOT serve.
+    await expect(modelSelect).toContainText("glm-5.2-chat");
+    // …and an id the gateway serves but no provider declares is not offered: it
+    // is not part of the catalog.
+    await expect(modelSelect).not.toContainText("system-only");
     await expect(page.locator('[data-od-id="cp-config-model-note"]')).toContainText("http://ai-gateway.test:8080/v1");
 
     await expect(page.locator('[data-od-id="cp-config-prompt-input"]')).toHaveValue("巡检优先,写操作全部走审批");
@@ -1564,7 +1576,13 @@ test.describe("cubepilot config (AgentInstance CR + AgentTemplate catalog)", () 
     // providers (written to the AgentTemplate, keyed ones through a Secret).
     await expect(page.locator('[data-od-id="cp-config-llm"]')).toBeVisible();
     await expect(page.locator('[data-od-id="cp-config-llm-src-system"]')).toHaveAttribute("aria-pressed", "true");
-    await expect(page.locator('[data-od-id="cp-config-llm-system"]')).toContainText("system-only");
+    // The platform list is the platform PROVIDER's models — the template's own
+    // entry, which is what the assistant can actually run. An id the gateway
+    // serves but no provider declares is not in the catalog, so it is not here
+    // either (it used to be listed, straight off the gateway's response).
+    const platformList = page.locator('[data-od-id="cp-config-llm-system"]');
+    await expect(platformList).toContainText("qwen38-27b");
+    await expect(platformList).not.toContainText("system-only");
     await page.locator('[data-od-id="cp-config-llm-src-external"]').click();
     await expect(page.locator('[data-od-id="cp-config-llm-external"]')).toContainText("glm-5.2-chat");
     await expect(page.locator('[data-od-id="cp-config-llm-external"]')).toContainText("密钥");
@@ -1629,14 +1647,42 @@ test.describe("cubepilot config (AgentInstance CR + AgentTemplate catalog)", () 
     await expect(owned).toHaveCount(1);
 
     // Saving the model/prompt hits the config route and confirms with a toast.
-    // Picking another served model first: the save carries the new ref.
-    await modelSelect.selectOption("cubestack/system-only");
+    // Picking the EXTERNAL provider's model first — the case a user hits after
+    // adding their own provider: the save has to carry its ref, not one of the
+    // platform's.
+    await modelSelect.selectOption("glm-5.2-chat/glm-5.2-chat");
+    // The note follows the selection: that provider's endpoint, not the platform's.
+    const note = page.locator('[data-od-id="cp-config-model-note"]');
+    await expect(note).toContainText("glm-5.2-chat");
+    await expect(note).not.toContainText("/v1");
     await page.locator('[data-od-id="cp-config-save"]').click();
     await expect(page.getByText("配置已保存,模型与系统提示词下轮生效")).toBeVisible();
     expect(captured.configPuts.at(-1)).toEqual({
-      selectedModel: "cubestack/system-only",
+      selectedModel: "glm-5.2-chat/glm-5.2-chat",
       userInstructions: "巡检优先,写操作全部走审批",
     });
+  });
+
+  test("does not claim the template declares no provider while the read is still in flight", async ({ page }) => {
+    // The catalog arrives one gateway round-trip late, so this card's warning used
+    // to open every refresh — a statement about the TEMPLATE made before the
+    // template had been read.
+    await stubAgent(page, { config: CONFIG_READY, configDelayMs: 2500 });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="cp-tab-config"]').click();
+
+    const pane = page.locator('[data-od-id="cp-config-pane"]');
+    await expect(pane).toBeVisible();
+    // Nothing has been read yet, so nothing may be claimed about the template.
+    await expect(pane).not.toContainText("模板未声明 provider");
+    // The select is empty and disabled while the read is in flight — an unfilled
+    // control, not an error.
+    await expect(page.locator('[data-od-id="cp-config-model-select"]')).toBeDisabled();
+
+    // When it lands, the catalog is there and the warning still is not.
+    await expect(page.locator('[data-od-id="cp-config-model-select"] option')).toHaveCount(2, { timeout: 10000 });
+    await expect(page.locator('[data-od-id="cp-config-model-select"]')).toBeEnabled();
+    await expect(pane).not.toContainText("模板未声明 provider");
   });
 
   test("switching the policy to None persists the override and hides the allowlist", async ({ page }) => {

@@ -56,16 +56,37 @@ export function ConfigPane() {
   const gatewayModels = config.gatewayModels ?? [];
   /** The platform's own provider — the builtin entry pointing at the gateway. */
   const platformProvider = providers.find((p) => p.name === PLATFORM_MODEL_NAME);
-  /** The system catalog: what the gateway serves, or (gateway down) the ids the
-   *  platform provider was last written with. */
-  const systemModels = gatewayModels.length > 0 ? gatewayModels : (platformProvider?.models ?? []);
-  /** The ref the select shows and saves: the stored ref when it still names a
-   *  served model, else the first served model (a stale CR value would fail
-   *  the save, which the route checks against the live catalog). */
-  const modelValue =
-    systemModels.length > 0 && !systemModels.some((m) => modelKey(PLATFORM_MODEL_NAME, m) === config.selectedModel)
-      ? modelKey(PLATFORM_MODEL_NAME, systemModels[0])
-      : config.selectedModel;
+  /** Every selectable model, grouped by the provider it belongs to: the ref is
+   *  what the CR stores, and the template's providers are the catalog — the
+   *  reference says as much in its own hint ("models come from the template's
+   *  providers"), so an external provider added in the card below is selectable
+   *  the moment it is saved.
+   *
+   *  The gateway's served list is NOT the catalog: it is the ids the PLATFORM
+   *  provider's entry gets written with, and they are already in here as that
+   *  provider's models. Reading the catalog from it instead is what hid every
+   *  provider the user added. */
+  const modelGroups = providers
+    .map((p) => ({
+      name: p.name,
+      options: (p.models ?? []).map((id) => ({ ref: modelKey(p.name, id), id })),
+    }))
+    .filter((g) => g.options.length > 0)
+    .map((g) => ({ ...g, options: g.options.filter((o, i, all) => all.findIndex((x) => x.ref === o.ref) === i) }));
+  const modelOptions = modelGroups.flatMap((g) => g.options);
+  /** The ref the select shows and saves: the stored one while it is still
+   *  selectable, else the first option — a stale ref is what the save refuses. */
+  const modelValue = modelOptions.some((o) => o.ref === config.selectedModel)
+    ? config.selectedModel
+    : (modelOptions[0]?.ref ?? "");
+  /** The provider the current selection belongs to, for the note under the
+   *  select: an external model does not run through the platform endpoint. */
+  const selectedProvider = providers.find((p) => modelValue.startsWith(`${p.name}/`)) ?? platformProvider;
+  /** The platform provider's ids: what the gateway serves, as the template's
+   *  platform entry holds them. This is the card's "platform" list — the select
+   *  above no longer reads it as the catalog, because that is what hid every
+   *  provider the user added. */
+  const systemModels: string[] = platformProvider?.models?.length ? platformProvider.models : gatewayModels;
   const selectedId = displayModelName(config.selectedModel);
   const externalProviders = providers.filter((p) => p.origin !== "system");
   const [confirmBusy, setConfirmBusy] = useState(false);
@@ -79,6 +100,11 @@ export function ConfigPane() {
   /** The last load failure: kept on screen (a toast disappears before it can be
    *  read, which is what makes an empty page look like "nothing loaded"). */
   const [loadError, setLoadError] = useState("");
+  /** Whether the first read has settled. The card's own warning ("the template
+   *  declares no provider") is a statement about the TEMPLATE, and the catalog
+   *  arrives one gateway round-trip late — saying it while the read is still in
+   *  flight is what made every refresh open on a contradiction. */
+  const [loaded, setLoaded] = useState(false);
 
   const loadAll = useCallback(async () => {
     const get = async <T,>(path: string) => {
@@ -100,6 +126,8 @@ export function ConfigPane() {
     } catch (e) {
       setLoadError(String(e));
       showToast(t("cubepilot.failed", { error: String(e) }), "error");
+    } finally {
+      setLoaded(true);
     }
   }, [showToast, t]);
 
@@ -339,29 +367,33 @@ export function ConfigPane() {
             <Box sx={{ p: "16px", display: "flex", flexDirection: "column", gap: "14px" }}>
               <Box sx={{ display: "flex", flexDirection: "column", gap: "6px" }}>
                 <Box component="label" sx={{ fontSize: 12.5, color: "text.secondary", fontWeight: 550 }}>{t("cubepilot.config.model")}</Box>
-                {/* The agent runs the platform provider: picking a model here
-                    selects one of the gateway's ids as its ref (the platform
-                    prefix stays out of the labels). Disabled only when the
-                    catalog is empty — a save would fail with no served models. */}
+                {/* The catalog is the template's providers, grouped by provider
+                    (the labels stay bare ids; the value is the ref the CR
+                    stores). Disabled only when there is nothing to choose — a
+                    save needs a ref the template can resolve. */}
                 <Box
                   component="select"
                   aria-label={t("cubepilot.config.model")}
                   value={modelValue}
                   onChange={(e) => setConfig({ ...config, selectedModel: e.target.value })}
-                  disabled={systemModels.length === 0}
+                  disabled={modelOptions.length === 0}
                   sx={inputSx}
                   data-od-id="cp-config-model-select"
                 >
-                  {systemModels.map((m) => (
-                    <Box key={m} component="option" value={modelKey(PLATFORM_MODEL_NAME, m)}>
-                      {m}
+                  {modelGroups.map((g) => (
+                    <Box key={g.name} component="optgroup" label={g.name}>
+                      {g.options.map((o) => (
+                        <Box key={o.ref} component="option" value={o.ref}>
+                          {o.id}
+                        </Box>
+                      ))}
                     </Box>
                   ))}
                 </Box>
                 <Box sx={{ fontSize: 11.5, color: "text.secondary", lineHeight: 1.6 }} data-od-id="cp-config-model-note">
-                  {t("cubepilot.config.modelPlatformNote", { model: displayModelName(modelValue) || "—", endpoint: platformProvider?.endpoint || "—" })}
+                  {t("cubepilot.config.modelPlatformNote", { model: displayModelName(modelValue) || "—", endpoint: selectedProvider?.endpoint || "—" })}
                 </Box>
-                {providers.length === 0 && systemModels.length === 0 ? (
+                {loaded && providers.length === 0 ? (
                   <Box sx={{ fontSize: 12, color: "#e15c5c" }} data-od-id="cp-config-model-empty">
                     {t("cubepilot.config.noModels")}
                   </Box>

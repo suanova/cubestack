@@ -212,14 +212,32 @@ describe("/api/cubepilot/agent/config", () => {
     expect(calls[0][0].body).toEqual([{ op: "add", path: "/spec/selectedModel", value: picked }]);
   });
 
-  it("PUT: a model the gateway does not serve is refused", async () => {
+  it("PUT: a model from an external provider is accepted even though the gateway does not serve it", async () => {
+    // The template's providers are the catalog — an external provider added in
+    // the LLM card is a first-class choice for the assistant. Reading the catalog
+    // from the gateway instead is what made those selections impossible: the
+    // picker had nothing to offer and this refused the ref.
     mockK8s(INSTANCE_CR);
+    patchNamespacedCustomObject.mockResolvedValue(INSTANCE_CR);
     const res = await PUT(
       await authedRequest({ method: "PUT", body: JSON.stringify({ config: { selectedModel: "deepseek/deepseek-chat" } }) }),
       undefined,
     );
+    expect(res.status).toBe(200);
+    const calls = patchNamespacedCustomObject.mock.calls as Array<[{ plural?: string; body?: unknown[] }]>;
+    const instance = calls.find((c) => c[0].plural === "agentinstances");
+    expect(instance?.[0].body).toEqual([{ op: "add", path: "/spec/selectedModel", value: "deepseek/deepseek-chat" }]);
+  });
+
+  it("PUT: a ref no provider in the template declares is refused", async () => {
+    // Nothing resolves "openai/gpt-4o": storing it would fail every turn.
+    mockK8s(INSTANCE_CR);
+    const res = await PUT(
+      await authedRequest({ method: "PUT", body: JSON.stringify({ config: { selectedModel: "openai/gpt-4o" } }) }),
+      undefined,
+    );
     expect(res.status).toBe(400);
-    expect(((await res.json()) as { error: string }).error).toContain('unknown model "deepseek/deepseek-chat"');
+    expect(((await res.json()) as { error: string }).error).toContain('unknown model "openai/gpt-4o"');
     expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
   });
 

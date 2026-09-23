@@ -429,9 +429,12 @@ describe("cubepilot page", () => {
     expect(model.disabled).toBe(false);
     expect(model.textContent).toContain("qwen38-27b");
     expect(model.textContent).not.toContain("cubestack/");
-    // One option per served gateway model, valued as the platform ref.
+    // One option per model the TEMPLATE'S PROVIDERS declare, valued as the ref
+    // the CR stores — the external provider's included. (The gateway serves
+    // "deepseek-v4-flash" as well, but no provider declares it, so it is not a
+    // choice: the providers are the catalog.)
     expect(model.options.length).toBe(2);
-    expect(Array.from(model.options).map((o) => o.value)).toEqual(["cubestack/qwen38-27b", "cubestack/deepseek-v4-flash"]);
+    expect(Array.from(model.options).map((o) => o.value)).toEqual(["cubestack/qwen38-27b", "deepseek/deepseek-chat"]);
 
     const external = container.querySelector('[data-od-id="cp-config-llm-src-external"]') as HTMLElement;
     act(() => external.click());
