@@ -8,9 +8,13 @@ name: CI Operator Chart
 # regenerate/package targets, and this workflow file itself is included so a
 # workflow-only fix re-triggers a publish. Everything else under operator/ is
 # covered by the image and CI workflows.
+#
+# Two triggers, two kinds of version: a merge to main packages the rolling chart
+# as `<Chart.yaml version>-latest`; a `vX.Y.Z` tag packages the release version.
 on:
   push:
     branches: [main]
+    tags: ['v*']
 
 permissions: {}
 
@@ -20,6 +24,8 @@ concurrency:
 
 jobs:
   changes:
+    # A tag has no diff base, and a release publishes regardless of what changed.
+    if: github.ref_type != 'tag'
     permissions:
       contents: read
       pull-requests: read
@@ -46,10 +52,14 @@ jobs:
               - '.github/workflows/ci-operator-chart.yml'
 
   build-push-chart:
-    # Publish the chart as an OCI artifact only when a merge lands on main
-    # with chart-content-relevant changes.
+    # A merge publishes what it changed; a release publishes everything, so the
+    # released version does not depend on what changed since the last one.
+    #
+    # `!cancelled()` is required: a skipped `changes` job skips this one whatever
+    # its own condition says. Not `always()`, which is true even for a cancelled
+    # run. Quoted because YAML reads a leading `!` as a tag.
     needs: changes
-    if: needs.changes.outputs.chart == 'true'
+    if: "!cancelled() && (github.ref_type == 'tag' || needs.changes.outputs.chart == 'true')"
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -58,6 +68,9 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      - name: Resolve the release version
+        id: release
+        uses: ./.github/actions/resolve-release-version
       - name: Setup Go
         uses: ./.github/actions/setup-go
         with:
@@ -67,9 +80,27 @@ jobs:
       # always matches the committed sources — the generator fails loudly on
       # errors — and drops any stale tgz before packaging. The tgz lands next
       # to the chart (helm/cubestack-controller-manager-chart/cubestack-controller-manager-chart-<version>.tgz).
+      #
+      # A release names itself: the tag becomes both version and appVersion, and
+      # appVersion is what the templates resolve images from. A merge packages
+      # the rolling chart as <Chart.yaml version>-latest instead, a distinct OCI
+      # tag so a later push cannot clobber a released <version>.
       - name: Package the chart
+        id: package
         working-directory: operator
-        run: make helm-package
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "${RELEASE_VERSION}" ]; then
+            VERSION="${RELEASE_VERSION}"
+            APP_VERSION="${RELEASE_VERSION}"
+          else
+            VERSION="$(grep '^version:' helm/cubestack-controller-manager-chart/Chart.yaml | awk '{print $2}')-latest"
+            APP_VERSION=latest
+          fi
+          make helm-package HELM_CHART_VERSION="${VERSION}" HELM_CHART_APP_VERSION="${APP_VERSION}"
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
       # helm is preinstalled on ubuntu-24.04 runners — no install step needed.
       - name: Log in to Harbor (helm registry)
         working-directory: operator
@@ -91,10 +122,11 @@ jobs:
       # the same repo name within a project.
       - name: Push chart to Harbor
         working-directory: operator
+        env:
+          # The version the chart was packaged under -- not read back from
+          # Chart.yaml, which carries neither the tag nor the -latest suffix.
+          PACKAGED_VERSION: ${{ steps.package.outputs.version }}
         run: |
           set -euo pipefail
-          # The OCI version tag is the Chart.yaml version — derive the tgz
-          # name from it so a version bump needs no workflow edit.
-          CHART_VERSION="$(helm show chart helm/cubestack-controller-manager-chart | awk '/^version:/{print $2}')"
-          helm push "helm/cubestack-controller-manager-chart/cubestack-controller-manager-chart-${CHART_VERSION}.tgz" \
+          helm push "helm/cubestack-controller-manager-chart/cubestack-controller-manager-chart-${PACKAGED_VERSION}.tgz" \
             oci://harbor.isuanova.com/suanova

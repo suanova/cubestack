@@ -5,9 +5,13 @@ name: CI Portal Chart
 # chart itself (lint + KinD install) lives in ci-portal.yml; this workflow
 # publishes the packaged chart as an OCI artifact when a merge to main touches
 # chart content or this workflow file.
+#
+# Two triggers, two kinds of version: a merge to main packages the rolling chart
+# as `<Chart.yaml version>-latest`; a `vX.Y.Z` tag packages the release version.
 on:
   push:
     branches: [main]
+    tags: ['v*']
 
 permissions: {}
 
@@ -17,6 +21,8 @@ concurrency:
 
 jobs:
   changes:
+    # A tag has no diff base, and a release publishes regardless of what changed.
+    if: github.ref_type != 'tag'
     permissions:
       contents: read
       pull-requests: read
@@ -40,10 +46,14 @@ jobs:
               - '.github/workflows/ci-portal-chart.yml'
 
   build-push-chart:
-    # Publish the chart as an OCI artifact only when a merge lands on main
-    # with chart-content-relevant changes.
+    # A merge publishes what it changed; a release publishes everything, so the
+    # released version does not depend on what changed since the last one.
+    #
+    # `!cancelled()` is required: a skipped `changes` job skips this one whatever
+    # its own condition says. Not `always()`, which is true even for a cancelled
+    # run. Quoted because YAML reads a leading `!` as a tag.
     needs: changes
-    if: needs.changes.outputs.chart == 'true'
+    if: "!cancelled() && (github.ref_type == 'tag' || needs.changes.outputs.chart == 'true')"
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -52,6 +62,9 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      - name: Resolve the release version
+        id: release
+        uses: ./.github/actions/resolve-release-version
       # helm is preinstalled on ubuntu-24.04 runners — no install step needed.
       - name: Log in to Harbor (helm registry)
         env:
@@ -67,15 +80,25 @@ jobs:
             -u "$HARBOR_USERNAME" -p "$HARBOR_PASSWORD"
       - name: Package and push the chart to Harbor
         working-directory: web/helm/cubestack-portal-chart
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
+          # A release names itself: the tag becomes both version and appVersion,
+          # and appVersion is what the templates resolve images from. A merge
+          # packages the rolling chart as <Chart.yaml version>-latest instead, a
+          # distinct OCI tag so a later push cannot clobber a released <version>.
+          if [ -n "${RELEASE_VERSION}" ]; then
+            VERSION="${RELEASE_VERSION}"
+            APP_VERSION="${RELEASE_VERSION}"
+          else
+            VERSION="$(grep '^version:' Chart.yaml | awk '{print $2}')-latest"
+            APP_VERSION=latest
+          fi
           # Package next to the chart dir and push as an OCI artifact. The OCI
           # repository is the chart name (cubestack-portal-chart); Harbor
           # serves chart-OCI and image artifacts under the same project, and
           # this name does not collide with the cubestack-ui image repo.
-          helm package .
-          # The OCI version tag is the Chart.yaml version — derive the tgz
-          # name from it so a version bump needs no workflow edit.
-          CHART_VERSION="$(helm show chart . | awk '/^version:/{print $2}')"
-          helm push "cubestack-portal-chart-${CHART_VERSION}.tgz" \
+          helm package . --version "${VERSION}" --app-version "${APP_VERSION}"
+          helm push "cubestack-portal-chart-${VERSION}.tgz" \
             oci://harbor.isuanova.com/suanova

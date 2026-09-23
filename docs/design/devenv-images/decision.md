@@ -446,6 +446,9 @@ platform's own publishing target, so they do not dictate the project below.
     `MACA_PACKAGE` and publishes `<maca-version>-py<python>-torch<ver>-<sha>` — derived, not written
     twice, so the tag cannot name a base the image was not built from, and the SHA still ends it so a
     re-build of the overlay on an unchanged base moves the reference rather than redefining it.
+  - CI adds a second kind of pinned tag on a `vX.Y.Z` release: the platform release version, e.g.
+    `ssh-ubuntu22.04:1.0.0`. The schemes above say what the image *is*; this says which CubeStack
+    release it shipped with. A release publishes it instead of `:latest`, which stays a main-only tag.
   - Both forms of reference are published: the pinned tag above *and* a moving `:latest` that the push
     re-points at the image it just built, so a deployment may track the newest publish or pin exactly.
     Re-publishing an older commit therefore moves `:latest` backwards, which is inherent to the tag —

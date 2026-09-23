@@ -52,11 +52,15 @@ trap 'rm -rf "${OUT}" "${RENDER_DIR}"' EXIT
 # Rewrite the manager image to values references. The images transformer in
 # config/manager/kustomization.yaml already rewrote controller:latest to
 # example.com/cubestack:v0.0.1 in the build output.
-sed -i 's|^\(\s*\)image: example\.com/cubestack:v0\.0\.1$|\1image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"|' "${OUT}"
-# Fail loudly if the needle above matched nothing (e.g. the images transformer
-# in config/manager/kustomization.yaml changed): a silent no-op would leave a
+#
+# `#` not `|` as the s/// delimiter: the replacement's `default` call is a pipe.
+# The empty tag falls back to the chart's appVersion, which is what makes a
+# released chart pull the manager image released with it.
+sed -i 's#^\(\s*\)image: example\.com/cubestack:v0\.0\.1$#\1image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"#' "${OUT}"
+# Fail loudly if the needle above matched nothing: a silent no-op would leave a
 # stale hardcoded image in the chart while the drift gate stays green.
-grep -q 'image: "{{ .Values.image' "${OUT}" || { echo "image rewrite no-op'd — update needle in update-helm-resources.sh"; exit 1; }
+grep -q 'image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"' "${OUT}" \
+  || { echo "image rewrite no-op'd — update needle in update-helm-resources.sh"; exit 1; }
 # Replace the hardcoded namespace (metadata + binding subjects) with the release ns.
 sed -i 's|namespace: cubestack-system|namespace: {{ .Release.Namespace }}|g' "${OUT}"
 
@@ -330,4 +334,12 @@ expect_render ctp-name-custom present '^    name: my-gateway$' --set gateway.nam
 # whole provider config instead of merging with it.
 expect_render defaults absent '^[[:space:]]*kind: EnvoyProxy$'
 expect_render defaults absent '^[[:space:]]*parametersRef:'
+
+# The manager image's tag defaults to the chart's appVersion. Read the expected
+# tag from Chart.yaml so a version bump cannot break this gate.
+CHART_APP_VERSION="$(helm show chart "${CHART}" | awk '/^appVersion:/{gsub(/"/,"",$2); print $2}')"
+expect_render defaults present "^[[:space:]]*image: \"harbor\.isuanova\.com/suanova/cubestack-controller-manager:${CHART_APP_VERSION}\"$" --namespace cubestack-system
+# An explicit tag still wins, which is how a rolling install points at `latest`.
+expect_render image-tag-set present '^[[:space:]]*image: "harbor\.isuanova\.com/suanova/cubestack-controller-manager:v9\.9\.9"$' --set image.tag=v9.9.9
+
 echo "chart resources regenerated under ${CHART}"

@@ -11,8 +11,9 @@ nameOverride: cubestack-portal
 image:
   registry: harbor.isuanova.com
   repository: suanova/cubestack-ui
-  # Use latest or a specific tag for OCI mode
-  tag: "latest"
+  # Empty means the chart's appVersion, so a released chart pulls the images
+  # released with it. Set a tag to point the chart somewhere else.
+  tag: ""
   pullPolicy: Always
 
 # Number of replicas

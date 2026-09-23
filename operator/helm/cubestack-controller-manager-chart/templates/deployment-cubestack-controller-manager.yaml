@@ -43,7 +43,7 @@ spec:
         - --rdma-roce-resource={{ .Values.rdma.roceResource }}
         command:
         - /manager
-        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
         imagePullPolicy: IfNotPresent
         livenessProbe:
           httpGet:

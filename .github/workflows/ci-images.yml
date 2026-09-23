@@ -3,14 +3,20 @@ name: CI Images
 # Push-only so publishing never appears in pull request checks. The suite that
 # validates these images — build and smoke — runs in ci-operator.yml, on pull
 # requests too; this workflow is about what a merge publishes.
+#
+# Two triggers, two kinds of tag: a merge to main publishes a commit-addressed
+# tag plus `latest`; a `vX.Y.Z` tag publishes the release version it names.
 on:
   push:
     branches: [main]
+    tags: ['v*']
 
 permissions: {}
 
 jobs:
   changes:
+    # A tag has no diff base, and a release publishes regardless of what changed.
+    if: github.ref_type != 'tag'
     permissions:
       contents: read
       pull-requests: read
@@ -33,9 +39,14 @@ jobs:
               - 'images/**'
 
   build-push-images:
-    # Publish only when a merge lands on main with a change under images/.
+    # A merge publishes what it changed; a release publishes everything, so the
+    # released version does not depend on what changed since the last one.
+    #
+    # `!cancelled()` is required: a skipped `changes` job skips this one whatever
+    # its own condition says. Not `always()`, which is true even for a cancelled
+    # run. Quoted because YAML reads a leading `!` as a tag.
     needs: changes
-    if: needs.changes.outputs.images == 'true'
+    if: "!cancelled() && (github.ref_type == 'tag' || needs.changes.outputs.images == 'true')"
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -51,6 +62,9 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      - name: Resolve the release version
+        id: release
+        uses: ./.github/actions/resolve-release-version
       - name: Reclaim disk space
         uses: ./.github/actions/reclaim-disk
       - name: Smoke the images before publishing them
@@ -90,9 +104,19 @@ jobs:
           username: ${{ vars.CI_BOT_NAME }}
           password: ${{ secrets.CI_BOT_PASSWORD }}
       - name: Build and push the images
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
           TAG="$(git rev-parse --short HEAD)"
+
+          # A release publishes the version it names and does not move `latest`,
+          # which tracks main. No commit-addressed tag here either: these are
+          # multi-arch indexes, where a second tag costs a second full build.
+          if [ -n "${RELEASE_VERSION}" ]; then
+            make -C images push PUSH_LATEST=0 TAG="${RELEASE_VERSION}"
+            exit 0
+          fi
 
           # PUSH_LATEST=0: the mutable tag is moved below, and only if this run's
           # image is still the newest image content on main.

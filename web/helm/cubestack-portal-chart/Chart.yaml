@@ -5,6 +5,8 @@ description: A Helm chart for deploying CubeStack Portal (UI)
 type: application
 
 version: 1.0.0
+# The tag the UI image defaults to, so it names a real image tag. Both fields
+# are overridden at package time; keeping them in step names the rolling chart.
 appVersion: "1.0.0"
 
 annotations:

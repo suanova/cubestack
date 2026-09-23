@@ -3,9 +3,13 @@ name: CI Operator Image
 # Push-only so the image job never appears in pull request checks. The lint, test
 # and e2e checks run in ci-operator.yml on the same push; the make docker-build
 # here also validates the operator compiles before anything is pushed.
+#
+# Two triggers, two kinds of tag: a merge to main publishes this commit's rolling
+# tags; a `vX.Y.Z` tag publishes the release version it names.
 on:
   push:
     branches: [main]
+    tags: ['v*']
 
 permissions: {}
 
@@ -15,6 +19,8 @@ concurrency:
 
 jobs:
   changes:
+    # A tag has no diff base, and a release publishes regardless of what changed.
+    if: github.ref_type != 'tag'
     permissions:
       contents: read
       pull-requests: read
@@ -39,9 +45,14 @@ jobs:
               - '.github/**'
 
   build-push-image:
-    # Push the operator image only when a merge lands on main with operator changes.
+    # A merge publishes what it changed; a release publishes everything, so the
+    # released version does not depend on what changed since the last one.
+    #
+    # `!cancelled()` is required: a skipped `changes` job skips this one whatever
+    # its own condition says. Not `always()`, which is true even for a cancelled
+    # run. Quoted because YAML reads a leading `!` as a tag.
     needs: changes
-    if: needs.changes.outputs.operator == 'true'
+    if: "!cancelled() && (github.ref_type == 'tag' || needs.changes.outputs.operator == 'true')"
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -50,6 +61,9 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      - name: Resolve the release version
+        id: release
+        uses: ./.github/actions/resolve-release-version
       - name: Log in to Harbor
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -59,6 +73,7 @@ jobs:
       - name: Build and push image
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
           IMAGE=harbor.isuanova.com/suanova/cubestack-controller-manager
@@ -68,6 +83,14 @@ jobs:
           # ever landed on main, even if a newer commit now exists.
           make -C operator docker-build IMG="${IMAGE}:${SHA_TAG}"
           make -C operator docker-push IMG="${IMAGE}:${SHA_TAG}"
+
+          # A release publishes the version it names and does not move `latest`,
+          # which tracks main.
+          if [ -n "${RELEASE_VERSION}" ]; then
+            docker tag "${IMAGE}:${SHA_TAG}" "${IMAGE}:${RELEASE_VERSION}"
+            docker push "${IMAGE}:${RELEASE_VERSION}"
+            exit 0
+          fi
 
           # Only refresh the mutable `latest` tag if this run's commit is still
           # the head of main. An older run can finish after a newer main commit;

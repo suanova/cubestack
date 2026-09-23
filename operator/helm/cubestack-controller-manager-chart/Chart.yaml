@@ -3,5 +3,8 @@ name: cubestack-controller-manager-chart
 description: CubeStack operator — installs the ai.cubestack.io CRDs, VAPs and controller manager
 type: application
 version: 1.0.0
-appVersion: v1.0.0
+# The tag the manager image defaults to, so it names a real image tag: no `v`
+# prefix, which the release tag carries but the image tag does not. Both fields
+# are overridden at package time; keeping them in step names the rolling chart.
+appVersion: 1.0.0
 kubeVersion: ">=1.30.0-0"

@@ -1,0 +1,42 @@
+name: Resolve release version
+description: >-
+  Turn a `v*` tag push into the release version its artifacts are published
+  under, validating it as semver first. Yields an empty version on a branch
+  push, which is how a caller tells a release from a merge to main.
+
+outputs:
+  version:
+    description: >-
+      The release version — the tag without its leading `v` — or empty when this
+      run was not a tag push.
+    value: ${{ steps.resolve.outputs.version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve and validate the release version
+      id: resolve
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        # A branch push publishes its rolling tags instead; empty is the answer.
+        if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+          echo "version=" >> "${GITHUB_OUTPUT}"
+          exit 0
+        fi
+
+        VERSION="${GITHUB_REF_NAME#v}"
+
+        # Validate before anything is built: helm takes a malformed version
+        # silently and writes it into the chart verbatim, and build metadata
+        # (`1.0.0+build`) is legal semver but not a legal image tag. This is
+        # semver without build metadata, so `1.0.0-01` and `1.0.0-alpha..1` are
+        # rejected as well.
+        SEMVER='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?$'
+        if ! printf '%s' "${VERSION}" | grep -Eq "${SEMVER}"; then
+          echo "::error::tag '${GITHUB_REF_NAME}' is not a release version; expected vX.Y.Z or vX.Y.Z-<prerelease>"
+          exit 1
+        fi
+
+        echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"

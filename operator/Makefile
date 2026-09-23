@@ -510,12 +510,18 @@ helm-resources-update: ## Regenerate chart resources from config/ sources
 helm-resources-check: ## Fail if chart resources are out of sync with config/ sources
 	hack/update-helm-resources.sh && git diff --exit-code -- helm hack/update-helm-resources.sh || { echo "chart resources out of date — run: make helm-resources-update"; exit 1; }
 
+# Version overrides for the packaged chart; empty leaves helm to take both from
+# Chart.yaml. CI sets them — see .github/workflows/ci-operator-chart.yml.
+HELM_CHART_VERSION ?=
+HELM_CHART_APP_VERSION ?=
+HELM_PACKAGE_VERSION_ARGS = $(if $(HELM_CHART_VERSION),--version $(HELM_CHART_VERSION)) $(if $(HELM_CHART_APP_VERSION),--app-version $(HELM_CHART_APP_VERSION))
+
 .PHONY: helm-package
 helm-package: helm-resources-update helm-crds-sync ## Package the chart as a tgz next to the chart (distributable artifact)
 	# helm package embeds any pre-existing *.tgz it finds in the chart dir —
 	# drop stale archives first so re-runs stay clean and deterministic.
 	rm -f $(HELM_CHART_DIR)/*.tgz
-	$(HELM) package $(HELM_CHART_DIR) --destination $(HELM_CHART_DIR)
+	$(HELM) package $(HELM_CHART_DIR) --destination $(HELM_CHART_DIR) $(HELM_PACKAGE_VERSION_ARGS)
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
