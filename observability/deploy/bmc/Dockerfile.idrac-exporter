@@ -1,8 +1,0 @@
-# idrac_exporter v1.6.2 built from source (see deploy-bmc.sh):
-# GOBIN=<build-dir> CGO_ENABLED=0 go install github.com/mrlhansen/idrac_exporter/cmd/idrac_exporter@v1.6.2
-# FROM scratch avoids any base image pull (test env has no usable registry mirror).
-# Config is mounted by k8s at the exporter's default path /etc/prometheus/idrac.yml.
-FROM scratch
-COPY idrac_exporter /idrac_exporter
-EXPOSE 9348
-ENTRYPOINT ["/idrac_exporter"]
