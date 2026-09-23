@@ -91,6 +91,39 @@ export function newAgentMsg(id: number, now: number = Date.now()): AgentMsg {
  */
 export type ThreadMsg = { id: number; role: "user"; text: string } | AgentMsg;
 
+/**
+ * The lines a fresh conversation opens with: what the session is looking at, and
+ * — once the effective approval policy is known — what happens to write
+ * operations.
+ *
+ * The approval line is the part that has to be EARNED. The platform offers two
+ * policies — None (writes just run) and Allowlist (only unlisted writes ask) — and
+ * a sentence claiming one of them unconditionally is wrong for the other: that is
+ * what this used to print, so a deployment with approvals turned off was greeted
+ * with a promise to ask.
+ *
+ * Anything else — a policy this UI does not offer, or "" for a read that failed or
+ * has not landed — claims nothing about approvals rather than guessing. The
+ * frontend deliberately carries no third policy: the platform's own page offers
+ * these two, and inventing a sentence for a value nobody here can set would be
+ * copy with no owner.
+ *
+ * Both surfaces build their greeting from this: the chat pane and the floating
+ * panel ask the same question, and a second copy of the answer is where they
+ * would drift apart.
+ */
+export function greetingTexts(
+  t: (key: MessageKey, params?: Record<string, string>) => string,
+  opts: { exists: boolean; model: string; skills: number; policy: string },
+): string[] {
+  if (!opts.exists) return [t("cubepilot.chat.greetingNoInstance")];
+  const lines = [t("cubepilot.chat.greeting", { tools: String(opts.skills), model: opts.model })];
+  if (opts.policy === "None") lines.push(t("cubepilot.chat.approvalNone"));
+  else if (opts.policy === "Allowlist") lines.push(t("cubepilot.chat.approvalAllowlist"));
+  lines.push(t("cubepilot.chat.greetingMeta"));
+  return lines;
+}
+
 // ── event folding ────────────────────────────────────────────────────────
 
 /**

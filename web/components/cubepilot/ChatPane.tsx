@@ -31,6 +31,7 @@ import type { PointerEvent as ReactPointerEvent } from "react";
 
 import {
   addApproval,
+  greetingTexts,
   adoptsRestoredThread,
   applyAgentEvent,
   historyToMsgs,
@@ -283,7 +284,11 @@ export function ChatPane() {
   /** The instance's confirm policy is Allowlist, so a durable approval would
    *  mean something. False until read (and false when the read fails): the
    *  "always allow" button offers a rule that would not apply otherwise. */
-  const [allowAlwaysOk, setAllowAlwaysOk] = useState(false);
+  /** The instance's effective approval policy, or "" while it is unknown. The
+   *  durable "always allow" decision needs Allowlist, and the greeting's own
+   *  sentence about write operations needs the value itself — a boolean cannot
+   *  tell "writes ask" from "writes run". */
+  const [confirmPolicy, setConfirmPolicy] = useState("");
   /** The 1s ticker's clock. A question's countdown is derived from it, so it has
    *  to move for the card to lock itself up when the gateway's timeout runs out. */
   const [now, setNow] = useState(() => Date.now());
@@ -469,13 +474,12 @@ export function ChatPane() {
    *  The greeting and its footnote are two text blocks of one agent turn: the
    *  model carries no per-message meta line, and the footnote is not a turn
    *  outcome either — it is the second thing the greeting says. */
-  function greetingMsgs(status: AgentStatus | null, config: AgentConfig | null, skills: SkillInfo[]): ChatMsg[] {
-    const greeting = !status?.exists
-      ? t("cubepilot.chat.greetingNoInstance")
-      : t("cubepilot.chat.greeting", {
-          tools: String(skills.length),
-          model: displayModelName(config?.selectedModel || PLATFORM_MODEL_NAME),
-        });
+  function greetingMsgs(
+    status: AgentStatus | null,
+    config: AgentConfig | null,
+    skills: SkillInfo[],
+    policy: string,
+  ): ChatMsg[] {
     return [
       {
         ...newAgentMsg(nextId()),
@@ -483,10 +487,14 @@ export function ChatPane() {
         // its turn is already told. Leaving it unfinished would start the ticker
         // and report a live turn that does not exist.
         phase: "done",
-        blocks: [
-          { kind: "text", text: greeting },
-          { kind: "text", text: t("cubepilot.chat.greetingMeta") },
-        ],
+        // The lines come from the shared builder: the floating panel asks the same
+        // question and must not drift from this one.
+        blocks: greetingTexts(t, {
+          exists: !!status?.exists,
+          model: displayModelName(config?.selectedModel || PLATFORM_MODEL_NAME),
+          skills: skills.length,
+          policy,
+        }).map((text) => ({ kind: "text", text })),
       },
     ];
   }
@@ -495,14 +503,17 @@ export function ChatPane() {
    *  "always allow" decision is worth offering at all. A read that fails leaves
    *  it off: the button promises a rule that will stop the asking, and a promise
    *  that might not hold is worse than a button the user never sees. */
-  async function loadConfirmPolicy(): Promise<void> {
+  async function loadConfirmPolicy(): Promise<string> {
     try {
       const res = await fetch("/api/cubepilot/agent/confirm");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const body = (await res.json()) as { confirmPolicy?: string };
-      setAllowAlwaysOk(body.confirmPolicy === "Allowlist");
+      const policy = body.confirmPolicy ?? "";
+      setConfirmPolicy(policy);
+      return policy;
     } catch {
-      setAllowAlwaysOk(false);
+      setConfirmPolicy("");
+      return "";
     }
   }
 
@@ -531,7 +542,7 @@ export function ChatPane() {
       if (meta.status?.exists) {
         await restoreAgentSession(meta);
       } else {
-        setMsgs(greetingMsgs(meta.status, meta.config, meta.skills));
+        setMsgs(greetingMsgs(meta.status, meta.config, meta.skills, await loadConfirmPolicy()));
       }
     })();
   }
@@ -606,7 +617,9 @@ export function ChatPane() {
     // see — it reads as a chat that lost its contents. A handed-over thread is
     // the exception: it IS the conversation, and the read behind it may simply
     // not have caught up yet.
-    if (!hadHistory && !seededRef.current) setMsgs(greetingMsgs(meta.status, meta.config, meta.skills));
+    if (!hadHistory && !seededRef.current) {
+      setMsgs(greetingMsgs(meta.status, meta.config, meta.skills, await loadConfirmPolicy()));
+    }
     seededRef.current = false;
     const running = await checkTurnElsewhere(key, gen);
     if (genRef.current !== gen) return;
@@ -1983,7 +1996,7 @@ export function ChatPane() {
                 questions={dockQuestions}
                 sessionKey={agentSessionKey}
                 now={now}
-                allowAlwaysOk={allowAlwaysOk}
+                allowAlwaysOk={confirmPolicy === "Allowlist"}
                 onDecide={(callId, decision) => void decideApproval(callId, decision)}
                 onAnswer={(callId, answers, cancel) => void submitQuestion(callId, answers, cancel)}
               />

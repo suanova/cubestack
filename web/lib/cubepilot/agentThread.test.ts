@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   adoptsRestoredThread,
+  greetingTexts,
   applyAgentEvent,
   approvalExpiring,
   approvalSecondsLeft,
@@ -654,6 +655,43 @@ describe("attachToolResult", () => {
 
   it("drops an orphan result when there is nothing to attach it to", () => {
     expect(attachToolResult([], undefined, "ORPHAN")).toEqual([]);
+  });
+});
+
+describe("greetingTexts", () => {
+  // A translator that echoes the key: these cases are about WHICH sentence the
+  // policy picks, not about the copy itself.
+  const t = ((key: string) => key) as never;
+
+  it("names the skills and the model from the instance", () => {
+    const lines = greetingTexts(t, { exists: true, model: "qwen38-27b", skills: 3, policy: "" });
+    expect(lines[0]).toBe("cubepilot.chat.greeting");
+    expect(lines.join("\n")).not.toContain("approval");
+  });
+
+  it("claims nothing about approvals when the policy is unknown", () => {
+    // An unread (or unreadable) policy is not a policy: the greeting says nothing
+    // rather than promising a queue that may not exist.
+    for (const policy of ["", "something-new"]) {
+      const lines = greetingTexts(t, { exists: true, model: "m", skills: 0, policy });
+      expect(lines.filter((l) => l.includes("approval"))).toEqual([]);
+    }
+  });
+
+  it("picks the sentence the effective policy calls for", () => {
+    const allow = greetingTexts(t, { exists: true, model: "m", skills: 0, policy: "Allowlist" });
+    expect(allow).toContain("cubepilot.chat.approvalAllowlist");
+    // The one that mattered: an instance with approvals OFF must not be greeted
+    // with a promise to ask.
+    const none = greetingTexts(t, { exists: true, model: "m", skills: 0, policy: "None" });
+    expect(none).toContain("cubepilot.chat.approvalNone");
+    expect(none).not.toContain("cubepilot.chat.approvalAllowlist");
+  });
+
+  it("greets with the no-instance line alone when there is no instance", () => {
+    expect(greetingTexts(t, { exists: false, model: "m", skills: 0, policy: "None" })).toEqual([
+      "cubepilot.chat.greetingNoInstance",
+    ]);
   });
 });
 

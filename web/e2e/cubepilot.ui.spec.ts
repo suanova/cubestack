@@ -601,6 +601,11 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     // The greeting is data-driven: the instance's skills and model from the CRs.
     await expect(thread).toContainText("技能 2 项,当前模型 qwen38-27b");
     await expect(thread).toContainText("会话审计已开启");
+    // …and what it says about write operations follows the instance's EFFECTIVE
+    // policy (the stub's confirm view says Allowlist). It used to promise an
+    // approval queue unconditionally, which was a lie for any other policy.
+    await expect(thread).toContainText("白名单内的写操作直接执行");
+    await expect(thread).not.toContainText("所有写操作(重建、扩容、降频)都会先生成执行计划");
 
     // The chat tab has no context rail: the instance state lives in the card
     // header (phase pill + activity line), not in a right-hand card column.
@@ -629,6 +634,19 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     await expect(page.locator('[data-od-id="chat-card"]')).toContainText("实例未创建");
     await expect(page.locator('[data-od-id="agent-status-card"]')).toHaveCount(0);
     await expect(page.locator('[data-od-id="tool-whitelist-card"]')).toHaveCount(0);
+  });
+
+  test("greets an approvals-off instance without promising an approval queue", async ({ page }) => {
+    // The case that was wrong: with the policy at None every write runs, and the
+    // greeting still said every write would be reviewed first.
+    await stubAgent(page, { confirm: { ...CONFIRM, confirmPolicy: "None", override: "" } });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="obj-cubepilot"]').click();
+
+    const thread = page.locator('[data-od-id="chat-thread"]');
+    await expect(thread).toContainText("写操作会直接执行");
+    await expect(thread).not.toContainText("都会先生成执行计划");
+    await expect(thread).not.toContainText("白名单内的写操作");
   });
 
   test("streams a turn and approves the write operation it blocks on", async ({ page }) => {

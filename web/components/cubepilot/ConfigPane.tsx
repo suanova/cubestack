@@ -391,7 +391,17 @@ export function ConfigPane() {
                   ))}
                 </Box>
                 <Box sx={{ fontSize: 11.5, color: "text.secondary", lineHeight: 1.6 }} data-od-id="cp-config-model-note">
-                  {t("cubepilot.config.modelPlatformNote", { model: displayModelName(modelValue) || "—", endpoint: selectedProvider?.endpoint || "—" })}
+                  {t("cubepilot.config.modelPlatformNote", {
+                    model: displayModelName(modelValue) || "—",
+                    // The platform's own provider is described as the platform's;
+                    // any other one is named, because the sentence's whole point is
+                    // which endpoint the model runs through.
+                    provider:
+                      selectedProvider && selectedProvider.name !== PLATFORM_MODEL_NAME
+                        ? selectedProvider.name
+                        : t("cubepilot.config.providerPlatform"),
+                    endpoint: selectedProvider?.endpoint || "—",
+                  })}
                 </Box>
                 {loaded && providers.length === 0 ? (
                   <Box sx={{ fontSize: 12, color: "#e15c5c" }} data-od-id="cp-config-model-empty">

@@ -24,6 +24,7 @@ import { Fragment, useEffect, useRef, useState } from "react";
 
 import {
   addApproval,
+  greetingTexts,
   applyAgentEvent,
   historyToMsgs,
   newAgentMsg,
@@ -114,7 +115,10 @@ export function FloatingChat() {
   const [stoppingElsewhere, setStoppingElsewhere] = useState(false);
   /** The instance's confirm policy is Allowlist, so a durable approval rule
    *  would mean something. False until read (and false when the read fails). */
-  const [allowAlwaysOk, setAllowAlwaysOk] = useState(false);
+  /** The instance's effective approval policy, or "" while unknown — the pane's
+   *  own greeting is built from the same value, so the two surfaces cannot say
+   *  different things about write operations. */
+  const [confirmPolicy, setConfirmPolicy] = useState("");
   /** The 1s ticker's clock. A question's countdown is derived from it. */
   const [now, setNow] = useState(() => Date.now());
 
@@ -217,23 +221,24 @@ export function FloatingChat() {
 
   /** The greeting (real data: instance, model, whitelist size) — the same two
    *  text blocks the chat tab opens its conversation with. */
-  function greetingMsgs(status: AgentStatus | null, config: AgentConfig | null, skills: SkillInfo[]): ThreadMsg[] {
-    const greeting = !status?.exists
-      ? t("cubepilot.chat.greetingNoInstance")
-      : t("cubepilot.chat.greeting", {
-          tools: String(skills.length),
-          model: displayModelName(config?.selectedModel || PLATFORM_MODEL_NAME),
-        });
+  function greetingMsgs(
+    status: AgentStatus | null,
+    config: AgentConfig | null,
+    skills: SkillInfo[],
+    policy: string,
+  ): ThreadMsg[] {
     return [
       {
         ...newAgentMsg(nextId()),
         // Nothing is running: the greeting says what the agent is looking at,
         // so its turn is already told.
         phase: "done",
-        blocks: [
-          { kind: "text", text: greeting },
-          { kind: "text", text: t("cubepilot.chat.greetingMeta") },
-        ],
+        blocks: greetingTexts(t, {
+          exists: !!status?.exists,
+          model: displayModelName(config?.selectedModel || PLATFORM_MODEL_NAME),
+          skills: skills.length,
+          policy,
+        }).map((text) => ({ kind: "text", text })),
       },
     ];
   }
@@ -241,14 +246,17 @@ export function FloatingChat() {
   /** Read the instance's confirm policy once: it decides whether the durable
    *  "always allow" decision is worth offering at all. A failed read leaves it
    *  off: a button that might not hold is worse than a button never seen. */
-  async function loadConfirmPolicy(): Promise<void> {
+  async function loadConfirmPolicy(): Promise<string> {
     try {
       const res = await fetch("/api/cubepilot/agent/confirm");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const body = (await res.json()) as { confirmPolicy?: string };
-      setAllowAlwaysOk(body.confirmPolicy === "Allowlist");
+      const policy = body.confirmPolicy ?? "";
+      setConfirmPolicy(policy);
+      return policy;
     } catch {
-      setAllowAlwaysOk(false);
+      setConfirmPolicy("");
+      return "";
     }
   }
 
@@ -499,7 +507,7 @@ export function FloatingChat() {
       // it (the history carries no HITL cards either).
       const hadHistory = ownTurnRef.current ? true : await loadAgentHistory(SESSION_KEY);
       if (genRef.current !== gen) return;
-      if (!hadHistory && first) setMsgs(greetingMsgs(meta.status, meta.config, meta.skills));
+      if (!hadHistory && first) setMsgs(greetingMsgs(meta.status, meta.config, meta.skills, await loadConfirmPolicy()));
       // While we are driving our own turn, the stream is the state: the /turn
       // read would report the turn WE are streaming as "running elsewhere",
       // which would mislabel its status and send a needless stop-first abort
@@ -1175,7 +1183,7 @@ export function FloatingChat() {
               questions={dockQuestions}
               sessionKey={SESSION_KEY}
               now={now}
-              allowAlwaysOk={allowAlwaysOk}
+              allowAlwaysOk={confirmPolicy === "Allowlist"}
               onDecide={(callId, decision) => void decideApproval(callId, decision)}
               onAnswer={(callId, answers, cancel) => void submitQuestion(callId, answers, cancel)}
             />
