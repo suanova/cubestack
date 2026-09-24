@@ -10,10 +10,23 @@ import CubepilotPage from "./page";
 // which vitest's import-analysis can't transform.
 
 /** Stub every endpoint the three panes fetch on mount + the agent flow.
- *  `config` replaces the agent config body when a test needs its own catalog.
- *  `opts.catalogUnavailable` makes the model catalog request fail, the shape a
- *  cluster with no platform model service produces. */
-function stubApi(config?: Record<string, unknown>, opts: { catalogUnavailable?: boolean } = {}) {
+ *  `opts.catalogUnavailable` fails the model catalog; `opts.stream` picks how the
+ *  turn's SSE stream dies ("error" mid-read, "stall" silent and open);
+ *  `opts.activePolls` bounds how long /turn reports a run; `opts.transcript` is
+ *  the runtime's copy of the conversation, `opts.attach` serves the re-attach
+ *  stream a following pane opens for a parked run. */
+function stubApi(
+  config?: Record<string, unknown>,
+  opts: {
+    catalogUnavailable?: boolean;
+    stream?: "end" | "error" | "stall" | "terminal";
+    activePolls?: number;
+    transcript?: Array<{ role: string; content: string }>;
+    attach?: { events?: unknown[]; emit?: (ev: unknown) => void; calls?: number };
+  } = {},
+) {
+  let turnPolls = 0;
+  let sent = false;
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -65,6 +78,7 @@ function stubApi(config?: Record<string, unknown>, opts: { catalogUnavailable?: 
       // matched first: the send and the transcript read are the SAME path, and
       // only the method tells them apart.
       if (url.endsWith("/messages") && method === "POST") {
+        sent = true;
         // The agent turn: real SSE events (the client accumulates deltas,
         // pairs the tool result by callId, and renders the HITL card).
         //
@@ -73,23 +87,75 @@ function stubApi(config?: Record<string, unknown>, opts: { catalogUnavailable?: 
         // just ends) and the card stays answerable. A `message_done` here would
         // say the turn was over while the write was still parked, and a turn
         // that really ends settles its parked cards.
-        const events = [
-          { type: "message_start", sessionId: "agent:main:conv-1" },
-          { type: "agent_thinking", sessionId: "agent:main:conv-1" },
-          { type: "message_delta", sessionId: "agent:main:conv-1", delta: "正在检查 Ceph 状态…" },
-          { type: "tool_call", sessionId: "agent:main:conv-1", callId: "call-1", name: "shell", arguments: { cmd: "ceph df" } },
-          { type: "tool_result", sessionId: "agent:main:conv-1", callId: "call-1", output: "POOL USED: 71%" },
-          { type: "message_delta", sessionId: "agent:main:conv-1", delta: "OSD 使用率 71%。" },
-          { type: "approval_pending", sessionId: "agent:main:conv-1", callId: "app-1", name: "shell", command: "ceph osd set-noscrub", level: "write" },
-        ];
+        const events =
+          opts.stream === "terminal"
+            ? [
+                { type: "message_start", sessionId: "agent:main:conv-portal" },
+                { type: "message_delta", sessionId: "agent:main:conv-portal", delta: "正在查 demo 的 DevEnvironment…" },
+                { type: "approval_pending", sessionId: "agent:main:conv-portal", callId: "app-3", name: "shell", command: "kubectl delete pod demo-env-0", level: "write", createdAtMs: Date.now(), expiresAtMs: Date.now() + 600000 },
+                { type: "approval_resolved", sessionId: "agent:main:conv-portal", callId: "app-3", approved: true },
+                { type: "message_done", sessionId: "agent:main:conv-portal", stopped: false },
+              ]
+            : opts.stream
+              ? [
+              // A plain turn that narrates and then loses its link, before any
+              // terminal event: what the runtime's transcript has to answer for.
+              { type: "message_start", sessionId: "agent:main:conv-portal" },
+                  { type: "message_delta", sessionId: "agent:main:conv-portal", delta: "正在查 demo 的 DevEnvironment…" },
+                ]
+              : [
+              { type: "message_start", sessionId: "agent:main:conv-1" },
+              { type: "agent_thinking", sessionId: "agent:main:conv-1" },
+              { type: "message_delta", sessionId: "agent:main:conv-1", delta: "正在检查 Ceph 状态…" },
+              { type: "tool_call", sessionId: "agent:main:conv-1", callId: "call-1", name: "shell", arguments: { cmd: "ceph df" } },
+              { type: "tool_result", sessionId: "agent:main:conv-1", callId: "call-1", output: "POOL USED: 71%" },
+              { type: "message_delta", sessionId: "agent:main:conv-1", delta: "OSD 使用率 71%。" },
+              { type: "approval_pending", sessionId: "agent:main:conv-1", callId: "app-1", name: "shell", command: "ceph osd set-noscrub", level: "write" },
+                ];
         const enc = new TextEncoder();
         const stream = new ReadableStream({
           start(controller) {
             for (const e of events) controller.enqueue(enc.encode(`data: ${JSON.stringify(e)}\n\n`));
-            controller.close();
+            if (opts.stream === "error") controller.error(new TypeError("network error"));
+            else if (opts.stream !== "stall" && opts.stream !== "terminal") controller.close();
+            // A real fetch aborts the body when the caller aborts its signal.
+            init?.signal?.addEventListener("abort", () => controller.error(new DOMException("Aborted", "AbortError")));
           },
         });
         return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+      }
+      // The re-attach stream: what a following pane opens for a parked run once
+      // its own stream is gone. `emit` lets the test push the events a real
+      // runtime would (a new card, a resolution).
+      if (url.endsWith("/turn/events") && opts.attach) {
+        opts.attach.calls = (opts.attach.calls ?? 0) + 1;
+        const enc = new TextEncoder();
+        const stream = new ReadableStream({
+          start(controller) {
+            // Delivered once, as the runtime does when the card is raised: a
+            // replay on every attach would paper over a refresh that drops it.
+            if (opts.attach?.calls === 1) {
+              for (const e of opts.attach.events ?? []) controller.enqueue(enc.encode(`data: ${JSON.stringify(e)}\n\n`));
+            }
+            if (opts.attach) opts.attach.emit = (ev: unknown) => controller.enqueue(enc.encode(`data: ${JSON.stringify(ev)}\n\n`));
+          },
+        });
+        return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+      }
+      if (url.endsWith("/turn") && opts.activePolls !== undefined) {
+        // A turn is only running once one has been sent: before that the pane is
+        // looking at a conversation that is idle, and a stub that said otherwise
+        // would have the composer offering Stop on an empty thread.
+        if (!sent) return json({ active: false });
+        turnPolls += 1;
+        return json({ active: turnPolls <= opts.activePolls });
+      }
+      if (url.endsWith("/messages") && opts.transcript) {
+        // The runtime writes a turn as it goes, so the stub's transcript only
+        // exists once the run is over — otherwise the mount's own read would
+        // satisfy an adoption assertion without the poll ever running.
+        if (!sent || (opts.activePolls !== undefined && turnPolls <= opts.activePolls)) return json({ items: [] });
+        return json({ items: opts.transcript });
       }
       if (url.endsWith("/approvals/decision"))
         return json({ approved: true, decision: "approve", approvalId: "app-1" });
@@ -165,6 +231,32 @@ describe("cubepilot page", () => {
       root.render(createElement(CubepilotPage));
     });
     return { container, root };
+  }
+
+  /** Type into the composer and send — the path a reader takes. */
+  async function sendTurn(container: HTMLElement, text: string): Promise<void> {
+    const input = container.querySelector('[data-od-id="chat-input"]') as HTMLTextAreaElement;
+    const setValue = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")!.set!;
+    act(() => {
+      setValue.call(input, text);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    act(() => {
+      (container.querySelector('[data-od-id="send-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+  }
+
+  /** Advance the clock in act() until `predicate` holds. The turn's own
+   *  machinery runs on timers (the follow loop polls every few seconds), so the
+   *  tests drive time rather than racing it. */
+  async function waitFor(predicate: () => boolean, ticks = 400): Promise<boolean> {
+    for (let i = 0; i < ticks && !predicate(); i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 50));
+      });
+    }
+    return predicate();
   }
 
   it("renders the page head and the three tabs", async () => {
@@ -409,6 +501,200 @@ describe("cubepilot page", () => {
     expect(container.textContent).toContain("已切换到 glm-5.2-chat");
     act(() => root.unmount());
   }, 15000);
+
+  // The transport a pane watches a turn with can die under it — a dropped link,
+  // a pod that goes away, a proxy that gives up. That is not the turn's own
+  // failure: the run may still be executing, and the only thing that can say
+  // what it did is the runtime's transcript. This used to print the browser's
+  // own words ("network error") on the bubble and freeze the turn where it
+  // stood, until a reload re-read the conversation.
+  it("a broken turn stream reads as a lost connection, and the run is taken from the server", async () => {
+    stubApi(undefined, {
+      stream: "error",
+      activePolls: 1,
+      transcript: [
+        { role: "user", content: "查一下 demo 的 DevEnvironment" },
+        { role: "assistant", content: "demo 下共 5 个 DevEnvironment,全部 Running。" },
+      ],
+    });
+    const { container, root } = renderPage();
+    await act(async () => {});
+    act(() => {
+      (container.querySelector('[data-od-id="obj-cubepilot"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    await sendTurn(container, "查一下 demo 的 DevEnvironment");
+
+    // The link dies. The bubble names the transport in the platform's own words
+    // — the browser's error is diagnostics, not something to show a reader.
+    expect(await waitFor(() => (container.textContent ?? "").includes("连接中断"))).toBe(true);
+    expect(container.textContent ?? "").not.toContain("network error");
+
+    // The run is over, so the pane converges on the server's copy: the answer
+    // the stream never delivered is on screen without a reload.
+    expect(await waitFor(() => (container.textContent ?? "").includes("全部 Running"))).toBe(true);
+    act(() => root.unmount());
+  }, 30000);
+
+  // A link that goes silent without closing — a half-open connection, what a
+  // dropped tunnel or a dead NAT entry leaves behind — is the same event as one
+  // that breaks, and it is the one a reader sees as a page stuck on
+  // "正在汇总工具结果…" with a ticking timer while the run has long finished.
+  it("a turn whose stream goes silent converges on the server once the run is over", async () => {
+    stubApi(undefined, {
+      stream: "stall",
+      activePolls: 1,
+      transcript: [
+        { role: "user", content: "查一下 demo 的 DevEnvironment" },
+        { role: "assistant", content: "demo 下共 5 个 DevEnvironment,全部 Running。" },
+      ],
+    });
+    const { container, root } = renderPage();
+    await act(async () => {});
+    act(() => {
+      (container.querySelector('[data-od-id="obj-cubepilot"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    await sendTurn(container, "查一下 demo 的 DevEnvironment");
+    // The events that made it through are on screen, and the turn reads as live.
+    expect(await waitFor(() => (container.textContent ?? "").includes("正在查 demo 的 DevEnvironment…"))).toBe(true);
+
+    expect(await waitFor(() => (container.textContent ?? "").includes("全部 Running"))).toBe(true);
+    // Nothing is left claiming the turn is still running, and the composer is
+    // released: a half-open link leaves the send parked in a read, so giving up
+    // on it is what takes Stop off the screen.
+    expect(container.textContent ?? "").not.toContain("仍在运行");
+    expect(container.querySelector('[data-od-id="stop-btn"]')).toBeNull();
+    expect(container.querySelector('[data-od-id="send-btn"]')).not.toBeNull();
+    act(() => root.unmount());
+  }, 30000);
+
+  // The run's events — "a write needs your decision" among them — are written
+  // only to the stream the send opened, so a pane that lost that stream never
+  // hears about a card raised afterwards (the runtime logs "no open stream for
+  // session …; push dropped"). The API's re-attach route is what makes such a
+  // card appear, and stay answerable, in place.
+  it("a parked turn recovers its card by re-attaching to the run", async () => {
+    const attach: { events?: unknown[]; emit?: (ev: unknown) => void } = {
+      events: [
+        {
+          type: "approval_pending",
+          sessionId: "agent:main:conv-portal",
+          callId: "app-9",
+          name: "shell",
+          command: "kubectl delete pod demo-env-0",
+          level: "write",
+        },
+      ],
+    };
+    stubApi(undefined, { stream: "error", activePolls: 999, attach });
+    const { container, root } = renderPage();
+    await act(async () => {});
+    act(() => {
+      (container.querySelector('[data-od-id="obj-cubepilot"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    await sendTurn(container, "清理掉那个开发环境");
+    expect(await waitFor(() => container.querySelector('[data-od-id="approval-approve"]') !== null)).toBe(true);
+    expect(container.textContent ?? "").toContain("kubectl delete pod demo-env-0");
+
+    // The decision taken elsewhere arrives on the same stream and settles the
+    // card here: a re-attached view is a live one, not a snapshot.
+    act(() => {
+      attach.emit?.({ type: "approval_resolved", sessionId: "agent:main:conv-portal", callId: "app-9", approved: true });
+    });
+    expect(await waitFor(() => (container.textContent ?? "").includes("已批准"))).toBe(true);
+    expect(container.querySelector('[data-od-id="approval-approve"]')).toBeNull();
+    act(() => root.unmount());
+  }, 30000);
+
+  // The first poll after a send can report "nothing is running" before the run
+  // has even registered. That must not retire the pane's own view of the turn:
+  // the silence guard decides, and the adoption still has to happen later.
+  it("an early inactive poll does not retire a turn whose stream is still open", async () => {
+    stubApi(undefined, {
+      stream: "stall",
+      activePolls: 0,
+      transcript: [
+        { role: "user", content: "查一下 demo 的 DevEnvironment" },
+        { role: "assistant", content: "demo 下共 5 个 DevEnvironment,全部 Running。" },
+      ],
+    });
+    const { container, root } = renderPage();
+    await act(async () => {});
+    act(() => {
+      (container.querySelector('[data-od-id="obj-cubepilot"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    await sendTurn(container, "查一下 demo 的 DevEnvironment");
+    expect(await waitFor(() => (container.textContent ?? "").includes("全部 Running"))).toBe(true);
+    act(() => root.unmount());
+  }, 30000);
+
+  // A re-attach belongs to the follow state that opened it. Leaving the
+  // conversation and coming back must attach again — a stream left parked in a
+  // ref would silently refuse every later one.
+  it("re-attaches after the conversation is reopened", async () => {
+    const attach: { events?: unknown[]; emit?: (ev: unknown) => void; calls?: number } = {};
+    stubApi(undefined, { stream: "error", activePolls: 999, attach });
+    const { container, root } = renderPage();
+    await act(async () => {});
+    act(() => {
+      (container.querySelector('[data-od-id="obj-cubepilot"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await sendTurn(container, "清理掉那个开发环境");
+    expect(await waitFor(() => (attach.calls ?? 0) >= 1)).toBe(true);
+
+    // Away to the model and back to the assistant.
+    act(() => {
+      (container.querySelector('[data-od-id="obj-glm-5.2-chat"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    act(() => {
+      (container.querySelector('[data-od-id="obj-cubepilot"]') as HTMLElement).click();
+    });
+    expect(await waitFor(() => (attach.calls ?? 0) >= 2)).toBe(true);
+    act(() => root.unmount());
+  }, 30000);
+
+  // A turn this pane's own stream reported the terminal for is complete here —
+  // its output and its settled cards both. Adopting the transcript over it would
+  // drop the cards the reader just used.
+  it("does not adopt the transcript over a turn the stream settled", async () => {
+    stubApi(undefined, {
+      stream: "terminal",
+      activePolls: 1,
+      transcript: [
+        { role: "user", content: "清理掉那个开发环境" },
+        { role: "assistant", content: "已删除 demo-env-0。" },
+      ],
+    });
+    const { container, root } = renderPage();
+    await act(async () => {});
+    act(() => {
+      (container.querySelector('[data-od-id="obj-cubepilot"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await sendTurn(container, "清理掉那个开发环境");
+    expect(await waitFor(() => (container.textContent ?? "").includes("已批准"))).toBe(true);
+
+    // Long past the silence threshold and the run is over: the transcript is not
+    // adopted over the settled turn.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 9000));
+    });
+    expect(container.textContent ?? "").not.toContain("已删除 demo-env-0。");
+    expect(container.textContent ?? "").toContain("已批准");
+    // The settled turn released the composer, whatever the response does.
+    expect(container.querySelector('[data-od-id="stop-btn"]')).toBeNull();
+    expect(container.querySelector('[data-od-id="send-btn"]')).not.toBeNull();
+    act(() => root.unmount());
+  }, 40000);
 
   it("resizes the object list column by dragging the pane resizer", async () => {
     const { container, root } = renderPage();

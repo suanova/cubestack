@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   adoptsRestoredThread,
+  carryOpenCards,
   greetingTexts,
   applyAgentEvent,
   approvalExpiring,
@@ -12,6 +13,8 @@ import {
   historyToMsgs,
   isExpiring,
   newAgentMsg,
+  newApproval,
+  newQuestion,
   remainingSeconds,
   seedAnswers,
   TOOL_SUMMARY_CHARS,
@@ -714,5 +717,59 @@ describe("adoptsRestoredThread", () => {
     // caught up with. This read is that thread's first, so adopting here is the
     // one chance to drop what was carried across.
     expect(adoptsRestoredThread([{ role: "user" }], true)).toBe(false);
+  });
+});
+
+describe("carryOpenCards — a refresh keeps the reader's cards", () => {
+  const card = newApproval({ approvalId: "app-1", name: "shell", command: "kubectl delete pod x", level: "write" });
+  const withCard = { ...newAgentMsg(1, T0), phase: "done" as const, approvals: [card] };
+  const user = { id: 0, role: "user" as const, text: "清理掉那个开发环境" };
+  const refreshed = [{ ...user, id: 2 }, { ...newAgentMsg(2, T0), phase: "done" as const }];
+
+  it("moves an open card onto the refreshed turn", () => {
+    const out = carryOpenCards([user, withCard], refreshed);
+    expect((out[1] as AgentMsg).approvals).toHaveLength(1);
+    expect((out[1] as AgentMsg).approvals[0].callId).toBe("app-1");
+  });
+
+  it("settled cards are not carried", () => {
+    const settled = { ...withCard, approvals: [{ ...card, state: "approved" as const }] };
+    const out = carryOpenCards([user, settled], refreshed);
+    expect((out[1] as AgentMsg).approvals).toHaveLength(0);
+  });
+
+  it("carries a question once, not per refresh", () => {
+    const q = newQuestion("q-1", [{ questionId: "a", header: "pick", question: "which one?" }], 600, T0);
+    const out = carryOpenCards([user, { ...withCard, questions: [q] }], refreshed);
+    const twice = carryOpenCards(out, refreshed);
+    expect((twice[1] as AgentMsg).questions).toHaveLength(1);
+  });
+
+  it("carries each turn's own cards, not just the newest turn's", () => {
+    const older = { ...newAgentMsg(1, T0), phase: "done" as const, approvals: [card] };
+    const newer = {
+      ...newAgentMsg(3, T0),
+      phase: "done" as const,
+      approvals: [{ ...card, callId: "app-2" }],
+    };
+    const refreshedBoth = [
+      { ...user, id: 4 },
+      { ...newAgentMsg(4, T0), phase: "done" as const },
+      { ...user, id: 5 },
+      { ...newAgentMsg(5, T0), phase: "done" as const },
+    ];
+    const out = carryOpenCards([user, older, user, newer], refreshedBoth);
+    expect((out[1] as AgentMsg).approvals.map((a) => a.callId)).toEqual(["app-1"]);
+    expect((out[3] as AgentMsg).approvals.map((a) => a.callId)).toEqual(["app-2"]);
+  });
+
+  it("a turn the transcript has not written yet falls to the newest", () => {
+    const last = { ...newAgentMsg(3, T0), phase: "done" as const, approvals: [card] };
+    const out = carryOpenCards([user, last], refreshed);
+    expect((out[1] as AgentMsg).approvals).toHaveLength(1);
+  });
+
+  it("nothing to carry leaves the refreshed transcript alone", () => {
+    expect(carryOpenCards([user, { ...newAgentMsg(1, T0), phase: "done" as const }], refreshed)).toBe(refreshed);
   });
 });

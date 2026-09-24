@@ -24,6 +24,7 @@ import { Fragment, useEffect, useRef, useState } from "react";
 
 import {
   addApproval,
+  carryOpenCards,
   greetingTexts,
   applyAgentEvent,
   historyToMsgs,
@@ -66,6 +67,21 @@ const SESSION_KEY = "agent:main:conv-portal";
 
 // Follow-loop period: the same rhythm the chat tab watches at.
 const FOLLOW_INTERVAL_MS = 3000;
+
+// How quiet a turn's stream has to go, while the server says the run is over,
+// before this surface stops treating it as the state of the turn (see the chat
+// tab's own constant: same reasoning, same value).
+const STREAM_SILENCE_MS = 5000;
+
+// The events the re-attach stream is read for: the ones that carry a human's
+// decision. Whatever else it carries is already in the runtime's transcript,
+// which the follow loop polls.
+const ATTACH_EVENTS = new Set<AgentSseEvent["type"]>([
+  "approval_pending",
+  "approval_resolved",
+  "question_pending",
+  "question_resolved",
+]);
 
 // The status line's tone → pill colour, the chat tab's own mapping.
 const STATUS_PILL = {
@@ -150,6 +166,19 @@ export function FloatingChat() {
   /** Whether the follow loop has been adopting the history document for the
    *  turn it is watching now (a turn this surface did NOT author). */
   const followingRef = useRef(false);
+  /** When this surface's turn stream last carried anything. A link that dies
+   *  takes no notice of it — the read simply never returns — so silence is the
+   *  only evidence there is, and it is read together with the server's own
+   *  "nothing is running", never on its own. */
+  const lastStreamAtRef = useRef(0);
+  /** The re-attach stream open for a parked run, so only one is opened. */
+  const attachRef = useRef<AbortController | null>(null);
+  /** The send whose stream is still open. Aborting it ends this surface's
+   *  observation of the turn — the run itself is untouched. */
+  const sendCtlRef = useRef<AbortController | null>(null);
+  /** Whether this surface's own stream reported the turn's terminal. Such a
+   *  turn needs no adoption: its output and its cards are already here. */
+  const ownTurnSettledRef = useRef(false);
 
   const nextId = (): number => {
     idRef.current += 1;
@@ -173,14 +202,22 @@ export function FloatingChat() {
   /** Stop the follow loop for good: bump its generation so a tick already in
    *  flight cannot schedule a successor for a conversation this surface has
    *  stopped watching. */
+  /** The re-attach stream belongs to the follow state being retired. */
+  function stopAttach(): void {
+    attachRef.current?.abort();
+    attachRef.current = null;
+  }
+
   function stopFollowing(): void {
     followGenRef.current++;
     stopTurnPolling();
+    stopAttach();
   }
 
   function cancelInflight(): void {
     genRef.current++;
     stopFollowing();
+    sendCtlRef.current?.abort();
     // The turn and its follow state describe the session this surface is
     // leaving (unmount): retired with it.
     ownTurnRef.current = false;
@@ -419,10 +456,110 @@ export function FloatingChat() {
       const raw = JSON.stringify(items);
       if (raw === lastHistoryRef.current) return;
       lastHistoryRef.current = raw;
-      setMsgs(historyToMsgs(items, nextId));
+      setMsgs((list) => carryOpenCards(list, historyToMsgs(items, nextId)));
     } catch {
       /* a dropped poll is not an error; the next one re-reads */
     }
+  }
+
+  /**
+   * Adopt the runtime's copy of the conversation — the transcript, plus the
+   * cards still waiting on a human. This is where a turn's outcome comes from
+   * once its stream is gone: the transcript is written as the run goes, so it is
+   * what a reader sees after a reload, and reading it is the only way an answer
+   * the stream never delivered reaches the page.
+   */
+  async function adoptServerState(key: string): Promise<void> {
+    // A half-open link can leave either stream parked in a read for good; give up
+    // on both, so `sending` (and the composer with it) is released and a later
+    // run can be re-attached to.
+    sendCtlRef.current?.abort();
+    stopAttach();
+    followingRef.current = false;
+    setRunningElsewhere(false);
+    setAgentNotice("");
+    await loadAgentHistory(key);
+    await restorePendingHitl(key);
+  }
+
+  /**
+   * Observe a parked run with the API's re-attach stream (the chat tab's own
+   * reasoning, same route). A turn's events — "a write needs your decision"
+   * among them — are written only to the stream the send opened, so this
+   * surface never hears about a card raised after it lost that stream. The
+   * route accepts only a PARKED run: a 404 (not parked) or 409 (another stream
+   * holds the session) is ordinary, and the polling carries on either way. Read
+   * for the cards alone — the transcript comes from the poll.
+   */
+  async function attachToRun(key: string): Promise<void> {
+    if (attachRef.current) return;
+    const gen = genRef.current;
+    const ctl = new AbortController();
+    attachRef.current = ctl;
+    try {
+      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/turn/events`, {
+        signal: ctl.signal,
+      });
+      // 404 (not parked) and 409 (another stream holds the session) are the
+      // ordinary refusals; the polling carries on either way.
+      if (!res.ok || !res.body) return;
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      for (;;) {
+        let step: ReadableStreamReadResult<Uint8Array>;
+        try {
+          step = await reader.read();
+        } catch {
+          break; // the link died again; a later tick may re-attach
+        }
+        const { done, value } = step;
+        if (done) break;
+        if (genRef.current !== gen) {
+          try {
+            await reader.cancel();
+          } catch {
+            /* already closed */
+          }
+          return;
+        }
+        lastStreamAtRef.current = Date.now();
+        buffer += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice(5).trim();
+          if (!payload) continue;
+          let evt: AgentSseEvent;
+          try {
+            evt = JSON.parse(payload) as AgentSseEvent;
+          } catch {
+            continue;
+          }
+          if (genRef.current === gen && ATTACH_EVENTS.has(evt.type)) applyAttachedEvent(evt);
+        }
+      }
+    } catch {
+      /* the next tick tries again */
+    } finally {
+      // Only if this is still the current one: a newer attach must not be
+      // cleared by an older one ending.
+      if (attachRef.current === ctl) attachRef.current = null;
+    }
+  }
+
+  /** Apply an event from the re-attach stream to the newest agent bubble: the
+   *  stream describes the turn that bubble is showing, and the id the send used
+   *  may be gone — a transcript read can have replaced the thread under it. */
+  function applyAttachedEvent(evt: AgentSseEvent): void {
+    setMsgs((list) => {
+      const lastIdx = [...list].reverse().findIndex((x) => x.role === "agent");
+      if (lastIdx < 0) return list;
+      const i = list.length - 1 - lastIdx;
+      return list.map((x, xi) => (xi === i && x.role === "agent" ? applyAgentEvent(x, evt) : x));
+    });
   }
 
   /**
@@ -450,7 +587,24 @@ export function FloatingChat() {
         // A turn this surface started. Its stream is the state, and the
         // history document is no substitute: it holds no cards, and it cannot
         // say that the stream died.
-        if (active !== true) ownTurnRef.current = false;
+        if (active !== true) {
+          // A turn this surface's own stream reported the terminal for is
+          // already complete here, cards and all: nothing to adopt.
+          if (ownTurnSettledRef.current) {
+            ownTurnRef.current = false;
+            ownTurnSettledRef.current = false;
+            // The terminal settles the turn; an open response must not keep the
+            // composer's Stop waiting on another read.
+            sendCtlRef.current?.abort();
+            return;
+          }
+          // Otherwise only once the stream has gone quiet: an early "nothing is
+          // running" must not retire this surface's own view of the turn.
+          if (Date.now() - lastStreamAtRef.current >= STREAM_SILENCE_MS) {
+            ownTurnRef.current = false;
+            await adoptServerState(key);
+          }
+        }
         return;
       }
       if (active === true) {
@@ -460,15 +614,13 @@ export function FloatingChat() {
         // the turn was started elsewhere.
         followingRef.current = true;
         await refreshHistoryIfChanged(key);
+        // A run parked on a human pushes its card to the session's own stream,
+        // which this surface no longer holds. Re-attach so it arrives here.
+        void attachToRun(key);
         return;
       }
-      setRunningElsewhere(false);
-      if (followingRef.current) {
-        followingRef.current = false;
-        setAgentNotice("");
-        await loadAgentHistory(key);
-        await restorePendingHitl(key);
-      }
+      if (followingRef.current) await adoptServerState(key);
+      else setRunningElsewhere(false);
     };
 
     const tick = async (): Promise<void> => {
@@ -608,6 +760,9 @@ export function FloatingChat() {
 
   async function sendAgent(text: string, gen: number, msgId: number): Promise<void> {
     let gotDone = false;
+    ownTurnSettledRef.current = false;
+    const ctl = new AbortController();
+    sendCtlRef.current = ctl;
     try {
       const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(SESSION_KEY)}/messages`, {
         method: "POST",
@@ -615,6 +770,7 @@ export function FloatingChat() {
         // The conversation is named by the path. Bodies are decoded strictly,
         // so the key does not belong in the body as well.
         body: JSON.stringify({ content: text }),
+        signal: ctl.signal,
       });
       if (!res.ok) {
         // Request-phase failure (400/409/503-warming): surfaced as an error on
@@ -623,11 +779,26 @@ export function FloatingChat() {
         throw new Error(err?.error || `HTTP ${res.status}`);
       }
       if (!res.body) throw new Error(t("cubepilot.chat.emptyStream"));
+      // The stream is this surface's clock for the turn: silence since here is
+      // what tells the follow loop that the link, not the model, stopped.
+      lastStreamAtRef.current = Date.now();
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
       for (;;) {
-        const { done, value } = await reader.read();
+        let step: ReadableStreamReadResult<Uint8Array>;
+        try {
+          step = await reader.read();
+        } catch {
+          // Our own abort (unmount) is not a transport failure. Anything else is
+          // the connection dying under the reader — the browser's "network
+          // error" — which ends the reading rather than becoming the turn's own
+          // error: the run may still be executing, so the lost-stream path below
+          // reports it.
+          if (ctl.signal.aborted) return;
+          break;
+        }
+        const { done, value } = step;
         if (done) break;
         if (genRef.current !== gen) {
           try {
@@ -637,6 +808,7 @@ export function FloatingChat() {
           }
           return;
         }
+        lastStreamAtRef.current = Date.now();
         buffer += decoder.decode(value, { stream: true });
         let nl: number;
         while ((nl = buffer.indexOf("\n")) >= 0) {
@@ -651,7 +823,10 @@ export function FloatingChat() {
           } catch {
             continue;
           }
-          if (evt.type === "message_done") gotDone = true;
+          if (evt.type === "message_done") {
+            gotDone = true;
+            ownTurnSettledRef.current = true;
+          }
           if (genRef.current === gen) handleAgentEvent(evt, msgId);
         }
       }
@@ -670,9 +845,13 @@ export function FloatingChat() {
         void checkTurnElsewhere(SESSION_KEY, gen);
       }
     } catch (e) {
+      // Our own abort is this surface walking away, not a turn that failed.
+      if (sendCtlRef.current?.signal.aborted) return;
       if (genRef.current === gen) {
         setMsgs((list) => list.map((x) => (x.id === msgId && x.role === "agent" ? { ...x, error: String(e instanceof Error ? e.message : e) } : x)));
       }
+    } finally {
+      if (sendCtlRef.current === ctl) sendCtlRef.current = null;
     }
   }
 
