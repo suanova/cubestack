@@ -17,10 +17,12 @@
 //      of the gateway; spec.defaultModel names the ref it selects;
 //   2. the caller's AgentInstance — selectedModel "<provider>/<model id>" (e.g.
 //      "cubestack/qwen38-27b") and userInstructions.
-// The model API must resolve and serve at least one model first: an
-// unreachable/unconfigured gateway (or an empty catalog) fails the save (503)
-// before anything is written, so a CR never carries an endpoint or a model id
-// the runtime cannot reach.
+// The platform half is optional: a cluster can run the assistant on the
+// providers the template declares with no AI Gateway at all, and then only (2)
+// is written. A save never stores a platform endpoint or model id it could not
+// resolve — an unreachable gateway leaves the platform's models unselectable
+// (and asking for one anyway is refused with 503 naming the gateway), while the
+// template's own providers stay selectable.
 
 import {
   DEFAULT_AGENT_NAME,
@@ -61,8 +63,9 @@ function clearOrAdd(value: string | undefined, path: string, current: string | u
 /**
  * The model ids the AI Gateway serves (the chat tab's source, and what the
  * platform provider's entry gets written with). Best effort and bounded — an
- * absent or slow gateway simply means "no models"; the save is what refuses an
- * empty list, so a read-only GET still answers.
+ * absent or slow gateway simply means "no models": the platform provider's entry
+ * is left as it stands and its ids are not offered. Bounded so that a read-only
+ * GET still answers.
  */
 async function gatewayModels(): Promise<string[]> {
   try {
@@ -145,16 +148,13 @@ export const PUT = withAuth(async (req, session) => {
     }
     // 1) the model API the platform serves models from — the agent talks to it
     //    through the platform provider, so it is written into the template first.
-    const modelApi = await gatewayOpenAiBase();
-    if (!modelApi) {
-      return Response.json(
-        {
-          error:
-            "cannot resolve the model API (AI Gateway) — set CUBESTACK_GATEWAT_URL or install the gateway in the configured namespace; nothing was saved",
-        },
-        { status: 503 },
-      );
-    }
+    //    Writing that entry needs both halves: a base to point it at, and the ids
+    //    to list. An install with no AI Gateway (the assistant running on the
+    //    providers the template declares) is a supported shape, so a missing
+    //    gateway means "no platform models in this save", never a refusal — the
+    //    platform is a capability of the cluster, not a precondition of a save.
+    const served = await gatewayModels();
+    const modelApi = served.length > 0 ? await gatewayOpenAiBase() : null;
     // selectedModel is written as the "<provider>/<model id>" ref the operator
     // resolves against the template's PROVIDERS, not against the gateway: an
     // external provider added in the LLM card is a first-class choice for the
@@ -164,16 +164,6 @@ export const PUT = withAuth(async (req, session) => {
     // provider's — it is what the select sent before providers were selectable
     // — and a ref the template cannot resolve is refused, because a stored ref
     // the runtime cannot answer fails every turn.
-    const served = await gatewayModels();
-    if (served.length === 0) {
-      return Response.json(
-        {
-          error:
-            "the model API serves no models (its /v1/models is empty or unreachable) — nothing was saved",
-        },
-        { status: 503 },
-      );
-    }
     // The template's providers MINUS the platform's: that entry is rewritten from
     // `served` by this same save (platformProviderOps below), so a platform id the
     // template still lists but the gateway no longer serves would pass a check
@@ -185,7 +175,9 @@ export const PUT = withAuth(async (req, session) => {
     const selectable = new Set<string>(
       externalProviders.flatMap((p) => (p.models ?? []).map((id) => modelKey(p.name ?? "", id))),
     );
-    for (const id of served) selectable.add(modelKey(PLATFORM_MODEL_NAME, id));
+    if (modelApi) {
+      for (const id of served) selectable.add(modelKey(PLATFORM_MODEL_NAME, id));
+    }
     const requested = patch.selectedModel ?? "";
     // A bare id means the platform provider's — unless the gateway itself serves
     // an id containing a slash (a namespaced model like "meta-llama/Llama-3"),
@@ -198,6 +190,17 @@ export const PUT = withAuth(async (req, session) => {
           ? modelKey(PLATFORM_MODEL_NAME, requested)
           : requested;
     if (requestedRef !== "" && !selectable.has(requestedRef)) {
+      // A platform ref whose platform is missing is not an unknown model: name
+      // what is missing, and what can be picked instead.
+      if (!modelApi && requestedRef.startsWith(`${PLATFORM_MODEL_NAME}/`)) {
+        return Response.json(
+          {
+            error:
+              `the platform model API (AI Gateway) is unavailable, so "${requested}" cannot be selected — the template's providers offer: ${[...selectable].join(", ")}`,
+          },
+          { status: 503 },
+        );
+      }
       return Response.json(
         {
           error: `unknown model "${requested}" — the template's providers offer: ${[...selectable].join(", ")}`,
@@ -205,9 +208,18 @@ export const PUT = withAuth(async (req, session) => {
         { status: 400 },
       );
     }
-    const selectedModel = requestedRef || modelKey(PLATFORM_MODEL_NAME, served[0]);
-    const templateOps = platformProviderOps(tmpl.spec?.providers, modelApi, served);
-    if (templateOps.length > 0) {
+    // Only a selection the caller NAMED moves the model — plus the first save,
+    // which must pin something for the instance to run. An instructions-only
+    // update must not re-derive one: with external providers in play that would
+    // replace the reader's model with whichever one comes first in the catalog.
+    // With no platform the default is the first model the template declares, and
+    // "" stays "" — the instance is then created with no selection rather than
+    // pinned to a ref nothing resolves.
+    const selectedModel =
+      requestedRef ||
+      (existing ? "" : modelApi ? modelKey(PLATFORM_MODEL_NAME, served[0]) : ([...selectable][0] ?? ""));
+    const templateOps = modelApi ? platformProviderOps(tmpl.spec?.providers, modelApi, served) : [];
+    if (modelApi && templateOps.length > 0) {
       logger("agent").info("template updated for the platform provider", {
         provider: PLATFORM_MODEL_NAME,
         endpoint: modelApi,
@@ -216,9 +228,11 @@ export const PUT = withAuth(async (req, session) => {
       });
     }
     // The template carries the default too: an instance without its own
-    // selection runs this ref (CRD: it must name a provider/model listed).
+    // selection runs this ref (CRD: it must name a provider/model listed). An
+    // empty selection writes nothing — the CRD has no "" to point at, and the
+    // default the template already carries stays valid as it stands.
     const defaultOps: JsonPatchOp[] =
-      tmpl.spec?.defaultModel === selectedModel
+      selectedModel === "" || tmpl.spec?.defaultModel === selectedModel
         ? []
         : [{ op: "add", path: "/spec/defaultModel", value: selectedModel }];
     const opsToSend = [...templateOps, ...defaultOps];
@@ -239,9 +253,7 @@ export const PUT = withAuth(async (req, session) => {
     // empty nodes ("" = template instructions only).
     // 2) the caller's instance: the platform provider selection + the prompt.
     const ops = [
-      // Only when the caller named one: a prompt-only update must not re-derive a
-      // selection, which would replace an external model with the first platform
-      // one the gateway happens to serve.
+      // Undefined is a no-op (see selectedModel above); "" clears the field.
       ...clearOrAdd(
         patch.selectedModel === undefined ? undefined : selectedModel,
         "/spec/selectedModel",

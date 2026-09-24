@@ -294,12 +294,78 @@ describe("/api/cubepilot/agent/config", () => {
     expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
-  it("PUT: nothing is written when the model API serves no models", async () => {
+  it("PUT: a template provider's model is saved when the gateway serves nothing", async () => {
+    // An environment can run the assistant on the providers the template declares
+    // without any AI Gateway installed. The platform provider is written FROM the
+    // gateway, so with no gateway there is nothing to write — but that must not
+    // refuse the selection the page actually offered.
     gatewayFetch.mockResolvedValue(new Response(JSON.stringify({ data: [] }), { status: 200 }));
-    mockK8s(INSTANCE_CR, { metadata: { name: "cubepilot" }, spec: {} });
-    const res = await PUT(await authedRequest({ method: "PUT", body: JSON.stringify({ config: { userInstructions: "x" } }) }), undefined);
+    mockK8s(INSTANCE_CR);
+    patchNamespacedCustomObject.mockResolvedValue(INSTANCE_CR);
+    const res = await PUT(
+      await authedRequest({ method: "PUT", body: JSON.stringify({ config: { selectedModel: "deepseek/deepseek-chat" } }) }),
+      undefined,
+    );
+    expect(res.status).toBe(200);
+    const calls = patchNamespacedCustomObject.mock.calls as Array<[{ plural?: string; body?: unknown[] }]>;
+    // The template's default ref follows the selection; its platform entry is left
+    // as it stands, because this save has nothing to rewrite it with.
+    expect(calls.map((c) => c[0].plural)).toEqual(["agenttemplates", "agentinstances"]);
+    expect(calls[0][0].body).toEqual([{ op: "add", path: "/spec/defaultModel", value: "deepseek/deepseek-chat" }]);
+    expect(calls[1][0].body).toEqual([{ op: "add", path: "/spec/selectedModel", value: "deepseek/deepseek-chat" }]);
+  });
+
+  it("PUT: a prompt-only update is saved when the gateway serves nothing", async () => {
+    // Instructions do not depend on the catalog: refusing them would block the
+    // page entirely on a cluster that runs no gateway.
+    gatewayFetch.mockResolvedValue(new Response(JSON.stringify({ data: [] }), { status: 200 }));
+    const external = {
+      metadata: { name: "tester-cubepilot" },
+      spec: { owner: "tester", selectedModel: "deepseek/deepseek-chat" },
+    };
+    mockK8s(external);
+    patchNamespacedCustomObject.mockResolvedValue(external);
+    const res = await PUT(
+      await authedRequest({ method: "PUT", body: JSON.stringify({ config: { userInstructions: "be terse" } }) }),
+      undefined,
+    );
+    expect(res.status).toBe(200);
+    const calls = patchNamespacedCustomObject.mock.calls as Array<[{ plural?: string; body?: unknown[] }]>;
+    // No derived model (the reader's own selection is kept) and no template write:
+    // the default ref the template already carries is left alone.
+    expect(calls.map((c) => c[0].plural)).toEqual(["agentinstances"]);
+    expect(calls[0][0].body).toEqual([{ op: "add", path: "/spec/userInstructions", value: "be terse" }]);
+  });
+
+  it("PUT: a first save with no catalog anywhere still creates the instance", async () => {
+    // Nothing to select — no gateway and no template provider. The instance is
+    // created without a selection rather than with an empty ref the CRD would
+    // have to reject.
+    gatewayFetch.mockResolvedValue(new Response(JSON.stringify({ data: [] }), { status: 200 }));
+    mockK8s(null, { metadata: { name: "cubepilot" }, spec: { runtime: "OpenClaw" } });
+    createNamespacedCustomObject.mockResolvedValue({ metadata: { name: "tester-cubepilot" }, spec: { owner: "tester" } });
+    const res = await PUT(
+      await authedRequest({ method: "PUT", body: JSON.stringify({ config: { userInstructions: "be terse" } }) }),
+      undefined,
+    );
+    expect(res.status).toBe(200);
+    expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
+    const [init] = createNamespacedCustomObject.mock.calls[0] as [{ body?: { spec?: Record<string, unknown> } }];
+    expect(init.body?.spec).toEqual({ templateRef: "cubepilot", owner: "tester", userInstructions: "be terse" });
+  });
+
+  it("PUT: a platform model is refused, naming the gateway, when nothing serves it", async () => {
+    // The template still lists the platform entry, but this save cannot rewrite it
+    // from the gateway — accepting the ref would store a selection against a
+    // provider entry this request cannot vouch for.
+    gatewayFetch.mockResolvedValue(new Response(JSON.stringify({ data: [] }), { status: 200 }));
+    mockK8s(INSTANCE_CR);
+    const res = await PUT(
+      await authedRequest({ method: "PUT", body: JSON.stringify({ config: { selectedModel: SELECTED_MODEL } }) }),
+      undefined,
+    );
     expect(res.status).toBe(503);
-    expect(((await res.json()) as { error: string }).error).toContain("serves no models");
+    expect(((await res.json()) as { error: string }).error).toContain("AI Gateway");
     expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
@@ -330,12 +396,18 @@ describe("/api/cubepilot/agent/config", () => {
     ]);
   });
 
-  it("PUT: nothing is written when the model API cannot be resolved", async () => {
+  it("PUT: an unresolvable model API leaves the platform's models unselectable", async () => {
+    // The platform provider is written from the resolved base AND the served ids;
+    // without a base there is nothing to write, so the ids it would carry are not
+    // offered — the template's own providers still are.
     gatewayOpenAiBase.mockResolvedValue(null);
-    mockK8s(INSTANCE_CR, { metadata: { name: "cubepilot" }, spec: {} });
-    const res = await PUT(await authedRequest({ method: "PUT", body: JSON.stringify({ config: { userInstructions: "x" } }) }), undefined);
+    mockK8s(INSTANCE_CR);
+    const res = await PUT(
+      await authedRequest({ method: "PUT", body: JSON.stringify({ config: { selectedModel: SELECTED_MODEL } }) }),
+      undefined,
+    );
     expect(res.status).toBe(503);
-    expect(((await res.json()) as { error: string }).error).toContain("model API");
+    expect(((await res.json()) as { error: string }).error).toContain("AI Gateway");
     expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
