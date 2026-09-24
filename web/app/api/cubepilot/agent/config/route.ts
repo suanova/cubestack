@@ -208,16 +208,17 @@ export const PUT = withAuth(async (req, session) => {
         { status: 400 },
       );
     }
-    // Only a selection the caller NAMED moves the model — plus the first save,
-    // which must pin something for the instance to run. An instructions-only
-    // update must not re-derive one: with external providers in play that would
-    // replace the reader's model with whichever one comes first in the catalog.
-    // With no platform the default is the first model the template declares, and
-    // "" stays "" — the instance is then created with no selection rather than
-    // pinned to a ref nothing resolves.
-    const selectedModel =
-      requestedRef ||
-      (existing ? "" : modelApi ? modelKey(PLATFORM_MODEL_NAME, served[0]) : ([...selectable][0] ?? ""));
+    // A first save with nothing selected gets a default, or the instance has no
+    // model to run. An explicit "" is a clear, not an omission, so it stays
+    // empty — and only a NAMED selection moves the model: re-deriving one for an
+    // instructions-only update would replace the reader's own choice.
+    const derived =
+      patch.selectedModel === undefined && !existing
+        ? modelApi
+          ? modelKey(PLATFORM_MODEL_NAME, served[0])
+          : ([...selectable][0] ?? "")
+        : "";
+    const selectedModel = requestedRef || derived;
     const templateOps = modelApi ? platformProviderOps(tmpl.spec?.providers, modelApi, served) : [];
     if (modelApi && templateOps.length > 0) {
       logger("agent").info("template updated for the platform provider", {
@@ -227,12 +228,14 @@ export const PUT = withAuth(async (req, session) => {
         ops: templateOps.length,
       });
     }
-    // The template carries the default too: an instance without its own
-    // selection runs this ref (CRD: it must name a provider/model listed). An
-    // empty selection writes nothing — the CRD has no "" to point at, and the
-    // default the template already carries stays valid as it stands.
+    // The template's default is shared by every instance, and an instance
+    // without its own selection runs it (CRD: it must name a listed ref). A
+    // derived selection must not move it when there is no platform: this save
+    // leaves the template's own providers alone, so its default stays valid.
     const defaultOps: JsonPatchOp[] =
-      selectedModel === "" || tmpl.spec?.defaultModel === selectedModel
+      selectedModel === "" ||
+      tmpl.spec?.defaultModel === selectedModel ||
+      (requestedRef === "" && !modelApi)
         ? []
         : [{ op: "add", path: "/spec/defaultModel", value: selectedModel }];
     const opsToSend = [...templateOps, ...defaultOps];

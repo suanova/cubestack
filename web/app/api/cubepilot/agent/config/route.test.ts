@@ -354,6 +354,58 @@ describe("/api/cubepilot/agent/config", () => {
     expect(init.body?.spec).toEqual({ templateRef: "cubepilot", owner: "tester", userInstructions: "be terse" });
   });
 
+  it("PUT: an explicit empty selection on a first save selects nothing", async () => {
+    // "" is a clear, not an omission: picking the first model in the catalog for
+    // it would silently override what the caller asked for.
+    gatewayFetch.mockResolvedValue(new Response(JSON.stringify({ data: [] }), { status: 200 }));
+    mockK8s(null, {
+      metadata: { name: "cubepilot" },
+      spec: {
+        providers: [{ name: "deepseek", endpoint: "https://api.deepseek.com/v1", models: ["deepseek-chat"] }],
+        defaultModel: "deepseek/deepseek-chat",
+      },
+    });
+    createNamespacedCustomObject.mockResolvedValue({ metadata: { name: "tester-cubepilot" }, spec: { owner: "tester" } });
+    const res = await PUT(
+      await authedRequest({ method: "PUT", body: JSON.stringify({ config: { selectedModel: "" } }) }),
+      undefined,
+    );
+    expect(res.status).toBe(200);
+    expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
+    const [init] = createNamespacedCustomObject.mock.calls[0] as [{ body?: { spec?: Record<string, unknown> } }];
+    expect(init.body?.spec?.selectedModel).toBeUndefined();
+  });
+
+  it("PUT: a derived selection leaves the template's default alone when there is no platform", async () => {
+    // The template's default is what every instance without its own selection
+    // runs. A save that named no model must not repoint it at the first model of
+    // the list just because this caller had none.
+    gatewayFetch.mockResolvedValue(new Response(JSON.stringify({ data: [] }), { status: 200 }));
+    mockK8s(null, {
+      metadata: { name: "cubepilot" },
+      spec: {
+        providers: [
+          { name: "alpha", endpoint: "https://a.test/v1", models: ["a-1"] },
+          { name: "beta", endpoint: "https://b.test/v1", models: ["b-1"] },
+        ],
+        defaultModel: "beta/b-1",
+      },
+    });
+    createNamespacedCustomObject.mockResolvedValue({
+      metadata: { name: "tester-cubepilot" },
+      spec: { owner: "tester", selectedModel: "alpha/a-1" },
+    });
+    const res = await PUT(
+      await authedRequest({ method: "PUT", body: JSON.stringify({ config: { userInstructions: "be terse" } }) }),
+      undefined,
+    );
+    expect(res.status).toBe(200);
+    // No template write at all: its own providers are untouched by this save.
+    expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
+    const [init] = createNamespacedCustomObject.mock.calls[0] as [{ body?: { spec?: Record<string, unknown> } }];
+    expect(init.body?.spec?.selectedModel).toBe("alpha/a-1");
+  });
+
   it("PUT: a platform model is refused, naming the gateway, when nothing serves it", async () => {
     // The template still lists the platform entry, but this save cannot rewrite it
     // from the gateway — accepting the ref would store a selection against a
