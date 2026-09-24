@@ -174,15 +174,29 @@ export const PUT = withAuth(async (req, session) => {
         { status: 503 },
       );
     }
+    // The template's providers MINUS the platform's: that entry is rewritten from
+    // `served` by this same save (platformProviderOps below), so a platform id the
+    // template still lists but the gateway no longer serves would pass a check
+    // against the template and then disappear from it — leaving a stored selection
+    // that no longer resolves. The platform's ids are accepted from `served` only.
+    const externalProviders = ((tmpl.spec?.providers ?? []) as Array<{ name?: string; models?: string[] }>).filter(
+      (p) => p.name !== PLATFORM_MODEL_NAME,
+    );
     const selectable = new Set<string>(
-      ((tmpl.spec?.providers ?? []) as Array<{ name?: string; models?: string[] }>).flatMap((p) =>
-        (p.models ?? []).map((id) => modelKey(p.name ?? "", id)),
-      ),
+      externalProviders.flatMap((p) => (p.models ?? []).map((id) => modelKey(p.name ?? "", id))),
     );
     for (const id of served) selectable.add(modelKey(PLATFORM_MODEL_NAME, id));
     const requested = patch.selectedModel ?? "";
+    // A bare id means the platform provider's — unless the gateway itself serves
+    // an id containing a slash (a namespaced model like "meta-llama/Llama-3"),
+    // which is a bare id too and would otherwise read as a ref for a provider
+    // named "meta-llama".
     const requestedRef =
-      requested === "" ? "" : requested.includes("/") ? requested : modelKey(PLATFORM_MODEL_NAME, requested);
+      requested === ""
+        ? ""
+        : served.includes(requested) || !requested.includes("/")
+          ? modelKey(PLATFORM_MODEL_NAME, requested)
+          : requested;
     if (requestedRef !== "" && !selectable.has(requestedRef)) {
       return Response.json(
         {
@@ -225,7 +239,14 @@ export const PUT = withAuth(async (req, session) => {
     // empty nodes ("" = template instructions only).
     // 2) the caller's instance: the platform provider selection + the prompt.
     const ops = [
-      ...clearOrAdd(selectedModel, "/spec/selectedModel", existing.spec?.selectedModel),
+      // Only when the caller named one: a prompt-only update must not re-derive a
+      // selection, which would replace an external model with the first platform
+      // one the gateway happens to serve.
+      ...clearOrAdd(
+        patch.selectedModel === undefined ? undefined : selectedModel,
+        "/spec/selectedModel",
+        existing.spec?.selectedModel,
+      ),
       ...clearOrAdd(patch.userInstructions, "/spec/userInstructions", existing.spec?.userInstructions),
     ];
     const cr = ops.length > 0 ? await patchAgentInstanceCr(name, ops) : existing;

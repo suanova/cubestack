@@ -355,6 +355,8 @@ interface Stubs {
   /** Makes the agent-config read slow, which is what the card's own warning has
    *  to survive: the catalog arrives one gateway round-trip late. */
   configDelayMs?: number;
+  /** Makes the agent-config read fail: a FAILED read is not an empty template. */
+  configFails?: boolean;
   /** What the restore read of /questions finds. Absent → an empty collection,
    *  which is the ordinary "nothing is pending". */
   pendingQuestion?: object | null;
@@ -430,6 +432,7 @@ async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
 
     // ── REST: agent CR projections ──
     if (path.endsWith("/api/cubepilot/agent/config")) {
+      if (method === "GET" && stubs.configFails) return json({ error: "read failed" }, 500);
       if (method === "GET" && stubs.configDelayMs) await new Promise((r) => setTimeout(r, stubs.configDelayMs));
       if (method === "PUT") {
         const body = post() as { config?: { selectedModel?: string; userInstructions?: string } };
@@ -1671,7 +1674,10 @@ test.describe("cubepilot config (AgentInstance CR + AgentTemplate catalog)", () 
     await modelSelect.selectOption("glm-5.2-chat/glm-5.2-chat");
     // The note follows the selection: that provider's endpoint, not the platform's.
     const note = page.locator('[data-od-id="cp-config-model-note"]');
+    // The bare model id, as the picker shows it — not the "provider/id" ref, which
+    // reads as if the provider were part of the model's name.
     await expect(note).toContainText("glm-5.2-chat");
+    await expect(note).not.toContainText("glm-5.2-chat/glm-5.2-chat");
     await expect(note).not.toContainText("/v1");
     await page.locator('[data-od-id="cp-config-save"]').click();
     await expect(page.getByText("配置已保存,模型与系统提示词下轮生效")).toBeVisible();
@@ -1716,6 +1722,21 @@ test.describe("cubepilot config (AgentInstance CR + AgentTemplate catalog)", () 
     await expect(page.locator('[data-od-id="cp-allowlist-default"]')).toHaveCount(0);
     await expect(page.locator('[data-od-id="cp-config-rule-pattern"]')).toHaveCount(0);
     expect(captured.confirmPuts.at(-1)).toEqual({ confirmPolicy: "None" });
+  });
+
+  test("does not call a failed read an empty template", async ({ page }) => {
+    // A read that failed leaves the catalog empty too, and the warning is a
+    // statement about the TEMPLATE: shown here it would send the reader to add a
+    // provider that may well already exist.
+    await stubAgent(page, { configFails: true });
+    await page.goto("/cubepilot");
+    await page.locator('[data-od-id="cp-tab-config"]').click();
+
+    const pane = page.locator('[data-od-id="cp-config-pane"]');
+    await expect(pane).toBeVisible();
+    await expect(pane).not.toContainText("模板未声明 provider");
+    // What is on screen instead is the failure itself.
+    await expect(page.locator('[data-od-id="cp-config-load-error"]')).toBeVisible();
   });
 
   test("keeps the page usable when the template declares no provider", async ({ page }) => {

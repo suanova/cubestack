@@ -392,7 +392,11 @@ export function ConfigPane() {
                 </Box>
                 <Box sx={{ fontSize: 11.5, color: "text.secondary", lineHeight: 1.6 }} data-od-id="cp-config-model-note">
                   {t("cubepilot.config.modelPlatformNote", {
-                    model: displayModelName(modelValue) || "—",
+                    // The option's own id, not the ref: displayModelName strips the
+                    // platform prefix only, so an external selection would read as
+                    // "cuberouter/deepseek-flash" while the picker beside it shows
+                    // "deepseek-flash".
+                    model: modelOptions.find((o) => o.ref === modelValue)?.id || "—",
                     // The platform's own provider is described as the platform's;
                     // any other one is named, because the sentence's whole point is
                     // which endpoint the model runs through.
@@ -403,7 +407,10 @@ export function ConfigPane() {
                     endpoint: selectedProvider?.endpoint || "—",
                   })}
                 </Box>
-                {loaded && providers.length === 0 ? (
+                {/* Only after a read that SUCCEEDED: a failed read leaves the
+                    catalog empty too, and "the template declares no provider" is a
+                    statement about the template, not about this page's luck. */}
+                {loaded && !loadError && providers.length === 0 ? (
                   <Box sx={{ fontSize: 12, color: "#e15c5c" }} data-od-id="cp-config-model-empty">
                     {t("cubepilot.config.noModels")}
                   </Box>
