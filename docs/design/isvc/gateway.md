@@ -45,8 +45,67 @@
   `streamIdleTimeout` = "maximum time Envoy will wait **without receiving any bytes** from the
   upstream"（映射到 xDS 的 `retry_policy.per_try_idle_timeout`；首字节前触发可 failover，
   流中途触发断流/504；不设 = 不生效）。
-- ext_proc 当前无 pod（controller 带 `--extProcImage=ai-gateway-extproc:v1.1.0`，按需部署）；
-  配额执行链未部署（`--quotaRateLimitServiceAddr` 指向的 `envoy-ai-gateway-ratelimit` Service 不存在）。
+- **ext_proc 的部署形态与翻译位置（实测）**：Agent Router 按需把 `ai-gateway-extproc` 作为 **sidecar
+  注入 Gateway 的数据面 Pod**——没有 AIGatewayRoute 时该 Pod 只有 envoy 与 shutdown-manager，出现
+  AI 路由后多出第三个容器；`ai-gateway-system` 里只有 controller，没有独立的 extproc 部署。
+  协议翻译与 body 解析都跑在这个 sidecar 里；controller 只在 xDS 翻译期（extensionManager `:1063`）
+  注入配置。分层：
+
+  ```
+  客户端（Host: <catalogHostname>，客户端协议由路径前缀选定，如 /anthropic/v1/messages）
+    │
+    ▼
+  【数据面】envoy-cubestack-system-cubestack-gateway-*（ns envoy-gateway-system）
+     ├─ envoy              ← 承载流量、按 header 匹配路由、把 request/response 流交给 ext_proc
+     ├─ ai-gateway-extproc ← 协议翻译（OpenAI ↔ Anthropic / Cohere 等，含流式事件）、
+     │                        提取 model（x-ai-eg-model）与 usage
+     └─ shutdown-manager
+    │
+    ▼
+  上游（vLLM，OpenAI 方言）
+
+  【控制面】ns ai-gateway-system
+     └─ ai-gateway-controller ← watch CRD、生成底层 HTTPRoute、经 extensionManager(:1063)
+                                注入 ext_proc 与 schema 翻译配置
+  ```
+
+- **一个已发布请求的完整路径（实测）**：
+
+  ```
+  客户端
+    │  POST <协议路径，如 /v1/chat/completions 或 /anthropic/v1/messages>
+    │  Host: <catalogHostname>          ← 所有目录模型共用这一个入口
+    │  body: {"model": "<目录名>", ...}  ← 目录名 = spec.route.modelName
+    ▼
+  NodePort ──> Gateway 的 Envoy listener :80
+    │  ① Host 匹配：命中 Agent Router 从本服务 AIGatewayRoute 生成的那条 HTTPRoute
+    ▼
+  ② ext_proc（数据面 Pod 内的 sidecar，gRPC 双向流）
+    │   · 按客户端协议解析请求体，提取 model → 注入 x-ai-eg-model 请求头；
+    │     客户端协议 ≠ 后端 schema 时在此翻译请求体
+    ▼
+  ③ Envoy 按 x-ai-eg-model 匹配路由规则 → 选中该服务的 cluster
+    │   · cluster 由 AIServiceBackend → EG Backend 的 FQDN 得出：
+    │     <isvc>-<role>.<ns>.svc.cluster.local:<port>
+    │   · modelNameOverride：把请求体里的目录名改写成引擎 served name
+    ▼
+  ④ 上游：Service <isvc>-<role> → Pod（vLLM）
+    │   · timeoutSeconds → 总时长上限（默认 0 = 不设）；idleTimeoutSeconds → 无进展上限（默认 300s）
+    ▼
+  ⑤ ext_proc（响应阶段）
+    │   · 解析响应体提取 usage（流式需客户端带 stream_options.include_usage）
+    │   · 需要时把响应与流式事件翻译回客户端协议（如 Anthropic SSE）
+    │   · usage → token 限流/记账：执行链尚未部署，为后续增量
+    ▼
+  客户端收到响应（协议形状与其请求一致）
+  ```
+
+- **客户端协议与后端 schema 是两件事（实测）**：客户端协议由 controller 的
+  `--endpointPrefixes=openai:,cohere:/cohere,anthropic:/anthropic` 决定——同一个目录 host 下
+  `/v1/chat/completions`、`/v1/responses`、`/anthropic/v1/messages`（含流式 SSE）都可用；
+  `AIServiceBackend.schema` 声明的是**上游方言**（vLLM = OpenAI），网关在两者之间做双向翻译。
+  任何协议下请求体的 `model` 都必须是目录名，否则 404。
+- 配额执行链未部署（`--quotaRateLimitServiceAddr` 指向的 `envoy-ai-gateway-ratelimit` Service 不存在）。
 
 **平台侧（现状与实测）**
 
