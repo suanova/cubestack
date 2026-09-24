@@ -202,12 +202,16 @@ export function FloatingChat() {
   /** Stop the follow loop for good: bump its generation so a tick already in
    *  flight cannot schedule a successor for a conversation this surface has
    *  stopped watching. */
+  /** The re-attach stream belongs to the follow state being retired. */
+  function stopAttach(): void {
+    attachRef.current?.abort();
+    attachRef.current = null;
+  }
+
   function stopFollowing(): void {
     followGenRef.current++;
     stopTurnPolling();
-    // The re-attach stream belongs to the follow state being retired.
-    attachRef.current?.abort();
-    attachRef.current = null;
+    stopAttach();
   }
 
   function cancelInflight(): void {
@@ -466,9 +470,11 @@ export function FloatingChat() {
    * the stream never delivered reaches the page.
    */
   async function adoptServerState(key: string): Promise<void> {
-    // A half-open link can leave the send parked in a read for good; give up on
-    // it so `sending` (and the composer with it) is released.
+    // A half-open link can leave either stream parked in a read for good; give up
+    // on both, so `sending` (and the composer with it) is released and a later
+    // run can be re-attached to.
     sendCtlRef.current?.abort();
+    stopAttach();
     followingRef.current = false;
     setRunningElsewhere(false);
     setAgentNotice("");
@@ -587,6 +593,9 @@ export function FloatingChat() {
           if (ownTurnSettledRef.current) {
             ownTurnRef.current = false;
             ownTurnSettledRef.current = false;
+            // The terminal settles the turn; an open response must not keep the
+            // composer's Stop waiting on another read.
+            sendCtlRef.current?.abort();
             return;
           }
           // Otherwise only once the stream has gone quiet: an early "nothing is

@@ -745,6 +745,30 @@ describe("carryOpenCards — a refresh keeps the reader's cards", () => {
     expect((twice[1] as AgentMsg).questions).toHaveLength(1);
   });
 
+  it("carries each turn's own cards, not just the newest turn's", () => {
+    const older = { ...newAgentMsg(1, T0), phase: "done" as const, approvals: [card] };
+    const newer = {
+      ...newAgentMsg(3, T0),
+      phase: "done" as const,
+      approvals: [{ ...card, callId: "app-2" }],
+    };
+    const refreshedBoth = [
+      { ...user, id: 4 },
+      { ...newAgentMsg(4, T0), phase: "done" as const },
+      { ...user, id: 5 },
+      { ...newAgentMsg(5, T0), phase: "done" as const },
+    ];
+    const out = carryOpenCards([user, older, user, newer], refreshedBoth);
+    expect((out[1] as AgentMsg).approvals.map((a) => a.callId)).toEqual(["app-1"]);
+    expect((out[3] as AgentMsg).approvals.map((a) => a.callId)).toEqual(["app-2"]);
+  });
+
+  it("a turn the transcript has not written yet falls to the newest", () => {
+    const last = { ...newAgentMsg(3, T0), phase: "done" as const, approvals: [card] };
+    const out = carryOpenCards([user, last], refreshed);
+    expect((out[1] as AgentMsg).approvals).toHaveLength(1);
+  });
+
   it("nothing to carry leaves the refreshed transcript alone", () => {
     expect(carryOpenCards([user, { ...newAgentMsg(1, T0), phase: "done" as const }], refreshed)).toBe(refreshed);
   });

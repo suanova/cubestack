@@ -690,6 +690,9 @@ describe("cubepilot page", () => {
     });
     expect(container.textContent ?? "").not.toContain("已删除 demo-env-0。");
     expect(container.textContent ?? "").toContain("已批准");
+    // The settled turn released the composer, whatever the response does.
+    expect(container.querySelector('[data-od-id="stop-btn"]')).toBeNull();
+    expect(container.querySelector('[data-od-id="send-btn"]')).not.toBeNull();
     act(() => root.unmount());
   }, 40000);
 

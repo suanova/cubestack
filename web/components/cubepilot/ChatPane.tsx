@@ -885,9 +885,11 @@ export function ChatPane() {
    * otherwise come back looking idle.
    */
   async function adoptServerState(key: string): Promise<void> {
-    // A half-open link can leave the send parked in a read for good; give up on
-    // it so `sending` (and the composer with it) is released.
+    // A half-open link can leave either stream parked in a read for good; give up
+    // on both, so `sending` (and the composer with it) is released and a later
+    // run can be re-attached to.
     sendCtlRef.current?.abort();
+    stopAttach();
     followingRef.current = false;
     setRunningElsewhere(false);
     setAgentNotice("");
@@ -1029,6 +1031,9 @@ export function ChatPane() {
           if (ownTurnSettledRef.current) {
             ownTurnRef.current = false;
             ownTurnSettledRef.current = false;
+            // The terminal settles the turn; an open response must not keep the
+            // composer's Stop waiting on another read.
+            sendCtlRef.current?.abort();
             return;
           }
           // Otherwise only once the stream has gone quiet: an early "nothing is
