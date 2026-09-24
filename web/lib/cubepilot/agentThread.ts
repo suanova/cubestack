@@ -428,6 +428,25 @@ export function openQuestions(msg: AgentMsg): AgentQuestion[] {
   return msg.questions.filter((q) => q.state === "pending" || q.state === "submitting");
 }
 
+/** Carry the cards a reader still has open onto `next`'s newest agent message.
+ *  The runtime's transcript has no cards, so a refresh that adopts it would drop
+ *  the controls a parked run is blocked on. Generic over the thread's own
+ *  message union: a pane's list also holds model-side bubbles. */
+export function carryOpenCards<T extends { role: string }>(prev: readonly T[], next: T[]): T[] {
+  const from = [...prev].reverse().find((m) => m.role === "agent") as AgentMsg | undefined;
+  if (!from) return next;
+  const approvals = openApprovals(from);
+  const questions = openQuestions(from);
+  if (approvals.length === 0 && questions.length === 0) return next;
+  const lastIdx = next.reduce((acc, m, i) => (m.role === "agent" ? i : acc), -1);
+  if (lastIdx < 0) return next;
+  let merged = approvals.reduce(addApproval, next[lastIdx] as unknown as AgentMsg);
+  const known = new Set(merged.questions.map((q) => q.callId));
+  const added = questions.filter((q) => !known.has(q.callId));
+  if (added.length > 0) merged = { ...merged, questions: [...merged.questions, ...added] };
+  return next.map((m, i) => (i === lastIdx ? (merged as unknown as T) : m));
+}
+
 /** Seconds left before the gateway expires the question, or undefined if it
  *  carries no deadline. */
 export function remainingSeconds(q: AgentQuestion, now: number): number | undefined {

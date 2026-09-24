@@ -24,6 +24,7 @@ import { Fragment, useEffect, useRef, useState } from "react";
 
 import {
   addApproval,
+  carryOpenCards,
   greetingTexts,
   applyAgentEvent,
   historyToMsgs,
@@ -172,6 +173,12 @@ export function FloatingChat() {
   const lastStreamAtRef = useRef(0);
   /** The re-attach stream open for a parked run, so only one is opened. */
   const attachRef = useRef<AbortController | null>(null);
+  /** The send whose stream is still open. Aborting it ends this surface's
+   *  observation of the turn — the run itself is untouched. */
+  const sendCtlRef = useRef<AbortController | null>(null);
+  /** Whether this surface's own stream reported the turn's terminal. Such a
+   *  turn needs no adoption: its output and its cards are already here. */
+  const ownTurnSettledRef = useRef(false);
 
   const nextId = (): number => {
     idRef.current += 1;
@@ -206,6 +213,7 @@ export function FloatingChat() {
   function cancelInflight(): void {
     genRef.current++;
     stopFollowing();
+    sendCtlRef.current?.abort();
     // The turn and its follow state describe the session this surface is
     // leaving (unmount): retired with it.
     ownTurnRef.current = false;
@@ -444,7 +452,7 @@ export function FloatingChat() {
       const raw = JSON.stringify(items);
       if (raw === lastHistoryRef.current) return;
       lastHistoryRef.current = raw;
-      setMsgs(historyToMsgs(items, nextId));
+      setMsgs((list) => carryOpenCards(list, historyToMsgs(items, nextId)));
     } catch {
       /* a dropped poll is not an error; the next one re-reads */
     }
@@ -458,6 +466,9 @@ export function FloatingChat() {
    * the stream never delivered reaches the page.
    */
   async function adoptServerState(key: string): Promise<void> {
+    // A half-open link can leave the send parked in a read for good; give up on
+    // it so `sending` (and the composer with it) is released.
+    sendCtlRef.current?.abort();
     followingRef.current = false;
     setRunningElsewhere(false);
     setAgentNotice("");
@@ -483,6 +494,8 @@ export function FloatingChat() {
       const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/turn/events`, {
         signal: ctl.signal,
       });
+      // 404 (not parked) and 409 (another stream holds the session) are the
+      // ordinary refusals; the polling carries on either way.
       if (!res.ok || !res.body) return;
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -569,8 +582,15 @@ export function FloatingChat() {
         // history document is no substitute: it holds no cards, and it cannot
         // say that the stream died.
         if (active !== true) {
-          // Only once the stream has gone quiet: an early "nothing is running"
-          // must not retire this surface's own view of the turn.
+          // A turn this surface's own stream reported the terminal for is
+          // already complete here, cards and all: nothing to adopt.
+          if (ownTurnSettledRef.current) {
+            ownTurnRef.current = false;
+            ownTurnSettledRef.current = false;
+            return;
+          }
+          // Otherwise only once the stream has gone quiet: an early "nothing is
+          // running" must not retire this surface's own view of the turn.
           if (Date.now() - lastStreamAtRef.current >= STREAM_SILENCE_MS) {
             ownTurnRef.current = false;
             await adoptServerState(key);
@@ -731,6 +751,9 @@ export function FloatingChat() {
 
   async function sendAgent(text: string, gen: number, msgId: number): Promise<void> {
     let gotDone = false;
+    ownTurnSettledRef.current = false;
+    const ctl = new AbortController();
+    sendCtlRef.current = ctl;
     try {
       const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(SESSION_KEY)}/messages`, {
         method: "POST",
@@ -738,6 +761,7 @@ export function FloatingChat() {
         // The conversation is named by the path. Bodies are decoded strictly,
         // so the key does not belong in the body as well.
         body: JSON.stringify({ content: text }),
+        signal: ctl.signal,
       });
       if (!res.ok) {
         // Request-phase failure (400/409/503-warming): surfaced as an error on
@@ -757,10 +781,12 @@ export function FloatingChat() {
         try {
           step = await reader.read();
         } catch {
-          // The connection died under the reader (the browser's "network
-          // error"). That ends the reading rather than becoming the turn's own
+          // Our own abort (unmount) is not a transport failure. Anything else is
+          // the connection dying under the reader — the browser's "network
+          // error" — which ends the reading rather than becoming the turn's own
           // error: the run may still be executing, so the lost-stream path below
-          // reports it and the follow loop finds out what the run did.
+          // reports it.
+          if (ctl.signal.aborted) return;
           break;
         }
         const { done, value } = step;
@@ -788,7 +814,10 @@ export function FloatingChat() {
           } catch {
             continue;
           }
-          if (evt.type === "message_done") gotDone = true;
+          if (evt.type === "message_done") {
+            gotDone = true;
+            ownTurnSettledRef.current = true;
+          }
           if (genRef.current === gen) handleAgentEvent(evt, msgId);
         }
       }
@@ -807,9 +836,13 @@ export function FloatingChat() {
         void checkTurnElsewhere(SESSION_KEY, gen);
       }
     } catch (e) {
+      // Our own abort is this surface walking away, not a turn that failed.
+      if (sendCtlRef.current?.signal.aborted) return;
       if (genRef.current === gen) {
         setMsgs((list) => list.map((x) => (x.id === msgId && x.role === "agent" ? { ...x, error: String(e instanceof Error ? e.message : e) } : x)));
       }
+    } finally {
+      if (sendCtlRef.current === ctl) sendCtlRef.current = null;
     }
   }
 

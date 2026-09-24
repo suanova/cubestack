@@ -19,7 +19,7 @@ function stubApi(
   config?: Record<string, unknown>,
   opts: {
     catalogUnavailable?: boolean;
-    stream?: "end" | "error" | "stall";
+    stream?: "end" | "error" | "stall" | "terminal";
     activePolls?: number;
     transcript?: Array<{ role: string; content: string }>;
     attach?: { events?: unknown[]; emit?: (ev: unknown) => void; calls?: number };
@@ -87,14 +87,23 @@ function stubApi(
         // just ends) and the card stays answerable. A `message_done` here would
         // say the turn was over while the write was still parked, and a turn
         // that really ends settles its parked cards.
-        const events = opts.stream
-          ? [
+        const events =
+          opts.stream === "terminal"
+            ? [
+                { type: "message_start", sessionId: "agent:main:conv-portal" },
+                { type: "message_delta", sessionId: "agent:main:conv-portal", delta: "正在查 demo 的 DevEnvironment…" },
+                { type: "approval_pending", sessionId: "agent:main:conv-portal", callId: "app-3", name: "shell", command: "kubectl delete pod demo-env-0", level: "write", createdAtMs: Date.now(), expiresAtMs: Date.now() + 600000 },
+                { type: "approval_resolved", sessionId: "agent:main:conv-portal", callId: "app-3", approved: true },
+                { type: "message_done", sessionId: "agent:main:conv-portal", stopped: false },
+              ]
+            : opts.stream
+              ? [
               // A plain turn that narrates and then loses its link, before any
               // terminal event: what the runtime's transcript has to answer for.
               { type: "message_start", sessionId: "agent:main:conv-portal" },
-              { type: "message_delta", sessionId: "agent:main:conv-portal", delta: "正在查 demo 的 DevEnvironment…" },
-            ]
-          : [
+                  { type: "message_delta", sessionId: "agent:main:conv-portal", delta: "正在查 demo 的 DevEnvironment…" },
+                ]
+              : [
               { type: "message_start", sessionId: "agent:main:conv-1" },
               { type: "agent_thinking", sessionId: "agent:main:conv-1" },
               { type: "message_delta", sessionId: "agent:main:conv-1", delta: "正在检查 Ceph 状态…" },
@@ -102,13 +111,15 @@ function stubApi(
               { type: "tool_result", sessionId: "agent:main:conv-1", callId: "call-1", output: "POOL USED: 71%" },
               { type: "message_delta", sessionId: "agent:main:conv-1", delta: "OSD 使用率 71%。" },
               { type: "approval_pending", sessionId: "agent:main:conv-1", callId: "app-1", name: "shell", command: "ceph osd set-noscrub", level: "write" },
-            ];
+                ];
         const enc = new TextEncoder();
         const stream = new ReadableStream({
           start(controller) {
             for (const e of events) controller.enqueue(enc.encode(`data: ${JSON.stringify(e)}\n\n`));
             if (opts.stream === "error") controller.error(new TypeError("network error"));
-            else if (opts.stream !== "stall") controller.close();
+            else if (opts.stream !== "stall" && opts.stream !== "terminal") controller.close();
+            // A real fetch aborts the body when the caller aborts its signal.
+            init?.signal?.addEventListener("abort", () => controller.error(new DOMException("Aborted", "AbortError")));
           },
         });
         return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
@@ -121,7 +132,11 @@ function stubApi(
         const enc = new TextEncoder();
         const stream = new ReadableStream({
           start(controller) {
-            for (const e of opts.attach?.events ?? []) controller.enqueue(enc.encode(`data: ${JSON.stringify(e)}\n\n`));
+            // Delivered once, as the runtime does when the card is raised: a
+            // replay on every attach would paper over a refresh that drops it.
+            if (opts.attach?.calls === 1) {
+              for (const e of opts.attach.events ?? []) controller.enqueue(enc.encode(`data: ${JSON.stringify(e)}\n\n`));
+            }
             if (opts.attach) opts.attach.emit = (ev: unknown) => controller.enqueue(enc.encode(`data: ${JSON.stringify(ev)}\n\n`));
           },
         });
@@ -547,8 +562,12 @@ describe("cubepilot page", () => {
     expect(await waitFor(() => (container.textContent ?? "").includes("正在查 demo 的 DevEnvironment…"))).toBe(true);
 
     expect(await waitFor(() => (container.textContent ?? "").includes("全部 Running"))).toBe(true);
-    // Nothing is left claiming the turn is still running.
+    // Nothing is left claiming the turn is still running, and the composer is
+    // released: a half-open link leaves the send parked in a read, so giving up
+    // on it is what takes Stop off the screen.
     expect(container.textContent ?? "").not.toContain("仍在运行");
+    expect(container.querySelector('[data-od-id="stop-btn"]')).toBeNull();
+    expect(container.querySelector('[data-od-id="send-btn"]')).not.toBeNull();
     act(() => root.unmount());
   }, 30000);
 
@@ -642,6 +661,37 @@ describe("cubepilot page", () => {
     expect(await waitFor(() => (attach.calls ?? 0) >= 2)).toBe(true);
     act(() => root.unmount());
   }, 30000);
+
+  // A turn this pane's own stream reported the terminal for is complete here —
+  // its output and its settled cards both. Adopting the transcript over it would
+  // drop the cards the reader just used.
+  it("does not adopt the transcript over a turn the stream settled", async () => {
+    stubApi(undefined, {
+      stream: "terminal",
+      activePolls: 1,
+      transcript: [
+        { role: "user", content: "清理掉那个开发环境" },
+        { role: "assistant", content: "已删除 demo-env-0。" },
+      ],
+    });
+    const { container, root } = renderPage();
+    await act(async () => {});
+    act(() => {
+      (container.querySelector('[data-od-id="obj-cubepilot"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await sendTurn(container, "清理掉那个开发环境");
+    expect(await waitFor(() => (container.textContent ?? "").includes("已批准"))).toBe(true);
+
+    // Long past the silence threshold and the run is over: the transcript is not
+    // adopted over the settled turn.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 9000));
+    });
+    expect(container.textContent ?? "").not.toContain("已删除 demo-env-0。");
+    expect(container.textContent ?? "").toContain("已批准");
+    act(() => root.unmount());
+  }, 40000);
 
   it("resizes the object list column by dragging the pane resizer", async () => {
     const { container, root } = renderPage();

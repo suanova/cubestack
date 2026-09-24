@@ -31,6 +31,7 @@ import type { PointerEvent as ReactPointerEvent } from "react";
 
 import {
   addApproval,
+  carryOpenCards,
   greetingTexts,
   adoptsRestoredThread,
   applyAgentEvent,
@@ -392,6 +393,12 @@ export function ChatPane() {
   /** The re-attach stream open for a parked run, so the follow loop opens one at
    *  a time. */
   const attachRef = useRef<AbortController | null>(null);
+  /** The send whose stream is still open. Aborting it ends this pane's
+   *  observation of the turn — the run itself is untouched. */
+  const sendCtlRef = useRef<AbortController | null>(null);
+  /** Whether this pane's own stream reported the turn's terminal. Such a turn
+   *  needs no adoption: its output and its settled cards are already here. */
+  const ownTurnSettledRef = useRef(false);
 
   const svc = models.find((s) => s.id === svcId) ?? null;
   const endpointText = endpoint ? `${endpoint}/v1/chat/completions` : "";
@@ -428,6 +435,7 @@ export function ChatPane() {
     followGenRef.current++;
     stopTurnPolling();
     stopAttach();
+    sendCtlRef.current?.abort();
     // The turn and its follow state describe the session this pane is leaving.
     ownTurnRef.current = false;
     followingRef.current = false;
@@ -860,7 +868,7 @@ export function ChatPane() {
       const raw = JSON.stringify(items);
       if (raw === lastHistoryRef.current) return;
       lastHistoryRef.current = raw;
-      setMsgs(historyToMsgs(items, nextId));
+      setMsgs((list) => carryOpenCards(list, historyToMsgs(items, nextId)));
     } catch {
       /* a dropped poll is not an error; the next one re-reads */
     }
@@ -877,6 +885,9 @@ export function ChatPane() {
    * otherwise come back looking idle.
    */
   async function adoptServerState(key: string): Promise<void> {
+    // A half-open link can leave the send parked in a read for good; give up on
+    // it so `sending` (and the composer with it) is released.
+    sendCtlRef.current?.abort();
     followingRef.current = false;
     setRunningElsewhere(false);
     setAgentNotice("");
@@ -909,6 +920,8 @@ export function ChatPane() {
       const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/turn/events`, {
         signal: ctl.signal,
       });
+      // 404 (not parked) and 409 (another stream holds the session) are the
+      // ordinary refusals; the polling carries on either way.
       if (!res.ok || !res.body) return;
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -1010,9 +1023,17 @@ export function ChatPane() {
         // already ended cannot tell the pane is whether the run is still going,
         // and that is all this read is for.
         if (active !== true) {
-          // Only once the stream has gone quiet: an early "nothing is running"
-          // (the run has not registered yet) must not retire this pane's own
-          // view — nothing else would adopt the transcript.
+          // A turn this pane's own stream reported the terminal for is already
+          // complete here — output and settled cards both — and the transcript
+          // the adoption would fetch carries no cards. Retire it and stop.
+          if (ownTurnSettledRef.current) {
+            ownTurnRef.current = false;
+            ownTurnSettledRef.current = false;
+            return;
+          }
+          // Otherwise only once the stream has gone quiet: an early "nothing is
+          // running" (the run has not registered yet) must not retire this
+          // pane's own view — nothing else would adopt the transcript.
           if (Date.now() - lastStreamAtRef.current >= STREAM_SILENCE_MS) {
             ownTurnRef.current = false;
             await adoptServerState(key);
@@ -1202,6 +1223,9 @@ export function ChatPane() {
 
   async function sendAgent(text: string, gen: number, msgId: number): Promise<void> {
     let gotDone = false;
+    ownTurnSettledRef.current = false;
+    const ctl = new AbortController();
+    sendCtlRef.current = ctl;
     // The conversation is named by the path: a POST to a session's messages IS
     // that session's first (or next) turn, so a send with no key has nothing to
     // address. It cannot happen — the key starts as this pane's fixed
@@ -1223,6 +1247,7 @@ export function ChatPane() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content: text }),
+        signal: ctl.signal,
       });
       if (!res.ok) {
         // Request-phase failure (400/409/503-warming): surfaced as an error
@@ -1243,11 +1268,12 @@ export function ChatPane() {
         try {
           step = await reader.read();
         } catch {
-          // The connection died under the reader — the browser's "network error"
-          // / "Error in input stream". That ends the reading rather than
-          // becoming this turn's own error: the run may still be executing, so
-          // the lost-stream path below is what reports it, and the follow loop
-          // is what finds out what the run did.
+          // Our own abort (a session switch, or adopting after silence) is not a
+          // transport failure. Anything else is the connection dying under the
+          // reader — the browser's "network error" — which ends the reading
+          // rather than becoming this turn's own error: the run may still be
+          // executing, so the lost-stream path below reports it.
+          if (ctl.signal.aborted) return;
           break;
         }
         const { done, value } = step;
@@ -1276,7 +1302,10 @@ export function ChatPane() {
             continue;
           }
           if (evt.type === "message_start") sessionOfTurn = evt.sessionId;
-          if (evt.type === "message_done") gotDone = true;
+          if (evt.type === "message_done") {
+            gotDone = true;
+            ownTurnSettledRef.current = true;
+          }
           if (genRef.current === gen) handleAgentEvent(evt, msgId);
         }
       }
@@ -1307,10 +1336,14 @@ export function ChatPane() {
         if (key) void checkTurnElsewhere(key, gen);
       }
     } catch (e) {
+      // Our own abort is this pane walking away, not a turn that failed.
+      if (sendCtlRef.current?.signal.aborted) return;
       if (genRef.current === gen) {
         setThinkingText(null);
         setMsgs((list) => list.map((x) => (x.id === msgId && x.role === "agent" ? { ...x, error: String(e instanceof Error ? e.message : e) } : x)));
       }
+    } finally {
+      if (sendCtlRef.current === ctl) sendCtlRef.current = null;
     }
   }
 
