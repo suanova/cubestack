@@ -417,10 +417,17 @@ export function ChatPane() {
     }
   }
 
+  /** Drop the re-attach stream: it belongs to the follow state being retired. */
+  function stopAttach(): void {
+    attachRef.current?.abort();
+    attachRef.current = null;
+  }
+
   function cancelInflight(): void {
     genRef.current++;
     followGenRef.current++;
     stopTurnPolling();
+    stopAttach();
     // The turn and its follow state describe the session this pane is leaving.
     ownTurnRef.current = false;
     followingRef.current = false;
@@ -944,7 +951,9 @@ export function ChatPane() {
     } catch {
       /* the next tick tries again */
     } finally {
-      attachRef.current = null;
+      // Only if this is still the current one: a newer attach must not be
+      // cleared by an older one ending.
+      if (attachRef.current === ctl) attachRef.current = null;
     }
   }
 
@@ -985,6 +994,7 @@ export function ChatPane() {
    */
   function startFollowing(key: string): void {
     stopTurnPolling();
+    stopAttach();
     const gen = followGenRef.current;
 
     const tickOnce = async (): Promise<void> => {
@@ -1000,13 +1010,13 @@ export function ChatPane() {
         // already ended cannot tell the pane is whether the run is still going,
         // and that is all this read is for.
         if (active !== true) {
-          ownTurnRef.current = false;
-          // Nothing is running, and this stream has been quiet longer than a
-          // model takes to say anything at all: whatever it was going to report,
-          // it is not coming. The server's copy is the truth now — and adopting
-          // it is the only way an answer, or a card the run left parked, ever
-          // reaches a reader whose link died mid-turn.
-          if (Date.now() - lastStreamAtRef.current >= STREAM_SILENCE_MS) await adoptServerState(key);
+          // Only once the stream has gone quiet: an early "nothing is running"
+          // (the run has not registered yet) must not retire this pane's own
+          // view — nothing else would adopt the transcript.
+          if (Date.now() - lastStreamAtRef.current >= STREAM_SILENCE_MS) {
+            ownTurnRef.current = false;
+            await adoptServerState(key);
+          }
         }
         return;
       }

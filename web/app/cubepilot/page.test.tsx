@@ -117,6 +117,7 @@ function stubApi(
       // its own stream is gone. `emit` lets the test push the events a real
       // runtime would (a new card, a resolution).
       if (url.endsWith("/turn/events") && opts.attach) {
+        opts.attach.calls = (opts.attach.calls ?? 0) + 1;
         const enc = new TextEncoder();
         const stream = new ReadableStream({
           start(controller) {
@@ -134,7 +135,13 @@ function stubApi(
         turnPolls += 1;
         return json({ active: turnPolls <= opts.activePolls });
       }
-      if (url.endsWith("/messages") && opts.transcript) return json({ items: opts.transcript });
+      if (url.endsWith("/messages") && opts.transcript) {
+        // The runtime writes a turn as it goes, so the stub's transcript only
+        // exists once the run is over — otherwise the mount's own read would
+        // satisfy an adoption assertion without the poll ever running.
+        if (!sent || (opts.activePolls !== undefined && turnPolls <= opts.activePolls)) return json({ items: [] });
+        return json({ items: opts.transcript });
+      }
       if (url.endsWith("/approvals/decision"))
         return json({ approved: true, decision: "approve", approvalId: "app-1" });
       if (url.endsWith("/questions/answer")) return json({ questionId: "ask-1", cancelled: false });
@@ -582,6 +589,57 @@ describe("cubepilot page", () => {
     });
     expect(await waitFor(() => (container.textContent ?? "").includes("已批准"))).toBe(true);
     expect(container.querySelector('[data-od-id="approval-approve"]')).toBeNull();
+    act(() => root.unmount());
+  }, 30000);
+
+  // The first poll after a send can report "nothing is running" before the run
+  // has even registered. That must not retire the pane's own view of the turn:
+  // the silence guard decides, and the adoption still has to happen later.
+  it("an early inactive poll does not retire a turn whose stream is still open", async () => {
+    stubApi(undefined, {
+      stream: "stall",
+      activePolls: 0,
+      transcript: [
+        { role: "user", content: "查一下 demo 的 DevEnvironment" },
+        { role: "assistant", content: "demo 下共 5 个 DevEnvironment,全部 Running。" },
+      ],
+    });
+    const { container, root } = renderPage();
+    await act(async () => {});
+    act(() => {
+      (container.querySelector('[data-od-id="obj-cubepilot"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    await sendTurn(container, "查一下 demo 的 DevEnvironment");
+    expect(await waitFor(() => (container.textContent ?? "").includes("全部 Running"))).toBe(true);
+    act(() => root.unmount());
+  }, 30000);
+
+  // A re-attach belongs to the follow state that opened it. Leaving the
+  // conversation and coming back must attach again — a stream left parked in a
+  // ref would silently refuse every later one.
+  it("re-attaches after the conversation is reopened", async () => {
+    const attach: { events?: unknown[]; emit?: (ev: unknown) => void; calls?: number } = {};
+    stubApi(undefined, { stream: "error", activePolls: 999, attach });
+    const { container, root } = renderPage();
+    await act(async () => {});
+    act(() => {
+      (container.querySelector('[data-od-id="obj-cubepilot"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await sendTurn(container, "清理掉那个开发环境");
+    expect(await waitFor(() => (attach.calls ?? 0) >= 1)).toBe(true);
+
+    // Away to the model and back to the assistant.
+    act(() => {
+      (container.querySelector('[data-od-id="obj-glm-5.2-chat"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    act(() => {
+      (container.querySelector('[data-od-id="obj-cubepilot"]') as HTMLElement).click();
+    });
+    expect(await waitFor(() => (attach.calls ?? 0) >= 2)).toBe(true);
     act(() => root.unmount());
   }, 30000);
 

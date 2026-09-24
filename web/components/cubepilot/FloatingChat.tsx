@@ -198,6 +198,9 @@ export function FloatingChat() {
   function stopFollowing(): void {
     followGenRef.current++;
     stopTurnPolling();
+    // The re-attach stream belongs to the follow state being retired.
+    attachRef.current?.abort();
+    attachRef.current = null;
   }
 
   function cancelInflight(): void {
@@ -522,7 +525,9 @@ export function FloatingChat() {
     } catch {
       /* the next tick tries again */
     } finally {
-      attachRef.current = null;
+      // Only if this is still the current one: a newer attach must not be
+      // cleared by an older one ending.
+      if (attachRef.current === ctl) attachRef.current = null;
     }
   }
 
@@ -564,12 +569,12 @@ export function FloatingChat() {
         // history document is no substitute: it holds no cards, and it cannot
         // say that the stream died.
         if (active !== true) {
-          ownTurnRef.current = false;
-          // Nothing is running and this stream has gone quiet past any model's
-          // first token: the server's copy is the truth now, and adopting it is
-          // how an answer — or a card the run left parked — reaches a reader
-          // whose link died mid-turn.
-          if (Date.now() - lastStreamAtRef.current >= STREAM_SILENCE_MS) await adoptServerState(key);
+          // Only once the stream has gone quiet: an early "nothing is running"
+          // must not retire this surface's own view of the turn.
+          if (Date.now() - lastStreamAtRef.current >= STREAM_SILENCE_MS) {
+            ownTurnRef.current = false;
+            await adoptServerState(key);
+          }
         }
         return;
       }
