@@ -3,6 +3,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { authedGet, bareGet } from "@/test/auth";
 
+// Off-cluster with nothing to discover: the gateway module's Service lookup must
+// not reach for a real kubeconfig in a unit test.
+vi.mock("@/lib/kubernetes", () => ({
+  getCoreClient: () => {
+    throw new Error("no cluster in this test");
+  },
+  getKubeConfig: () => ({ getCurrentCluster: () => null }),
+}));
+
 const { GET } = await import("./route");
 
 describe("/api/cubepilot/playground/services", () => {
@@ -38,11 +47,37 @@ describe("/api/cubepilot/playground/services", () => {
     expect(body.endpoint).toBe("http://gw.test:8080");
   });
 
-  it("returns 502 with the gateway error when /v1/models fails", async () => {
+  it("returns 502 without the upstream detail when /v1/models fails", async () => {
     vi.stubEnv("CUBESTACK_GATEWAT_URL", "http://gw.test:8080");
     vi.stubGlobal("fetch", vi.fn(async () => new Response("boom", { status: 404 })));
     const res = await GET(await authedGet(), undefined);
     expect(res.status).toBe(502);
-    expect(((await res.json()) as { error: string }).error).toContain("404");
+    // A fixed phrase, not the upstream body or the status: nothing downstream
+    // shows it, and an internal detail is not this route's to hand out.
+    expect(await res.json()).toEqual({ models: [], endpoint: null, error: "model catalog unavailable" });
+  });
+
+  it("returns 502 without the transport error when the gateway is unreachable", async () => {
+    // The shape a cluster with no platform model service produces: Node's fetch
+    // rejects with "TypeError: fetch failed" (cause ENOTFOUND), and that string
+    // used to travel all the way into the page.
+    vi.stubEnv("CUBESTACK_GATEWAT_URL", "http://gw.test:8080");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("fetch failed");
+      }),
+    );
+    const res = await GET(await authedGet(), undefined);
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({ models: [], endpoint: null, error: "model catalog unavailable" });
+  });
+
+  it("returns 503 with the same fixed phrase when no gateway is resolvable", async () => {
+    // No env override and no discoverable Service: the body must not repeat the
+    // resolution hint (an env var name, a namespace) either.
+    const res = await GET(await authedGet(), undefined);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ models: [], endpoint: null, error: "model catalog unavailable" });
   });
 });

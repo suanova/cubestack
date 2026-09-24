@@ -941,8 +941,14 @@ export function ChatPane() {
       // Nothing is selected here either. The object the page opens on is the
       // assistant, chosen in the mount effect; which model is "first" is the
       // gateway's order, not a choice.
-    } catch (e) {
-      showToast(t("cubepilot.failed", { error: String(e) }), "error");
+    } catch {
+      // No platform model service is a supported shape (the assistant runs on
+      // the providers the template declares), so this is not a page-level
+      // failure: the model group is left out and nothing is announced. The
+      // reason is in the portal's log — the reader can neither act on it nor
+      // be told about it in a way that is not an internal detail.
+      setModels([]);
+      setEndpoint(null);
     }
   }
 
@@ -1645,7 +1651,12 @@ export function ChatPane() {
               {agentRoleLine}
             </Box>
           </Box>
-          <Box sx={{ ...groupLabelSx, mt: "18px" }}>{t("cubepilot.chat.objectsModels")}</Box>
+          {/* The group appears only when it has something in it: an install with no
+              platform model service offers the assistant and nothing else, and a
+              labelled but empty group reads as "still loading". */}
+          {models.length > 0 ? (
+            <Box data-od-id="objects-models" sx={{ ...groupLabelSx, mt: "18px" }}>{t("cubepilot.chat.objectsModels")}</Box>
+          ) : null}
           {models.map((m) => {
             const active = isModel && m.id === svcId;
             return (

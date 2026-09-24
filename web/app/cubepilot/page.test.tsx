@@ -10,8 +10,10 @@ import CubepilotPage from "./page";
 // which vitest's import-analysis can't transform.
 
 /** Stub every endpoint the three panes fetch on mount + the agent flow.
- *  `config` replaces the agent config body when a test needs its own catalog. */
-function stubApi(config?: Record<string, unknown>) {
+ *  `config` replaces the agent config body when a test needs its own catalog.
+ *  `opts.catalogUnavailable` makes the model catalog request fail, the shape a
+ *  cluster with no platform model service produces. */
+function stubApi(config?: Record<string, unknown>, opts: { catalogUnavailable?: boolean } = {}) {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -100,11 +102,19 @@ function stubApi(config?: Record<string, unknown>) {
       // Everything else under a session: the list is empty for a fresh user (the
       // greeting, not a restore), and `items` covers the transcript read.
       if (url.includes("/api/cubepilot/pilot/api/v1/sessions")) return json({ sessions: [], items: [] });
-      if (url.includes("/api/cubepilot/playground/services"))
+      if (url.includes("/api/cubepilot/playground/services")) {
+        if (opts.catalogUnavailable) {
+          return {
+            ok: false,
+            status: 502,
+            json: async () => ({ models: [], endpoint: null, error: "model catalog unavailable" }),
+          };
+        }
         return json({
           models: [{ id: "glm-5.2-chat", ownedBy: "cubestack" }],
           endpoint: "http://gw.test:8080",
         });
+      }
       if (url.includes("/api/cubepilot/playground/chat")) {
         // Real streaming: SSE chunks (the client accumulates the deltas).
         const FULL = "好的,已收到。这是来自真实 AI Gateway 的流式回复。";
@@ -168,6 +178,27 @@ describe("cubepilot page", () => {
     expect(container.textContent).toContain("配置");
     expect(container.querySelector('[data-od-id="cp-tab-playground"]')).toBeNull();
     expect(container.querySelector('[data-od-id="cubepilot-tabs"]')).not.toBeNull();
+    act(() => root.unmount());
+  });
+
+  // An install with no platform model service is a supported shape: the page
+  // offers the assistant and leaves the model group out, announcing nothing. The
+  // reason a catalog is missing (a gateway that was never installed, a name that
+  // does not resolve) is an internal detail the reader can neither act on nor be
+  // shown — it used to arrive as "Operation failed: Error: TypeError: fetch
+  // failed" on a page whose assistant worked fine.
+  it("offers the assistant alone when no model service is available", async () => {
+    stubApi(undefined, { catalogUnavailable: true });
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    expect(container.querySelector('[data-od-id="obj-cubepilot"]')).not.toBeNull();
+    expect(container.querySelector('[data-od-id="obj-glm-5.2-chat"]')).toBeNull();
+    // The group label goes with the list — asserting on the text would match the
+    // page subtitle, which names the group in prose.
+    expect(container.querySelector('[data-od-id="objects-models"]')).toBeNull();
+    expect(document.body.textContent).not.toContain("操作失败");
+    expect(document.body.textContent).not.toContain("fetch failed");
     act(() => root.unmount());
   });
 
