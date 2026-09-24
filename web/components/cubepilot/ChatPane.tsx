@@ -200,6 +200,22 @@ const SESSION_KEY = "agent:main:conv-portal";
  *  is one small GET every few seconds. */
 const FOLLOW_INTERVAL_MS = 3000;
 
+/** How quiet a turn's stream has to go, while the server says the run is over,
+ *  before the pane stops treating it as the state of the turn. Longer than any
+ *  first token: the point is to tell a link that died from a model that is
+ *  thinking, and the cost of waiting is a few seconds of a stale bubble. */
+const STREAM_SILENCE_MS = 5000;
+
+/** The events the re-attach stream is read for: the ones that carry a human's
+ *  decision. Whatever else it carries is already in the runtime's transcript,
+ *  which the follow loop polls. */
+const ATTACH_EVENTS = new Set<AgentSseEvent["type"]>([
+  "approval_pending",
+  "approval_resolved",
+  "question_pending",
+  "question_resolved",
+]);
+
 export function ChatPane() {
   const { t } = useI18n();
   const { showToast, toastView } = useToast();
@@ -368,6 +384,14 @@ export function ChatPane() {
    *  it is watching now. Only a turn this pane did NOT author is watched that
    *  way, and its terminal read is what completes that transcript. */
   const followingRef = useRef(false);
+  /** When this pane's turn stream last carried anything. A link that dies takes
+   *  no notice of it: the read simply never returns, so silence is the only
+   *  evidence there is — and it is read together with the server's own "nothing
+   *  is running", never on its own. */
+  const lastStreamAtRef = useRef(0);
+  /** The re-attach stream open for a parked run, so the follow loop opens one at
+   *  a time. */
+  const attachRef = useRef<AbortController | null>(null);
 
   const svc = models.find((s) => s.id === svcId) ?? null;
   const endpointText = endpoint ? `${endpoint}/v1/chat/completions` : "";
@@ -836,6 +860,107 @@ export function ChatPane() {
   }
 
   /**
+   * Adopt the runtime's copy of the conversation.
+   *
+   * This is where a turn's outcome comes from once its stream is gone: the
+   * transcript is written as the run goes, so it is what a reader sees after a
+   * reload — and reading it is the only way an answer the stream never
+   * delivered reaches the page. The cards come with it: the history document
+   * carries no approvals or questions, so a run parked on a human would
+   * otherwise come back looking idle.
+   */
+  async function adoptServerState(key: string): Promise<void> {
+    followingRef.current = false;
+    setRunningElsewhere(false);
+    setAgentNotice("");
+    await loadAgentHistory(key);
+    await restorePendingHitl(key);
+  }
+
+  /**
+   * Observe a parked run with the API's re-attach stream.
+   *
+   * A turn's events — "a write needs your decision" among them — are written
+   * only to the stream the send opened, so a pane that lost that stream never
+   * hears about a card raised afterwards (the runtime logs "no open stream for
+   * session …; push dropped"). Re-attaching is what makes such a card appear
+   * here, and stay answerable here: a decision taken elsewhere arrives on the
+   * same stream.
+   *
+   * The route accepts only a run that is PARKED, so a refusal is ordinary — 404
+   * when the run is not parked, 409 when another stream holds the session — and
+   * the polling that led here carries on either way. This stream is read for the
+   * cards alone: the transcript keeps coming from the poll, and taking both
+   * would write every delta twice.
+   */
+  async function attachToRun(key: string): Promise<void> {
+    if (attachRef.current) return;
+    const gen = genRef.current;
+    const ctl = new AbortController();
+    attachRef.current = ctl;
+    try {
+      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/turn/events`, {
+        signal: ctl.signal,
+      });
+      if (!res.ok || !res.body) return;
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      for (;;) {
+        let step: ReadableStreamReadResult<Uint8Array>;
+        try {
+          step = await reader.read();
+        } catch {
+          break; // the link died again; a later tick may re-attach
+        }
+        const { done, value } = step;
+        if (done) break;
+        if (genRef.current !== gen) {
+          try {
+            await reader.cancel();
+          } catch {
+            /* already closed */
+          }
+          return;
+        }
+        lastStreamAtRef.current = Date.now();
+        buffer += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice(5).trim();
+          if (!payload) continue;
+          let evt: AgentSseEvent;
+          try {
+            evt = JSON.parse(payload) as AgentSseEvent;
+          } catch {
+            continue;
+          }
+          if (genRef.current === gen && ATTACH_EVENTS.has(evt.type)) applyAttachedEvent(evt);
+        }
+      }
+    } catch {
+      /* the next tick tries again */
+    } finally {
+      attachRef.current = null;
+    }
+  }
+
+  /** Apply an event from the re-attach stream to the newest agent bubble: the
+   *  stream describes the turn that bubble is showing, and the id the send used
+   *  may be gone — a transcript read can have replaced the thread under it. */
+  function applyAttachedEvent(evt: AgentSseEvent): void {
+    setMsgs((list) => {
+      const lastIdx = [...list].reverse().findIndex((x) => x.role === "agent");
+      if (lastIdx < 0) return list;
+      const i = list.length - 1 - lastIdx;
+      return list.map((x, xi) => (xi === i && x.role === "agent" ? applyAgentEvent(x, evt) : x));
+    });
+  }
+
+  /**
    * Watch the conversation for as long as it is the one on screen.
    *
    * The pane cannot infer the conversation's state from its own stream, because
@@ -874,7 +999,15 @@ export function ChatPane() {
         // cannot say that the stream died. The one thing a stream that has
         // already ended cannot tell the pane is whether the run is still going,
         // and that is all this read is for.
-        if (active !== true) ownTurnRef.current = false;
+        if (active !== true) {
+          ownTurnRef.current = false;
+          // Nothing is running, and this stream has been quiet longer than a
+          // model takes to say anything at all: whatever it was going to report,
+          // it is not coming. The server's copy is the truth now — and adopting
+          // it is the only way an answer, or a card the run left parked, ever
+          // reaches a reader whose link died mid-turn.
+          if (Date.now() - lastStreamAtRef.current >= STREAM_SILENCE_MS) await adoptServerState(key);
+        }
         return;
       }
       if (active === true) {
@@ -887,19 +1020,18 @@ export function ChatPane() {
         // goes, so re-reading it is what makes the output appear at all.
         followingRef.current = true;
         await refreshHistoryIfChanged(key);
+        // A turn can now be parked on a human, and the card that says so is
+        // pushed to the session's own stream — the one this pane lost. Re-attach
+        // so the card arrives here rather than being dropped on the floor.
+        void attachToRun(key);
         return;
       }
       // A poll that fails is not the header's "could not check": the status is
       // already the server's own answer, and one dropped request in a 3s rhythm
       // is not worth replacing it with an alarm. Only a definite "nothing is
       // running" retires the state.
-      setRunningElsewhere(false);
-      if (followingRef.current) {
-        followingRef.current = false;
-        setAgentNotice("");
-        await loadAgentHistory(key);
-        await restorePendingHitl(key);
-      }
+      if (followingRef.current) await adoptServerState(key);
+      else setRunningElsewhere(false);
     };
 
     const tick = async (): Promise<void> => {
@@ -1090,11 +1222,25 @@ export function ChatPane() {
         throw new Error(err?.error || `HTTP ${res.status}`);
       }
       if (!res.body) throw new Error(t("cubepilot.chat.emptyStream"));
+      // The stream is this pane's clock for the turn: silence since here is what
+      // tells the follow loop that the link, not the model, is what stopped.
+      lastStreamAtRef.current = Date.now();
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
       for (;;) {
-        const { done, value } = await reader.read();
+        let step: ReadableStreamReadResult<Uint8Array>;
+        try {
+          step = await reader.read();
+        } catch {
+          // The connection died under the reader — the browser's "network error"
+          // / "Error in input stream". That ends the reading rather than
+          // becoming this turn's own error: the run may still be executing, so
+          // the lost-stream path below is what reports it, and the follow loop
+          // is what finds out what the run did.
+          break;
+        }
+        const { done, value } = step;
         if (done) break;
         if (genRef.current !== gen) {
           try {
@@ -1104,6 +1250,7 @@ export function ChatPane() {
           }
           return;
         }
+        lastStreamAtRef.current = Date.now();
         buffer += decoder.decode(value, { stream: true });
         let nl: number;
         while ((nl = buffer.indexOf("\n")) >= 0) {
