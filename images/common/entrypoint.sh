@@ -12,9 +12,11 @@
 #
 # Modes:
 #   jupyter  start sshd only when the operator mounted the ssh Secret, then hand
-#            off to the image CMD (start-jupyter.sh in both jupyter images: the CPU
-#            one dispatches into docker-stacks' start.sh, the MACA one is the whole
-#            launcher, the vendor base shipping none).
+#            off to the image CMD (start-jupyter.sh in each jupyter image: the CPU
+#            one dispatches into docker-stacks' start.sh, and both vendor images run
+#            the shared common/jupyter one, which expands NOTEBOOK_ARGS into
+#            --ServerApp.base_url itself — neither vendor base starts jupyter at all,
+#            one shipping none and the other JupyterLab with no command to launch it).
 #   ssh      run sshd in the foreground.
 set -euo pipefail
 

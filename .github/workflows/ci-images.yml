@@ -13,11 +13,12 @@ on:
 
 permissions: {}
 
-# Two jobs, one per family of images, because the families are independent: no
+# Three jobs, one per family of images, because the families are independent: no
 # Dockerfile reads across them, so a merge that changes only the CPU pair cannot
-# change what is in the MACA pair. Running one job for all four made every such
-# merge pull the 10.5 GiB vendor base twice on its way to publishing two images it
-# could not have altered.
+# change what is in either vendor pair. Running one job for all six made every such
+# merge pull both 10.5 GiB vendor bases on its way to publishing images it could not
+# have altered — and hold both of them unpacked at once, which is the disk the
+# ci-operator split exists for.
 #
 # The split has to hold across runs, not just within one, which is why each family
 # carries its own concurrency group and its own `latest` gate below.
@@ -32,6 +33,7 @@ jobs:
     outputs:
       cpu: ${{ steps.filter.outputs.cpu }}
       maca: ${{ steps.filter.outputs.maca }}
+      cuda: ${{ steps.filter.outputs.cuda }}
     steps:
       - name: Clone the code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -50,9 +52,9 @@ jobs:
           # the gate pathspecs below spelled the other way round, and they have to stay
           # that way — see the gate.
           #
-          # images/common/** is in both, because all four Dockerfiles COPY from it. This workflow
-          # file is in both because it is what defines these lists, so a change to the lanes
-          # republishes both families.
+          # images/common/** is in all three, because all six Dockerfiles COPY from it. This
+          # workflow file is in all three because it is what defines these lists, so a change to
+          # the lanes republishes every family.
           #
           # Enumerating the paths also drops the two things under images/ that reach no
           # image at all: the markdown (README.md, AGENTS.md) and hack/. A docs edit on
@@ -71,6 +73,13 @@ jobs:
             maca:
               - 'images/jupyter-maca-pytorch/**'
               - 'images/ssh-maca-pytorch/**'
+              - 'images/common/**'
+              - 'images/Makefile'
+              - 'images/.dockerignore'
+              - '.github/workflows/ci-images.yml'
+            cuda:
+              - 'images/jupyter-cuda-pytorch/**'
+              - 'images/ssh-cuda-pytorch/**'
               - 'images/common/**'
               - 'images/Makefile'
               - 'images/.dockerignore'
@@ -280,3 +289,91 @@ jobs:
 
           # Repoints the tags at the indexes pushed above; nothing is rebuilt.
           make -C images retag-latest TAG="${TAG}" RETAG="maca ssh-maca"
+
+  build-push-cuda:
+    # As above: a merge publishes this pair when it changed something that can reach it,
+    # a release publishes everything.
+    needs: changes
+    if: "!cancelled() && (github.ref_type == 'tag' || needs.changes.outputs.cuda == 'true')"
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    # The MACA lane's number, on the same reasoning: a backstop that releases the group
+    # rather than a tight bound. This base is a different vendor's and a different size
+    # unpacked (38.6 GB against 33), but it is the same 10.5 GiB to upload — measured
+    # from the manifest, not assumed — so the one cold push that sized that lane (2h25m
+    # at 1.30 MB/s) is the case to clear here too.
+    timeout-minutes: 300
+    # Per family and per ref: only another run that publishes this same pair may cancel
+    # it. See the CPU lane for why one group for all families is not equivalent.
+    concurrency:
+      group: ci-images-cuda-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Resolve the release version
+        id: release
+        uses: ./.github/actions/resolve-release-version
+      - name: Reclaim disk space
+        uses: ./.github/actions/reclaim-disk
+      - name: Smoke the images before publishing them
+        # As in the CPU and MACA lanes: the acceptance contract, run against a build of
+        # this commit's source before the merge publishes it, ahead of `Set up Buildx` so
+        # the engine's own store holds what `docker run` reads.
+        run: make -C images smoke-cuda smoke-ssh-cuda
+      - name: Drop what the smoke built
+        # The push below builds both images again, in the buildx builder, whose store is
+        # its own — so what the smoke loaded into the engine is 39 GB that nothing
+        # downstream reads. Dropping it here is the difference between one copy of the
+        # vendor base on this runner and two.
+        run: |
+          docker image prune -af
+          docker builder prune -af
+          df -h /
+      - name: Set up Buildx
+        # A runner's default driver is `docker`, which builds for a single platform.
+        #
+        # No QEMU here, unlike the CPU lane: both of these images are built for
+        # CUDA_PLATFORM alone, which is linux/amd64 and nothing else.
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Log in to Harbor
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: harbor.isuanova.com
+          username: ${{ vars.CI_BOT_NAME }}
+          password: ${{ secrets.CI_BOT_PASSWORD }}
+      - name: Build and push the images
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="$(git rev-parse --short HEAD)"
+
+          # A release publishes the version it names and does not move `latest`. Both
+          # of these publish a single-platform index, so a second tag is a second build
+          # for them too.
+          if [ -n "${RELEASE_VERSION}" ]; then
+            make -C images push-cuda push-ssh-cuda PUSH_LATEST=0 TAG="${RELEASE_VERSION}"
+            exit 0
+          fi
+
+          # PUSH_LATEST=0: the mutable tag is moved below, and only if this run's image
+          # is still the newest image content on main.
+          make -C images push-cuda push-ssh-cuda PUSH_LATEST=0 TAG="${TAG}"
+
+          # The `cuda` filter above, and it has to stay equal to it — see the CPU lane.
+          PATHS="images/jupyter-cuda-pytorch images/ssh-cuda-pytorch images/common images/Makefile images/.dockerignore .github/workflows/ci-images.yml"
+          git fetch --no-tags --depth=1 origin main
+          if ! git diff --quiet "${GITHUB_SHA}" FETCH_HEAD -- ${PATHS}; then
+            echo "Skipping 'latest': a later commit changed what these images are built from, whose own run owns the tag"
+            exit 0
+          fi
+
+          # Repoints the tags at the indexes pushed above; nothing is rebuilt. RETAG
+          # names what this run published and nothing else — the other families' tags
+          # were not pushed here, so asking for them would fail on a manifest that does
+          # not exist.
+          make -C images retag-latest TAG="${TAG}" RETAG="cuda ssh-cuda"

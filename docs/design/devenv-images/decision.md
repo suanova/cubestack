@@ -8,7 +8,8 @@ GPU vendor, storage, and an SSH toggle. This module delivers that **base-image s
 satisfy the image contract already fixed in the operator, are published to a container image
 registry, and can be bundled for offline installation.
 
-In scope: the five image products `base-cuda` (NVIDIA), `jupyter-maca-pytorch` and `ssh-maca-pytorch`
+In scope: the image set that now ships — `jupyter-cuda-pytorch` and `ssh-cuda-pytorch` (NVIDIA — a
+single `base-cuda` in the earlier draft, see §6.1), `jupyter-maca-pytorch` and `ssh-maca-pytorch`
 (Metax — a single `base-maca` in the earlier draft, see §6.2), `jupyter-minimal`, `ssh-ubuntu22.04`,
 plus offline packaging / container image registry publishing. **Out of scope**: code-server,
 `DevEnvironmentTemplate`, GPU driver / RDMA bring-up (Installer).
@@ -27,7 +28,7 @@ images are final** — they cannot be solved inside the images themselves.
 
 | # | Operator assumption | Code evidence | Requirement on the image | Status |
 |---|---|---|---|---|
-| 1 | Brand marker | `devenvironment_controller.go::brandMismatchReason`: image name (lowercased) must **contain** the vendor's token — `cuda` for nvidia, `maca` for metax. Checked **only when a GPU is requested** — an absent `spec.resources.gpu` block is exempt | Image must carry its vendor token when it is a GPU image; CPU images are named freely. nvidia products spell it out in `base-cuda`; metax products are the upstream Metax packages (`maca`, `maca-pytorch`, `maca-tensorflow`, …) mirrored under their own names | ✅ consistent with the brand gate |
+| 1 | Brand marker | `devenvironment_controller.go::brandMismatchReason`: image name (lowercased) must **contain** the vendor's token — `cuda` for nvidia, `maca` for metax. Checked **only when a GPU is requested** — an absent `spec.resources.gpu` block is exempt | Image must carry its vendor token when it is a GPU image; CPU images are named freely. Both nvidia products spell it out in their names (`jupyter-cuda-pytorch`, `ssh-cuda-pytorch`); metax products are the upstream Metax packages (`maca`, `maca-pytorch`, `maca-tensorflow`, …) mirrored under their own names, and the pair built on that mirror carries the token too | ✅ consistent with the brand gate |
 | 2 | Type → port | `::mainContainerPort`: jupyter 8888 / vscode 8080 / ssh `sshContainerPort`; readiness probe = TCP on the main port | The server must listen on the type's port and accept TCP — **except ssh**, where the container listens on the unprivileged **2222** (see B) and the Service publishes that as 22 | ✅ implemented (#173): the probe targets the container port (2222 for ssh) and the Service publishes `port: 22 → targetPort: 2222` |
 | 3 | Non-root default | `::desiredSecurityContext`: `runAsUser=runAsGroup=1000`, `runAsNonRoot=true` (only lifted when the user explicitly sets `0`) | Image must run as the **uid/gid the spec resolves to** (`spec.runtime.securityContext`, platform default 1000/1000), non-root, incl. writing `$HOME` (stock images ship uid 1000) | ✅ (but see #6, #9) |
 | 4 | `$HOME` = the workspace mount; the working directory is separate | `::withWorkspaceHome` states the resolved mount path as the container's `HOME`, for every type, whenever `spec.storage` is set; `desiredPodSpec` sets no `container.WorkingDir`, and no image's own account home is rewritten | The container is **told** where its home is; an image must act on that for anything meant to land on the workspace. The mount path is `spec.storage.mountPath`, else the home the runtime identity implies — docker-stacks images keep `/home/jovyan` by naming `jovyan`; the self-authored images get `/home/ubuntu`. A non-root account must be able to **write** that mount, which no image can arrange for itself | ✅ Gap A closed for `HOME`: an init container repairs the claim's ownership — the root alone while it already matches, the whole tree when it does not — before the container starts. Both jupyter launchers end up serving the stated home rather than one the image bakes — the MACA one passes it as `--ServerApp.root_dir`, the CPU one takes uid 0 out of the stock chain and `cd`s into it — so a notebook serves the workspace. **The ssh family does not**: it keeps `WORKDIR /home/ubuntu` and nothing in the image reads `HOME`, so an ssh session works in the directory the image gives it, which is the claim only where the mount resolves there. A working-directory guarantee is **not implemented** |
@@ -295,6 +296,11 @@ together with Gaps B/C.
 - Driver requirement: the host driver must be ≥ the image's minimum CUDA version (e.g. CUDA 12.4 ≥
   550.54.14; drivers are backward compatible).
 
+**Not the base that shipped** (§6.1): the platform builds on the vendor's NGC **PyTorch** release
+instead, which already carries the toolkit, torch and JupyterLab — so the base/runtime/devel split
+surveyed above is not a choice this work had to make. The driver findings apply unchanged, being
+properties of the node rather than of the image.
+
 ### 3.B Jupyter docker-stacks
 
 - **Official images are only published to Quay since 2023-10** (`quay.io/jupyter/*`); Docker Hub
@@ -354,9 +360,9 @@ key handling) is written once. They differ in the base and the layout they carry
  + jupyterlab (jupyter type) + openssh-server     runAsGroup=100); + openssh-server ONLY, so ssh works;
    │                                              otherwise == stock
    ├── CPU: ssh-ubuntu22.04                       (jupyter type on a GPU-vendor image is the
-   └── GPU: base-cuda (+nvidia runtime)           self-authored jupyterlab, not this overlay)
-           jupyter-maca-pytorch (+Metax runtime)
-           ssh-maca-pytorch   (same base, ssh alone)
+   └── GPU: a vendor base, mirrored verbatim:     self-authored jupyterlab, not this overlay)
+           jupyter-maca-pytorch / ssh-maca-pytorch (Metax, one image per mode: §6.2)
+           jupyter-cuda-pytorch / ssh-cuda-pytorch (NVIDIA, the same two modes: §6.1)
 ```
 
 Key points:
@@ -377,8 +383,12 @@ Key points:
   sshd's `SetEnv` replaces a session's environment rather than extending it, so a fixed literal would
   hide whichever family's toolchain it did not name. The mount-contract paths (`AuthorizedKeysFile`,
   `HostKey`) are `%h`-relative, so one file serves every family and the shared parts cannot drift apart.
+  The jupyter launcher (`images/common/jupyter/start-jupyter.sh`) is shared too, between the two images
+  that need one: it is what expands `NOTEBOOK_ARGS` into `--ServerApp.base_url` (Gap C), which the
+  docker-stacks overlay does not need because upstream's launcher already does it.
 - **Account / `HOME` follow the image family** (see §2 contract): the **self-authored** platform
-  layer (`ssh-ubuntu22.04`, `base-cuda`, `jupyter-maca-pytorch`, `ssh-maca-pytorch`) ships account
+  layer (`ssh-ubuntu22.04`, `jupyter-maca-pytorch`, `ssh-maca-pytorch`, `jupyter-cuda-pytorch`,
+  `ssh-cuda-pytorch`) ships account
   `ubuntu` uid/gid 1000
   with `$HOME=/home/ubuntu`, named per environment via `spec.runtime.user` — there is no
   upstream UX to preserve, so uniformity is free. The **stock-derived jupyter** image is **not**
@@ -386,11 +396,12 @@ Key points:
   (uid 1000, gid 100) and `/home/jovyan` exactly as docker-stacks ships them, so users familiar with
   the stock image see stock behavior; it adds sshd only for `ssh.enabled`. An environment selects
   either layout through the same two fields, so neither family bends to the platform's defaults.
-- **The GPU images reuse the same self-authored platform layer**, and there is one per mode: a
-  jupyter-type environment picks `jupyter-maca-pytorch`, an ssh-type environment on a GPU-vendor image
-  gets `ssh-maca-pytorch`, which runs sshd alone. The split is at the image, not the controller: the
+- **The GPU images reuse the same self-authored platform layer**, and there is one per mode and per
+  vendor: a jupyter-type environment picks `jupyter-maca-pytorch` or `jupyter-cuda-pytorch` by the
+  vendor it asks for, and an ssh-type environment on a GPU-vendor image gets the ssh sibling of the
+  same pair, which runs sshd alone. The split is at the image, not the controller: the
   mode is baked into each image as `CUBESTACK_IMAGE` and the controller injects no type today, so a
-  single image cannot act on that distinction (§6.2). The CPU pair is split the same way
+  single image cannot act on that distinction (§6.1, §6.2). The CPU pair is split the same way
   (`jupyter-minimal` / `ssh-ubuntu22.04`).
 
 ---
@@ -403,7 +414,8 @@ offline in-cluster registry host form. Those are fixture values for a *user-chos
 platform's own publishing target, so they do not dictate the project below.
 
 - **Project name**: `suanova` — our images publish as
-  `harbor.isuanova.com/suanova/{ssh-ubuntu22.04,jupyter-minimal,base-cuda,jupyter-maca-pytorch,ssh-maca-pytorch}`.
+  `harbor.isuanova.com/suanova/`
+  `{ssh-ubuntu22.04,jupyter-minimal,jupyter-maca-pytorch,ssh-maca-pytorch,jupyter-cuda-pytorch,ssh-cuda-pytorch}`.
   That
   is the
   project CI already publishes operator and portal to (`suanova/cubestack-{operator,ui}`), so every
@@ -415,20 +427,25 @@ platform's own publishing target, so they do not dictate the project below.
   preinstalled and likewise moves slowly, hence `jupyter-minimal`. What does *not* qualify is a value
   that moves every release: upstream's *date* is exactly that, so it stays in the tag, and its Ubuntu
   base is upstream's choice rather than our pin (naming it would assert something we do not control).
-  The GPU images name their vendor by the same rule — it is what the user picks on: `base-cuda` for
-  NVIDIA, and `jupyter-maca-pytorch` for Metax, which names the vendor's package family rather than the
-  platform's own `base-maca` because what ships is a jupyter image prepared from that package, not a
-  bare base (§6.2). The **mode** is a second such axis, and it is why the Metax pair is two
+  The GPU images name their vendor by the same rule — it is what the user picks on: the two vendor
+  pairs, `jupyter-maca-pytorch` / `ssh-maca-pytorch` for Metax and `jupyter-cuda-pytorch` /
+  `ssh-cuda-pytorch` for NVIDIA, each naming the vendor's package family rather than the platform's
+  own `base-maca` / `base-cuda` because what ships is a jupyter image prepared from that package, not a
+  bare base (§6.1, §6.2). The **mode** is a second such axis, and it is why each vendor pair is two
   repositories rather than one repository with a tag or a flag: `ssh-maca-pytorch` is the same base
-  and platform layer without JupyterLab. The image carries its mode as baked state
+  and platform layer without JupyterLab, and `ssh-cuda-pytorch` is its NVIDIA twin. The image carries
+  its mode as baked state
   (`CUBESTACK_IMAGE`), the controller injects no type (§6.2), and a repository is what a
   DevEnvironment names in `spec.image` — so the axis has to be spelled in the name for either mode to
   be selectable. Offline
   installs surface the same images at `harbor.local`; only the host is swapped, by packaging/rewriting.
 - **Tags**: content-locked and reproducible. Examples:
-  - `base-cuda:<cuda>-py<python>[-torch<torch>]`, e.g. `12.4.1-py3.11-torch2.4.0`; or reuse today's
-    semantics `11.8-py3.10-torch2.2.2`. **Recommend promoting the sample's `11.8` to the full patch
-    `11.8.0` and eventually recording digests** in the packaging manifest.
+  - `jupyter-cuda-pytorch:<ngc-release>-<sha>` / `ssh-cuda-pytorch:<ngc-release>-<sha>`, e.g.
+    `26.08-<sha>`. Here the release *is* the compatibility contract: NGC pins python, torch and CUDA
+    together in one tag rather than naming them as separable axes, so unlike the earlier draft's
+    `base-cuda:<cuda>-py<python>-torch<torch>` there is one axis and not three — there is no torch
+    version to state separately, and repeating the python field the release also encodes (`-py3`) would
+    restate what it already fixes.
   - `jupyter-maca-pytorch:<maca-version>-py<python>-torch<ver>`, e.g. `3.9.0.12-py310-torch2.4`. The
     same axes the base is built on, for the same reason the ssh image carries its Ubuntu release: the
     vendor package version is the compatibility contract of the whole stack, and it is what a user
@@ -449,7 +466,10 @@ platform's own publishing target, so they do not dictate the project below.
     The MACA pair does not wait for that explicit tag: `MACA_TAG` reads the two axes out of
     `MACA_PACKAGE` and publishes `<maca-version>-py<python>-torch<ver>-<sha>` — derived, not written
     twice, so the tag cannot name a base the image was not built from, and the SHA still ends it so a
-    re-build of the overlay on an unchanged base moves the reference rather than redefining it.
+    re-build of the overlay on an unchanged base moves the reference rather than redefining it. The
+    CUDA pair works the same way off `CUDA_PACKAGE`, with the one axis that tag carries:
+    `<ngc-release>-<sha>`. Both derivations are guarded — an unreadable vendor release stops the build
+    rather than publishing a name with an empty field.
   - CI adds a second kind of pinned tag on a `vX.Y.Z` release: the platform release version, e.g.
     `ssh-ubuntu22.04:1.0.0`. The schemes above say what the image *is*; this says which CubeStack
     release it shipped with. A release publishes it instead of `:latest`, which stays a main-only tag.
@@ -464,20 +484,50 @@ platform's own publishing target, so they do not dictate the project below.
 
 ## 6. Image inventory and composition
 
-### 6.1 `base-cuda` (NVIDIA)
+### 6.1 `jupyter-cuda-pytorch` and `ssh-cuda-pytorch` (NVIDIA)
 
-- **Base**: pull `nvidia/cuda:<cuda>-runtime-ubuntu22.04` directly (**runtime**, not devel — see below).
-- **Overlay**: the platform layer (§4): python + entrypoint + account `ubuntu`(1000) with
-  `$HOME=/home/ubuntu` (`spec.runtime.user: ubuntu`).
-- **Bake PyTorch or not**: to decide. Today's sample implies yes (`…-pytorch2.2`); baking requires
-  pulling CUDA torch wheels at build time and a larger image. **Recommendation**: bake a default,
-  commonly used `torch+cu` stack into the GPU image for "out of the box" use, version pinned in the tag.
-- **runtime vs devel**: a runtime base covers "run torch"; if target users must `nvcc`-compile inside
-  the container, devel is needed (+~2.3 GB) or a separate `-devel` variant. **Recommendation: runtime
-  by default**, compile needs handled as build-time wheels, with a devel variant if required — pending
-  product confirmation.
-- **Acceptance mapping**: `nvidia-smi` visible = driver+toolkit injection check (not image content);
-  non-root 1000, `$HOME=/home/ubuntu`, 8888/2222 ready — smoke-driven by the controller pod spec.
+Shipped as `images/jupyter-cuda-pytorch/` and `images/ssh-cuda-pytorch/`. This section was written as
+`base-cuda` on a `nvidia/cuda` **runtime** base with "bake torch or not" and "runtime or devel" both
+open; what ships answers both at once and not separately, because the base is NVIDIA's own NGC
+**PyTorch** image (`nvcr.io/nvidia/pytorch:<release>-py3`) — the vendor's torch+CUDA stack rather than
+a bare runtime the platform would assemble torch onto. A `nvidia/cuda` base would have meant owning the
+wheel manifest and the CUDA/torch compatibility matrix; this one makes the vendor release the
+compatibility contract, and it is also the image a user of this stack already knows. The naming is
+§5's rule applied to it, exactly as §6.2's rename was: a jupyter image prepared from the vendor
+package, not a bare base.
+
+- **Base**: the NGC PyTorch release, **mirrored verbatim** into
+  `harbor.isuanova.com/mirrors/nvcr.io/nvidia/…` and pinned by digest — the same delivery the Metax
+  package gets, and for the same reason: a vendor artifact the platform serves rather than republishes,
+  so it has no `BASE_MIRRORS` entry in `operator/Makefile` and needs none. It is **amd64-only** (the
+  mirror carries one `linux/amd64` manifest), so both images are single-platform like the MACA pair.
+- **Unlike the MACA base, it is not bare.** It ships the account — uid/gid 1000 `ubuntu` at
+  `/home/ubuntu`, which is the self-authored family's layout exactly, so the overlay **inherits** it
+  and must not `useradd` over it — plus one python 3.12 with torch in its dist-packages (no second
+  interpreter, so no PATH correction), JupyterLab bound to that interpreter as a bare-`python`
+  kernelspec, an `ENTRYPOINT`, and the PATH / `LD_LIBRARY_PATH` / `LIBRARY_PATH` that put the CUDA
+  stack on the account's search path.
+- **Overlay**: the platform layer (§4) minus what the base already provides — `openssh-server`, `tini`,
+  the shared entrypoint and sshd drop-in, the shared jupyter launcher, the `ssh-copy-id` target
+  `/home/ubuntu/.ssh`, `/run/sshd`, and `CUBESTACK_IMAGE`. Nothing is installed from pip: this base's
+  JupyterLab is the one the notebook runs on. The base's `nvidia_entrypoint.sh` is displaced — it
+  prints the vendor's banner and runs hardware diagnostics, which is not what a DevEnvironment pod log
+  is for, and the entrypoint that decides what a container runs is the platform's.
+- **Acceptance mapping**: as the MACA pair, minus `mx-smi`: `python3` on the account imports the
+  vendor torch and prints the release's version, the notebook kernel resolves to that same interpreter,
+  jupyter 8888 behind token + `base_url`, the ssh session carries the CUDA stack's paths, and ssh 2222
+  key-auth login as `ubuntu`. `nvidia-smi` is **not** asserted — it comes from driver injection at
+  container start (§3.A), so it is a check of the node rather than of the image.
+- **Decision**: self-authored platform layer on the **mirrored vendor base**, with the account
+  inherited from it. What stays open is on-node, as for MACA: the node's driver has to be at least the
+  CUDA version this release requires, and whether the vendor stack works for uid 1000 once a device is
+  present is untested locally.
+- **The ssh sibling (`ssh-cuda-pytorch`)**: the same base and the same platform layer without
+  JupyterLab — `CUBESTACK_IMAGE=ssh`, `EXPOSE 2222`, no `CMD`. This base *does* ship JupyterLab whether
+  or not this image uses it, so what the mode decides is what runs rather than what is installed, and
+  the smoke asserts the ssh image's process tree instead of the absence of a binary. Everything above
+  that is not jupyter-specific applies to it unchanged: the vendor base pinned by digest, the
+  amd64-only footgun, the driver question.
 
 ### 6.2 `jupyter-maca-pytorch` and `ssh-maca-pytorch` (Metax)
 
@@ -501,8 +551,9 @@ prepared from the vendor package, not a bare base.
   amd64-only — see `images/README.md`.
 - **Overlay**: the platform layer (§4) — account `ubuntu` (1000:1000, `$HOME=/home/ubuntu`), the shared
   entrypoint and sshd drop-in — plus the jupyter launch chain, which this base has no equivalent of:
-  `start-jupyter.sh` stands in for docker-stacks' `start.sh` and is what expands `NOTEBOOK_ARGS`
-  (Gap C), since jupyter itself does not read that variable.
+  `common/jupyter/start-jupyter.sh` stands in for docker-stacks' `start.sh` and is what expands
+  `NOTEBOOK_ARGS` (Gap C), since jupyter itself does not read that variable. It is shared with the CUDA
+  image rather than written per vendor, because what it does does not depend on the base (§6.1).
 - **Software stack**: the vendor's own python and `torch+metax` build, inherited untouched — jupyterlab
   is installed into that interpreter rather than beside it; stock CUDA wheels remain unusable
   (cu-bridge recompile).
@@ -550,7 +601,8 @@ prepared from the vendor package, not a bare base.
     everything except the added sshd stays identical to the stock image, because there is no platform
     reason to change it — the §2 contract lets an environment name the image's layout rather than
     the image conform to the platform's. Option B (self-build) stays a fallback if a product later needs the
-    ecosystem trimmed; the GPU variant remains base-cuda's self-authored platform layer.
+    ecosystem trimmed; the GPU variants remain the vendor-base images' self-authored platform layer
+    (§6.1, §6.2).
 - **`ssh-ubuntu22.04` (CPU)**: self-build (ubuntu22.04 + openssh-server + entrypoint) — simplest,
   smallest attack surface; self-authored (no upstream stock UX to preserve) so it ships account
   `ubuntu` uid/gid 1000 with `$HOME=/home/ubuntu` (`spec.runtime.user: ubuntu`).
@@ -572,9 +624,12 @@ prepared from the vendor package, not a bare base.
 - **CI**: two workflows, split by what they may do, mirroring how operator and portal are handled.
   `ci-operator.yml`'s `images-smoke` job builds and smokes every image on any change under `images/**`
   that is not markdown, on **pull requests** — that is what validates them, and it needs neither a
-  cluster nor registry credentials. Publishing is `ci-images.yml`, on a push to `main` that changes
-  `images/**` or the workflow file itself (a change to the lanes starts both jobs), in **two jobs split
-  by image family** — `cpu` (ssh + jupyter) and `maca` (the vendor pair). Each smokes what it publishes,
+  cluster nor registry credentials. It does that in two steps with a `docker image prune -af` between
+  them, so only one vendor base is resident on the runner at a time: the two vendor bases together are
+  over 70 GB unpacked, well past what the reclaim leaves free. Publishing is `ci-images.yml`, on a push
+  to `main` that changes
+  `images/**` or the workflow file itself (a change to the lanes starts every job), in **three jobs split
+  by image family** — `cpu` (ssh + jupyter), `maca` (the Metax pair) and `cuda` (the NVIDIA pair). Each smokes what it publishes,
   pushes the short-SHA tag with `PUSH_LATEST=0`, and moves its own mutable `:latest` only if `main`'s
   copy of the paths that decide those images still matches that commit. Three properties hold that
   together, and each is load-bearing: a family's trigger paths, its gate pathspec and its
@@ -582,8 +637,8 @@ prepared from the vendor package, not a bare base.
   started a run of that family to move the tag; a family's `:latest` is moved only by a run that
   published it; and each family carries its own concurrency group, so only a run that would redo the
   same work can cancel one in flight. The split is what keeps a merge touching only the CPU pair from
-  pulling the 10.5 GiB vendor base twice on its way to publishing images it could not have changed. A
-  `vX.Y.Z` tag publishes both families at the version it names and moves no `:latest` (§5).
+  pulling a 10.5 GiB vendor base twice on its way to publishing images it could not have changed. A
+  `vX.Y.Z` tag publishes all three families at the version it names and moves no `:latest` (§5).
 - **Still open**: the offline export script (§3.D) — nothing in the repo produces the bundle yet, so
   an offline install is assembled by hand from the published images.
 
@@ -595,7 +650,7 @@ prepared from the vendor package, not a bare base.
 |---|---|---|---|
 | A workspace writability check (uid 1000 writing the home mount: `/home/ubuntu` self-authored, `/home/jovyan` jupyter) | workspace storage (cephfs-ephemeral) | **Closed controller-side**: an init container sets the claim root's mode and chowns it — recursively, but only when the owner does not already match — to the container's own identity on the way in, measured on `cephfs-ephemeral`, so the storage class needs no change (Gap A) | — |
 | B non-root sshd binding :22 | controller | **Closed image-side**: sshd listens on 2222 and the Service publishes it as 22, so no capability is ever granted. Retargeting `targetPort`/probe is #173 | base image ssh acceptance |
-| C injecting jupyter `base_url` | controller | **Closed controller-side**: `::withNotebookBaseURL` injects `NOTEBOOK_ARGS=--ServerApp.base_url=/dev/<ns>/<env>/` (replaces a `base_url` the environment declares, keeps its other flags; a `valueFrom`-fed `NOTEBOOK_ARGS` is refused) — docker-stacks' launcher honours it, so the CPU jupyter image needs no change. An image with a launcher of its own has to expand the variable itself; `jupyter-maca-pytorch` does (§6.2) | — |
+| C injecting jupyter `base_url` | controller | **Closed controller-side**: `::withNotebookBaseURL` injects `NOTEBOOK_ARGS=--ServerApp.base_url=/dev/<ns>/<env>/` (replaces a `base_url` the environment declares, keeps its other flags; a `valueFrom`-fed `NOTEBOOK_ARGS` is refused) — docker-stacks' launcher honours it, so the CPU jupyter image needs no change. An image with a launcher of its own has to expand the variable itself; the two vendor jupyter images share one that does (`images/common/jupyter/start-jupyter.sh`, §6.1, §6.2) | — |
 | D mode env (optional) | controller | Inject `CUBESTACK_TYPE`, entrypoint reads it first | vscode hook |
 
 ---
@@ -608,8 +663,8 @@ prepared from the vendor package, not a bare base.
 | GPU image = self-authored platform + runtime layer (layered reuse) | §4 | ✅ recommended here |
 | Project `suanova`, host `harbor.isuanova.com` (online) / `harbor.local` (offline) | §5 | ✅ recommended |
 | Dockerfiles live in monorepo `images/` | §7 | ✅ decided — landed, with CI on both sides (smoke per PR, publish on merge); the offline export script is still open |
-| base-cuda base = runtime (not devel) + whether to bake torch | §6.1 | ⚠️ **pending product** (CUDA version 11.8 vs 12.x, torch version, devel variant?) |
-| Metax images: self-authored platform layer on the **mirrored** vendor base, plus the image's own jupyter launcher (the vendor base ships none), amd64-only — one image per mode, `jupyter-maca-pytorch` and `ssh-maca-pytorch` | §6.2 | ✅ shipped in `images/`; ⚠️ **to confirm on a Metax node**: driver model (the base's baked `/opt/mxdriver` vs. what the node injects) and `mx-smi`/`metax-tech.com/gpu` |
+| NVIDIA images: self-authored platform layer on the **mirrored** NGC PyTorch vendor base, which already supplies the account, the interpreter, torch and JupyterLab — so the "bake torch or not" and "runtime or devel" questions this row used to leave open are answered together by the base choice — plus the shared jupyter launcher; amd64-only, one image per mode, `jupyter-cuda-pytorch` and `ssh-cuda-pytorch` | §6.1 | ✅ shipped in `images/` (the earlier `base-cuda` on a bare `nvidia/cuda` runtime is superseded); ⚠️ **to confirm on an NVIDIA node**: the node's driver against the release's CUDA requirement, and the vendor stack under uid 1000 once a device is present |
+| Metax images: self-authored platform layer on the **mirrored** vendor base, plus the shared jupyter launcher (`common/jupyter/` — the vendor base ships none), amd64-only — one image per mode, `jupyter-maca-pytorch` and `ssh-maca-pytorch` | §6.2 | ✅ shipped in `images/`; ⚠️ **to confirm on a Metax node**: driver model (the base's baked `/opt/mxdriver` vs. what the node injects) and `mx-smi`/`metax-tech.com/gpu` |
 | jupyter-minimal = stock-native thin-overlay on Quay minimal-notebook + ssh only | §6.3 | ✅ decided (shipped in images work) |
 | ssh-ubuntu22.04 self-build, account `ubuntu`/`$HOME=/home/ubuntu` (`spec.runtime.user: ubuntu`) | §6.3 | ✅ recommended here |
 | Gaps A/B/C/D closure | §8 | ✅ A, B and C closed (A and C controller-side, B image-side); ⚠️ D remains, and only a vscode type needs it |

@@ -38,6 +38,11 @@ PLATFORMS_ARG = $(foreach p,$(PLATFORMS),--platform $(p))
 # push, which buildx supports.
 MACA_PLATFORM ?= linux/amd64
 
+# The CUDA image is single-platform for the same reason and by the same mechanism: its vendor base
+# is published per architecture too — the mirror serves one linux/amd64 manifest — so there is no
+# arm64 layer to build an arm64 manifest from either. Kept out of PLATFORMS and named here.
+CUDA_PLATFORM ?= linux/amd64
+
 # Buildkit's provenance and SBOM attestations are off. Harbor rejects an index carrying
 # them with a 404 on the manifest PUT — "artifact ... not found" — even when every
 # manifest it references resolves on its own (seen 2026-09-21 publishing
@@ -64,13 +69,15 @@ PIP_INDEX_URL ?=
 # and in operator/Makefile's BASE_MIRRORS (the map the e2e's own builds and the mirror script
 # read — the two must name the same bases), then re-run the mirror script, which fails if a
 # mirrored tag no longer hashes to the digest it is listed under. Pass `BASE_ARGS=` to resolve
-# FROM upstream instead, unpinned — which covers the CPU bases only: the MACA base has no upstream
-# a build here reaches, so a MACA build needs an explicit `--build-arg MACA_BASE=<ref>` in its
-# place. The jupyter date tracks the base in jupyter/Dockerfile; bump both together.
+# FROM upstream instead, unpinned — which covers the CPU bases only: neither vendor base has an
+# upstream a build here reaches, so a MACA or CUDA build needs an explicit
+# `--build-arg MACA_BASE=<ref>` / `--build-arg CUDA_BASE=<ref>` in its place. The jupyter date
+# tracks the base in jupyter/Dockerfile; bump both together.
 BASE_ARGS ?= \
 	--build-arg JUPYTER_BASE=$(REGISTRY)/$(MIRROR_PROJECT)/quay.io/jupyter/minimal-notebook:2026-09-07@sha256:f6dc79ec57e05d28fa8f08dbd457c0d46f79e3677083e2eed9fb2d892942d810 \
 	--build-arg UBUNTU_BASE=$(UBUNTU_BASE) \
-	--build-arg MACA_BASE=$(MACA_BASE)
+	--build-arg MACA_BASE=$(MACA_BASE) \
+	--build-arg CUDA_BASE=$(CUDA_BASE)
 
 # Base release of the self-authored ssh image. It selects the build base AND names the
 # published repository (decision doc §5), so the name cannot outlive the base. The release is
@@ -94,8 +101,33 @@ UBUNTU_BASE = $(REGISTRY)/$(MIRROR_PROJECT)/docker.io/library/ubuntu:$(UBUNTU_VE
 # stands, into MIRROR_PROJECT, so there is no suanova/ copy to name; the vendor package keeps
 # its upstream path and the platform owns only the host serving it. Spelled out rather than
 # derived from $(PROJECT) so that stays visible.
+#
+# A table rather than an inline digest, for the reason UBUNTU_BASE_DIGESTS gives: MACA_PACKAGE
+# selects the base *and* is read for the tag, so a package bumped on its own would carry its name
+# onto the previous package's digest — and the digest is what the build resolves, so the published
+# reference would claim a package its layers do not come from. One entry per mirrored package; a
+# package with no entry stops in check-maca-base instead. Nothing mirrors the vendor bases, so the
+# entry is added by hand.
 MACA_PACKAGE = maca-pytorch:3.9.0.12-torch2.4-py310-ubuntu22.04-amd64
-MACA_BASE = $(REGISTRY)/$(MIRROR_PROJECT)/cr.metax-tech.com/public-library/$(MACA_PACKAGE)@sha256:da5065e441290224914e5643f6cd39e46a927d58eb2d97c865263ddd87c37a49
+MACA_BASE_DIGESTS = maca-pytorch:3.9.0.12-torch2.4-py310-ubuntu22.04-amd64=sha256:da5065e441290224914e5643f6cd39e46a927d58eb2d97c865263ddd87c37a49
+MACA_BASE_DIGEST = $(patsubst $(MACA_PACKAGE)=%,%,$(filter $(MACA_PACKAGE)=%,$(MACA_BASE_DIGESTS)))
+MACA_BASE = $(REGISTRY)/$(MIRROR_PROJECT)/cr.metax-tech.com/public-library/$(MACA_PACKAGE)@$(MACA_BASE_DIGEST)
+
+# The CUDA base, pinned the same way and outside $(PROJECT) for the same reason: NVIDIA's PyTorch
+# package was mirrored as it stands. It differs from MACA_PACKAGE in shape — the upstream host is
+# the first path segment of the *upstream* reference and the tag is nvcr.io's own release name,
+# not a vendor package rebuilt per architecture.
+#
+# A table rather than an inline digest, the way UBUNTU_VERSION is looked up in UBUNTU_BASE_DIGESTS:
+# CUDA_PACKAGE selects the base *and* is read for the tag, so a release bumped on its own would
+# carry its name onto the previous release's digest — and the digest is what the build resolves,
+# so the published reference would claim a release its layers do not come from. One entry per
+# mirrored release; a release with no entry stops in check-cuda-base instead. Nothing mirrors the
+# vendor bases, so the entry is added by hand.
+CUDA_PACKAGE = pytorch:26.08-py3
+CUDA_BASE_DIGESTS = pytorch:26.08-py3=sha256:ee619c9e16df23c5a7f6f79ff9a41ce3c6ea9f23a92a4833b59825bb056002cc
+CUDA_BASE_DIGEST = $(patsubst $(CUDA_PACKAGE)=%,%,$(filter $(CUDA_PACKAGE)=%,$(CUDA_BASE_DIGESTS)))
+CUDA_BASE = $(REGISTRY)/$(MIRROR_PROJECT)/nvcr.io/nvidia/$(CUDA_PACKAGE)@$(CUDA_BASE_DIGEST)
 
 APT_MIRROR_ARG    = $(if $(APT_MIRROR),--build-arg APT_MIRROR=$(APT_MIRROR))
 PIP_INDEX_URL_ARG = $(if $(PIP_INDEX_URL),--build-arg PIP_INDEX_URL=$(PIP_INDEX_URL))
@@ -136,6 +168,12 @@ MACA_REPO    = $(REGISTRY)/$(PROJECT)/jupyter-maca-pytorch
 # base is the one thing they have in common.
 SSH_MACA_REPO = $(REGISTRY)/$(PROJECT)/ssh-maca-pytorch
 
+# The NVIDIA twin of the MACA pair, named by the same rule: the vendor stack it carries, not its
+# base image. The mode split is the same one and for the same reason — CUBESTACK_IMAGE is baked at
+# build time, so an ssh-type GPU environment needs its own repository rather than a flag.
+CUDA_REPO     = $(REGISTRY)/$(PROJECT)/jupyter-cuda-pytorch
+SSH_CUDA_REPO = $(REGISTRY)/$(PROJECT)/ssh-cuda-pytorch
+
 # The MACA pair's tag carries the vendor axes a user picks between (decision doc §5), not only the
 # commit: this is the one base the platform does not choose, and the vendor package version is the
 # compatibility contract of the whole stack, so a deployment naming it should say what it is. Read
@@ -153,10 +191,22 @@ MACA_PKG_TORCH   = $(filter torch%,$(MACA_PKG_FIELDS))
 MACA_TAG_AXES    = $(MACA_PKG_VERSION)-$(MACA_PKG_PY)-$(MACA_PKG_TORCH)
 MACA_TAG        ?= $(MACA_TAG_AXES)-$(TAG)
 
+# The CUDA pair's tag carries its vendor release for the same reason, and is derived the same way —
+# but the NGC tag has a different shape, so the derivation is not the same one. `pytorch:26.08-py3`
+# encodes no torch axis: the release *is* the combination of python, torch and CUDA, pinned
+# together upstream, which is why the whole compatibility contract is the release. What is read out
+# of CUDA_PACKAGE is therefore just its version field, '26.08', giving '<release>-<sha>'. The
+# remaining field is dropped rather than appended: '-py3' names a python the release already
+# fixes, with one interpreter in the image for it to be ambiguous about.
+CUDA_PKG_VERSION = $(firstword $(subst -, ,$(lastword $(subst :, ,$(CUDA_PACKAGE)))))
+CUDA_TAG        ?= $(CUDA_PKG_VERSION)-$(TAG)
+
 IMG_SSH      ?= $(SSH_REPO):$(TAG)
 IMG_JUPYTER  ?= $(JUPYTER_REPO):$(TAG)
 IMG_MACA     ?= $(MACA_REPO):$(MACA_TAG)
 IMG_SSH_MACA ?= $(SSH_MACA_REPO):$(MACA_TAG)
+IMG_CUDA     ?= $(CUDA_REPO):$(CUDA_TAG)
+IMG_SSH_CUDA ?= $(SSH_CUDA_REPO):$(CUDA_TAG)
 
 # The moving publish tag: added by `make push`, never produced by `make build`, so a
 # local :latest means it came from a publish.
@@ -164,6 +214,8 @@ LATEST_SSH      = $(SSH_REPO):latest
 LATEST_JUPYTER  = $(JUPYTER_REPO):latest
 LATEST_MACA     = $(MACA_REPO):latest
 LATEST_SSH_MACA = $(SSH_MACA_REPO):latest
+LATEST_CUDA     = $(CUDA_REPO):latest
+LATEST_SSH_CUDA = $(SSH_CUDA_REPO):latest
 
 # Whether `make push` also moves :latest. A caller that may not move it — CI, which
 # only moves :latest when the run's commit is still the head of main — passes
@@ -176,10 +228,12 @@ LATEST_ARG_SSH      = $(if $(filter 1,$(PUSH_LATEST)),-t $(LATEST_SSH))
 LATEST_ARG_JUPYTER  = $(if $(filter 1,$(PUSH_LATEST)),-t $(LATEST_JUPYTER))
 LATEST_ARG_MACA     = $(if $(filter 1,$(PUSH_LATEST)),-t $(LATEST_MACA))
 LATEST_ARG_SSH_MACA = $(if $(filter 1,$(PUSH_LATEST)),-t $(LATEST_SSH_MACA))
+LATEST_ARG_CUDA     = $(if $(filter 1,$(PUSH_LATEST)),-t $(LATEST_CUDA))
+LATEST_ARG_SSH_CUDA = $(if $(filter 1,$(PUSH_LATEST)),-t $(LATEST_SSH_CUDA))
 
-.PHONY: help check-tag check-platform check-platforms check-push-latest check-ubuntu-base check-maca-base build build-ssh build-jupyter build-maca build-ssh-maca \
-	smoke smoke-ssh smoke-jupyter smoke-maca smoke-ssh-maca push push-ssh push-jupyter push-maca push-ssh-maca retag-latest \
-	retag-latest-ssh retag-latest-jupyter retag-latest-maca retag-latest-ssh-maca
+.PHONY: help check-tag check-platform check-platforms check-push-latest check-ubuntu-base check-maca-base check-cuda-base build build-ssh build-jupyter build-maca build-ssh-maca build-cuda build-ssh-cuda \
+	smoke smoke-ssh smoke-jupyter smoke-maca smoke-ssh-maca smoke-cuda smoke-ssh-cuda push push-ssh push-jupyter push-maca push-ssh-maca push-cuda push-ssh-cuda retag-latest \
+	retag-latest-ssh retag-latest-jupyter retag-latest-maca retag-latest-ssh-maca retag-latest-cuda retag-latest-ssh-cuda
 
 .DEFAULT_GOAL := help
 
@@ -243,13 +297,42 @@ check-ubuntu-base:
 # axes would publish a name with an empty field — '4.0--torch2.5-<sha>' — claiming less than the
 # image is (and a vendor rename is the one thing a base bump can bring). Stop instead of publishing
 # it; the fix is the derivation above.
+#
+# The package also selects the base, so that lookup is checked too — and likewise only for the
+# defaulted BASE_ARGS, since a caller who passed their own chose their own base.
 check-maca-base:
 	@test -n "$(MACA_PKG_VERSION)" && test -n "$(MACA_PKG_PY)" && test -n "$(MACA_PKG_TORCH)" || { \
 		echo "make -C images: cannot read the vendor axes out of MACA_PACKAGE=$(MACA_PACKAGE)." >&2; \
 		echo "                Expected <version>-torch<ver>-py<python>-<distro>-<arch>." >&2; \
 		exit 1; }
+	@test "$(origin BASE_ARGS)" != file || test -n "$(MACA_BASE_DIGEST)" || { \
+		echo "make -C images: MACA_PACKAGE=$(MACA_PACKAGE) has no pinned base in MACA_BASE_DIGESTS." >&2; \
+		echo "                Add '<package>=sha256:<digest>' for the mirror's copy of that package," >&2; \
+		echo "                then verify the digest against the mirror rather than the tag." >&2; \
+		echo "                Or pass BASE_ARGS= to build FROM upstream, unpinned." >&2; \
+		exit 1; }
 
-build: build-ssh build-jupyter build-maca build-ssh-maca ## Build every image
+# CUDA_TAG is read out of CUDA_PACKAGE too, and its derivation reads only the first field of the
+# tag — so a re-tagged or renamed release whose version cannot be picked out would publish
+# '-<sha>', a name with no vendor release in it at all. Stop instead; the fix is the derivation
+# above.
+#
+# The package also selects the base, so that lookup is checked the way check-ubuntu-base checks
+# its release — and likewise only for the defaulted BASE_ARGS: a caller who passed their own chose
+# their own base, and this file has nothing to check it against.
+check-cuda-base:
+	@test -n "$(CUDA_PKG_VERSION)" || { \
+		echo "make -C images: cannot read the vendor release out of CUDA_PACKAGE=$(CUDA_PACKAGE)." >&2; \
+		echo "                Expected <release>-py<python>, e.g. pytorch:26.08-py3." >&2; \
+		exit 1; }
+	@test "$(origin BASE_ARGS)" != file || test -n "$(CUDA_BASE_DIGEST)" || { \
+		echo "make -C images: CUDA_PACKAGE=$(CUDA_PACKAGE) has no pinned base in CUDA_BASE_DIGESTS." >&2; \
+		echo "                Add '<package>=sha256:<digest>' for the mirror's copy of that release," >&2; \
+		echo "                then verify the digest against the mirror rather than the tag." >&2; \
+		echo "                Or pass BASE_ARGS= to build FROM upstream, unpinned." >&2; \
+		exit 1; }
+
+build: build-ssh build-jupyter build-maca build-ssh-maca build-cuda build-ssh-cuda ## Build every image
 
 build-ssh: check-tag check-platform check-ubuntu-base ## Build the self-authored ssh image
 	$(CONTAINER_TOOL) build --platform "$(PLATFORM)" $(BASE_ARGS) $(APT_MIRROR_ARG) --build-arg UBUNTU_VERSION=$(UBUNTU_VERSION) \
@@ -270,22 +353,40 @@ build-ssh-maca: check-tag check-maca-base ## Build the metax MACA ssh image (lin
 	$(CONTAINER_TOOL) build --platform "$(MACA_PLATFORM)" $(BASE_ARGS) $(APT_MIRROR_ARG) \
 		-f ssh-maca-pytorch/Dockerfile -t $(IMG_SSH_MACA) .
 
+# CUDA_PLATFORM, for the same reason the MACA pair does not use PLATFORM.
+#
+# No PIP_INDEX_URL_ARG on either: this overlay installs nothing from pip — the NGC base carries
+# its own jupyter stack, and the ssh sibling carries none.
+build-cuda: check-tag check-cuda-base ## Build the NVIDIA CUDA image (linux/amd64 only)
+	$(CONTAINER_TOOL) build --platform "$(CUDA_PLATFORM)" $(BASE_ARGS) $(APT_MIRROR_ARG) \
+		-f jupyter-cuda-pytorch/Dockerfile -t $(IMG_CUDA) .
+
+build-ssh-cuda: check-tag check-cuda-base ## Build the NVIDIA CUDA ssh image (linux/amd64 only)
+	$(CONTAINER_TOOL) build --platform "$(CUDA_PLATFORM)" $(BASE_ARGS) $(APT_MIRROR_ARG) \
+		-f ssh-cuda-pytorch/Dockerfile -t $(IMG_SSH_CUDA) .
+
 smoke: build ## Build and run the full local Docker smoke
-	IMG_SSH=$(IMG_SSH) IMG_JUPYTER=$(IMG_JUPYTER) IMG_MACA=$(IMG_MACA) IMG_SSH_MACA=$(IMG_SSH_MACA) hack/smoke.sh
+	IMG_SSH=$(IMG_SSH) IMG_JUPYTER=$(IMG_JUPYTER) IMG_MACA=$(IMG_MACA) IMG_SSH_MACA=$(IMG_SSH_MACA) IMG_CUDA=$(IMG_CUDA) IMG_SSH_CUDA=$(IMG_SSH_CUDA) hack/smoke.sh
 
 smoke-ssh: build-ssh ## Build and smoke only the self-authored ssh image
-	IMG_SSH=$(IMG_SSH) IMG_JUPYTER=$(IMG_JUPYTER) IMG_MACA=$(IMG_MACA) IMG_SSH_MACA=$(IMG_SSH_MACA) hack/smoke.sh --ssh
+	IMG_SSH=$(IMG_SSH) IMG_JUPYTER=$(IMG_JUPYTER) IMG_MACA=$(IMG_MACA) IMG_SSH_MACA=$(IMG_SSH_MACA) IMG_CUDA=$(IMG_CUDA) IMG_SSH_CUDA=$(IMG_SSH_CUDA) hack/smoke.sh --ssh
 
 smoke-jupyter: build-jupyter ## Build and smoke only the jupyter image
-	IMG_SSH=$(IMG_SSH) IMG_JUPYTER=$(IMG_JUPYTER) IMG_MACA=$(IMG_MACA) IMG_SSH_MACA=$(IMG_SSH_MACA) hack/smoke.sh --jupyter
+	IMG_SSH=$(IMG_SSH) IMG_JUPYTER=$(IMG_JUPYTER) IMG_MACA=$(IMG_MACA) IMG_SSH_MACA=$(IMG_SSH_MACA) IMG_CUDA=$(IMG_CUDA) IMG_SSH_CUDA=$(IMG_SSH_CUDA) hack/smoke.sh --jupyter
 
 smoke-maca: build-maca ## Build and smoke only the metax MACA image
-	IMG_SSH=$(IMG_SSH) IMG_JUPYTER=$(IMG_JUPYTER) IMG_MACA=$(IMG_MACA) IMG_SSH_MACA=$(IMG_SSH_MACA) hack/smoke.sh --maca
+	IMG_SSH=$(IMG_SSH) IMG_JUPYTER=$(IMG_JUPYTER) IMG_MACA=$(IMG_MACA) IMG_SSH_MACA=$(IMG_SSH_MACA) IMG_CUDA=$(IMG_CUDA) IMG_SSH_CUDA=$(IMG_SSH_CUDA) hack/smoke.sh --maca
 
 smoke-ssh-maca: build-ssh-maca ## Build and smoke only the metax MACA ssh image
-	IMG_SSH=$(IMG_SSH) IMG_JUPYTER=$(IMG_JUPYTER) IMG_MACA=$(IMG_MACA) IMG_SSH_MACA=$(IMG_SSH_MACA) hack/smoke.sh --ssh-maca
+	IMG_SSH=$(IMG_SSH) IMG_JUPYTER=$(IMG_JUPYTER) IMG_MACA=$(IMG_MACA) IMG_SSH_MACA=$(IMG_SSH_MACA) IMG_CUDA=$(IMG_CUDA) IMG_SSH_CUDA=$(IMG_SSH_CUDA) hack/smoke.sh --ssh-maca
 
-push: push-ssh push-jupyter push-maca push-ssh-maca ## Publish every image (TAG + :latest)
+smoke-cuda: build-cuda ## Build and smoke only the NVIDIA CUDA image
+	IMG_SSH=$(IMG_SSH) IMG_JUPYTER=$(IMG_JUPYTER) IMG_MACA=$(IMG_MACA) IMG_SSH_MACA=$(IMG_SSH_MACA) IMG_CUDA=$(IMG_CUDA) IMG_SSH_CUDA=$(IMG_SSH_CUDA) hack/smoke.sh --cuda
+
+smoke-ssh-cuda: build-ssh-cuda ## Build and smoke only the NVIDIA CUDA ssh image
+	IMG_SSH=$(IMG_SSH) IMG_JUPYTER=$(IMG_JUPYTER) IMG_MACA=$(IMG_MACA) IMG_SSH_MACA=$(IMG_SSH_MACA) IMG_CUDA=$(IMG_CUDA) IMG_SSH_CUDA=$(IMG_SSH_CUDA) hack/smoke.sh --ssh-cuda
+
+push: push-ssh push-jupyter push-maca push-ssh-maca push-cuda push-ssh-cuda ## Publish every image (TAG + :latest)
 
 push-ssh: check-tag check-platforms check-push-latest check-ubuntu-base ## Publish the ssh image as a multi-arch index (TAG, and :latest unless PUSH_LATEST=0)
 	$(CONTAINER_TOOL) buildx build $(PLATFORMS_ARG) $(BUILDX_ATTEST) $(BASE_ARGS) $(APT_MIRROR_ARG) \
@@ -306,6 +407,14 @@ push-ssh-maca: check-tag check-maca-base check-push-latest ## Publish the metax 
 	$(CONTAINER_TOOL) buildx build --platform "$(MACA_PLATFORM)" $(BUILDX_ATTEST) $(BASE_ARGS) $(APT_MIRROR_ARG) \
 		-f ssh-maca-pytorch/Dockerfile -t $(IMG_SSH_MACA) $(LATEST_ARG_SSH_MACA) --push .
 
+push-cuda: check-tag check-cuda-base check-push-latest ## Publish the NVIDIA CUDA image (linux/amd64 only, TAG and :latest unless PUSH_LATEST=0)
+	$(CONTAINER_TOOL) buildx build --platform "$(CUDA_PLATFORM)" $(BUILDX_ATTEST) $(BASE_ARGS) $(APT_MIRROR_ARG) \
+		-f jupyter-cuda-pytorch/Dockerfile -t $(IMG_CUDA) $(LATEST_ARG_CUDA) --push .
+
+push-ssh-cuda: check-tag check-cuda-base check-push-latest ## Publish the NVIDIA CUDA ssh image (linux/amd64 only, TAG and :latest unless PUSH_LATEST=0)
+	$(CONTAINER_TOOL) buildx build --platform "$(CUDA_PLATFORM)" $(BUILDX_ATTEST) $(BASE_ARGS) $(APT_MIRROR_ARG) \
+		-f ssh-cuda-pytorch/Dockerfile -t $(IMG_SSH_CUDA) $(LATEST_ARG_SSH_CUDA) --push .
+
 # Repoint :latest at a TAG already in the registry rather than rebuilding: imagetools
 # writes an index naming the same manifests, so this cannot publish anything the build
 # did not produce. It is how a caller that withheld :latest from `push` moves it after
@@ -315,7 +424,7 @@ push-ssh-maca: check-tag check-maca-base check-push-latest ## Publish the metax 
 # the rest: the ref a skipped image would name is one this run never pushed, so its retag
 # would fail on a missing manifest, and a tag that another run published is that run's to
 # move. Defaults to every image, which is what a human means.
-RETAG ?= ssh jupyter maca ssh-maca
+RETAG ?= ssh jupyter maca ssh-maca cuda ssh-cuda
 
 retag-latest: $(addprefix retag-latest-,$(RETAG)) ## Repoint :latest at an already-published TAG (no rebuild; RETAG names the images)
 retag-latest-ssh: check-tag
@@ -326,6 +435,10 @@ retag-latest-maca: check-tag
 	$(CONTAINER_TOOL) buildx imagetools create -t $(LATEST_MACA) $(IMG_MACA)
 retag-latest-ssh-maca: check-tag
 	$(CONTAINER_TOOL) buildx imagetools create -t $(LATEST_SSH_MACA) $(IMG_SSH_MACA)
+retag-latest-cuda: check-tag
+	$(CONTAINER_TOOL) buildx imagetools create -t $(LATEST_CUDA) $(IMG_CUDA)
+retag-latest-ssh-cuda: check-tag
+	$(CONTAINER_TOOL) buildx imagetools create -t $(LATEST_SSH_CUDA) $(IMG_SSH_CUDA)
 
 help: ## Show this help message
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \

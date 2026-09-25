@@ -41,7 +41,7 @@ jobs:
           #
           # Markdown is not a build input — nothing under images/ COPYs or otherwise
           # reads one, the Dockerfiles taking *.sh and *.conf — so a docs edit on the
-          # image contract should not pay for a ~33 GB build of four images. The
+          # image contract should not pay for the ~72 GB build of six images. The
           # extglob says that directly. The obvious form, listing 'images/**' and then
           # negating with '!images/**/*.md', is a silent no-op: paths-filter combines
           # a rule's patterns with `some`, so a pattern that negates a match cannot
@@ -53,7 +53,7 @@ jobs:
           # still matches at any depth, and *.md does not.
           #
           # The paths here decide what gets smoked before a merge, not what gets
-          # published — ci-images.yml's own two filters decide that, by enumerating what
+          # published — ci-images.yml's own three filters decide that, by enumerating what
           # reaches a build context instead.
           filters: |
             operator:
@@ -116,9 +116,10 @@ jobs:
     permissions:
       contents: read
     runs-on: ubuntu-latest
-    # A full four-image smoke measured 17m02s, so this only ever fires on something stuck.
-    # The bound's job is to release the runner, not to be tight.
-    timeout-minutes: 45
+    # The four CPU-and-Metax images measured 17m02s together; the CUDA pair adds two more
+    # builds on a 38.6 GB base, so this is sized to release the runner rather than to be
+    # tight, as before.
+    timeout-minutes: 60
     steps:
       - name: Clone the code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -126,15 +127,29 @@ jobs:
           persist-credentials: false
       - name: Reclaim disk space
         uses: ./.github/actions/reclaim-disk
-      - name: Build and smoke the DevEnvironment base images
-        # Every image is built for linux/amd64 and started as a throwaway container on
-        # 127.0.0.1, so this needs neither a cluster nor registry credentials. The e2e
-        # exercises jupyter-minimal alone and leaves the rest neither built nor pulled
-        # (operator/Makefile), so this is the only job that covers them.
-        #
-        # The reclaim above is what makes it fit: the MACA pair is ~33 GB unpacked,
-        # against the ~31 GB a standard runner has free on /.
-        run: make -C images smoke
+      # Three steps, and the prune between them is the reason for the split. Every image
+      # is built for linux/amd64 and started as a throwaway container on 127.0.0.1, so this
+      # needs neither a cluster nor registry credentials. The e2e exercises jupyter-minimal
+      # alone and leaves the rest neither built nor pulled (operator/Makefile), so this is
+      # the only job that covers them.
+      #
+      # The reclaim above is what makes it fit, and it has to cover one vendor base at a
+      # time: the MACA pair is ~33 GB unpacked, the CUDA base 38.6 GB, and the aggregate
+      # `make -C images smoke` would want both of them resident on the same / at once. The
+      # grouping is the Makefile's own families spelled out, so it cannot drift from what
+      # the aggregates mean; keep it equal to `smoke` minus the other family, so a new
+      # image cannot join one group's aggregate and no group.
+      - name: Build and smoke the CPU and Metax base images
+        run: make -C images smoke-ssh smoke-jupyter smoke-maca smoke-ssh-maca
+      - name: Drop what that built
+        run: |
+          # The builder's cache is not the image store's, and `docker image prune` does not
+          # reach it: what the MACA pair cached would still be resident under the CUDA base.
+          docker image prune -af
+          docker builder prune -af
+          df -h /
+      - name: Build and smoke the CUDA images
+        run: make -C images smoke-cuda smoke-ssh-cuda
 
   test-e2e:
     needs: changes
