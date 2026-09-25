@@ -20,48 +20,42 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       operator: ${{ steps.filter.outputs.operator }}
-      images: ${{ steps.filter.outputs.images }}
+      build: ${{ steps.select.outputs.build }}
+      smoke: ${{ steps.select.outputs.smoke }}
     steps:
       - name: Clone the code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          # Full history so paths-filter can diff against the base ref without fetching
+          # Full history so paths-filter can diff against the base ref without fetching,
+          # and so the action below can diff against a commit that is already here.
           fetch-depth: 0
           persist-credentials: false
       - name: Detect changed paths
         uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3
         id: filter
         with:
-          # images/** has its own filter rather than riding on the operator one. The
-          # e2e pulls the *published* DevEnvironment image, so an edit under images/
+          # Only the operator's own paths. Which *images* a change reaches is not a
+          # filter here any more: that question has one answer, computed once by
+          # images/hack/changed-images.sh for this workflow and ci-images.yml both, and
+          # it is not a boolean — the images to smoke are a superset of the images to
+          # build, since a change to the smoke harness rebuilds nothing and re-smokes
+          # everything. The action below runs it; the image jobs read its two outputs.
+          #
+          # The e2e pulls the *published* DevEnvironment image, so an edit under images/
           # changes nothing its cluster assertions can see until that commit is
-          # published — running the whole operator suite for it would buy nothing.
-          # What does validate the images is images-smoke below, which builds every
-          # image and asserts the operator contract against them.
-          #
-          # Markdown is not a build input — nothing under images/ COPYs or otherwise
-          # reads one, the Dockerfiles taking *.sh and *.conf — so a docs edit on the
-          # image contract should not pay for a ~33 GB build of four images. The
-          # extglob says that directly. The obvious form, listing 'images/**' and then
-          # negating with '!images/**/*.md', is a silent no-op: paths-filter combines
-          # a rule's patterns with `some`, so a pattern that negates a match cannot
-          # subtract the file a positive pattern already matched. `every` would make
-          # negation work, but it applies to the whole rule set and would break the
-          # operator rule above, whose three patterns a file must not have to satisfy
-          # all of. Checked against picomatch with the action's own options
-          # ({dot: true}): every *.sh, *.conf, Dockerfile and Makefile under images/
-          # still matches at any depth, and *.md does not.
-          #
-          # The paths here decide what gets smoked before a merge, not what gets
-          # published — ci-images.yml's own two filters decide that, by enumerating what
-          # reaches a build context instead.
+          # published — running the operator suite for it would buy nothing. What does
+          # validate the images is images-smoke and images-check below.
           filters: |
             operator:
               - 'operator/**'
               - 'Makefile'
               - '.github/**'
-            images:
-              - 'images/**/!(*.md)'
+      - name: Work out which images this change reaches
+        id: select
+        # Shared with ci-images.yml, which derives its `:latest` gate from the same
+        # selection — so the diff base and the two selections are answered in one place
+        # rather than in a step here that the publish workflow would have to restate.
+        uses: ./.github/actions/changed-images
 
   lint:
     needs: changes
@@ -110,8 +104,12 @@ jobs:
     # so this is the only acceptance the images on those branches ever get. The PR run is
     # what gates `main`: it feeds the required `result` check below, which a skipped need
     # does not fail.
+    #
+    # `smoke` is empty exactly when the change reaches no image at all — a docs edit on
+    # the image contract, or a change to the selector's fixtures alone — and there is
+    # nothing to smoke then.
     if: >-
-      needs.changes.outputs.images == 'true' &&
+      needs.changes.outputs.smoke != '' &&
       (github.event_name == 'pull_request' || github.ref != 'refs/heads/main')
     permissions:
       contents: read
@@ -126,15 +124,53 @@ jobs:
           persist-credentials: false
       - name: Reclaim disk space
         uses: ./.github/actions/reclaim-disk
-      - name: Build and smoke the DevEnvironment base images
+      - name: Build and smoke the images this change reaches
         # Every image is built for linux/amd64 and started as a throwaway container on
         # 127.0.0.1, so this needs neither a cluster nor registry credentials. The e2e
         # exercises jupyter-minimal alone and leaves the rest neither built nor pulled
         # (operator/Makefile), so this is the only job that covers them.
         #
-        # The reclaim above is what makes it fit: the MACA pair is ~33 GB unpacked,
+        # Only the images the change reaches are built, which is what keeps a CPU-only
+        # pull request from paying for two 33 GB unpacks of the vendor base. A change to
+        # images/common/** reaches all four and still does.
+        #
+        # The reclaim above is what makes the MACA pair fit: ~33 GB unpacked each,
         # against the ~31 GB a standard runner has free on /.
-        run: make -C images smoke
+        run: |
+          set -euo pipefail
+
+          # One target per image rather than `smoke`, which builds all four: smoke.sh
+          # takes one image per invocation, so naming the targets is how a subset is
+          # asked for. The names are the selector's vocabulary, which is the Makefile's
+          # (`make -C images smoke-ssh`, and `RETAG="ssh jupyter"` for the same set).
+          targets=""
+          for img in ${{ needs.changes.outputs.smoke }}; do
+            targets="${targets} smoke-${img}"
+          done
+          make -C images ${targets}
+
+  images-check:
+    needs: changes
+    # The two assertions images/hack/changed-images.sh rests on: that no Dockerfile reads
+    # from a sibling image's directory — which is what makes an image's inputs derivable
+    # from a path at all — and that the rule's own fixtures still pass, including the
+    # equivalence between the paths that select an image and the pathspec its `:latest`
+    # gate diffs against. Neither builds anything, so this job is seconds, not minutes.
+    #
+    # Gated on the selection rather than on a filter of its own: the rule, its fixtures and
+    # the COPY checker are all paths that reach every image, so a change leaving the
+    # selection empty reaches none of them and leaves nothing to check.
+    if: needs.changes.outputs.build != ''
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Check the images' inputs and the selection rule
+        run: make -C images check-deps check-select
 
   test-e2e:
     needs: changes
@@ -229,7 +265,7 @@ jobs:
         working-directory: operator
 
   result:
-    needs: [lint, test, images-smoke, test-e2e, helm-drift, generate-drift]
+    needs: [lint, test, images-smoke, images-check, test-e2e, helm-drift, generate-drift]
     if: always()
     runs-on: ubuntu-latest
     steps:

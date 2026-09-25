@@ -1,0 +1,124 @@
+name: Changed images
+description: >-
+  Which DevEnvironment images a change reaches, and which of them it must smoke —
+  the answer both workflows select on, computed by images/hack/changed-images.sh.
+
+# The rule itself is that script, not this action. What this adds is the one part of the
+# question a script reading paths on stdin cannot answer by itself: what to diff against,
+# which differs per event. It is an action rather than a step in each workflow for the
+# same reason the rule is a script — a copy in each would be a second answer free to
+# drift from the first, and ci-images.yml's `:latest` gate is derived from this selection,
+# so a drift there publishes an image no smoke ever agreed to.
+
+outputs:
+  build:
+    description: >-
+      The images to build and publish, space-separated; empty when the change reaches
+      none.
+    value: ${{ steps.rule.outputs.build }}
+  smoke:
+    description: >-
+      The images to smoke, space-separated — a superset of `build`, since a change to the
+      smoke harness re-verifies every image while rebuilding none of them.
+    value: ${{ steps.rule.outputs.smoke }}
+  build-json:
+    description: >-
+      `build` as a JSON array of `{image, vendor}` objects, for the `include` of a
+      `fromJSON` matrix.
+    value: ${{ steps.rule.outputs.build-json }}
+
+runs:
+  using: composite
+  steps:
+    - name: Work out which images this change reaches
+      id: rule
+      shell: bash
+      env:
+        # The previous head of a pushed branch. A pull request has none — it is diffed
+        # against its base instead — and a tag has no diff base at all.
+        BEFORE: ${{ github.event.before }}
+      run: |
+        set -euo pipefail
+
+        # A release is not a change: it publishes every image at the version it names,
+        # whatever moved since the last one, and it does so without consulting the rule.
+        # This is the image list, not a selection from it.
+        if [ "${GITHUB_REF_TYPE}" = tag ]; then
+          build="$(images/hack/changed-images.sh list | tr '\n' ' ')"
+          smoke="${build}"
+        else
+          # What to diff against, one shape per event. actions/checkout checks a pull
+          # request out as the merge commit GitHub builds for it, whose first parent is
+          # the base branch — so HEAD^1..HEAD is the pull request's own changes, not
+          # whatever landed on the base branch while it was open. A push names its
+          # previous head in the payload.
+          base=""
+          case "${GITHUB_EVENT_NAME}" in
+            pull_request) base="$(git rev-parse --verify --quiet HEAD^1 || true)" ;;
+            *) base="${BEFORE:-}" ;;
+          esac
+
+          # A push to a branch that did not exist before carries all zeros rather than a
+          # sha. That is no base at all, which is what the case below answers — not a base
+          # gone missing, which is the case after it.
+          if [ "${base}" = "0000000000000000000000000000000000000000" ]; then base=""; fi
+
+          # A base that is not a commit in this clone has no diff to take: `git diff`
+          # fails on it with "bad object", and under `set -e` that ends the step rather
+          # than answering it — every job below skipped, and a merge that published
+          # nothing while a run that never happened leaves `:latest` where it was. A push
+          # whose previous head the server no longer holds is how that arises, a force
+          # push being the usual way; both checkouts here fetch full history, so this is
+          # the leftover case rather than the common one. It takes the same answer as no
+          # base at all, because it is the same situation: nothing to diff against.
+          if [ -n "${base}" ] && ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            echo "changed-images: ${base} is not a commit in this clone; selecting from every tracked image path" >&2
+            base=""
+          fi
+
+          # No base to diff against — a new branch, an unreadable one, or a checkout
+          # shape this does not know. Every path under images/ is a candidate then, and
+          # the rule answers from that. Over-selecting costs a rebuild, where the
+          # alternative is a step that fails, which selects nothing and publishes nothing.
+          case "${base}" in
+            "") changed="$(git ls-files images)" ;;
+            *) changed="$(git diff --name-only "${base}" HEAD)" ;;
+          esac
+
+          # Two selections, not one, and both come out of the same rule.
+          build="$(printf '%s\n' "${changed}" | images/hack/changed-images.sh select | tr '\n' ' ')"
+          smoke="$(printf '%s\n' "${changed}" | images/hack/changed-images.sh smoke | tr '\n' ' ')"
+        fi
+
+        # The publish side runs one job per image, so the selection goes out as the matrix
+        # those jobs expand from: an image the change did not reach has no job at all
+        # rather than a skipped one, and so claims no concurrency group and no runner. The
+        # per-leg settings come along as keys, because a matrix keyed by image name alone
+        # could not say which legs are the vendor pair — and an `include` in the workflow
+        # cannot add it either: an entry merges into the combination whose keys it matches
+        # and is appended as a new one otherwise, so a per-image entry duplicates its own
+        # leg.
+        #
+        # `vendor` is what sizes a leg. The two MACA images are tens of GB unpacked each
+        # against the ~31 GB a standard runner has free, where the CPU pair is a fraction
+        # of that (`ssh-ubuntu22.04` measures 132 MB), so the disk reclaim and the long
+        # timeout belong to them alone. Named here because this is the layer those two
+        # settings live in; an image added tomorrow and not named below gets the CPU leg's
+        # settings, and fails loudly on disk rather than quietly on time.
+        matrix="["
+        sep=""
+        for img in ${build}; do
+          case "${img}" in
+            maca | ssh-maca) vendor=true ;;
+            *) vendor=false ;;
+          esac
+          matrix="${matrix}${sep}{\"image\":\"${img}\",\"vendor\":${vendor}}"
+          sep=","
+        done
+        matrix="${matrix}]"
+
+        {
+          printf 'build=%s\n' "${build}"
+          printf 'smoke=%s\n' "${smoke}"
+          printf 'build-json=%s\n' "${matrix}"
+        } >>"${GITHUB_OUTPUT}"

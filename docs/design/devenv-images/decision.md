@@ -570,20 +570,26 @@ prepared from the vendor package, not a bare base.
   same-repo references to the shared base; consistent with the existing operator/web two-stack layout.
 - Alternative: a separate Installer/image repo — not recommended (splits contract evolution from builds).
 - **CI**: two workflows, split by what they may do, mirroring how operator and portal are handled.
-  `ci-operator.yml`'s `images-smoke` job builds and smokes every image on any change under `images/**`
-  that is not markdown, on **pull requests** — that is what validates them, and it needs neither a
-  cluster nor registry credentials. Publishing is `ci-images.yml`, on a push to `main` that changes
-  `images/**` or the workflow file itself (a change to the lanes starts both jobs), in **two jobs split
-  by image family** — `cpu` (ssh + jupyter) and `maca` (the vendor pair). Each smokes what it publishes,
-  pushes the short-SHA tag with `PUSH_LATEST=0`, and moves its own mutable `:latest` only if `main`'s
-  copy of the paths that decide those images still matches that commit. Three properties hold that
-  together, and each is load-bearing: a family's trigger paths, its gate pathspec and its
-  `retag-latest` list are all the same set, so any later commit that could fail its gate has itself
-  started a run of that family to move the tag; a family's `:latest` is moved only by a run that
-  published it; and each family carries its own concurrency group, so only a run that would redo the
-  same work can cancel one in flight. The split is what keeps a merge touching only the CPU pair from
-  pulling the 10.5 GiB vendor base twice on its way to publishing images it could not have changed. A
-  `vX.Y.Z` tag publishes both families at the version it names and moves no `:latest` (§5).
+  `ci-operator.yml`'s `images-smoke` job builds and smokes the images a change reaches, on any change
+  under `images/**` that is not markdown, on **pull requests** — that is what validates them, and it
+  needs neither a cluster nor registry credentials. Which images those are is answered by
+  `images/hack/changed-images.sh`, the rule the operator workflow asks; `make -C images check-deps
+  check-select` asserts the convention that answer is derived from, and runs its fixtures. Publishing
+  is `ci-images.yml`, on a push to `main` that changes `images/**` or the CI that selects what a
+  change reaches — the workflows and the action they delegate to — as **one job per image**,
+  selected by that same rule — the selection *is* the job matrix, so an image the merge did not
+  reach has no job at all rather than a skipped one. Each leg smokes the image it is about to
+  publish, pushes the short-SHA tag with `PUSH_LATEST=0`, and moves its own mutable `:latest` only if
+  `main`'s copy of the paths that decide that image still matches that commit. Three properties hold
+  that together, and each is load-bearing: an image's trigger paths, its gate pathspec and its
+  `retag-latest` set are all the same set — the latter two read from `changed-images.sh paths <image>`
+  rather than restated, so any later commit that could fail its gate has itself started a run that
+  would move the tag; an image's `:latest` is moved only by a run that published it; and each image
+  carries its own concurrency group, so only a run that would redo the same work can cancel one in
+  flight. The granularity is what keeps a merge touching only the CPU pair from pulling the 10.5 GiB
+  vendor base on its way to publishing images it could not have changed, and the vendor legs' disk
+  reclaim and long timeout are theirs alone — a CPU image is a fraction of that base. A `vX.Y.Z` tag
+  publishes every image at the version it names and moves no `:latest` (§5).
 - **Still open**: the offline export script (§3.D) — nothing in the repo produces the bundle yet, so
   an offline install is assembled by hand from the published images.
 

@@ -177,7 +177,7 @@ LATEST_ARG_JUPYTER  = $(if $(filter 1,$(PUSH_LATEST)),-t $(LATEST_JUPYTER))
 LATEST_ARG_MACA     = $(if $(filter 1,$(PUSH_LATEST)),-t $(LATEST_MACA))
 LATEST_ARG_SSH_MACA = $(if $(filter 1,$(PUSH_LATEST)),-t $(LATEST_SSH_MACA))
 
-.PHONY: help check-tag check-platform check-platforms check-push-latest check-ubuntu-base check-maca-base build build-ssh build-jupyter build-maca build-ssh-maca \
+.PHONY: help check-tag check-platform check-platforms check-push-latest check-ubuntu-base check-maca-base check-deps check-select build build-ssh build-jupyter build-maca build-ssh-maca \
 	smoke smoke-ssh smoke-jupyter smoke-maca smoke-ssh-maca push push-ssh push-jupyter push-maca push-ssh-maca retag-latest \
 	retag-latest-ssh retag-latest-jupyter retag-latest-maca retag-latest-ssh-maca
 
@@ -248,6 +248,21 @@ check-maca-base:
 		echo "make -C images: cannot read the vendor axes out of MACA_PACKAGE=$(MACA_PACKAGE)." >&2; \
 		echo "                Expected <version>-torch<ver>-py<python>-<distro>-<arch>." >&2; \
 		exit 1; }
+
+# The two assertions the image-selection rule rests on. Neither builds anything — no
+# registry, no network, no cluster — so both run in a moment, here and in CI.
+#
+# check-deps is the convention hack/changed-images.sh reads an image's inputs out of: a
+# Dockerfile COPYs from common/ and from its own directory, never from a sibling's. The
+# rule is sound only while that holds, and a violation is invisible without this.
+#
+# check-select is the rule's own fixtures, including the equivalence between the paths
+# that select an image and the pathspec its `:latest` gate diffs against.
+check-deps: ## Assert no Dockerfile reads from outside common/ and its own directory
+	hack/check-dockerfile-copies.sh
+
+check-select: ## Run the image-selection rule's fixtures
+	hack/changed-images.test.sh
 
 build: build-ssh build-jupyter build-maca build-ssh-maca ## Build every image
 
