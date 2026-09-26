@@ -9,24 +9,38 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 // The catalog lives in lib/devenvironments/images.ts because the create route
-// derives the environment's runtime identity from the same list; the wizard
-// is sent only what it displays.
-const IMAGES: Array<{ tag: string; label: string }> = DEV_IMAGES.map(({ tag, label }) => ({
+// falls back to the same list; the wizard is sent only what it displays — which
+// now includes each image's runtime identity, since the wizard shows it and
+// pre-fills the editable account / uid / gid fields from it.
+const IMAGES: DevEnvImageOption[] = DEV_IMAGES.map(({ tag, label, user, runAsGroup }) => ({
   tag,
   label,
+  user,
+  runAsGroup,
 }));
+
+/** One selectable image, with the identity the wizard pre-fills from it. */
+export interface DevEnvImageOption {
+  tag: string;
+  label: string;
+  /** spec.runtime.user the image's own sshd serves. */
+  user: string;
+  /** spec.runtime.securityContext.runAsGroup, when 1000 is wrong for this image. */
+  runAsGroup?: number;
+}
 
 /** Catalog the create wizard needs, read from the live cluster. */
 export interface DevEnvOptionsResponse {
   namespaces: Array<{ name: string }>;
-  images: Array<{ tag: string; label: string }>;
+  images: DevEnvImageOption[];
 }
 
 /**
  * GET /api/devenvironments/options
  *
  * Namespaces come from the live cluster; the image catalog is static. The
- * wizard uses these to populate its namespace select and image select.
+ * wizard uses these to populate its namespace select and the image combobox,
+ * and to pre-fill the runtime identity the user may then edit.
  */
 export const GET = withAuth(async () => {
   try {

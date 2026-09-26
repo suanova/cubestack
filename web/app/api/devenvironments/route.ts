@@ -38,7 +38,14 @@ export interface DevEnvironmentSummary {
     cpu: string;
     memory: string;
   };
-  storage: { size: string; mountPath: string } | null;
+  storage: { size: string; mountPath: string | null } | null;
+  // spec.volumes: extra PVCs mounted alongside the workspace.
+  volumes: Array<{ name: string; pvcName: string; mountPath: string; readOnly: boolean }>;
+  // Variable *names* only — a value can be a registry token (HF_TOKEN), and the
+  // names alone answer what the environment was configured with.
+  envNames: string[];
+  args: string[];
+  ports: Array<{ name: string; type: "http" | "tcp" | "udp"; containerPort: number }>;
   idleTimeout: number;
   sshEnabled: boolean;
   // observed state (phase is null until the controller reports it)
@@ -73,6 +80,9 @@ interface DevEnvSpec {
   running?: boolean;
   resources?: DevEnvResources;
   storage?: { size?: string; mountPath?: string };
+  volumes?: Array<{ name?: string; pvcName?: string; mountPath?: string; readOnly?: boolean }>;
+  ports?: Array<{ name?: string; type?: string; containerPort?: number }>;
+  runtime?: { env?: Array<{ name?: string }>; args?: string[] };
   lifecycle?: { idleTimeout?: number };
   ssh?: { enabled?: boolean };
 }
@@ -114,8 +124,25 @@ function project(env: DevEnv): DevEnvironmentSummary {
       memory: spec.resources?.memory ?? "—",
     },
     storage: spec.storage
-      ? { size: spec.storage.size ?? "10Gi", mountPath: spec.storage.mountPath ?? "/workspace" }
+      // A null mountPath is "not stated": the controller derives the path — and
+      // the container's HOME — from the runtime identity, so the panel must not
+      // invent "/workspace". A jupyter environment's workspace is /home/jovyan.
+      ? { size: spec.storage.size ?? "10Gi", mountPath: spec.storage.mountPath?.trim() || null }
       : null,
+    volumes: (spec.volumes ?? []).map((v) => ({
+      name: v.name ?? "",
+      pvcName: v.pvcName ?? "",
+      mountPath: v.mountPath ?? "",
+      readOnly: v.readOnly ?? false,
+    })),
+    envNames: (spec.runtime?.env ?? []).map((e) => e.name ?? "").filter(Boolean),
+    args: spec.runtime?.args ?? [],
+    ports: (spec.ports ?? []).map((p) => ({
+      name: p.name ?? "",
+      // The CRD's own default for an absent type.
+      type: p.type === "tcp" || p.type === "udp" ? p.type : "http",
+      containerPort: num(p.containerPort),
+    })),
     idleTimeout: num(spec.lifecycle?.idleTimeout),
     sshEnabled: spec.ssh?.enabled ?? false,
     phase: status.phase?.name ?? null,
@@ -160,10 +187,75 @@ export const GET = withAuth(async () => {
 // ── create (POST) ────────────────────────────────────────────────────────────
 
 const DNS_LABEL_RE = /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/;
+// spec.runtime.user's own validation, mirrored from the CRD
+// (operator/api/v1alpha1/devenvironment_types.go: it is MaxLength=32 with
+// Pattern ^[a-z_][a-z0-9_-]*$, enforced by the API server and nothing else).
+const RUNTIME_USER_RE = /^[a-z_][a-z0-9_-]*$/;
+const RUNTIME_USER_MAX = 32;
+// Neither runAsUser nor runAsGroup is bounded in the CRD; nothing wider than an
+// int32 is a uid or gid, and a value past it would be rejected by the API
+// server as an opaque 422 rather than here.
+const RUN_AS_ID_MAX = 2147483647;
 const DEVENV_TYPES = ["jupyter", "ssh", "vscode"] as const;
 // The accelerator is a single choice, "none" included, mirroring
 // spec.resources.gpu.vendor plus the absence of the block.
 const ACCELERATORS = ["none", "nvidia", "metax"] as const;
+// corev1.EnvVar.name's own validation, enforced by the API server and nothing
+// else — an invalid name would surface as an opaque 422 on the CR, not here.
+const ENV_NAME_RE = /^[-._a-zA-Z][-._a-zA-Z0-9]*$/;
+const PORT_TYPES = ["http", "tcp", "udp"] as const;
+
+/**
+ * Split a command line into argv: whitespace separates, and single or double
+ * quotes group, so an argument carrying a space ("--name \"a b\"") survives as
+ * one. Returns null on an unbalanced quote — starting the container with
+ * arguments the user never wrote is worse than refusing the request.
+ */
+function splitArgs(input: string): string[] | null {
+  const argv: string[] = [];
+  let current = "";
+  let quote: '"' | "'" | null = null;
+  let started = false;
+  for (const ch of input) {
+    if (quote) {
+      if (ch === quote) quote = null;
+      else current += ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      started = true;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (started) argv.push(current);
+      current = "";
+      started = false;
+      continue;
+    }
+    current += ch;
+    started = true;
+  }
+  if (quote) return null;
+  if (started) argv.push(current);
+  return argv;
+}
+
+/**
+ * spec.volumes[].name: an identifier derived from the PVC it mounts. The CRD
+ * only asks for MinLength=1, but the controller renders it as a pod volume name
+ * — a DNS-1123 label of at most 63 characters — so the slug is capped short
+ * enough to leave room for a de-duplication suffix.
+ */
+function volumeNameBase(pvcName: string): string {
+  const slug = pvcName
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 57);
+  return slug || "volume";
+}
 
 interface CreateBody {
   namespace?: string;
@@ -176,6 +268,20 @@ interface CreateBody {
   memory?: string;
   storageGi?: number;
   idleTimeout?: number;
+  // The runtime identity (spec.runtime). All optional: a client that states
+  // none gets the image catalog's identity, as before. Named after the CR's own
+  // leaves, with the parent prefix the rest of this body already uses
+  // (storageGi ← storage.size, gpuCount ← resources.gpu.count).
+  runtimeUser?: string; // → spec.runtime.user
+  runAsUser?: number; // → spec.runtime.securityContext.runAsUser
+  runAsGroup?: number; // → spec.runtime.securityContext.runAsGroup
+  // Form-shaped where the UI is a single box, CR-named where the UI already
+  // edits a CR leaf.
+  mountPath?: string; // → spec.storage.mountPath (absent = derived)
+  volumes?: Array<{ pvcName?: string; mountPath?: string }>; // → spec.volumes[] (name is derived here)
+  env?: Array<{ name?: string; value?: string }>; // → spec.runtime.env[]
+  args?: string; // → spec.runtime.args (one command line, split here)
+  ports?: Array<{ name?: string; containerPort?: number; type?: string }>; // → spec.ports[]
 }
 
 /**
@@ -194,9 +300,13 @@ export const POST = withAuth(async (req) => {
     if (!body.name || !DNS_LABEL_RE.test(body.name)) {
       return ValidationError("环境名称不合法:需小写字母/数字/中划线,DNS-1123 label。");
     }
-    if (!body.namespace || !body.image) {
+    if (!body.namespace || !body.image?.trim()) {
       return ValidationError("namespace、image 均为必填。");
     }
+    // Trimmed once and used for both the catalog lookup and the CR: a padded
+    // reference is a different image to the registry, and looking the two up
+    // separately is how a catalog image stops being recognized as one.
+    const image = body.image.trim();
     if (!body.type || !(DEVENV_TYPES as readonly string[]).includes(body.type)) {
       return ValidationError(`type 必须为 ${DEVENV_TYPES.join(" / ")} 之一。`);
     }
@@ -217,6 +327,136 @@ export const POST = withAuth(async (req) => {
     const idleTimeout = body.idleTimeout === undefined ? 0 : body.idleTimeout;
     if (!Number.isInteger(idleTimeout) || idleTimeout < 0) {
       return ValidationError("idleTimeout 需为非负整数(秒)。");
+    }
+
+    // The runtime identity. An empty account is "not stated", not an account:
+    // spec.runtime.user is omitempty and does not match the CRD's own pattern,
+    // so writing "" would be an API-server 422 the user cannot act on.
+    if (body.runtimeUser) {
+      if (body.runtimeUser.length > RUNTIME_USER_MAX || !RUNTIME_USER_RE.test(body.runtimeUser)) {
+        return ValidationError("运行账号不合法:需以字母或下划线开头,仅含小写字母/数字/下划线/中划线,最长 32 字符。");
+      }
+      // Root is the one account whose uid the platform knows: the controller
+      // serves and advertises "root" only at runAsUser 0, so asking for it at
+      // any other uid describes an sshd that cannot serve the account it names.
+      // Every other account/uid pairing is the image's to get right and is
+      // unverifiable here (docs/design/devenv-images/decision.md).
+      if (body.runtimeUser === "root" && body.runAsUser !== 0) {
+        return ValidationError("运行账号 root 需与以 root 身份运行(runAsUser 为 0)同时使用。");
+      }
+    }
+    // Never through `||` or a truthiness test: runAsUser 0 is the root request,
+    // and `body.runAsUser || 1000` would silently turn a root environment into
+    // an ordinary uid 1000 one.
+    for (const [field, value] of [
+      ["runAsUser", body.runAsUser],
+      ["runAsGroup", body.runAsGroup],
+    ] as const) {
+      if (value === undefined) continue;
+      if (!Number.isInteger(value) || value < 0 || value > RUN_AS_ID_MAX) {
+        return ValidationError(`${field} 需为 0–${RUN_AS_ID_MAX} 之间的整数。`);
+      }
+    }
+
+    // The workspace path. Left empty it is not stated at all: the controller then
+    // derives the path — and the container's HOME — from the runtime identity,
+    // and pinning it from here would move a jupyter environment's home off
+    // /home/jovyan onto whatever this route guessed.
+    const workspacePath = body.mountPath?.trim() ?? "";
+    if (workspacePath && (!workspacePath.startsWith("/") || workspacePath === "/")) {
+      return ValidationError("workspace 挂载路径需为以 / 开头的绝对路径,且不能为 /。");
+    }
+    // spec.storage.mountPath exists only inside spec.storage: a path with no
+    // claim behind it describes a mount nothing can honour, and the API server
+    // would prune it rather than complain.
+    if (workspacePath && body.storageGi === undefined) {
+      return ValidationError("workspace 挂载路径需与持久化存储(storageGi)同时提交。");
+    }
+
+    const volumes: Array<{ name: string; pvcName: string; mountPath: string }> = [];
+    const volumeNames = new Set<string>();
+    // One path may be claimed once: two mounts at one path is a pod the API
+    // server rejects. The workspace path is part of that set.
+    const mountedPaths = new Set<string>(workspacePath ? [workspacePath] : []);
+    for (const v of Array.isArray(body.volumes) ? body.volumes : []) {
+      const pvcName = v.pvcName?.trim() ?? "";
+      const mountPath = v.mountPath?.trim() ?? "";
+      // A row the user added and never filled is not a request.
+      if (!pvcName && !mountPath) continue;
+      if (!pvcName || !mountPath) {
+        return ValidationError("额外 PVC 需同时填写 PVC 名称与挂载路径。");
+      }
+      if (!mountPath.startsWith("/") || mountPath === "/") {
+        return ValidationError(`PVC 挂载路径 '${mountPath}' 需为以 / 开头的绝对路径,且不能为 /。`);
+      }
+      if (mountedPaths.has(mountPath)) {
+        return ValidationError(`挂载路径 '${mountPath}' 重复。`);
+      }
+      mountedPaths.add(mountPath);
+      // The identifier is derived rather than asked for, so mounting one PVC
+      // twice is two entries with distinct names instead of an error.
+      const base = volumeNameBase(pvcName);
+      let name = base;
+      for (let n = 2; volumeNames.has(name); n++) name = `${base}-${n}`;
+      volumeNames.add(name);
+      volumes.push({ name, pvcName, mountPath });
+    }
+
+    const env: Array<{ name: string; value: string }> = [];
+    const envNames = new Set<string>();
+    for (const e of Array.isArray(body.env) ? body.env : []) {
+      const name = e.name?.trim() ?? "";
+      const value = e.value ?? "";
+      if (!name && !value) continue;
+      if (!name) return ValidationError("环境变量需填写变量名。");
+      if (!ENV_NAME_RE.test(name)) {
+        return ValidationError(`环境变量名 '${name}' 不合法:需以字母/下划线/点/中划线开头,仅含字母/数字/下划线/点/中划线。`);
+      }
+      if (envNames.has(name)) return ValidationError(`环境变量 '${name}' 重复。`);
+      envNames.add(name);
+      // HOME is not just another variable: an absolute one decides where the
+      // workspace mounts (StorageSpec.MountPath), so a relative value would tell
+      // the container its home is at a path that does not exist.
+      if (name === "HOME" && !value.startsWith("/")) {
+        return ValidationError("环境变量 HOME 需为绝对路径(以 / 开头),它同时决定工作区挂载路径。");
+      }
+      env.push({ name, value });
+    }
+
+    const argsLine = body.args?.trim() ?? "";
+    const args = argsLine ? splitArgs(argsLine) : [];
+    if (args === null) return ValidationError("启动参数引号不匹配。");
+
+    const ports: Array<{ name: string; type: string; containerPort: number }> = [];
+    const portNames = new Set<string>();
+    // tcp and udp are published over one L4 pool, where a number is held by a
+    // single protocol; http goes through the Gateway and may share a number.
+    const l4Ports = new Set<number>();
+    for (const p of Array.isArray(body.ports) ? body.ports : []) {
+      const name = p.name?.trim() ?? "";
+      const type = p.type?.trim() || "http";
+      const containerPort = p.containerPort;
+      // "Untouched" is decided by the name and the number alone: the type always
+      // has a value, so counting it would make every added row look filled.
+      if (!name && containerPort === undefined) continue;
+      if (!name) return ValidationError("额外端口需填写名称。");
+      // The name is published in the sub path and in status.endpoints, so the
+      // CRD requires it unique — stated in prose, not in the schema.
+      if (portNames.has(name)) return ValidationError(`端口名称 '${name}' 重复,名称用于发布子路径,须唯一。`);
+      if (!(PORT_TYPES as readonly string[]).includes(type)) {
+        return ValidationError(`端口类型须为 ${PORT_TYPES.join(" / ")} 之一。`);
+      }
+      if (containerPort === undefined || !Number.isInteger(containerPort) || containerPort < 1 || containerPort > 65535) {
+        return ValidationError("端口(containerPort)需为 1–65535 之间的整数。");
+      }
+      if (type !== "http") {
+        if (l4Ports.has(containerPort)) {
+          return ValidationError(`端口 ${containerPort} 已被另一条 tcp/udp 规则占用,tcp 与 udp 共用同一端口池。`);
+        }
+        l4Ports.add(containerPort);
+      }
+      portNames.add(name);
+      ports.push({ name, type, containerPort });
     }
 
     const core = getCoreClient();
@@ -241,20 +481,39 @@ export const POST = withAuth(async (req) => {
     );
     if (exists) return ValidationError(`环境 '${body.name}' 已存在。`);
 
-    // The image decides the account the environment runs as and, for the
-    // stock-derived jupyter image, the gid. Neither is discoverable from the
-    // cluster, so it is resolved here from the catalog rather than taken from
-    // the client. An image the platform does not publish resolves to nothing,
-    // leaving spec.runtime unset and the CRD's own defaults in force.
-    const published = devImageFor(body.image);
-    const runtime = published
-      ? {
-          user: published.user,
-          ...(published.runAsGroup !== undefined
-            ? { securityContext: { runAsGroup: published.runAsGroup } }
-            : {}),
-        }
-      : undefined;
+    // The runtime identity. Neither half is discoverable from the cluster, so
+    // the catalog is the default for a client that states none, and an explicit
+    // value from the client wins. The account/uid pairing belongs to the image
+    // and is not checked here or anywhere else — the operator cannot see inside
+    // the image, so a mismatch surfaces as a failed login rather than a
+    // rejected spec (docs/design/devenv-images/decision.md).
+    const published = devImageFor(image);
+
+    // runAsUser 0 is the whole of a request to run as root: the controller then
+    // serves and advertises "root" whatever spec.runtime.user says, reporting
+    // the contradictory field as ignored. So a root environment states no
+    // account at all, and takes gid 0 — a root uid beside the image's own gid
+    // would chown the workspace to a group the root process does not use.
+    const runAsRoot = body.runAsUser === 0;
+    const user = runAsRoot ? undefined : body.runtimeUser || published?.user;
+    const runAsGroup = runAsRoot ? 0 : body.runAsGroup ?? published?.runAsGroup;
+    const runAsUser = body.runAsUser;
+    const securityContext =
+      runAsUser === undefined && runAsGroup === undefined
+        ? undefined
+        : {
+            ...(runAsUser !== undefined ? { runAsUser } : {}),
+            ...(runAsGroup !== undefined ? { runAsGroup } : {}),
+          };
+    const runtime =
+      user === undefined && securityContext === undefined && env.length === 0 && args.length === 0
+        ? undefined
+        : {
+            ...(user !== undefined ? { user } : {}),
+            ...(securityContext ? { securityContext } : {}),
+            ...(env.length ? { env } : {}),
+            ...(args.length ? { args } : {}),
+          };
 
     const cr = {
       apiVersion: `${GROUP}/${VERSION}`,
@@ -262,7 +521,7 @@ export const POST = withAuth(async (req) => {
       metadata: { name: body.name, namespace: body.namespace },
       spec: {
         type: body.type,
-        image: body.image,
+        image,
         running: true,
         resources: {
           ...(gpuEnabled ? { gpu: { vendor: accelerator, count: gpuCount } } : {}),
@@ -270,7 +529,11 @@ export const POST = withAuth(async (req) => {
           ...(body.memory ? { memory: body.memory } : {}),
         },
         ...(runtime ? { runtime } : {}),
-        storage: body.storageGi !== undefined ? { size: `${body.storageGi}Gi` } : undefined,
+        ...(body.storageGi !== undefined
+          ? { storage: { size: `${body.storageGi}Gi`, ...(workspacePath ? { mountPath: workspacePath } : {}) } }
+          : {}),
+        ...(volumes.length ? { volumes } : {}),
+        ...(ports.length ? { ports } : {}),
         lifecycle: { idleTimeout },
       },
     };

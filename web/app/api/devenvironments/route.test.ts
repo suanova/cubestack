@@ -118,6 +118,43 @@ describe("GET /api/devenvironments", () => {
     expect(ssh.resources.gpu).toEqual({ vendor: "metax", count: 1 });
   });
 
+  it("projects spec.volumes / ports / runtime without inventing a workspace path", async () => {
+    listClusterCustomObject.mockResolvedValue({
+      items: [
+        {
+          metadata: { name: "pinned", namespace: "project-a" },
+          spec: {
+            type: "ssh",
+            storage: { size: "100Gi", mountPath: "/data" },
+            volumes: [{ name: "data-cache", pvcName: "data-cache", mountPath: "/cache", readOnly: true }],
+            ports: [{ name: "api", containerPort: 8080 }],
+            runtime: { env: [{ name: "HF_TOKEN" }, { name: "HF_HOME" }], args: ["--port", "8080"] },
+          },
+        },
+        {
+          metadata: { name: "derived", namespace: "project-a" },
+          // spec.storage.size with no mountPath: the controller derives the
+          // path, so the projection must say so rather than claim /workspace.
+          spec: { type: "jupyter", storage: { size: "100Gi" } },
+        },
+      ],
+    });
+    const { GET } = await importRoute();
+    const body = await (await GET(await authedGet(), undefined)).json();
+    const [pinned, derived] = body.items;
+
+    expect(pinned.storage).toEqual({ size: "100Gi", mountPath: "/data" });
+    expect(pinned.volumes).toEqual([{ name: "data-cache", pvcName: "data-cache", mountPath: "/cache", readOnly: true }]);
+    // The type is defaulted the way the CRD does; the env value is not
+    // projected at all — a value can be a registry token, and the names are
+    // what say which variables the environment carries.
+    expect(pinned.ports).toEqual([{ name: "api", type: "http", containerPort: 8080 }]);
+    expect(pinned.envNames).toEqual(["HF_TOKEN", "HF_HOME"]);
+    expect(pinned.args).toEqual(["--port", "8080"]);
+
+    expect(derived.storage).toEqual({ size: "100Gi", mountPath: null });
+  });
+
   it("defaults absent spec fields so rendering never crashes", async () => {
     listClusterCustomObject.mockResolvedValue({
       items: [
@@ -141,6 +178,10 @@ describe("GET /api/devenvironments", () => {
       // which is a state the UI must render rather than invent a GPU for.
       resources: { gpu: null, cpu: "—", memory: "—" },
       storage: null,
+      volumes: [],
+      envNames: [],
+      args: [],
+      ports: [],
       idleTimeout: 0,
       sshEnabled: false,
       phase: null,
@@ -271,7 +312,7 @@ describe("POST /api/devenvironments", () => {
     expect("gpu" in spec.resources).toBe(false);
   });
 
-  it("derives spec.runtime from the image, because the layout is not discoverable", async () => {
+  it("falls back to the image's published identity when the client states none", async () => {
     createNamespacedCustomObject.mockResolvedValue({});
     listClusterCustomObject.mockResolvedValue({ items: [] });
     const { POST } = await importRoute();
@@ -304,7 +345,7 @@ describe("POST /api/devenvironments", () => {
     });
   });
 
-  it("leaves spec.runtime unset for an image the platform does not publish", async () => {
+  it("leaves spec.runtime unset for an unpublished image with no stated identity", async () => {
     createNamespacedCustomObject.mockResolvedValue({});
     listClusterCustomObject.mockResolvedValue({ items: [] });
     const { POST } = await importRoute();
@@ -316,9 +357,336 @@ describe("POST /api/devenvironments", () => {
       undefined,
     );
     expect(res.status).toBe(201);
-    // A bring-your-own image states its own identity in the spec — the
-    // platform cannot guess it, so it leaves the CRD's defaults in force.
+    // Nothing states the identity: the platform does not publish this image and
+    // the client did not describe it, so the CRD's defaults stay in force.
     expect("runtime" in createNamespacedCustomObject.mock.calls[0][0].body.spec).toBe(false);
+  });
+
+  it("lets the client override the account and uid/gid the image would imply", async () => {
+    createNamespacedCustomObject.mockResolvedValue({});
+    listClusterCustomObject.mockResolvedValue({ items: [] });
+    const { POST } = await importRoute();
+    const res = await POST(
+      await authedRequest({
+        method: "POST",
+        body: JSON.stringify({
+          name: "alice-env",
+          namespace: "project-a",
+          type: "jupyter",
+          image: "harbor.isuanova.com/suanova/jupyter-minimal:latest",
+          runtimeUser: "alice",
+          runAsUser: 1500,
+          runAsGroup: 1500,
+        }),
+      }),
+      undefined,
+    );
+    expect(res.status).toBe(201);
+    // The account/uid pairing belongs to the image, not to the platform, and the
+    // operator cannot look inside the image to check it (decision.md) — so what
+    // the client states wins over what the catalog would have said.
+    expect(createNamespacedCustomObject.mock.calls[0][0].body.spec.runtime).toEqual({
+      user: "alice",
+      securityContext: { runAsUser: 1500, runAsGroup: 1500 },
+    });
+  });
+
+  it("keeps the image's gid when the client overrides only the uid", async () => {
+    createNamespacedCustomObject.mockResolvedValue({});
+    listClusterCustomObject.mockResolvedValue({ items: [] });
+    const { POST } = await importRoute();
+    await POST(
+      await authedRequest({
+        method: "POST",
+        body: JSON.stringify({
+          name: "jovyan-env",
+          namespace: "project-a",
+          type: "jupyter",
+          image: "harbor.isuanova.com/suanova/jupyter-minimal:latest",
+          runAsUser: 1500,
+        }),
+      }),
+      undefined,
+    );
+    expect(createNamespacedCustomObject.mock.calls[0][0].body.spec.runtime).toEqual({
+      user: "jovyan",
+      securityContext: { runAsUser: 1500, runAsGroup: 100 },
+    });
+  });
+
+  it("treats runAsUser 0 as the root request: gid 0 and no account", async () => {
+    createNamespacedCustomObject.mockResolvedValue({});
+    listClusterCustomObject.mockResolvedValue({ items: [] });
+    const { POST } = await importRoute();
+    const res = await POST(
+      await authedRequest({
+        method: "POST",
+        body: JSON.stringify({
+          name: "root-env",
+          namespace: "project-a",
+          type: "ssh",
+          image: "harbor.isuanova.com/suanova/ssh-ubuntu22.04:latest",
+          runAsUser: 0,
+          runAsGroup: 0,
+        }),
+      }),
+      undefined,
+    );
+    expect(res.status).toBe(201);
+    const runtime = createNamespacedCustomObject.mock.calls[0][0].body.spec.runtime;
+    expect(runtime.securityContext).toEqual({ runAsUser: 0, runAsGroup: 0 });
+    // The controller serves "root" itself and reports spec.runtime.user as
+    // overridden, so sending one would only describe a field it ignores.
+    expect("user" in runtime).toBe(false);
+  });
+
+  it("rejects an account the CRD's schema would refuse", async () => {
+    const { POST } = await importRoute();
+    for (const runtimeUser of ["Alice", "has space", "9lives", "a".repeat(33)]) {
+      const res = await POST(
+        await authedRequest({
+          method: "POST",
+          body: JSON.stringify({ name: "ok-name", namespace: "project-a", type: "jupyter", image: "img", runtimeUser }),
+        }),
+        undefined,
+      );
+      // Field-level 400 here rather than the API server's opaque 422 on the CR.
+      expect(res.status).toBe(400);
+      expect(createNamespacedCustomObject).not.toHaveBeenCalled();
+    }
+  });
+
+  it("rejects a uid or gid that is not a non-negative integer", async () => {
+    const { POST } = await importRoute();
+    for (const ids of [{ runAsUser: -1 }, { runAsGroup: 1.5 }, { runAsUser: 2147483648 }, { runAsUser: 1e30 }]) {
+      const res = await POST(
+        await authedRequest({
+          method: "POST",
+          body: JSON.stringify({ name: "ok-name", namespace: "project-a", type: "jupyter", image: "img", ...ids }),
+        }),
+        undefined,
+      );
+      expect(res.status).toBe(400);
+      expect(createNamespacedCustomObject).not.toHaveBeenCalled();
+    }
+  });
+
+  it("rejects the account root without the uid 0 that actually asks for root", async () => {
+    const { POST } = await importRoute();
+    const res = await POST(
+      await authedRequest({
+        method: "POST",
+        body: JSON.stringify({ name: "ok-name", namespace: "project-a", type: "jupyter", image: "img", runtimeUser: "root", runAsUser: 1000 }),
+      }),
+      undefined,
+    );
+    // A "root" account at uid 1000 is an image whose sshd serves root but whose
+    // process is not root — almost always a mistake, and never what it reads as.
+    expect(res.status).toBe(400);
+    expect(createNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
+  // ── step 3's storage / runtime / network sections ──────────────────────────
+
+  /** The spec the last successful POST wrote, for the step-3 cases below. */
+  async function postedSpec(extra: Record<string, unknown>): Promise<Record<string, unknown>> {
+    clearMocks();
+    createNamespacedCustomObject.mockResolvedValue({});
+    listClusterCustomObject.mockResolvedValue({ items: [] });
+    const { POST } = await importRoute();
+    const res = await POST(
+      await authedRequest({
+        method: "POST",
+        body: JSON.stringify({ name: "ok-name", namespace: "project-a", type: "ssh", image: "harbor.local/ai-images/custom:1.0", storageGi: 100, ...extra }),
+      }),
+      undefined,
+    );
+    expect(res.status).toBe(201);
+    return createNamespacedCustomObject.mock.calls[0][0].body.spec;
+  }
+
+  /** A request the route must refuse, asserting nothing reached the cluster. */
+  async function rejectedPost(extra: Record<string, unknown>): Promise<string> {
+    clearMocks();
+    const { POST } = await importRoute();
+    const res = await POST(
+      await authedRequest({
+        method: "POST",
+        body: JSON.stringify({ name: "ok-name", namespace: "project-a", type: "ssh", image: "img", storageGi: 100, ...extra }),
+      }),
+      undefined,
+    );
+    expect(res.status).toBe(400);
+    expect(createNamespacedCustomObject).not.toHaveBeenCalled();
+    return (await res.json()).error;
+  }
+
+  it("states storage.mountPath only when it is given one", async () => {
+    // Left empty the field is absent, not "/workspace": the controller derives
+    // the path (and HOME) from the runtime identity, and a jupyter image's
+    // workspace is /home/jovyan.
+    const derived = await postedSpec({});
+    expect(derived.storage).toEqual({ size: "100Gi" });
+
+    const pinned = await postedSpec({ mountPath: "/data" });
+    expect(pinned.storage).toEqual({ size: "100Gi", mountPath: "/data" });
+  });
+
+  it("rejects a workspace path that is not absolute, or that has no claim behind it", async () => {
+    expect(await rejectedPost({ mountPath: "data" })).toContain("绝对路径");
+    expect(await rejectedPost({ mountPath: "/" })).toContain("绝对路径");
+    // spec.storage.mountPath lives inside spec.storage, so a path with no size
+    // describes a mount nothing honours — the API server would prune it silently.
+    const { POST } = await importRoute();
+    const res = await POST(
+      await authedRequest({
+        method: "POST",
+        body: JSON.stringify({ name: "ok-name", namespace: "project-a", type: "ssh", image: "img", mountPath: "/data" }),
+      }),
+      undefined,
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("derives spec.volumes[].name from the PVC, uniquely", async () => {
+    const spec = await postedSpec({
+      volumes: [
+        { pvcName: "Data_Cache", mountPath: "/data" },
+        { pvcName: "data-cache", mountPath: "/cache" },
+        { pvcName: "models", mountPath: "/models" },
+      ],
+    });
+    // The name is the pod's own identifier, so it is slugged to a DNS-1123
+    // label and de-duplicated rather than asked for — mounting the same PVC
+    // twice under two paths is a legitimate request.
+    expect(spec.volumes).toEqual([
+      { name: "data-cache", pvcName: "Data_Cache", mountPath: "/data" },
+      { name: "data-cache-2", pvcName: "data-cache", mountPath: "/cache" },
+      { name: "models", pvcName: "models", mountPath: "/models" },
+    ]);
+  });
+
+  it("rejects volume rows that are half-filled, relative, or at a taken path", async () => {
+    expect(await rejectedPost({ volumes: [{ pvcName: "data-cache" }] })).toContain("同时填写");
+    expect(await rejectedPost({ volumes: [{ pvcName: "data-cache", mountPath: "data" }] })).toContain("绝对路径");
+    expect(
+      await rejectedPost({
+        volumes: [
+          { pvcName: "a", mountPath: "/data" },
+          { pvcName: "b", mountPath: "/data" },
+        ],
+      }),
+    ).toContain("重复");
+    // The workspace is a mount in the same pod, so its path is taken too.
+    expect(await rejectedPost({ mountPath: "/data", volumes: [{ pvcName: "a", mountPath: "/data" }] })).toContain("重复");
+  });
+
+  it("drops a volume row the user never filled", async () => {
+    const spec = await postedSpec({ volumes: [{ pvcName: "", mountPath: "" }] });
+    expect("volumes" in spec).toBe(false);
+  });
+
+  it("adds spec.runtime.env and .args alongside the identity the image implies", async () => {
+    createNamespacedCustomObject.mockResolvedValue({});
+    listClusterCustomObject.mockResolvedValue({ items: [] });
+    const { POST } = await importRoute();
+    const res = await POST(
+      await authedRequest({
+        method: "POST",
+        body: JSON.stringify({
+          name: "ok-name",
+          namespace: "project-a",
+          type: "jupyter",
+          image: "harbor.isuanova.com/suanova/jupyter-minimal:latest",
+          env: [{ name: "HF_HOME", value: "/data/hf" }],
+          args: '--port 8080 --name "a b"',
+        }),
+      }),
+      undefined,
+    );
+    expect(res.status).toBe(201);
+    // Stating an environment variable does not unstate an identity: the two
+    // are leaves of one spec.runtime, and the catalog still backs the account.
+    expect(createNamespacedCustomObject.mock.calls[0][0].body.spec.runtime).toEqual({
+      user: "jovyan",
+      securityContext: { runAsGroup: 100 },
+      env: [{ name: "HF_HOME", value: "/data/hf" }],
+      args: ["--port", "8080", "--name", "a b"],
+    });
+  });
+
+  it("rejects env names the API server would, and a relative HOME", async () => {
+    expect(await rejectedPost({ env: [{ name: "1BAD", value: "x" }] })).toContain("环境变量名");
+    expect(await rejectedPost({ env: [{ name: "has space", value: "x" }] })).toContain("环境变量名");
+    expect(await rejectedPost({ env: [{ value: "orphan" }] })).toContain("变量名");
+    expect(
+      await rejectedPost({
+        env: [
+          { name: "A", value: "1" },
+          { name: "A", value: "2" },
+        ],
+      }),
+    ).toContain("重复");
+    // HOME decides where the workspace mounts, so a relative one points the
+    // container's home at a directory that cannot exist.
+    expect(await rejectedPost({ env: [{ name: "HOME", value: "rel" }] })).toContain("HOME");
+  });
+
+  it("rejects an unbalanced quote in the arguments rather than guessing", async () => {
+    expect(await rejectedPost({ args: '--name "a b' })).toContain("引号");
+  });
+
+  it("omits args and env when they state nothing", async () => {
+    const spec = await postedSpec({ env: [{ name: "", value: "" }], args: "   " });
+    expect("runtime" in spec).toBe(false);
+  });
+
+  it("defaults a port's type to http and lets http share a number", async () => {
+    const spec = await postedSpec({
+      ports: [
+        { name: "api", containerPort: 8080 },
+        { name: "admin", containerPort: 8080, type: "http" },
+      ],
+    });
+    // The CRD's own default; http is published as a Gateway sub path, so
+    // nothing stops two names sharing one container port.
+    expect(spec.ports).toEqual([
+      { name: "api", type: "http", containerPort: 8080 },
+      { name: "admin", type: "http", containerPort: 8080 },
+    ]);
+  });
+
+  it("rejects ports the CRD or the publisher would refuse", async () => {
+    expect(await rejectedPost({ ports: [{ containerPort: 8080 }] })).toContain("名称");
+    expect(await rejectedPost({ ports: [{ name: "api", containerPort: 0 }] })).toContain("1–65535");
+    expect(await rejectedPost({ ports: [{ name: "api", containerPort: 65536 }] })).toContain("1–65535");
+    expect(await rejectedPost({ ports: [{ name: "api", containerPort: 1.5 }] })).toContain("1–65535");
+    expect(await rejectedPost({ ports: [{ name: "api", containerPort: 80, type: "sctp" }] })).toContain("端口类型");
+    expect(
+      await rejectedPost({
+        ports: [
+          { name: "api", containerPort: 8080, type: "tcp" },
+          { name: "api", containerPort: 9090, type: "tcp" },
+        ],
+      }),
+    ).toContain("重复");
+    // tcp and udp are published over one L4 pool, where a number is held by a
+    // single protocol — the CRD states this in prose, not in its schema.
+    expect(
+      await rejectedPost({
+        ports: [
+          { name: "api", containerPort: 9000, type: "tcp" },
+          { name: "metrics", containerPort: 9000, type: "udp" },
+        ],
+      }),
+    ).toContain("端口池");
+  });
+
+  it("drops a port row the user never filled", async () => {
+    // The type always holds a value, so an untouched row must be recognised by
+    // its name and number alone.
+    const spec = await postedSpec({ ports: [{ type: "tcp" }] });
+    expect("ports" in spec).toBe(false);
   });
 });
 
