@@ -47,7 +47,13 @@ before the chart is helm-installed:
 
 - the Gateway API CRDs (the DevEnvironment controller watches Gateway,
   HTTPRoute, TCPRoute, UDPRoute and ListenerSet; the manager registers those
-  watches at startup for the kinds the cluster serves), and
+  watches at startup for the kinds the cluster serves),
+- the platform Gateway and its `ClientTrafficPolicy`
+  (`test/e2e/assets/gateway.yaml`, the shape the chart README documents as a
+  prerequisite). The chart creates neither — the platform owns them — but
+  everything the operator publishes or exposes attaches to that Gateway, and the
+  DevEnvironment verification reaches each environment through its address, so
+  the cluster needs one before the verify steps run, and
 - the upstream [LeaderWorkerSet](https://github.com/kubernetes-sigs/lws)
   controller at the version pinned in `go.mod` (LWS workloads do not
   materialize pods without it). The controller install applies the pinned lws
@@ -57,12 +63,15 @@ before the chart is helm-installed:
 The chart installs the `ai.cubestack.io` CRDs (ModelVersion,
 InferenceRuntimeProfile, InferenceService, DevEnvironment — synced from
 `config/crd/bases` at build time) together with the VAPs, RBAC and Deployment
-for the controller manager; it does not ship the lws CRDs.
+for the controller manager; it does not ship the lws CRDs, and creates no
+Gateway API object.
 
-In a non-kind cluster you must provide both prerequisites before installing the
-chart, and the Envoy Gateway v1.9.1 CRDs as well: the `ClientTrafficPolicy` that
-ships with the Gateway — from the chart, and from the kustomize base's
-`config/gateway/` — is one of that controller's resources.
+In a non-kind cluster you must provide all of the above before installing the
+chart: the Gateway API CRDs, the Envoy Gateway v1.9.1 CRDs and controller
+(Gateway and `ClientTrafficPolicy` are that controller's resources), a
+GatewayClass carrying an `EnvoyProxy`, and a Gateway matching the chart's
+`gateway.name` / `gateway.namespace` — see the chart README's Prerequisites for
+the exact shape.
 
 ## Requirements on the namespaces that host DevEnvironments
 

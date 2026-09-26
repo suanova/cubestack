@@ -6,26 +6,33 @@ image:
 
 # Platform Gateway the operator publishes InferenceService catalog entries to
 # (spec.route.publish: true), and that DevEnvironment ListenerSets attach to.
-# The chart creates that Gateway in the release namespace and tells the manager
-# that same namespace, so the release can be installed anywhere. Set
-# gateway.catalogHostname to enable publishing:
+# The chart creates neither it nor its ClientTrafficPolicy: the platform owns
+# both, and this block only tells the manager which Gateway to use. The shape
+# the platform applies — a Gateway with the listener and the allowedListeners /
+# allowedRoutes opt-ins the operator needs, plus the Agent Router's
+# ClientTrafficPolicy — is in the chart README's Prerequisites.
+#
+# Set gateway.catalogHostname to enable publishing:
 #   helm install ... --set gateway.catalogHostname=ai.example.com
 #
-# The chart creates only the Gateway, not its dataplane: how the proxy is
+# The dataplane behind that Gateway is the platform's too: how the proxy is
 # exposed (Service type) and which proxy image runs are properties of the
-# EnvoyProxy the GatewayClass references, which the platform owns. The class
-# gateway.className names must therefore carry one. See the chart README.
+# EnvoyProxy the Gateway's GatewayClass references, not values here. See the
+# chart README.
 gateway:
-  # Name of the Gateway the chart creates, and the --gateway-name the manager
-  # receives, so the Gateway the operator publishes through is always the one
-  # the chart created. An empty value still creates the conventionally named
-  # Gateway but omits the flag, which leaves publishing off.
+  # Name of the platform's Gateway: what the manager receives as
+  # --gateway-name and looks the object up by, and what DevEnvironment
+  # ListenerSets attach to. An empty value omits the flag, which is not a clean
+  # off-switch: publishing turns off, but the DevEnvironment controller falls
+  # back to its built-in default (cubestack-gateway in cubestack-system).
+  # Leave it set.
   name: cubestack-gateway
-  # GatewayClass the Gateway asks to be served by. Not a manager flag: only
-  # the cluster's Gateway controller reads it, and it must name a class that
-  # controller has established (`eg` is the one Envoy Gateway installs) and
-  # that carries an EnvoyProxy configured for this cluster.
-  className: eg
+  # Namespace the Gateway object itself lives in, rendered as
+  # --gateway-namespace. Not a publishing switch — the flag always renders,
+  # since it is where the platform's Gateway lives rather than whether one
+  # exists. The default is the platform convention: the namespace Envoy
+  # Gateway and its `eg` GatewayClass are installed in (Prerequisites).
+  namespace: envoy-gateway-system           # --gateway-namespace
   # Shared model-catalog hostname published InferenceServices attach to: every
   # published service is one model of this one catalog entry, selected by the
   # model name in the request. Empty = flag omitted, which leaves publishing

@@ -280,12 +280,13 @@ helm-e2e-setup: ## Create the dedicated kind cluster for helm e2e if it does not
 	@echo "Provisioning the upstream LeaderWorkerSet controller (image from the platform registry, manifests from the pinned lws go module)..." ; \
 	KIND_CLUSTER_HELM="$(KIND_CLUSTER_HELM)" KIND="$(KIND)" KUBECTL="$(KUBECTL)" hack/install-lws-controller.sh
 	# The CRDs above are the API surface; this is the controller that programs
-	# the Gateway. Without it the chart's Gateway is accepted by the API server
-	# and never served, so nothing an environment publishes is reachable.
+	# the Gateway. Without it the platform Gateway applied below is accepted by
+	# the API server and never served, so nothing an environment publishes is
+	# reachable.
 	# --skip-crds is required: the chart's crds/ also carries the gateway-api
 	# CRDs installed from the pinned go module above, and re-applying those is
 	# denied by gateway-api's own safe-upgrades ValidatingAdmissionPolicy.
-	@echo "Installing the Envoy Gateway controller for the chart's Gateway..." ; \
+	@echo "Installing the Envoy Gateway controller for the platform Gateway..." ; \
 	$(HELM) upgrade --install eg "$(ENVOY_GATEWAY_CHART_TGZ)" \
 		--set deployment.envoyGateway.image.repository=$(ENVOY_GATEWAY_IMAGE_REPO) \
 		--set deployment.envoyGateway.image.tag=$(ENVOY_GATEWAY_IMAGE_TAG) \
@@ -303,6 +304,20 @@ helm-e2e-setup: ## Create the dedicated kind cluster for helm e2e if it does not
 	sed "s#__ENVOY_PROXY_IMAGE__#$(ENVOY_PROXY_IMAGE)#" test/e2e/assets/envoyproxy-gatewayclass.yaml \
 		| $(HELM_E2E_KUBECTL) apply -f - && \
 	$(HELM_E2E_KUBECTL) wait --for=condition=Accepted gatewayclass/eg --timeout=2m
+	# The Gateway itself, which the chart no longer ships: without one there is
+	# nothing for the manager to publish InferenceService routes to or to attach
+	# environment ListenerSets to, and verify-devenv.sh has no address to reach an
+	# environment at. The asset is the shape the chart README documents as a
+	# platform prerequisite, applied here so the cluster the e2e runs against
+	# looks like one that followed it. Waits for Programmed — the class above
+	# accepting the Gateway only means Envoy Gateway took it on, not that the
+	# dataplane is up.
+	@echo "Applying the platform Gateway + ClientTrafficPolicy..." ; \
+	$(HELM_E2E_KUBECTL) apply -f test/e2e/assets/gateway.yaml && \
+	$(HELM_E2E_KUBECTL) wait --for=condition=Accepted gateway/cubestack-gateway \
+		-n $(ENVOY_GATEWAY_NAMESPACE) --timeout=2m && \
+	$(HELM_E2E_KUBECTL) wait --for=condition=Programmed gateway/cubestack-gateway \
+		-n $(ENVOY_GATEWAY_NAMESPACE) --timeout=3m
 	# kind ships no cephfs; this gives the name the controller hardcodes to a
 	# provisioner kind already has, configured for the ReadWriteMany the
 	# workspace claim asks for. See the script for why a StorageClass alone is
@@ -422,24 +437,30 @@ helm-e2e-crd-check: ## Verify chart CRDs plus the prerequisite lws/gateway CRDs,
 	$(HELM_E2E_KUBECTL) auth can-i update devenvironments.ai.cubestack.io \
 		--as=system:serviceaccount:$(HELM_NAMESPACE):cubestack-controller-manager -n $(HELM_NAMESPACE) | grep -qx yes \
 		|| { echo "manager SA cannot update DevEnvironments (the controller adds and removes its finalizer with Update)"; exit 1; }; \
-	echo "platform Gateway:"; \
-	$(HELM_E2E_KUBECTL) get gateway cubestack-gateway -n $(HELM_NAMESPACE) >/dev/null \
-		|| { echo "MISSING: the chart did not create Gateway/cubestack-gateway"; exit 1; }
-	# The chart creates the Gateway and nothing else. No dataplane object may
-	# live here: a Gateway carrying an EnvoyProxy of its own replaces its class's
-	# provider config rather than merging with it, so a chart-shipped one would
-	# silently override whatever the platform configured for the whole class.
+	echo "platform Gateway the chart points at (the release does not create it):"; \
+	$(HELM_E2E_KUBECTL) get gateway cubestack-gateway -n $(ENVOY_GATEWAY_NAMESPACE) >/dev/null \
+		|| { echo "MISSING: no platform Gateway in $(ENVOY_GATEWAY_NAMESPACE) — the chart expects one to exist (chart README, Prerequisites)"; exit 1; }
+	# The chart ships no Gateway and no ClientTrafficPolicy: the platform owns
+	# both, and the asset helm-e2e-setup applied stands in for it. Either object
+	# appearing in the release namespace means a template outlived the removal.
+	# No EnvoyProxy here either: a Gateway carrying one of its own replaces its
+	# class's provider config rather than merging with it, so a release-shipped
+	# one would silently override whatever the platform configured for the class.
 	@set -e; \
-	[ -z "$$($(HELM_E2E_KUBECTL) get gateway cubestack-gateway -n $(HELM_NAMESPACE) -o jsonpath='{.spec.infrastructure}')" ] \
-		|| { echo "Gateway/cubestack-gateway carries spec.infrastructure: the dataplane belongs to the GatewayClass's EnvoyProxy"; exit 1; }; \
+	for kind in gateway clienttrafficpolicy; do \
+		[ -z "$$($(HELM_E2E_KUBECTL) get $$kind -n $(HELM_NAMESPACE) -o name 2>/dev/null)" ] \
+			|| { echo "the release created a $$kind in $(HELM_NAMESPACE): the chart must ship neither"; exit 1; }; \
+	done; \
 	[ -z "$$($(HELM_E2E_KUBECTL) get envoyproxy -n $(HELM_NAMESPACE) -o name 2>/dev/null)" ] \
 		|| { echo "the release shipped an EnvoyProxy of its own — the dataplane belongs to the GatewayClass"; exit 1; }; \
+	[ -z "$$($(HELM_E2E_KUBECTL) get gateway cubestack-gateway -n $(ENVOY_GATEWAY_NAMESPACE) -o jsonpath='{.spec.infrastructure}')" ] \
+		|| { echo "Gateway/cubestack-gateway carries spec.infrastructure: the dataplane belongs to the GatewayClass's EnvoyProxy"; exit 1; }; \
 	$(HELM_E2E_KUBECTL) get deploy cubestack-controller-manager -n $(HELM_NAMESPACE) -o jsonpath='{.spec.template.spec.containers[0].args}' \
 		| grep -q -- "--gateway-name=cubestack-gateway" \
-		|| { echo "the manager was not told the Gateway's name: gateway.name must reach --gateway-name, or the object above is not the one it publishes through"; exit 1; }; \
+		|| { echo "the manager was not told the Gateway's name: gateway.name must reach --gateway-name, or it publishes through a Gateway that is not there"; exit 1; }; \
 	$(HELM_E2E_KUBECTL) get deploy cubestack-controller-manager -n $(HELM_NAMESPACE) -o jsonpath='{.spec.template.spec.containers[0].args}' \
-		| grep -q -- "--gateway-namespace=$(HELM_NAMESPACE)" \
-		|| { echo "the manager was not told the release namespace: --gateway-namespace must render .Release.Namespace, or it looks for the Gateway in cubestack-system"; exit 1; }; \
+		| grep -q -- "--gateway-namespace=$(ENVOY_GATEWAY_NAMESPACE)" \
+		|| { echo "the manager was not told where the Gateway is: --gateway-namespace must render gateway.namespace ($(ENVOY_GATEWAY_NAMESPACE)), or it looks for the object in another namespace"; exit 1; }; \
 	echo "schema validation (invalid MV must be rejected):"; \
 	if printf '%s\n' 'apiVersion: ai.cubestack.io/v1alpha1' 'kind: ModelVersion' 'metadata:' '  name: e2e-invalid-should-fail' 'spec:' '  model: x' | $(HELM_E2E_KUBECTL) apply -f -; then \
 		echo "ERROR: invalid ModelVersion was accepted — CRD schema not enforced"; \
