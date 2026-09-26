@@ -1,8 +1,0 @@
-# The platform Gateway and the ClientTrafficPolicy that makes the Agent Router's
-# streaming path work. Each becomes a chart template of its own
-# (gateway-cubestack-gateway.yaml, clienttrafficpolicy-cubestack-gateway-ai.yaml).
-# The Gateway's dataplane parameters are not here: they come from the EnvoyProxy
-# the GatewayClass references.
-resources:
-- gateway.yaml
-- clienttrafficpolicy.yaml

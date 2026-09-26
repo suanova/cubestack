@@ -53,6 +53,9 @@
 - operator 现按 `--gateway-name=cubestack-gateway --gateway-namespace=cubestack-system` 运行（helm values
   `gateway.name` + chart 默认）；目录入口 hostname 无现成配置，由本次新增的 flag 传入（D5），旧的
   `--gateway-domain` 一并删除（无消费者，见 D1）。
+  > 后记（chart 不再创建 Gateway）：`--gateway-namespace` 改为渲染 `gateway.namespace`，默认
+  > `envoy-gateway-system`（平台装 Envoy Gateway 的命名空间）；`gateway.className` 随 Gateway
+  > 模板一并删除。上文的 `cubestack-system` 是当时验证集群的取值。
 - 网关 `cubestack-gateway`：Envoy Gateway v1.9.1；仅 HTTP:80 listener（NodePort 30365）；
   `allowedRoutes.namespaces.from: All`（ISVC 跨 namespace 附着 Gateway 已有先例）。
 - **超时实测（现网 HTTPRoute 的 60s request timeout）**：非流式 6000 token →
@@ -163,9 +166,11 @@ spec:
 
 ### D8 平台 prerequisite（不进 operator）
 
-- **CTP 一条**（挂 `cubestack-gateway`，`cubestack-system`）：`connection.bufferLimit: 50Mi` +
-  `http2` 窗口恢复 Envoy 原生值（16Mi/24Mi）。Phase 0 手工 apply；正式形态随 Gateway 进 chart
-  （与 Gateway 同生命周期）。
+- **CTP 一条**（挂平台 Gateway）：`connection.bufferLimit: 50Mi` +
+  `http2` 窗口恢复 Envoy 原生值（16Mi/24Mi）。Phase 0 手工 apply。
+  > 后记（chart 不再创建 Gateway）：CTP 归平台，与 Gateway 同生命周期，不再随 chart 发布——
+  > chart 与 kustomize base 都不再创建 Gateway/CTP，只渲染指向它们的 flag。参考形态见
+  > chart README 的 Prerequisites 与 `operator/test/e2e/assets/gateway.yaml`。
 - agent-router 的升级/监控与 envoy-gateway 同级对待（xDS 翻译硬依赖其 controller）。
 - ratelimit 服务与 QuotaPolicy：非本次范围。
 

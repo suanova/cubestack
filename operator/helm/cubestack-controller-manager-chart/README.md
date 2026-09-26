@@ -25,24 +25,23 @@ controller prerequisite below.
   controller that programs the Gateway, so the CRDs must be in place before the
   chart can be installed. v1.9.1 is the version ListenerSet reconciliation is
   verified on — an older one accepts the Gateway but never programs the
-  ListenerSets, so no L4 listener ever appears. The chart's Gateway names the
-  `eg` GatewayClass that this install creates (change it with
-  `gateway.className` if you installed a differently named class):
+  ListenerSets, so no L4 listener ever appears. The Gateway you create below
+  names the `eg` GatewayClass that this install creates:
 
   ```bash
   helm install eg oci://docker.io/envoyproxy/gateway-helm --version v1.9.1 \
     -n envoy-gateway-system --create-namespace
   ```
 
-- **A GatewayClass that carries an `EnvoyProxy`.** The chart creates only the
-  Gateway; the dataplane behind it — its Service type and the proxy image — is
-  whatever the `EnvoyProxy` referenced by that class's `spec.parametersRef`
-  says. A class with no `parametersRef` gets Envoy Gateway's built-in defaults:
-  a `LoadBalancer` Service, which never gets an address on a cluster with no
-  load-balancer controller (nothing is published at all), and the proxy image
-  pulled from `docker.io` (unreachable on a cluster with no egress to Docker
-  Hub, so the proxy pods go `ImagePullBackOff`). Point the `eg` class at one
-  before installing, and set **both** settings in it:
+- **A GatewayClass that carries an `EnvoyProxy`.** The dataplane behind the
+  Gateway — its Service type and the proxy image — is whatever the `EnvoyProxy`
+  referenced by that class's `spec.parametersRef` says. A class with no
+  `parametersRef` gets Envoy Gateway's built-in defaults: a `LoadBalancer`
+  Service, which never gets an address on a cluster with no load-balancer
+  controller (nothing is published at all), and the proxy image pulled from
+  `docker.io` (unreachable on a cluster with no egress to Docker Hub, so the
+  proxy pods go `ImagePullBackOff`). Point the `eg` class at one before you
+  create the Gateway, and set **both** settings in it:
 
   ```yaml
   apiVersion: gateway.envoyproxy.io/v1alpha1
@@ -81,6 +80,71 @@ controller prerequisite below.
   `envoy-gateway-config` provider block: an `EnvoyProxy` is a provider config in
   its own right, so an image mirrored globally is not guaranteed to reach a
   class that has one. Spelling it out works either way.
+
+- **A Gateway, and the `ClientTrafficPolicy` that goes with it.** The chart
+  creates neither. The manager boots without them (it only needs the gateway-api
+  CRDs) and reports `RouteReady=False, reason=GatewayNotFound` for every
+  `spec.route.publish: true` service until the Gateway exists, but nothing the
+  operator publishes or exposes carries traffic without one. Create both before
+  or after installing the chart — the operator picks them up either way:
+
+  ```yaml
+  apiVersion: gateway.networking.k8s.io/v1
+  kind: Gateway
+  metadata:
+    name: cubestack-gateway        # must match gateway.name
+    namespace: envoy-gateway-system  # must match gateway.namespace
+  spec:
+    gatewayClassName: eg           # the class established above
+    # ListenerSets contributed by tenant namespaces (one per DevEnvironment) are
+    # rejected unless the Gateway opts in: the API default is "None", which
+    # refuses every one of them.
+    allowedListeners:
+      namespaces:
+        from: All
+    listeners:
+      - name: http
+        port: 80
+        protocol: HTTP
+        # Routes from every namespace may attach; allowedRoutes.kinds is left
+        # unset so the API derives them from the protocol (HTTPRoute, GRPCRoute).
+        allowedRoutes:
+          namespaces:
+            from: All
+  ---
+  apiVersion: gateway.envoyproxy.io/v1alpha1
+  kind: ClientTrafficPolicy
+  metadata:
+    name: cubestack-gateway-ai
+    namespace: envoy-gateway-system
+  spec:
+    targetRefs:
+      - group: gateway.networking.k8s.io
+        kind: Gateway
+        name: cubestack-gateway     # must match gateway.name
+    connection:
+      bufferLimit: 50Mi
+    http2:
+      initialStreamWindowSize: 16Mi
+      initialConnectionWindowSize: 24Mi
+  ```
+
+  The `ClientTrafficPolicy` is a prerequisite of the Agent Router path, not a
+  tuning extra: a published request's body is buffered whole so the model name
+  can be read out of it, which the API's 32KiB `bufferLimit` default is too
+  small for, and the HTTP/2 flow-control windows are raised above the CRD
+  defaults. Without it large requests fail at the Gateway.
+
+  `allowedListeners` is what admits the per-environment ListenerSets (see the
+  L4 port pool section); `from: All` also means who may contribute a listener
+  is decided by RBAC alone — anyone who can create a `ListenerSet` in their own
+  namespace can publish a listener on this Gateway. If the cluster's tenants are
+  not mutually trusted, select the namespaces explicitly instead.
+
+  The names and namespace above are the defaults the chart expects, so a Gateway
+  created this way needs no `--set` at all. Create it elsewhere and point the
+  chart at it with `gateway.name` / `gateway.namespace`. `operator/test/e2e/assets/gateway.yaml`
+  is the same pair, applied by the operator's own end-to-end setup.
 
 - The **Agent Router** (`ai-gateway-controller` v1.1.0, namespace
   `ai-gateway-system`) running in the cluster, which provides the
@@ -150,37 +214,67 @@ kind-loaded into the cluster, and `IfNotPresent` makes the loaded image win
 over the registry instead of the kubelet's `Always` default for `latest`
 tags triggering a remote pull.
 
-### Upgrading a cluster that already has the Gateway
+### Upgrading from a chart that created the Gateway
 
-Before the chart shipped it, every cluster created `cubestack-gateway` — and
-usually the `EnvoyProxy` it references — by hand. Helm refuses to take over
-resources it does not own (the upgrade stops with `invalid ownership metadata`),
-so adopt the Gateway once:
+**Upgrading a release installed from a chart that still shipped the Gateway
+deletes it**, along with its `ClientTrafficPolicy` and, from an even earlier
+release, the `EnvoyProxy` it tracked. Helm removes the resources a release owns
+that have dropped out of its manifest, and this chart now carries neither
+object. The flag the manager receives changes too: `--gateway-namespace` used to
+follow the release namespace, and now follows `gateway.namespace` —
+`envoy-gateway-system` by default.
+
+Every published InferenceService route and every DevEnvironment ListenerSet goes
+`GatewayNotFound` the moment the old release's objects are pruned, and nothing
+recovers until a Gateway matching `gateway.name` / `gateway.namespace` exists.
+
+Where the platform Gateway goes decides whether the upgrade has a gap. The old
+chart put both objects in the **release namespace** (`cubestack-gateway` and
+`cubestack-gateway-ai`), and the release still owns them until the upgrade prunes
+them — so no second Gateway may take their place there beforehand:
+
+- **Move them to `envoy-gateway-system`** (the default, and where Envoy Gateway
+  itself runs): create the platform Gateway and its `ClientTrafficPolicy` there
+  before upgrading. They collide with nothing the release owns, the old pair is
+  pruned harmlessly, and both `gateway.name` and `gateway.namespace` already
+  default to the new location — no `--set` needed. No gap in service. This is
+  what to do by default.
+- **Keep them in the release namespace**: they cannot pre-exist under those
+  names — the release owns them, and the upgrade deletes them either way. Either
+  accept a gap between the upgrade finishing and your recreating them, or
+  pre-create a Gateway under a *different* name in that namespace, with a
+  `ClientTrafficPolicy` (under a new name too — `cubestack-gateway-ai` is
+  release-owned there as well) `targetRefs`-ing it, and pass `--set
+  gateway.name=<that name> --set gateway.namespace=<release namespace>`: the
+  namespace flag is needed either way, since the manager's default is
+  `envoy-gateway-system`. Only the pre-create route avoids the gap.
+
+The `ClientTrafficPolicy` may live wherever you like — it reaches the Gateway
+through its `targetRefs`, which name the Gateway's namespace — so only the
+Gateway's own name and namespace have to match what the manager is told.
+
+Whichever you pick, the YAML's `allowedListeners` and `allowedRoutes` opt-ins are
+what the deleted Gateway carried — leave them out and the Gateway comes up but
+every ListenerSet is rejected.
+
+To see what the upgrade will remove, compare the release's stored manifest with
+the new render. `kubectl diff` cannot show this on its own: a resource Helm is
+about to delete is simply absent from the new manifest, so it never reaches the
+diff.
 
 ```bash
-kubectl -n cubestack-system label --overwrite \
-  gateway/cubestack-gateway \
-  app.kubernetes.io/managed-by=Helm
-kubectl -n cubestack-system annotate --overwrite \
-  gateway/cubestack-gateway \
-  meta.helm.sh/release-name=cubestack meta.helm.sh/release-namespace=cubestack-system
+helm get manifest cubestack -n cubestack-system > /tmp/before.yaml
+helm template cubestack ./helm/cubestack-controller-manager-chart -n cubestack-system > /tmp/after.yaml
+diff /tmp/before.yaml /tmp/after.yaml
 ```
 
-(Helm 4 does the same thing with `helm upgrade --take-ownership`.) Adoption
-makes the object release-owned: later hand edits to it are reverted by the next
-upgrade, and `helm uninstall` deletes it. Diff before upgrading, since the
-chart's version of the Gateway replaces whatever was there — including any
-listener, label or annotation the hand-made one carried:
-
-```bash
-helm template cubestack ./helm/cubestack-controller-manager-chart -n cubestack-system \
-  | kubectl diff -f -
-```
+Export the objects first if you want them back afterwards: the deleted Gateway
+is not recoverable from the release, and `helm rollback` restores a manifest that
+recreates it only because the old chart still contains it.
 
 **An earlier release of this chart tracked an `EnvoyProxy` of its own
 (`cubestack-gateway-proxy`), and upgrades delete it**, since the chart no longer
-carries one and Helm removes the resources a release owns that have dropped out
-of its manifest. The dataplane does not fall back to that object's settings but
+carries one. The dataplane does not fall back to that object's settings but
 to Envoy Gateway's defaults — `LoadBalancer`, and the proxy image from
 `docker.io`. Before upgrading a release that owned one, create the class-level
 `EnvoyProxy` under Prerequisites (the `eg` class's `parametersRef`) and confirm
@@ -197,66 +291,68 @@ kubectl -n envoy-gateway-system get envoyproxy
 
 `spec.route.publish: true` on an InferenceService publishes it into the Agent
 Router model catalog: the catalog objects of the service attach to the platform
-Gateway, which serves the shared catalog hostname. **The chart creates that
-Gateway**: `cubestack-gateway`,
-with one HTTP listener on :80 that routes from any namespace may attach to and
-the `allowedListeners` opt-in the per-environment ListenerSets need (see the L4
-section). It lands in the **release namespace**, and the manager is told that
-same namespace, so the release can be installed anywhere: there is no namespace
-to keep in step by hand.
+Gateway, which serves the shared catalog hostname. **The chart does not create
+that Gateway** — the platform does (Prerequisites), and this section is about
+pointing the operator at it. One HTTP listener on :80 that routes from any
+namespace may attach to, plus the `allowedListeners` opt-in the per-environment
+ListenerSets need (see the L4 section), is what the Gateway has to carry for the
+operator's objects to work.
 
-The chart creates the Gateway only. The proxy fleet behind it — its Service
-type, its image, its scaling — belongs to the `EnvoyProxy` the Gateway's
-GatewayClass references (Prerequisites), which the platform owns and every
-Gateway of that class shares. That is deliberate: two Gateways of one class
-must not disagree about how their shared dataplane is exposed.
+The proxy fleet behind it — its Service type, its image, its scaling — belongs
+to the `EnvoyProxy` the Gateway's GatewayClass references (Prerequisites), which
+the platform owns and every Gateway of that class shares. That is deliberate:
+two Gateways of one class must not disagree about how their shared dataplane is
+exposed.
 
-One policy object ships with the Gateway: a `ClientTrafficPolicy`
-(`cubestack-gateway-ai`) that carries the connection buffer and HTTP/2
+The `ClientTrafficPolicy` that carries the connection buffer and HTTP/2
 flow-control windows the Agent Router's request translation needs — it buffers
 a whole request body to read the model name out of it, which the API's 32KiB
-default is too small for. It is created in the release namespace too, and its
-`targetRefs` follows `gateway.name` like the Gateway's own name does. Only the
-cluster's Envoy Gateway controller reads it (Prerequisites), so on a cluster
-without one it is inert.
+default is too small for — is the platform's as well, and travels with the
+Gateway (the YAML under Prerequisites includes it). Only the cluster's Envoy
+Gateway controller reads it, so on a cluster without one it is inert.
 
-`gateway.name` is the one value several readers have to agree on, so the chart
-feeds it to all of them: it names the Gateway object, the `--gateway-name` the
-manager receives, and the `targetRefs` of that policy. The DevEnvironment
-controller attaches its ListenerSets to that same Gateway, so renaming moves
-the object and every lookup together.
+`gateway.name` and `gateway.namespace` are the pair several readers have to
+agree on: they are the `--gateway-name` / `--gateway-namespace` the manager
+receives, and they are how the DevEnvironment controller finds the Gateway its
+ListenerSets attach to. Both must match the Gateway the platform created — a
+mismatch is not an error the chart can report, only `RouteReady=False,
+reason=GatewayNotFound` on every published service, and ListenerSets that never
+attach.
 
-The values below do two different jobs, which is worth knowing when one of them
-seems to have no effect:
+Every value in the block below is a manager flag. Nothing here is written into a
+Gateway API object, because the chart writes none:
 
-- **Manager flags** — `name`, `catalogHostname`, `dataplaneNamespace`. An empty
-  value omits its flag entirely, keeping the manager's own default. The
-  namespace is the exception among them: it always renders, because this chart
-  always creates the Gateway it points at.
-- **A Gateway API field** — `className`, written into the Gateway object. The
-  class it names is what decides the dataplane; the chart's `eg` default
-  assumes the install under Prerequisites.
+- **The one flag that always renders** — `namespace`. A Gateway is identified by
+  name *and* namespace, but the two do not behave alike when empty: an omitted
+  `--gateway-namespace` falls back inside the manager to `cubestack-system`, a
+  namespace neither install path configured, so the chart always renders it and
+  defaults it to `envoy-gateway-system`.
+- **Flags an empty value omits** — `name`, `catalogHostname`,
+  `dataplaneNamespace`. Omitting `catalogHostname` just leaves publishing off;
+  omitting `name` is not a switch either (see the table) — leave `name` set.
 
 | Key | Manager flag | Default | Notes |
 |---|---|---|---|
-| `gateway.name` | `--gateway-name` | `cubestack-gateway` | Names the Gateway the chart creates, **and** the flag — so the object the operator publishes through is always the one the chart made. Empty = flag omitted; publishing is disabled (`RouteReady=False`, `GatewayNotConfigured`) while the object still takes the conventional name. |
+| `gateway.name` | `--gateway-name` | `cubestack-gateway` | Names the platform's Gateway — the object the operator publishes through and attaches ListenerSets to. Leave it set. Empty = flag omitted, and the two controllers then disagree: publishing is off (`RouteReady=False`, `GatewayNotConfigured`), while the DevEnvironment controller falls back to the manager's own built-in default — `cubestack-gateway` in `cubestack-system`, whatever `gateway.namespace` says. |
+| `gateway.namespace` | `--gateway-namespace` | `envoy-gateway-system` | Namespace of that Gateway object — **not** where its dataplane pods run (`dataplaneNamespace`). Always rendered. Must match where the platform created the Gateway; `envoy-gateway-system` is where Envoy Gateway and the `eg` class live, so it is the conventional home unless the Gateway was put elsewhere. |
 | `gateway.catalogHostname` | `--gateway-catalog-hostname` | `""` | Empty = flag omitted. **Set this to enable publishing**: the shared hostname the model catalog answers on. Every published service is one model of that single catalog entry, addressed by the model name in the request body. |
 | `gateway.dataplaneNamespace` | `--gateway-dataplane-namespace` | `envoy-gateway-system` | Names the namespace the Gateway's dataplane pods run in. **Not** a publishing switch. Two things read it: environment pods admit ingress from that Gateway, and the controller looks up the dataplane Service there to learn which port each listener is reachable on. Empty = flag omitted: environments stay default-deny inbound, and endpoint addresses fall back to assuming the listener port is the reachable one — true of a LoadBalancer or ClusterIP dataplane, not of a NodePort one. |
-| `gateway.className` | *(no flag)* | `eg` | The GatewayClass the Gateway asks to be served by. Not fed to the manager — only the cluster's Gateway controller reads it — so it must name a class that controller has established, and that carries the `EnvoyProxy` the cluster's dataplane needs (Prerequisites: Service type and proxy image). |
 
 `dataplaneNamespace` is the key here the **DevEnvironment** controller is
 affected by most: the namespace is where its NetworkPolicy allowance points and
 where it finds the dataplane Service. That dataplane namespace is not the
-Gateway's own namespace — Envoy Gateway runs the proxy pods in a namespace of
-its own, separate from the one holding the `Gateway` object. Whether the port
+Gateway's own namespace — Envoy Gateway runs the proxy pods separately from the
+one holding the `Gateway` object, though both are `envoy-gateway-system` in the
+platform convention. Whether the port
 published for a listener is the listener's own port or the nodePort it was
 renumbered onto is decided by that class's `EnvoyProxy`, not by anything here.
-`name` reaches that controller too, as the Gateway its ListenerSets attach to;
-`className` is read only by the cluster, and `catalogHostname` configures the
+`name` and `namespace` reach that controller too, as the Gateway its ListenerSets
+attach to; `catalogHostname` configures the
 InferenceService publishing path only.
 
-The defaults are the platform convention — `cubestack-gateway`, served by the
-`eg` class — so a standard install only needs the catalog hostname:
+The defaults are the platform convention — `cubestack-gateway` in
+`envoy-gateway-system` — so an install against a platform that followed the
+Prerequisites only needs the catalog hostname:
 
 ```bash
 helm install cubestack ./helm/cubestack-controller-manager-chart -n cubestack-system \
@@ -269,22 +365,21 @@ release that was created by an older chart, drop `--reuse-values` (or pass
 the `gateway.*` keys explicitly): reused values are the release's stored
 values and do not pick up these new chart defaults.
 
-Renaming the Gateway — `--set gateway.name=...`, or moving the release to
-another namespace — makes Helm delete the object under the old name and create
-it under the new one. The manager picks the new name up in the same upgrade,
-but the old Gateway is gone before that: every environment loses its published
-address until the new one is admitted by its GatewayClass and Envoy Gateway
-programs it.
+Renaming the Gateway here — `--set gateway.name=...`, or `gateway.namespace` —
+does not move or create anything: the chart owns neither object, so the change
+only points the operator at a different Gateway. If nothing is there under the
+new name, every environment loses its published address until one is. Change the
+value and the object together, or create the Gateway under the new name before
+upgrading.
 
-The kustomize deployment (`make deploy`) carries the same `--gateway-name` /
-`--gateway-namespace` args in `operator/config/manager/manager.yaml`;
+The kustomize deployment (`make deploy`) sets the same `--gateway-name` /
+`--gateway-namespace` args in `operator/config/manager/manager.yaml`, as
+literals rather than values: `cubestack-gateway` in `envoy-gateway-system`;
 `--gateway-catalog-hostname` and `--gateway-dataplane-namespace` are left to
 your overlay there, so a kustomize install keeps environment pods default-deny
-inbound and publishing off until a hostname is added. It creates the same
-Gateway and ClientTrafficPolicy — `config/gateway/` is part of the kustomize
-base — and, like the chart, no `EnvoyProxy`: the class in
-`operator/config/gateway/gateway.yaml` decides the dataplane. There the name
-and the GatewayClass are literals under `operator/config/`, not values.
+inbound and publishing off until a hostname is added. Like the chart, it creates
+no Gateway and no `ClientTrafficPolicy`: both are the platform's, and the
+reference shape is `operator/test/e2e/assets/gateway.yaml`.
 
 ### L4 port pool (DevEnvironment exposure)
 
@@ -313,15 +408,14 @@ the pool, not the Service, is what runs out.
 
 Two things have to be in place for a listener to take effect, once per cluster:
 
-- The Gateway must admit the ListenerSets. **The chart's Gateway does**:
+- The Gateway must admit the ListenerSets. **The one under Prerequisites does**:
   `spec.allowedListeners` is set to `from: All`, because the API default
   (`from: None`) denies every ListenerSet, which comes back `Accepted=False` /
   `NotAllowed` — surfaced on the environment as `RouteReady=False` /
   `ListenerNotAccepted`, which names the reason rather than hanging. Who may
   publish is settled by RBAC, not by that selector — anyone able to create a
   ListenerSet in their own namespace can contribute a listener — so a Gateway
-  you create yourself with a namespace selector instead is an equally valid
-  setup.
+  with a namespace selector instead is an equally valid setup.
 - The `ListenerSet` CRD (`gateway.networking.k8s.io/v1`) must be installed, and
   the Envoy Gateway version must reconcile ListenerSets (v1.9.1 or newer — see
   the prerequisites). The controller probes for each Gateway API kind and only
@@ -403,8 +497,8 @@ The kustomize deployment (`make deploy`) carries the same two args in
 helm uninstall cubestack -n cubestack-system
 ```
 
-Helm uninstall removes the release's objects (Deployment, RBAC, VAPs, the
-Gateway, ...) but **not the CRDs** — CRDs are cluster-scoped
+Helm uninstall removes the release's objects (Deployment, RBAC, VAPs, ...) but
+**not the CRDs** — CRDs are cluster-scoped
 and intentionally left in place so custom resources survive a reinstall. Delete
 the chart's `ai.cubestack.io` CRDs explicitly if you want them gone (all custom
 resources must be removed first):
@@ -414,9 +508,11 @@ kubectl delete crd modelversions.ai.cubestack.io inferenceruntimeprofiles.ai.cub
   inferenceservices.ai.cubestack.io devenvironments.ai.cubestack.io
 ```
 
-Uninstalling therefore takes the platform Gateway down with it: every
-environment loses its published address until a Gateway exists again, and the
-per-environment ListenerSets wait for one to attach to.
+Uninstalling does **not** take the platform Gateway down: the chart never owned
+it, so its lifecycle is unaffected. What stops is the operator — published
+catalog entries and per-environment ListenerSets are no longer reconciled, and
+the gateway objects the manager created for them stay until the custom resources
+that own them are deleted.
 
 The `leaderworkerset.x-k8s.io` / `disaggregatedset.x-k8s.io` CRDs belong to the
 LeaderWorkerSet controller prerequisite (see above) rather than the chart;
@@ -454,9 +550,9 @@ this section). Re-pushing the same version overwrites the existing tag.
 - VAPs: `operator/config/vap/*.yaml` (concatenated with `---` separators)
 - RBAC / Deployment / Service / Role: `kustomize build operator/config/default`
   with namespace and image rewritten to Helm values
-- Gateway: the same kustomize build (`operator/config/gateway/`), with the
-  object name rewritten to `gateway.name` and its `gatewayClassName` to
-  `gateway.className`
+
+No Gateway API objects are generated: the platform supplies those
+(Prerequisites), and the chart only renders the manager flags that point at them.
 
 The `crds/` directory is NOT stored in the repo — it is populated at package
 or install time by copying `operator/config/crd/bases` into the chart

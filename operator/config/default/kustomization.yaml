@@ -19,8 +19,12 @@ resources:
 - ../rbac
 - ../manager
 - ../vap
-# The platform Gateway.
-- ../gateway
+# No gateway overlay: the platform supplies the Gateway and its
+# ClientTrafficPolicy. An install target that created them would own an object
+# whose lifecycle the platform decides — and whose dataplane is the EnvoyProxy
+# its GatewayClass references, not ours to replace. The reference shape the
+# platform applies is in test/e2e/assets/gateway.yaml; the helm chart ships
+# neither object either.
 # [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix including the one in
 # crd/kustomization.yaml
 #- ../webhook

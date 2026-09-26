@@ -1,12 +1,13 @@
 # The GatewayClass the platform's Gateway asks to be served by, and the
 # EnvoyProxy that says what the dataplane behind it looks like. The chart ships
-# neither: it creates only the Gateway, and this is the rest of the prerequisite
+# neither: it creates no Gateway API object at all, and this is the prerequisite
 # the chart README documents (Prerequisites, "A GatewayClass that carries an
-# EnvoyProxy").
+# EnvoyProxy"), applied by helm-e2e-setup alongside the Gateway itself
+# (test/e2e/assets/gateway.yaml).
 #
 # It lives in envoy-gateway-system rather than the release namespace on purpose.
 # The platform owns the dataplane for the whole class, so per the README a
-# chart-shipped EnvoyProxy would replace the class's provider config rather than
+# release-shipped EnvoyProxy would replace the class's provider config rather than
 # merge with it; `make helm-e2e-crd-check` asserts the release namespace holds
 # none.
 #

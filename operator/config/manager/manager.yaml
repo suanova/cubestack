@@ -65,15 +65,18 @@ spec:
           - --health-probe-bind-address=:8081
           # Platform Gateway published InferenceService routes and
           # DevEnvironment ListenerSets attach to — one pair of flags for both
-          # controllers. The helm chart renders these from its gateway.* values
-          # instead, with the namespace always taken from the release
-          # namespace.
+          # controllers. Neither this base nor the helm chart creates that
+          # Gateway: the platform owns it, and the namespace below is where the
+          # reference shape puts it (test/e2e/assets/gateway.yaml) and where the
+          # chart's gateway.namespace defaults. The chart renders both flags
+          # from its gateway.* values, so a change here has to be made there
+          # too.
           # --gateway-catalog-hostname is intentionally not set: publishing
           # stays off (RouteReady=False, GatewayNotConfigured) until a catalog
           # hostname is added via your overlay, e.g.:
           #   - --gateway-catalog-hostname=ai.example.com
           - --gateway-name=cubestack-gateway
-          - --gateway-namespace=cubestack-system
+          - --gateway-namespace=envoy-gateway-system
           # DevEnvironment L4 port pool. The helm chart renders these two
           # flags from its l4PortRange.* values instead.
           - --l4-port-range-start=20000

@@ -30,7 +30,7 @@ spec:
         {{- with .Values.gateway.name }}
         - --gateway-name={{ . }}
         {{- end }}
-        - --gateway-namespace={{ .Release.Namespace }}
+        - --gateway-namespace={{ .Values.gateway.namespace | default "envoy-gateway-system" }}
         {{- with .Values.gateway.dataplaneNamespace }}
         - --gateway-dataplane-namespace={{ . }}
         {{- end }}
