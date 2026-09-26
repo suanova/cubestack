@@ -9,6 +9,7 @@
 import { Box, Button, TextField, Typography } from "@mui/material";
 import { FormEvent, useState } from "react";
 
+import { apiFetch, withBasePath } from "@/lib/base-path";
 import { useI18n } from "@/lib/i18n";
 
 /** Safe same-origin path from the `next` query param, else "/". */
@@ -56,13 +57,13 @@ export default function LoginPage() {
     setBusy(true);
 
     try {
-      const res = await fetch("/api/auth/login", {
+      const res = await apiFetch("/api/auth/login", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ username: user, password: pass }),
       });
       if (res.ok) {
-        window.location.assign(readNextPath());
+        window.location.assign(withBasePath(readNextPath()));
         return;
       }
       if (res.status === 401) {

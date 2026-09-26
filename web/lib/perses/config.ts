@@ -3,7 +3,13 @@
 // They're only read by our own wrapper components, but keeping the same names
 // lets us port the provider chain verbatim.
 
-export const PERSES_PROXY_BASE_PATH = "/api/perses";
+import { withBasePath } from "../base-path";
+
+// Carries the deployment base path: this string reaches the browser both as a
+// fetch target here and baked into the perses island bundle (perses-island/
+// build.mjs runs off this file), and neither goes through Next's Link/router
+// rewriting.
+export const PERSES_PROXY_BASE_PATH = withBasePath("/api/perses");
 
 // Project the provisioned dashboards live in on the Perses server. This is
 // the build-time default baked into the client bundle; the deployment's

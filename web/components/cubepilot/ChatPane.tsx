@@ -29,6 +29,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import type { PointerEvent as ReactPointerEvent } from "react";
 
+import { apiFetch } from "@/lib/base-path";
 import {
   addApproval,
   greetingTexts,
@@ -442,9 +443,9 @@ export function ChatPane() {
   async function loadAgentMeta(): Promise<AgentMeta> {
     try {
       const [stRes, cfgRes, skRes] = await Promise.all([
-        fetch("/api/cubepilot/agent/status"),
-        fetch("/api/cubepilot/agent/config"),
-        fetch("/api/cubepilot/skills"),
+        apiFetch("/api/cubepilot/agent/status"),
+        apiFetch("/api/cubepilot/agent/config"),
+        apiFetch("/api/cubepilot/skills"),
       ]);
       const [stBody, cfgBody, skBody] = await Promise.all([
         stRes.json().catch(() => null),
@@ -505,7 +506,7 @@ export function ChatPane() {
    *  that might not hold is worse than a button the user never sees. */
   async function loadConfirmPolicy(): Promise<string> {
     try {
-      const res = await fetch("/api/cubepilot/agent/confirm");
+      const res = await apiFetch("/api/cubepilot/agent/confirm");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const body = (await res.json()) as { confirmPolicy?: string };
       const policy = body.confirmPolicy ?? "";
@@ -645,7 +646,7 @@ export function ChatPane() {
    */
   async function checkTurnElsewhere(key: string, gen: number): Promise<boolean> {
     try {
-      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/turn`);
+      const res = await apiFetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/turn`);
       if (genRef.current !== gen) return false;
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const { active } = (await res.json()) as { active?: boolean };
@@ -684,7 +685,7 @@ export function ChatPane() {
   async function loadAgentHistory(key: string): Promise<boolean> {
     const gen = genRef.current;
     try {
-      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/messages`);
+      const res = await apiFetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/messages`);
       // 404 is "this conversation has not started", which is an ordinary empty
       // thread and NOT a failure (docs/cubepilot/api.md §4.3). Reporting it would
       // make a brand-new conversation look like an erased one.
@@ -740,7 +741,7 @@ export function ChatPane() {
       attachToNewest((x) => addApproval(x, card));
     };
     try {
-      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/approvals`);
+      const res = await apiFetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/approvals`);
       // A failed read is thrown so that it is reported rather than folded into
       // "nothing is parked": an empty collection is the ordinary answer for a
       // session that is not parked, and a read that could not be made is not
@@ -768,7 +769,7 @@ export function ChatPane() {
       }
     }
     try {
-      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/questions`);
+      const res = await apiFetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/questions`);
       // A failed read is thrown so that it is reported rather than folded into
       // "idle"; an empty collection is not a failure, it is nothing pending.
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -809,7 +810,7 @@ export function ChatPane() {
   async function refreshHistoryIfChanged(key: string): Promise<void> {
     const gen = genRef.current;
     try {
-      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/messages`);
+      const res = await apiFetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/messages`);
       if (!res.ok) return;
       const body = (await res.json()) as { items?: HistoryMessage[] };
       if (genRef.current !== gen) return;
@@ -863,7 +864,7 @@ export function ChatPane() {
     const gen = followGenRef.current;
 
     const tickOnce = async (): Promise<void> => {
-      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/turn`);
+      const res = await apiFetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/turn`);
       if (!res.ok || followGenRef.current !== gen) return;
       const { active } = (await res.json()) as { active?: boolean };
       if (followGenRef.current !== gen) return;
@@ -925,7 +926,7 @@ export function ChatPane() {
   /** Load the gateway model catalog; on first load select the first model. */
   async function loadModels(): Promise<void> {
     try {
-      const res = await fetch("/api/cubepilot/playground/services");
+      const res = await apiFetch("/api/cubepilot/playground/services");
       const body = (await res.json().catch(() => null)) as
         | { models?: GatewayModel[]; endpoint?: string | null; error?: string }
         | null;
@@ -1017,7 +1018,7 @@ export function ChatPane() {
     if (!window.confirm(t("cubepilot.chat.clearConfirm"))) return;
     setClearing(true);
     try {
-      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}`, { method: "DELETE" });
+      const res = await apiFetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}`, { method: "DELETE" });
       const body = (await res.json().catch(() => null)) as { error?: string } | null;
       if (!res.ok) throw new Error(body?.error || `HTTP ${res.status}`);
       // Everything on screen described the session that is now gone: its
@@ -1077,7 +1078,7 @@ export function ChatPane() {
     // prevent.
     let sessionOfTurn: string | null = null;
     try {
-      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(sessionKey)}/messages`, {
+      const res = await apiFetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(sessionKey)}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content: text }),
@@ -1185,7 +1186,7 @@ export function ChatPane() {
     // look like it landed immediately.
     patchApproval(callId, (a) => ({ ...a, state: "deciding", error: undefined }));
     try {
-      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(agentSessionKey)}/approvals/decision`, {
+      const res = await apiFetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(agentSessionKey)}/approvals/decision`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         // The id is required: a session can hold several pending approvals, and
@@ -1241,7 +1242,7 @@ export function ChatPane() {
   async function reopenOrExpireQuestion(callId: string): Promise<void> {
     if (!agentSessionKey) return;
     try {
-      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(agentSessionKey)}/questions`);
+      const res = await apiFetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(agentSessionKey)}/questions`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const { questions } = (await res.json()) as {
         questions?: Array<{ id?: string; questions?: AgentQuestionItem[]; timeoutSeconds?: number }>;
@@ -1279,7 +1280,7 @@ export function ChatPane() {
     if (!agentSessionKey) return;
     patchQuestion(callId, (q) => ({ ...q, state: "submitting", answers: cancel ? q.answers : answers, error: undefined }));
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `/api/cubepilot/pilot/api/v1/sessions/${enc(agentSessionKey)}/questions/${cancel ? "cancel" : "answer"}`,
         {
           method: "POST",
@@ -1314,7 +1315,7 @@ export function ChatPane() {
    */
   async function abortTurn(key: string): Promise<{ ok: true } | { ok: false; error: string }> {
     try {
-      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/abort`, { method: "POST" });
+      const res = await apiFetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/abort`, { method: "POST" });
       if (res.ok) return { ok: true };
       const body = (await res.json().catch(() => null)) as { error?: string } | null;
       return { ok: false, error: body?.error ?? `HTTP ${res.status}` };
@@ -1407,7 +1408,7 @@ export function ChatPane() {
           const started = Date.now();
           let full = "";
           try {
-            const res = await fetch("/api/cubepilot/playground/chat", {
+            const res = await apiFetch("/api/cubepilot/playground/chat", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({

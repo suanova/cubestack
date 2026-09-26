@@ -22,7 +22,8 @@ export default defineConfig({
   },
   webServer: {
     command: "bash e2e/deploy/perses/local/run-preview.sh",
-    url: "http://localhost:3000",
+    // The readiness probe must hit the app's base path — a bare "/" 404s.
+    url: "http://localhost:3000/cubestack",
     timeout: 180_000,
     reuseExistingServer: !process.env.CI,
     env: {

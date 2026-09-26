@@ -42,7 +42,7 @@ test.beforeEach(async ({ context, page }) => {
 test.describe("dev environments landing (mocked data)", () => {
   test("renders environment rows with type badges, status chips and GPU columns", async ({ page }) => {
     await stubList(page, { items: devEnvironmentList() });
-    await page.goto("/dev-environments");
+    await page.goto("/cubestack/dev-environments");
 
     const table = page.locator('[data-od-id="dev-table"]');
     await expect(table).toContainText("jupyter-nlp-ln");
@@ -68,7 +68,7 @@ test.describe("dev environments landing (mocked data)", () => {
 
   test("filters rows by Running / Stopped tab", async ({ page }) => {
     await stubList(page, { items: devEnvironmentList() });
-    await page.goto("/dev-environments");
+    await page.goto("/cubestack/dev-environments");
 
     const tabs = page.locator('[data-od-id="dev-toolbar"] [role="tab"]');
     await expect(tabs).toHaveCount(3);
@@ -84,7 +84,7 @@ test.describe("dev environments landing (mocked data)", () => {
 
   test("selecting an environment opens its connection + spec detail", async ({ page }) => {
     await stubList(page, { items: devEnvironmentList() });
-    await page.goto("/dev-environments");
+    await page.goto("/cubestack/dev-environments");
 
     await page.locator('[data-od-id="dev-row-jupyter-nlp-ln"]').click();
 
@@ -106,7 +106,7 @@ test.describe("dev environments landing (mocked data)", () => {
       }
       return route.fulfill({ json: { items: devEnvironmentList() } });
     });
-    await page.goto("/dev-environments");
+    await page.goto("/cubestack/dev-environments");
 
     await page.locator('[data-od-id="act-start-ssh-dataset-prep"]').click();
     await expect.poll(() => patches).toHaveLength(1);
@@ -137,7 +137,7 @@ test.describe("dev environments landing (mocked data)", () => {
         json: { items: created ? [devEnvironmentSummary({ name: created.name, endpoints: [] }), ...devEnvironmentList()] : devEnvironmentList() },
       });
     });
-    await page.goto("/dev-environments");
+    await page.goto("/cubestack/dev-environments");
 
     await page.locator('[data-od-id="create-env-btn"]').click();
     const wizard = page.locator('[data-od-id="create-wizard"]');

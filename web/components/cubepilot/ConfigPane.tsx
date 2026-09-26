@@ -10,6 +10,7 @@
 import { Box } from "@mui/material";
 import { ReactNode, useCallback, useEffect, useState } from "react";
 
+import { apiFetch } from "@/lib/base-path";
 import { modelKey } from "@/lib/cubepilot/llm";
 import {
   PLATFORM_MODEL_NAME,
@@ -108,7 +109,7 @@ export function ConfigPane() {
 
   const loadAll = useCallback(async () => {
     const get = async <T,>(path: string) => {
-      const res = await fetch(path);
+      const res = await apiFetch(path);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return (await res.json()) as T;
     };
@@ -144,7 +145,7 @@ export function ConfigPane() {
     if (saving) return;
     setSaving(true);
     try {
-      const res = await fetch("/api/cubepilot/agent/config", {
+      const res = await apiFetch("/api/cubepilot/agent/config", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         // selectedModel is the platform ref the select offers; the route checks
@@ -175,7 +176,7 @@ export function ConfigPane() {
     if (confirmBusy) return;
     setConfirmBusy(true);
     try {
-      const res = await fetch("/api/cubepilot/agent/confirm", {
+      const res = await apiFetch("/api/cubepilot/agent/confirm", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -266,12 +267,12 @@ export function ConfigPane() {
     setLlmBusy(true);
     try {
       const res = editingProvider
-        ? await fetch(`/api/cubepilot/agent/llms/${encodeURIComponent(editingProvider)}`, {
+        ? await apiFetch(`/api/cubepilot/agent/llms/${encodeURIComponent(editingProvider)}`, {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ endpoint, models, apiKey: llmForm.apiKey || undefined, public: llmForm.public }),
           })
-        : await fetch("/api/cubepilot/agent/llms", {
+        : await apiFetch("/api/cubepilot/agent/llms", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ name, endpoint, models, apiKey: llmForm.apiKey || undefined, public: llmForm.public }),
@@ -298,7 +299,7 @@ export function ConfigPane() {
     if (!window.confirm(t("cubepilot.config.llmRemoveConfirm", { name }))) return;
     setLlmBusy(true);
     try {
-      const res = await fetch(`/api/cubepilot/agent/llms/${encodeURIComponent(name)}`, { method: "DELETE" });
+      const res = await apiFetch(`/api/cubepilot/agent/llms/${encodeURIComponent(name)}`, { method: "DELETE" });
       const body = (await res.json().catch(() => ({}))) as { error?: string; warning?: string };
       if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
       showToast(t("cubepilot.config.llmRemoved", { name }));

@@ -12,6 +12,7 @@ import { useEffect, useState } from "react";
 
 import { LanguageSwitcher } from "@/components/shell/LanguageSwitcher";
 import { ThemeToggle } from "@/components/perses/ThemeToggle";
+import { apiFetch } from "@/lib/base-path";
 import { MessageKey, useI18n } from "@/lib/i18n";
 
 // Every page the React shell currently serves. The perses dashboards and their
@@ -37,7 +38,7 @@ export function Topbar() {
   // in and offer to sign out. A 401 (no session) just hides the badge.
   const [user, setUser] = useState<string>("");
   useEffect(() => {
-    fetch("/api/auth/me")
+    apiFetch("/api/auth/me")
       .then((res) => (res.ok ? res.json() : Promise.reject()))
       .then((body: { user?: string }) => setUser(body.user ?? ""))
       .catch(() => setUser(""));
@@ -107,7 +108,7 @@ export function Topbar() {
                 data-od-id="logout-button"
                 onClick={async () => {
                   try {
-                    await fetch("/api/auth/logout", { method: "POST" });
+                    await apiFetch("/api/auth/logout", { method: "POST" });
                   } finally {
                     router.replace("/login");
                   }

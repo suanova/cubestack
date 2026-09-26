@@ -9,6 +9,7 @@
 import { Box } from "@mui/material";
 import { ReactNode, useCallback, useEffect, useRef, useState } from "react";
 
+import { apiFetch } from "@/lib/base-path";
 import { cronDescription, isValidCron } from "@/lib/cubepilot/cron";
 import type { Report, Task, TaskTemplate } from "@/lib/cubepilot/types";
 import { useI18n } from "@/lib/i18n";
@@ -64,7 +65,7 @@ export function TasksPane() {
 
   const loadTasks = useCallback(async () => {
     try {
-      const res = await fetch("/api/cubepilot/tasks");
+      const res = await apiFetch("/api/cubepilot/tasks");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const body = (await res.json()) as { tasks: Task[] };
       setTasks(body.tasks);
@@ -76,7 +77,7 @@ export function TasksPane() {
 
   const loadTemplates = useCallback(async () => {
     try {
-      const res = await fetch("/api/cubepilot/tasktemplates");
+      const res = await apiFetch("/api/cubepilot/tasktemplates");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const body = (await res.json()) as { taskTemplates: TaskTemplate[] };
       setTemplates(body.taskTemplates);
@@ -87,7 +88,7 @@ export function TasksPane() {
 
   const loadReports = useCallback(async (id: string) => {
     try {
-      const res = await fetch(`/api/cubepilot/tasks/${encodeURIComponent(id)}/reports`);
+      const res = await apiFetch(`/api/cubepilot/tasks/${encodeURIComponent(id)}/reports`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const body = (await res.json()) as { reports: Report[] };
       setReports(body.reports);
@@ -141,7 +142,7 @@ export function TasksPane() {
     try {
       // Send the state we want, not "flip": a retry then cannot undo the first
       // call (the row's own state is the source of truth for the button).
-      const res = await fetch(`/api/cubepilot/tasks/${encodeURIComponent(task.id)}/toggle`, {
+      const res = await apiFetch(`/api/cubepilot/tasks/${encodeURIComponent(task.id)}/toggle`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ state: task.enabled ? "Paused" : "Enabled" }),
@@ -157,7 +158,7 @@ export function TasksPane() {
   async function deleteTask(task: Task) {
     if (!window.confirm(t("cubepilot.deleteConfirm", { name: task.name }))) return;
     try {
-      const res = await fetch(`/api/cubepilot/tasks/${encodeURIComponent(task.id)}`, { method: "DELETE" });
+      const res = await apiFetch(`/api/cubepilot/tasks/${encodeURIComponent(task.id)}`, { method: "DELETE" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       showToast(t("cubepilot.deleted"));
       setSelectedTaskId(null);
@@ -172,7 +173,7 @@ export function TasksPane() {
     if (running) return;
     setRunning(true);
     try {
-      const res = await fetch(`/api/cubepilot/tasks/${encodeURIComponent(id)}/run`, { method: "POST" });
+      const res = await apiFetch(`/api/cubepilot/tasks/${encodeURIComponent(id)}/run`, { method: "POST" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const body = (await res.json()) as { started: boolean };
       if (body.started) showToast(t("cubepilot.runStarted"));
@@ -250,7 +251,7 @@ export function TasksPane() {
       const payload = activeTemplate
         ? { name, schedule, templateRef: activeTemplate.name, params: form.params }
         : { name, prompt: form.prompt.trim(), schedule };
-      const res = await fetch("/api/cubepilot/tasks", {
+      const res = await apiFetch("/api/cubepilot/tasks", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),

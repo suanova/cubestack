@@ -137,7 +137,7 @@ fi
 
 # --- web dev server ---------------------------------------------------------
 if [ "${START_DEV}" = "1" ]; then
-  info "Starting web dev server → http://localhost:3000 (Ctrl-C to stop)"
+  info "Starting web dev server → http://localhost:3000/cubestack (Ctrl-C to stop)"
   ( cd "${WEB_DIR}" && npm run dev ) || die "web dev server exited with an error"
 else
   info "Skipping dev server (--skip-dev). Start it yourself with:"

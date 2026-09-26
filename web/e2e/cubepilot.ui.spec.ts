@@ -593,7 +593,7 @@ test.beforeEach(async ({ context, page }) => {
 test.describe("cubepilot agent chat (CR-backed data)", () => {
   test("greets with the instance's model and shows its state in the card header", async ({ page }) => {
     await stubAgent(page);
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
 
     // The object entry carries the instance's real phase.
     const obj = page.locator('[data-od-id="obj-cubepilot"]');
@@ -622,7 +622,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
 
   test("asks to provision the instance when the caller has none", async ({ page }) => {
     await stubAgent(page, { status: STATUS_NONE, config: CONFIG_NONE, skills: SKILLS_BASELINE });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
 
     const obj = page.locator('[data-od-id="obj-cubepilot"]');
     await expect(obj).toContainText("实例未创建");
@@ -643,7 +643,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     // The case that was wrong: with the policy at None every write runs, and the
     // greeting still said every write would be reviewed first.
     await stubAgent(page, { confirm: { ...CONFIRM, confirmPolicy: "None", override: "" } });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
 
     const thread = page.locator('[data-od-id="chat-thread"]');
@@ -654,7 +654,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
 
   test("streams a turn and approves the write operation it blocks on", async ({ page }) => {
     const captured = await stubAgent(page, { turnEvents: TURN_APPROVAL });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
 
     const thread = page.locator('[data-od-id="chat-thread"]');
@@ -696,7 +696,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
 
   test("answers an ask_user question from the stream", async ({ page }) => {
     const captured = await stubAgent(page, { turnEvents: TURN_QUESTION });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
 
     await expect(page.locator('[data-od-id="chat-thread"]')).toContainText("技能 2 项");
@@ -738,7 +738,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
       history: HISTORY,
       pendingApproval: PENDING_APPROVAL,
     });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
 
     // History replaces the greeting (no fresh-start prompt).
@@ -767,7 +767,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     // "nothing is parked" and says nothing; a read that FAILED is not that, and
     // the two are only tellable apart if the failure is said out loud.
     await stubAgent(page, { sessions: [SESSION], history: HISTORY, pendingApprovalStatus: 502 });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
 
     await expect(page.locator('[data-od-id="chat-thread"]')).toContainText("无法确认是否有待审批的写操作");
@@ -792,7 +792,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
       ],
       history: HISTORY,
     });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
 
     await expect(page.locator('[data-od-id="chat-thread"]')).toContainText("上次巡检的结论?");
@@ -825,7 +825,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
         ],
       ],
     });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
     await expect(page.locator('[data-od-id="agent-status"]')).toContainText("仍在运行");
 
@@ -854,7 +854,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
         ],
       ],
     });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
 
     // It settles first: the load-time check and the first tick both say idle, and
@@ -889,7 +889,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
         ],
       ],
     });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
 
     await expect(page.locator('[data-od-id="agent-bubble"] [data-od-id="tool-card"]')).toHaveCount(1, {
@@ -908,7 +908,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     // history showed every step. The narration now arrives as its own event, and
     // it belongs between the cards, not gathered at the end.
     await stubAgent(page, { sessions: [SESSION], turnEvents: TURN_NARRATION });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
     await page.locator('[data-od-id="chat-input"]').fill("看看集群");
     await page.locator('[data-od-id="send-btn"]').click();
@@ -934,7 +934,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     // destructive and there is no undo, so the question comes first: that is the
     // last moment the choice can be made.
     const captured = await stubAgent(page, { sessions: [SESSION], history: HISTORY });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
     await expect(page.locator('[data-od-id="chat-thread"]')).toContainText("上次巡检的结论?");
 
@@ -960,7 +960,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
 
   test("answers an ask_user question in the human's own words", async ({ page }) => {
     const captured = await stubAgent(page, { turnEvents: TURN_QUESTION_FREE_TEXT });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
     await page.locator('[data-od-id="chat-input"]').fill("生成升级前预检结论");
     await page.locator('[data-od-id="send-btn"]').click();
@@ -1001,7 +1001,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     // the send's PATH carries, and the body carries nothing else: the route
     // decodes bodies strictly, so a leftover `sessionId` field is a 400.
     const captured = await stubAgent(page, { sessions: [SESSION], history: HISTORY, statusDelayMs: 4000 });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
 
     await page.locator('[data-od-id="chat-input"]').fill("趁恢复还没完就发");
@@ -1009,7 +1009,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
 
     await expect.poll(() => captured.messagePosts.length).toBe(1);
     expect(decodeURIComponent(captured.messagePosts[0].path)).toBe(
-      `/api/cubepilot/pilot/api/v1/sessions/${SESSION_KEY}/messages`,
+      `/cubestack/api/cubepilot/pilot/api/v1/sessions/${SESSION_KEY}/messages`,
     );
     expect(captured.messagePosts[0].body).toEqual({ content: "趁恢复还没完就发" });
   });
@@ -1020,7 +1020,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     // never ran and its controls stayed live past the point the gateway had
     // given it — an answer that could only come back refused.
     await stubAgent(page, { sessions: [SESSION], history: HISTORY, pendingQuestion: PENDING_QUESTION });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
 
     const card = page.locator('[data-od-id="question-item"]');
@@ -1052,7 +1052,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
         ],
       ],
     });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
     await page.locator('[data-od-id="chat-input"]').fill("看看集群");
     await page.locator('[data-od-id="send-btn"]').click();
@@ -1070,7 +1070,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     // gateway listed first — a choice nobody made, and not the object this page
     // is about. The assistant is selected on mount; a model is one click away.
     await stubAgent(page, { sessions: [SESSION], history: HISTORY });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="cp-tab-chat"]').click();
 
     await expect(page.locator('[data-od-id="obj-cubepilot"]')).toHaveAttribute("aria-pressed", "true");
@@ -1085,7 +1085,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     // the page exists for meant scrolling for it — so it sits first, where it
     // cannot be scrolled away from.
     await stubAgent(page, { sessions: [SESSION] });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="cp-tab-chat"]').click();
 
     const order = await page
@@ -1107,7 +1107,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     // approved one command and a different one went through, and both cards read
     // "approved". Each card now carries its own id, and the decision names it.
     const captured = await stubAgent(page, { sessions: [SESSION], turnEvents: TURN_TWO_APPROVALS });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
     await page.locator('[data-od-id="chat-input"]').fill("清理两个 pod");
     await page.locator('[data-od-id="send-btn"]').click();
@@ -1140,7 +1140,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     // one — reporting their click as a rejection would attribute to them a
     // decision the server refused.
     await stubAgent(page, { sessions: [SESSION], turnEvents: TURN_APPROVAL, approvalPostStatus: 409 });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
     await page.locator('[data-od-id="chat-input"]').fill("重启 portal");
     await page.locator('[data-od-id="send-btn"]').click();
@@ -1159,7 +1159,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
       history: HISTORY,
       pendingApprovals: [PENDING_APPROVAL, { ...PENDING_APPROVAL, approvalId: "app-10", command: "kubectl drain node-2", createdAtMs: 2000 }],
     });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
 
     const cards = page.locator('[data-od-id="approval-item"]');
@@ -1174,7 +1174,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     // nothing the user did. The countdown is what says the choice is not open
     // forever; the reference draws no timer here at all.
     await stubAgent(page, { sessions: [SESSION], turnEvents: TURN_APPROVAL_EXPIRING });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
     await page.locator('[data-od-id="chat-input"]').fill("删掉那个 pod");
     await page.locator('[data-od-id="send-btn"]').click();
@@ -1196,7 +1196,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
       history: HISTORY,
       pendingApprovals: [{ ...PENDING_APPROVAL, expiresAtMs: Date.now() + 20 * 60_000 }],
     });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
 
     await expect(page.locator('[data-od-id="approval-item"]')).toContainText("kubectl rollout restart deploy/portal");
@@ -1213,7 +1213,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     // in this view, so the only thing that can say it is still going is the
     // server's /turn answer — and Stop is then the only control that ends it.
     await stubAgent(page, { sessions: [SESSION], history: HISTORY, turnActive: true });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
 
     await expect(page.locator('[data-od-id="agent-status"]')).toContainText("仍在运行");
@@ -1229,7 +1229,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     // be on the wire BEFORE the message, which is a claim about their order and
     // not about either request alone.
     const captured = await stubAgent(page, { sessions: [SESSION], history: HISTORY, turnActive: true });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
 
     await expect(page.locator('[data-od-id="agent-status"]')).toContainText("仍在运行");
@@ -1245,14 +1245,14 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
 
     const posts = captured.agentPosts.map((p) => decodeURIComponent(p));
     expect(posts).toEqual([
-      `/api/cubepilot/pilot/api/v1/sessions/${SESSION_KEY}/abort`,
-      `/api/cubepilot/pilot/api/v1/sessions/${SESSION_KEY}/messages`,
+      `/cubestack/api/cubepilot/pilot/api/v1/sessions/${SESSION_KEY}/abort`,
+      `/cubestack/api/cubepilot/pilot/api/v1/sessions/${SESSION_KEY}/messages`,
     ]);
   });
 
   test("a failed turn check says so and offers no Stop", async ({ page }) => {
     await stubAgent(page, { sessions: [SESSION], history: HISTORY, turnCheckFails: true });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
 
     await expect(page.locator('[data-od-id="agent-status"]')).toContainText("无法确认");
@@ -1263,7 +1263,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
 
   test("renders a turn's narration and tool calls in the order they arrived", async ({ page }) => {
     await stubAgent(page, { sessions: [SESSION], turnEvents: TURN_TOOL_THEN_TEXT });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
     await page.locator('[data-od-id="chat-input"]').fill("看看集群");
     await page.locator('[data-od-id="send-btn"]').click();
@@ -1282,7 +1282,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
 
   test("a finished tool card collapses, and clicking it opens the output", async ({ page }) => {
     await stubAgent(page, { sessions: [SESSION], turnEvents: TURN_TOOL_THEN_TEXT });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
     await page.locator('[data-od-id="chat-input"]').fill("看看集群");
     await page.locator('[data-od-id="send-btn"]').click();
@@ -1303,7 +1303,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
 
   test("renders the agent's text as Markdown", async ({ page }) => {
     await stubAgent(page, { sessions: [SESSION], turnEvents: TURN_MARKDOWN });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
     await page.locator('[data-od-id="chat-input"]').fill("给我一段命令");
     await page.locator('[data-od-id="send-btn"]').click();
@@ -1328,7 +1328,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
 
   test("a pending approval docks above the composer, and lands in the thread once decided", async ({ page }) => {
     await stubAgent(page, { sessions: [SESSION], turnEvents: TURN_APPROVAL });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
     await page.locator('[data-od-id="chat-input"]').fill("调整 OSD");
     await page.locator('[data-od-id="send-btn"]').click();
@@ -1363,7 +1363,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     // panel. Reversed, the card pushed the conclusion up the screen and read as
     // a footnote to it rather than as part of the work it let through.
     await stubAgent(page, { sessions: [SESSION], turnEvents: TURN_APPROVAL });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
     await page.locator('[data-od-id="chat-input"]').fill("调整 OSD");
     await page.locator('[data-od-id="send-btn"]').click();
@@ -1392,7 +1392,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
       sessions: [SESSION],
       turnEvents: [...TURN_APPROVAL, { type: "approval_resolved", sessionId: SESSION_KEY, callId: "app-1" }, { type: "message_done", sessionId: SESSION_KEY }],
     });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
     await page.locator('[data-od-id="chat-input"]').fill("调整 OSD");
     await page.locator('[data-od-id="send-btn"]').click();
@@ -1415,7 +1415,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
         },
       ],
     });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
     await page.locator('[data-od-id="chat-input"]').fill("巡检");
     await page.locator('[data-od-id="send-btn"]').click();
@@ -1438,7 +1438,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     // so the card reopens with the server's own fresh deadline and the reason
     // on it, and the user can answer again.
     await stubAgent(page, { sessions: [SESSION], turnEvents: TURN_QUESTION, questionPostStatus: 409, pendingQuestionKept: true });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
     await page.locator('[data-od-id="chat-input"]').fill("巡检");
     await page.locator('[data-od-id="send-btn"]').click();
@@ -1457,7 +1457,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     // The re-read succeeds and the question is not in the list: that IS the
     // "gone" signal, so the card is over.
     await stubAgent(page, { sessions: [SESSION], turnEvents: TURN_QUESTION, questionPostStatus: 409, pendingQuestionMissing: true });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
     await page.locator('[data-od-id="chat-input"]').fill("巡检");
     await page.locator('[data-od-id="send-btn"]').click();
@@ -1480,7 +1480,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     // unable to answer until a reload. So the card stays open with the reason on
     // it, and the answer form stays live.
     await stubAgent(page, { sessions: [SESSION], turnEvents: TURN_QUESTION, questionPostStatus: 409, pendingQuestionStatus: 500 });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="obj-cubepilot"]').click();
     await page.locator('[data-od-id="chat-input"]').fill("巡检");
     await page.locator('[data-od-id="send-btn"]').click();
@@ -1506,7 +1506,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
 test.describe("cubepilot chat pane (layout)", () => {
   test("drags the resizer to resize the object list column", async ({ page }) => {
     await stubAgent(page);
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
 
     const resizer = page.locator('[data-od-id="pane-resizer"]');
     await expect(resizer).toBeVisible();
@@ -1535,7 +1535,7 @@ test.describe("cubepilot chat pane (layout)", () => {
 test.describe("cubepilot config (AgentInstance CR + AgentTemplate catalog)", () => {
   test("shows the instance state, the inherited policy and persists edits", async ({ page }) => {
     const captured = await stubAgent(page);
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="cp-tab-config"]').click();
 
     const pane = page.locator('[data-od-id="cp-config-pane"]');
@@ -1618,7 +1618,7 @@ test.describe("cubepilot config (AgentInstance CR + AgentTemplate catalog)", () 
     await expect(page.getByText("已添加 provider「Local Qwen」")).toBeVisible();
     expect(captured.llmPosts.at(-1)).toEqual({
       method: "POST",
-      path: "/api/cubepilot/agent/llms",
+      path: "/cubestack/api/cubepilot/agent/llms",
       body: {
         name: "Local Qwen",
         endpoint: "http://llm.local:8080/v1/chat/completions",
@@ -1692,7 +1692,7 @@ test.describe("cubepilot config (AgentInstance CR + AgentTemplate catalog)", () 
     // to open every refresh — a statement about the TEMPLATE made before the
     // template had been read.
     await stubAgent(page, { config: CONFIG_READY, configDelayMs: 2500 });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="cp-tab-config"]').click();
 
     const pane = page.locator('[data-od-id="cp-config-pane"]');
@@ -1711,7 +1711,7 @@ test.describe("cubepilot config (AgentInstance CR + AgentTemplate catalog)", () 
 
   test("switching the policy to None persists the override and hides the allowlist", async ({ page }) => {
     const captured = await stubAgent(page);
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="cp-tab-config"]').click();
 
     await page.locator('[data-od-id="cp-config-policy"]').selectOption("None");
@@ -1729,7 +1729,7 @@ test.describe("cubepilot config (AgentInstance CR + AgentTemplate catalog)", () 
     // statement about the TEMPLATE: shown here it would send the reader to add a
     // provider that may well already exist.
     await stubAgent(page, { configFails: true });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="cp-tab-config"]').click();
 
     const pane = page.locator('[data-od-id="cp-config-pane"]');
@@ -1741,7 +1741,7 @@ test.describe("cubepilot config (AgentInstance CR + AgentTemplate catalog)", () 
 
   test("keeps the page usable when the template declares no provider", async ({ page }) => {
     await stubAgent(page, { config: { ...CONFIG_READY, selectedModel: "", providers: [], gatewayModels: [] } });
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await page.locator('[data-od-id="cp-tab-config"]').click();
 
     // No template provider: the page says so instead of failing on a missing

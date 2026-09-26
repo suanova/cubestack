@@ -11,10 +11,13 @@ import { Box, CircularProgress, Typography } from "@mui/material";
 import type { DashboardResource } from "@perses-dev/core";
 import { useEffect, useRef, useState } from "react";
 
+import { withBasePath } from "@/lib/base-path";
 import { useI18n } from "@/lib/i18n";
 
-const ISLAND_CSS = "/perses-viewer/perses-viewer.css";
-const ISLAND_JS = "/perses-viewer/perses-viewer.js";
+// Served from public/, but loaded by hand below (not via next/link or the
+// router), so the base path has to be in the URL.
+const ISLAND_CSS = withBasePath("/perses-viewer/perses-viewer.css");
+const ISLAND_JS = withBasePath("/perses-viewer/perses-viewer.js");
 
 // Structural match for perses-island/index.tsx's PersesIslandOptions. Re-imported
 // locally (not from the island entry) so the Next bundle never pulls in react 18.

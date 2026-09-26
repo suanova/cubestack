@@ -13,6 +13,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { CreateOptionsResponse } from "@/app/api/inferenceservices/options/route";
 import type { InferenceServiceSummary } from "@/app/api/inferenceservices/route";
+import { apiFetch } from "@/lib/base-path";
 import { useI18n } from "@/lib/i18n";
 import { platformPalette, usePlatformTheme } from "@/lib/perses/theme";
 
@@ -130,7 +131,7 @@ export default function InferenceServicesPage() {
   const selectAfterLoad = useRef<string | null>(null);
 
   const load = useCallback(() => {
-    fetch("/api/inferenceservices")
+    apiFetch("/api/inferenceservices")
       .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
       .then((d: { items: InferenceServiceSummary[] }) => {
         setItems(d.items);
@@ -189,7 +190,7 @@ export default function InferenceServicesPage() {
       setScaleMsg(null);
       setScaleErr(null);
       setScaleBusy(true);
-      fetch("/api/inferenceservices", {
+      apiFetch("/api/inferenceservices", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ namespace: selected.namespace, name: selected.name, overrides }),
@@ -949,7 +950,7 @@ function DeployWizard({
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
-    fetch("/api/inferenceservices/options")
+    apiFetch("/api/inferenceservices/options")
       .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
       .then((d: CreateOptionsResponse) => {
         if (cancelled) return;
@@ -1030,7 +1031,7 @@ function DeployWizard({
         idleTimeoutSeconds: Number.isFinite(idleTimeout) ? idleTimeout : 300,
       },
     };
-    fetch("/api/inferenceservices", {
+    apiFetch("/api/inferenceservices", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
