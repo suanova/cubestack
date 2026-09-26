@@ -228,20 +228,44 @@ Every published InferenceService route and every DevEnvironment ListenerSet goes
 `GatewayNotFound` the moment the old release's objects are pruned, and nothing
 recovers until a Gateway matching `gateway.name` / `gateway.namespace` exists.
 
-So create the platform Gateway and its `ClientTrafficPolicy` (Prerequisites)
-**before** upgrading. The `allowedListeners` and `allowedRoutes` opt-ins in that
-YAML are what the deleted Gateway carried — leave them out and the listeners
-come up but every ListenerSet is rejected. If you intend to keep the namespace
-the old Gateway was in rather than move to `envoy-gateway-system`, create it
-there and pass `--set gateway.namespace=<ns>`; the *name* needs no `--set`, since
-the old chart's default was already `cubestack-gateway`.
+Where the platform Gateway goes decides whether the upgrade has a gap. The old
+chart put both objects in the **release namespace** (`cubestack-gateway` and
+`cubestack-gateway-ai`), and the release still owns them until the upgrade prunes
+them — so no second Gateway may take their place there beforehand:
 
-Diff before upgrading, to see the Gateway and policy drop out of the manifest
-along with any other change:
+- **Move them to `envoy-gateway-system`** (the default, and where Envoy Gateway
+  itself runs): create the platform Gateway and its `ClientTrafficPolicy` there
+  before upgrading. They collide with nothing the release owns, the old pair is
+  pruned harmlessly, and both `gateway.name` and `gateway.namespace` already
+  default to the new location — no `--set` needed. No gap in service. This is
+  what to do by default.
+- **Keep them in the release namespace**: they cannot pre-exist under those
+  names — the release owns them, and the upgrade deletes them either way. Either
+  accept a gap between the upgrade finishing and your recreating them, or
+  pre-create a Gateway under a *different* name in that namespace, with a
+  `ClientTrafficPolicy` (under a new name too — `cubestack-gateway-ai` is
+  release-owned there as well) `targetRefs`-ing it, and pass `--set
+  gateway.name=<that name> --set gateway.namespace=<release namespace>`: the
+  namespace flag is needed either way, since the manager's default is
+  `envoy-gateway-system`. Only the pre-create route avoids the gap.
+
+The `ClientTrafficPolicy` may live wherever you like — it reaches the Gateway
+through its `targetRefs`, which name the Gateway's namespace — so only the
+Gateway's own name and namespace have to match what the manager is told.
+
+Whichever you pick, the YAML's `allowedListeners` and `allowedRoutes` opt-ins are
+what the deleted Gateway carried — leave them out and the Gateway comes up but
+every ListenerSet is rejected.
+
+To see what the upgrade will remove, compare the release's stored manifest with
+the new render. `kubectl diff` cannot show this on its own: a resource Helm is
+about to delete is simply absent from the new manifest, so it never reaches the
+diff.
 
 ```bash
-helm template cubestack ./helm/cubestack-controller-manager-chart -n cubestack-system \
-  | kubectl diff -f -
+helm get manifest cubestack -n cubestack-system > /tmp/before.yaml
+helm template cubestack ./helm/cubestack-controller-manager-chart -n cubestack-system > /tmp/after.yaml
+diff /tmp/before.yaml /tmp/after.yaml
 ```
 
 Export the objects first if you want them back afterwards: the deleted Gateway

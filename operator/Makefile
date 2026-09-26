@@ -304,14 +304,24 @@ helm-e2e-setup: ## Create the dedicated kind cluster for helm e2e if it does not
 	sed "s#__ENVOY_PROXY_IMAGE__#$(ENVOY_PROXY_IMAGE)#" test/e2e/assets/envoyproxy-gatewayclass.yaml \
 		| $(HELM_E2E_KUBECTL) apply -f - && \
 	$(HELM_E2E_KUBECTL) wait --for=condition=Accepted gatewayclass/eg --timeout=2m
+	# Before the Gateway, because the Gateway needs it: the e2e EnvoyProxy's
+	# Service is a LoadBalancer, and with nothing to assign an address the
+	# dataplane never comes up and the Gateway parks at Programmed=False
+	# (AddressNotAssigned) for as long as you care to wait. Installing it here
+	# also gives its controller the length of the next two steps to become ready.
+	@echo "Installing MetalLB (the address the Gateway's dataplane is reachable on)..." ; \
+	KIND_CLUSTER_HELM="$(KIND_CLUSTER_HELM)" KUBECTL="$(KUBECTL)" DOCKER="$(CONTAINER_TOOL)" hack/install-metallb.sh
 	# The Gateway itself, which the chart no longer ships: without one there is
 	# nothing for the manager to publish InferenceService routes to or to attach
 	# environment ListenerSets to, and verify-devenv.sh has no address to reach an
 	# environment at. The asset is the shape the chart README documents as a
 	# platform prerequisite, applied here so the cluster the e2e runs against
-	# looks like one that followed it. Waits for Programmed — the class above
-	# accepting the Gateway only means Envoy Gateway took it on, not that the
-	# dataplane is up.
+	# looks like one that followed it. Waits for Programmed, not just Accepted:
+	# the class controller accepting the object only means Envoy Gateway took it
+	# on, not that the dataplane behind it is up — and the verifies below need it
+	# serving. MetalLB was installed above for this wait's sake: the e2e
+	# EnvoyProxy's Service is a LoadBalancer, so without it Envoy Gateway parks
+	# the Gateway at Programmed=False (AddressNotAssigned) and this never passes.
 	@echo "Applying the platform Gateway + ClientTrafficPolicy..." ; \
 	$(HELM_E2E_KUBECTL) apply -f test/e2e/assets/gateway.yaml && \
 	$(HELM_E2E_KUBECTL) wait --for=condition=Accepted gateway/cubestack-gateway \
@@ -325,8 +335,6 @@ helm-e2e-setup: ## Create the dedicated kind cluster for helm e2e if it does not
 	@echo "Creating the workspace StorageClass..." ; \
 	KIND_CLUSTER_HELM="$(KIND_CLUSTER_HELM)" KUBECTL="$(KUBECTL)" \
 		hack/install-workspace-storageclass.sh
-	@echo "Installing MetalLB (the address the Gateway's dataplane is reachable on)..." ; \
-	KIND_CLUSTER_HELM="$(KIND_CLUSTER_HELM)" KUBECTL="$(KUBECTL)" DOCKER="$(CONTAINER_TOOL)" hack/install-metallb.sh
 
 # Split in two: everything below needs a docker daemon and nothing needs a cluster, so this
 # target can run while helm-e2e-setup is still building one. The loads are the only part
