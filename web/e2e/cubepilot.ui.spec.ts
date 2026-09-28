@@ -1613,7 +1613,7 @@ test.describe("cubepilot config (AgentInstance CR + AgentTemplate catalog)", () 
     await page.locator('[data-od-id="cp-config-llm-name"]').fill("Local Qwen");
     await page.locator('[data-od-id="cp-config-llm-endpoint"]').fill("http://llm.local:8080/v1/chat/completions");
     await page.locator('[data-od-id="cp-config-llm-models"]').fill("local-qwen-32b, local-qwen-72b");
-    await page.locator('[data-od-id="cp-config-llm-public"]').check();
+    await page.locator('[data-od-id="cp-config-llm-cred-public"]').check();
     await page.locator('[data-od-id="cp-config-llm-save"]').click();
     await expect(page.getByText("已添加 provider「Local Qwen」")).toBeVisible();
     expect(captured.llmPosts.at(-1)).toEqual({

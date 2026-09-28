@@ -23,6 +23,15 @@ function stubApi(
     activePolls?: number;
     transcript?: Array<{ role: string; content: string }>;
     attach?: { events?: unknown[]; emit?: (ev: unknown) => void; calls?: number };
+    /** What POST /api/cubepilot/agent/llm-models answers. */
+    fetchModels?: {
+      models?: string[];
+      status?: number;
+      error?: string;
+      /** When set, the answer waits for the test to release it. */
+      pending?: Array<(models: string[]) => void>;
+      warning?: string;
+    };
   } = {},
 ) {
   let turnPolls = 0;
@@ -46,6 +55,23 @@ function stubApi(
             models: [{ name: "glm-5.2-chat", endpoint: "http://gw.test:8080" }],
           },
         });
+      if (url.includes("/api/cubepilot/agent/llm-models")) {
+        const fm = opts.fetchModels ?? {};
+        if (fm.pending) {
+          return new Promise((resolve) => {
+            fm.pending?.push((models: string[]) =>
+              resolve({ ok: true, status: 200, json: async () => ({ models }) }),
+            );
+          });
+        }
+        const status = fm.status ?? 200;
+        return {
+          ok: status < 400,
+          status,
+          json: async () =>
+            fm.error ? { error: fm.error } : { models: fm.models ?? [], ...(fm.warning ? { warning: fm.warning } : {}) },
+        };
+      }
       if (url.includes("/api/cubepilot/agent/status"))
         return json({
           exists: true,
@@ -724,6 +750,200 @@ describe("cubepilot page", () => {
     expect(resizer.getAttribute("aria-valuenow")).toBe("460");
     drag(200, -5000);
     expect(resizer.getAttribute("aria-valuenow")).toBe("120");
+    act(() => root.unmount());
+  });
+
+  /** Fill the external-provider form far enough to fetch: endpoint + key. */
+  function fillProviderForm(container: HTMLElement, endpoint = "https://api.deepseek.com/v1", key = "sk-test"): void {
+    const setValue = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
+    const endpointEl = container.querySelector('[data-od-id="cp-config-llm-endpoint"]') as HTMLInputElement;
+    const keyEl = container.querySelector('[data-od-id="cp-config-llm-key"]') as HTMLInputElement;
+    act(() => {
+      setValue.call(endpointEl, endpoint);
+      endpointEl.dispatchEvent(new Event("input", { bubbles: true }));
+      setValue.call(keyEl, key);
+      keyEl.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  }
+
+  /** The config page's external-provider card, with the platform provider only. */
+  const EXTERNAL_ONLY = {
+    exists: true,
+    selectedModel: "cubestack/qwen38-27b",
+    userInstructions: "",
+    providers: [{ name: "cubestack", endpoint: "http://gw.test:8080/v1", models: ["qwen38-27b"], origin: "system" }],
+    gatewayModels: ["qwen38-27b"],
+  };
+
+  it("fetches the models an endpoint serves and ticks one into the field", async () => {
+    // One of the ids is not one the CR would accept (a space in it), so it is
+    // not offered: a tick must not be able to build a list the save refuses.
+    stubApi(EXTERNAL_ONLY, { fetchModels: { models: ["deepseek-chat", "deepseek-reasoner", "has space"] } });
+    const { container, root } = renderPage();
+    await act(async () => {});
+    act(() => (container.querySelector('[data-od-id="cp-config-llm-src-external"]') as HTMLElement).click());
+    fillProviderForm(container);
+
+    act(() => (container.querySelector('[data-od-id="cp-config-llm-fetch"]') as HTMLElement).click());
+    await act(async () => {});
+
+    const list = container.querySelector('[data-od-id="cp-config-llm-fetched"]') as HTMLElement;
+    expect(list.textContent).toContain("deepseek-chat");
+    expect(list.textContent).toContain("deepseek-reasoner");
+    expect(list.textContent).not.toContain("has space");
+
+    // Ticking writes it into the field, which stays the one source of truth.
+    const box = container.querySelector('[data-od-id="cp-config-llm-fetched-deepseek-reasoner"] input') as HTMLInputElement;
+    act(() => box.click());
+    await act(async () => {});
+    expect((container.querySelector('[data-od-id="cp-config-llm-models"]') as HTMLInputElement).value).toBe("deepseek-reasoner");
+    act(() => root.unmount());
+  });
+
+  it("drops a fetch whose answer arrives after the settings changed", async () => {
+    // The ids belong to the endpoint they came from: an answer that lands after
+    // the reader moved on must not install itself under the new one.
+    const pending: Array<(models: string[]) => void> = [];
+    stubApi(EXTERNAL_ONLY, { fetchModels: { pending } });
+    const { container, root } = renderPage();
+    await act(async () => {});
+    act(() => (container.querySelector('[data-od-id="cp-config-llm-src-external"]') as HTMLElement).click());
+    fillProviderForm(container);
+
+    act(() => (container.querySelector('[data-od-id="cp-config-llm-fetch"]') as HTMLElement).click());
+    await act(async () => {});
+    // The reader edits the endpoint while that request is still out.
+    const endpointEl = container.querySelector('[data-od-id="cp-config-llm-endpoint"]') as HTMLInputElement;
+    const setValue = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
+    act(() => {
+      setValue.call(endpointEl, "https://other.test/v1");
+      endpointEl.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    act(() => pending[0]?.(["stale-model"]));
+    await act(async () => {});
+
+    expect(container.querySelector('[data-od-id="cp-config-llm-fetched"]')).toBeNull();
+    expect((container.querySelector('[data-od-id="cp-config-llm-models"]') as HTMLInputElement).value).toBe("");
+    // …and fetching works again: one stale answer must not disable the button
+    // for the rest of the mount.
+    act(() => (container.querySelector('[data-od-id="cp-config-llm-fetch"]') as HTMLElement).click());
+    await act(async () => {});
+    expect(pending.length).toBe(2);
+    act(() => root.unmount());
+  });
+
+  it("does not offer an id the models field cannot carry", async () => {
+    // The field is comma-separated, so an id holding a comma cannot be written
+    // into it: ticking one would split it into two ids.
+    stubApi(EXTERNAL_ONLY, { fetchModels: { models: ["ok-model", "with,comma"] } });
+    const { container, root } = renderPage();
+    await act(async () => {});
+    act(() => (container.querySelector('[data-od-id="cp-config-llm-src-external"]') as HTMLElement).click());
+    fillProviderForm(container);
+
+    act(() => (container.querySelector('[data-od-id="cp-config-llm-fetch"]') as HTMLElement).click());
+    await act(async () => {});
+
+    const list = container.querySelector('[data-od-id="cp-config-llm-fetched"]') as HTMLElement;
+    expect(list.textContent).toContain("ok-model");
+    expect(list.textContent).not.toContain("with,comma");
+    act(() => root.unmount());
+  });
+
+  it("says when a key is sent over plain http", async () => {
+    stubApi(EXTERNAL_ONLY, { fetchModels: { models: ["m"], warning: "key-over-http" } });
+    const { container, root } = renderPage();
+    await act(async () => {});
+    act(() => (container.querySelector('[data-od-id="cp-config-llm-src-external"]') as HTMLElement).click());
+    fillProviderForm(container);
+
+    act(() => (container.querySelector('[data-od-id="cp-config-llm-fetch"]') as HTMLElement).click());
+    await act(async () => {});
+
+    const warning = container.querySelector('[data-od-id="cp-config-llm-fetch-warning"]') as HTMLElement;
+    expect(warning).not.toBeNull();
+    expect(warning.textContent).toContain("http");
+    act(() => root.unmount());
+  });
+
+  it("needs a key when a public provider is switched to keyed", async () => {
+    // Nothing is stored to fall back on: without one the provider would be
+    // saved keyed and fail every turn.
+    stubApi({
+      exists: true,
+      selectedModel: "cubestack/qwen38-27b",
+      userInstructions: "",
+      providers: [
+        { name: "cubestack", endpoint: "http://gw.test:8080/v1", models: ["qwen38-27b"], origin: "system" },
+        { name: "openrouter", endpoint: "https://openrouter.ai/api/v1", models: ["m"], keyed: false, origin: "external" },
+      ],
+      gatewayModels: ["qwen38-27b"],
+    });
+    const { container, root } = renderPage();
+    await act(async () => {});
+    act(() => (container.querySelector('[data-od-id="cp-config-llm-src-external"]') as HTMLElement).click());
+    act(() => (container.querySelector('[data-od-id="cp-config-llm-edit"]') as HTMLElement).click());
+    await act(async () => {});
+    // The provider was public; choosing "key" makes a key mandatory.
+    act(() => (container.querySelector('[data-od-id="cp-config-llm-cred-key"]') as HTMLInputElement).click());
+    await act(async () => {});
+    act(() => (container.querySelector('[data-od-id="cp-config-llm-save"]') as HTMLElement).click());
+    await act(async () => {});
+
+    expect(document.body.textContent ?? "").toContain("请输入 apiKey");
+    act(() => root.unmount());
+  });
+
+  it("treats the credential as one choice, not a checkbox beside a field", async () => {
+    const { container, root } = renderPage();
+    await act(async () => {});
+    act(() => (container.querySelector('[data-od-id="cp-config-llm-src-external"]') as HTMLElement).click());
+    fillProviderForm(container);
+    expect((container.querySelector('[data-od-id="cp-config-llm-key"]') as HTMLInputElement).value).toBe("sk-test");
+
+    // Choosing public takes the key with it: the two cannot both be set, which
+    // is what the save and the fetch used to refuse.
+    act(() => (container.querySelector('[data-od-id="cp-config-llm-cred-public"]') as HTMLInputElement).click());
+    await act(async () => {});
+    expect(container.querySelector('[data-od-id="cp-config-llm-key"]')).toBeNull();
+
+    act(() => (container.querySelector('[data-od-id="cp-config-llm-cred-key"]') as HTMLInputElement).click());
+    await act(async () => {});
+    expect((container.querySelector('[data-od-id="cp-config-llm-key"]') as HTMLInputElement).value).toBe("");
+    act(() => root.unmount());
+  });
+
+  it("asks for the key before the models it is used to fetch", async () => {
+    // The list cannot be fetched without it, so the form reads in that order.
+    const { container, root } = renderPage();
+    await act(async () => {});
+    act(() => (container.querySelector('[data-od-id="cp-config-llm-src-external"]') as HTMLElement).click());
+    const order = [...container.querySelectorAll('[data-od-id^="cp-config-llm-"]')].map((e) => e.getAttribute("data-od-id"));
+    expect(order.indexOf("cp-config-llm-key")).toBeLessThan(order.indexOf("cp-config-llm-models"));
+    act(() => root.unmount());
+  });
+
+  it("reports a failed fetch and leaves the field usable", async () => {
+    stubApi(EXTERNAL_ONLY, { fetchModels: { status: 502, error: "the endpoint answered HTTP 401" } });
+    const { container, root } = renderPage();
+    await act(async () => {});
+    act(() => (container.querySelector('[data-od-id="cp-config-llm-src-external"]') as HTMLElement).click());
+    fillProviderForm(container);
+
+    act(() => (container.querySelector('[data-od-id="cp-config-llm-fetch"]') as HTMLElement).click());
+    await act(async () => {});
+
+    expect(container.querySelector('[data-od-id="cp-config-llm-fetched"]')).toBeNull();
+    expect((container.querySelector('[data-od-id="cp-config-llm-fetch-error"]') as HTMLElement).textContent).toContain("401");
+
+    // The list is a convenience: the field still takes what the reader types.
+    const models = container.querySelector('[data-od-id="cp-config-llm-models"]') as HTMLInputElement;
+    const setValue = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
+    act(() => {
+      setValue.call(models, "by-hand-model");
+      models.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(models.value).toBe("by-hand-model");
     act(() => root.unmount());
   });
 
