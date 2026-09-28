@@ -26,6 +26,7 @@ export function devEnvironmentSummary(
     // projection — only the name is carried — so there is nothing to put here.
     volumes: [{ name: "data-cache", pvcName: "data-cache", mountPath: "/data", readOnly: false }],
     envNames: ["HF_HOME", "HF_TOKEN"],
+    command: ["python", "-m", "jupyter", "lab"],
     args: ["--port", "8080"],
     ports: [{ name: "api", type: "http", containerPort: 8080 }],
     idleTimeout: 3600,
@@ -38,6 +39,9 @@ export function devEnvironmentSummary(
       { type: "Ready", status: "True", reason: "Running", message: "" },
     ],
     sshClientKeySecret: "jupyter-nlp-ln-ssh-client-key",
+    // The token the controller generates for a jupyter environment, which the
+    // portal can name but not read (no cluster-wide Secret access).
+    jupyterTokenSecret: { name: "jupyter-nlp-ln-jupyter-token", namespace: "project-a" },
     ...overrides,
   };
 }
@@ -63,6 +67,7 @@ export function devEnvironmentList(): DevEnvironmentSummary[] {
       // environment does not exercise are covered.
       volumes: [{ name: "models", pvcName: "shared-models", mountPath: "/models", readOnly: true }],
       envNames: [],
+      command: [],
       args: [],
       ports: [{ name: "debug", type: "tcp", containerPort: 9229 }],
       idleTimeout: 0,
@@ -70,6 +75,9 @@ export function devEnvironmentList(): DevEnvironmentSummary[] {
       endpoints: [],
       conditions: [],
       sshClientKeySecret: null,
+      // Not a jupyter environment, so the controller never records a token for
+      // it — the panel must omit the row rather than render an empty one.
+      jupyterTokenSecret: null,
       createdAt: "2026-08-30T12:00:00Z",
     }),
   ];

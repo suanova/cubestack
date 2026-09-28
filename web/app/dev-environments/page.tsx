@@ -645,6 +645,15 @@ function ConnectionCard({ e, onAct }: { e: DevEnvironmentSummary; onAct: (e: Dev
           {e.endpoints.map((ep) => (
             <EndpointRow key={ep.name} label={ep.name} value={ep.address} />
           ))}
+          {/* Reaching a jupyter environment needs its token, and the Copy button
+              is the same one the endpoints use — what is offered is the command
+              that reads the Secret, never its value. */}
+          {e.type === "jupyter" && e.jupyterTokenSecret ? (
+            <EndpointRow
+              label={t("dev.conn.tokenFrom", { name: e.jupyterTokenSecret.name })}
+              value={`kubectl -n ${e.jupyterTokenSecret.namespace} get secret ${e.jupyterTokenSecret.name} -o jsonpath='{.data.token}' | base64 -d`}
+            />
+          ) : null}
           <Typography sx={{ fontSize: 11, color: "text.secondary", lineHeight: 1.7 }}>{t("dev.conn.guide")}</Typography>
         </Box>
       </Card>
@@ -703,8 +712,13 @@ function SpecCard({ e }: { e: DevEnvironmentSummary }) {
     ]);
   }
   if (e.envNames.length) rows.push([t("dev.spec.env"), e.envNames.join(" · ")]);
+  if (e.command.length) rows.push([t("dev.spec.command"), e.command.join(" ")]);
   if (e.args.length) rows.push([t("dev.spec.args"), e.args.join(" ")]);
   if (e.ports.length) rows.push([t("dev.spec.ports"), e.ports.map((p) => `${p.name}:${p.containerPort}/${p.type}`).join(" · ")]);
+  // Only a jupyter environment has one, and only once the controller has made
+  // it. The value stays in the cluster — the portal has no cluster-wide Secret
+  // read — so the name is all this row can honestly show.
+  if (e.jupyterTokenSecret) rows.push([t("dev.spec.jupyterToken"), e.jupyterTokenSecret.name]);
   return (
     <Card title={t("dev.spec.title")} meta={t("dev.spec.meta")}>
       <Kvs rows={rows} />
@@ -835,9 +849,11 @@ interface Draft {
   mountPath: string;
   pvcs: PvcRow[];
   envs: EnvRow[];
-  // One command line, as the prototype's single box takes it; split into
-  // spec.runtime.args by the route.
+  // One command line each, as the prototype's single box takes them; split into
+  // spec.runtime.command / .args by the route. They override different things —
+  // the image's ENTRYPOINT and its CMD — so they are two boxes, not one.
   args: string;
+  command: string;
   ports: PortRow[];
 }
 
@@ -894,6 +910,7 @@ function CreateWizard({
     pvcs: [],
     envs: [],
     args: "",
+    command: "",
     ports: [],
   });
   const [nameError, setNameError] = useState(false);
@@ -1093,6 +1110,7 @@ function CreateWizard({
         ? { volumes: filledPvcs.map((r) => ({ pvcName: r.pvcName.trim(), mountPath: r.mountPath.trim() })) }
         : {}),
       ...(filledEnvs.length ? { env: filledEnvs.map((r) => ({ name: r.name.trim(), value: r.value })) } : {}),
+      ...(draft.command.trim() ? { command: draft.command.trim() } : {}),
       ...(draft.args.trim() ? { args: draft.args.trim() } : {}),
       ...(filledPorts.length
         ? {
@@ -1152,6 +1170,7 @@ function CreateWizard({
     summaryRows.push([t("dev.wizard.pvcs"), filledPvcs.map((r) => `${r.pvcName.trim()} → ${r.mountPath.trim()}`).join(" · ")]);
   }
   if (filledEnvs.length) summaryRows.push([t("dev.wizard.envs"), filledEnvs.map((r) => r.name.trim()).join(" · ")]);
+  if (draft.command.trim()) summaryRows.push([t("dev.wizard.command"), draft.command.trim()]);
   if (draft.args.trim()) summaryRows.push([t("dev.wizard.args"), draft.args.trim()]);
   if (filledPorts.length) {
     summaryRows.push([t("dev.wizard.ports"), filledPorts.map((r) => `${r.name.trim()}:${r.port.trim()}/${r.type}`).join(" · ")]);
@@ -1391,7 +1410,7 @@ function CreateWizard({
                   </Box>
                 </WizSection>
 
-                <WizSection odId="sec-runtime" title={t("dev.wizard.runtime")} badge="runtime.env / args">
+                <WizSection odId="sec-runtime" title={t("dev.wizard.runtime")} badge="runtime.env / args / command">
                   <WizField label={t("dev.wizard.envs")} hint={t("dev.wizard.envHint")} error={envError} errorText={t("dev.wizard.errEnv")}>
                     {draft.envs.map((r) => (
                       <Box key={r.id} sx={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: "8px", alignItems: "center", mb: "8px" }}>
@@ -1424,6 +1443,16 @@ function CreateWizard({
                       placeholder={t("dev.wizard.argsPh")}
                       value={draft.args}
                       onChange={(e) => setField("args", e.target.value)}
+                    />
+                  </WizField>
+                  <WizField label={t("dev.wizard.command")} hint={t("dev.wizard.commandHint")}>
+                    <TextField
+                      size="small"
+                      fullWidth
+                      data-od-id="wizard-command"
+                      placeholder={t("dev.wizard.commandPh")}
+                      value={draft.command}
+                      onChange={(e) => setField("command", e.target.value)}
                     />
                   </WizField>
                 </WizSection>

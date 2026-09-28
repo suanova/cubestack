@@ -44,6 +44,9 @@ export interface DevEnvironmentSummary {
   // Variable *names* only — a value can be a registry token (HF_TOKEN), and the
   // names alone answer what the environment was configured with.
   envNames: string[];
+  // spec.runtime.command and .args, as the argv they are. Both are projected in
+  // full: neither can carry a credential the way an env value can.
+  command: string[];
   args: string[];
   ports: Array<{ name: string; type: "http" | "tcp" | "udp"; containerPort: number }>;
   idleTimeout: number;
@@ -57,6 +60,11 @@ export interface DevEnvironmentSummary {
   // retrieve the private half. Absent when spec.ssh.authorizedKeysSecret names
   // the user's own Secret — that holds public keys, not a client key.
   sshClientKeySecret: string | null;
+  // The Secret a jupyter environment's access token lives in, recorded by the
+  // controller. Null for every other type, which serves no authenticated web
+  // path. Carries its namespace: the portal has no cluster-wide Secret read, so
+  // it says where the token is rather than fetching it.
+  jupyterTokenSecret: { name: string; namespace: string } | null;
 }
 
 interface Condition {
@@ -82,7 +90,7 @@ interface DevEnvSpec {
   storage?: { size?: string; mountPath?: string };
   volumes?: Array<{ name?: string; pvcName?: string; mountPath?: string; readOnly?: boolean }>;
   ports?: Array<{ name?: string; type?: string; containerPort?: number }>;
-  runtime?: { env?: Array<{ name?: string }>; args?: string[] };
+  runtime?: { env?: Array<{ name?: string }>; command?: string[]; args?: string[] };
   lifecycle?: { idleTimeout?: number };
   ssh?: { enabled?: boolean };
 }
@@ -91,6 +99,7 @@ interface DevEnvStatus {
   endpoints?: Endpoint[];
   conditions?: Condition[];
   sshClientKeySecret?: { name?: string };
+  jupyterTokenSecret?: { name?: string; namespace?: string };
 }
 interface DevEnv {
   metadata?: { name?: string; namespace?: string; creationTimestamp?: string };
@@ -136,6 +145,7 @@ function project(env: DevEnv): DevEnvironmentSummary {
       readOnly: v.readOnly ?? false,
     })),
     envNames: (spec.runtime?.env ?? []).map((e) => e.name ?? "").filter(Boolean),
+    command: spec.runtime?.command ?? [],
     args: spec.runtime?.args ?? [],
     ports: (spec.ports ?? []).map((p) => ({
       name: p.name ?? "",
@@ -158,6 +168,16 @@ function project(env: DevEnv): DevEnvironmentSummary {
       message: c.message ?? "",
     })),
     sshClientKeySecret: status.sshClientKeySecret?.name ?? null,
+    jupyterTokenSecret: status.jupyterTokenSecret?.name
+      ? {
+          name: status.jupyterTokenSecret.name,
+          // The reference's own namespace is optional; the Secret is created
+          // beside its environment, which is the fallback. Stating it here
+          // rather than reusing the environment's keeps the retrieval command
+          // correct if that ever stops being the same namespace.
+          namespace: status.jupyterTokenSecret.namespace ?? env.metadata?.namespace ?? "",
+        }
+      : null,
   };
 }
 
@@ -280,6 +300,7 @@ interface CreateBody {
   mountPath?: string; // → spec.storage.mountPath (absent = derived)
   volumes?: Array<{ pvcName?: string; mountPath?: string }>; // → spec.volumes[] (name is derived here)
   env?: Array<{ name?: string; value?: string }>; // → spec.runtime.env[]
+  command?: string; // → spec.runtime.command (one command line, split here)
   args?: string; // → spec.runtime.args (one command line, split here)
   ports?: Array<{ name?: string; containerPort?: number; type?: string }>; // → spec.ports[]
 }
@@ -423,6 +444,13 @@ export const POST = withAuth(async (req) => {
       env.push({ name, value });
     }
 
+    // The entrypoint and its arguments are two separate overrides of the
+    // image's own (command → ENTRYPOINT, args → CMD), so they are two boxes and
+    // two errors: one shared message would point at the wrong field.
+    const commandLine = body.command?.trim() ?? "";
+    const command = commandLine ? splitArgs(commandLine) : [];
+    if (command === null) return ValidationError("启动命令引号不匹配。");
+
     const argsLine = body.args?.trim() ?? "";
     const args = argsLine ? splitArgs(argsLine) : [];
     if (args === null) return ValidationError("启动参数引号不匹配。");
@@ -506,12 +534,17 @@ export const POST = withAuth(async (req) => {
             ...(runAsGroup !== undefined ? { runAsGroup } : {}),
           };
     const runtime =
-      user === undefined && securityContext === undefined && env.length === 0 && args.length === 0
+      user === undefined &&
+      securityContext === undefined &&
+      env.length === 0 &&
+      command.length === 0 &&
+      args.length === 0
         ? undefined
         : {
             ...(user !== undefined ? { user } : {}),
             ...(securityContext ? { securityContext } : {}),
             ...(env.length ? { env } : {}),
+            ...(command.length ? { command } : {}),
             ...(args.length ? { args } : {}),
           };
 

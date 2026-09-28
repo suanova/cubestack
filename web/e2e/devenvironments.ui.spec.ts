@@ -108,8 +108,15 @@ test.describe("dev environments landing (mocked data)", () => {
     await expect(detail).toContainText("200Gi · /home/ubuntu");
     await expect(detail).toContainText("data-cache → /data");
     await expect(detail).toContainText("HF_HOME · HF_TOKEN");
+    await expect(detail).toContainText("python -m jupyter lab");
     await expect(detail).toContainText("--port 8080");
     await expect(detail).toContainText("api:8080/http");
+    // The jupyter token is named where it lives, plus the command that reads
+    // it — the portal has no cluster-wide Secret access to show the value.
+    await expect(detail).toContainText("jupyter-nlp-ln-jupyter-token");
+    await expect(detail).toContainText(
+      "kubectl -n project-a get secret jupyter-nlp-ln-jupyter-token -o jsonpath='{.data.token}' | base64 -d",
+    );
   });
 
   test("start/stop a stopped environment via the row actions", async ({ page }) => {
@@ -315,6 +322,7 @@ test.describe("dev environments landing (mocked data)", () => {
     await page.locator('[data-od-id="env-name"] input').fill("HF_HOME");
     await page.locator('[data-od-id="env-value"] input').fill("/data/hf");
     await page.locator('[data-od-id="wizard-args"] input').fill("--port 8080");
+    await page.locator('[data-od-id="wizard-command"] input').fill("python -m jupyter lab");
 
     await page.locator('[data-od-id="row-add"]').nth(2).click();
     await page.locator('[data-od-id="port-name"] input').fill("debug");
@@ -331,13 +339,14 @@ test.describe("dev environments landing (mocked data)", () => {
       mountPath: "/data",
       volumes: [{ pvcName: "shared-models", mountPath: "/models" }],
       env: [{ name: "HF_HOME", value: "/data/hf" }],
-      // One line on the wire; the route splits it into argv.
+      // One line each on the wire; the route splits them into argv.
+      command: "python -m jupyter lab",
       args: "--port 8080",
       ports: [{ name: "debug", containerPort: 9229, type: "http" }],
     });
   });
 
-  test("an untouched advanced step sends none of its four keys", async ({ page }) => {
+  test("an untouched advanced step sends none of its five keys", async ({ page }) => {
     const posts: Record<string, unknown>[] = [];
     await stubOptions(page);
     await stubList(page, { items: devEnvironmentList() });
@@ -367,7 +376,7 @@ test.describe("dev environments landing (mocked data)", () => {
 
     // The mount-path box is empty, so the body must not carry a path at all —
     // pinning one would override the home the image's entrypoint derives.
-    for (const key of ["mountPath", "volumes", "env", "args", "ports"]) {
+    for (const key of ["mountPath", "volumes", "env", "command", "args", "ports"]) {
       expect(posts[0]).not.toHaveProperty(key);
     }
   });

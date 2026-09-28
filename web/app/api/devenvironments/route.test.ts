@@ -43,6 +43,7 @@ function stubCluster() {
             { type: "Ready", status: "True", reason: "Running", message: "" },
           ],
           sshClientKeySecret: { name: "jupyter-nlp-ln-ssh-client-key" },
+          jupyterTokenSecret: { name: "jupyter-nlp-ln-jupyter-token", namespace: "project-a" },
         },
       },
       {
@@ -106,6 +107,7 @@ describe("GET /api/devenvironments", () => {
       idleTimeout: 3600,
       phase: "Running",
       sshClientKeySecret: "jupyter-nlp-ln-ssh-client-key",
+      jupyterTokenSecret: { name: "jupyter-nlp-ln-jupyter-token", namespace: "project-a" },
       endpoints: [{ name: "jupyter", address: "https://dev.cubestack.local/ws/jupyter-nlp-ln" }],
     });
     expect(jupyter.conditions).toHaveLength(2);
@@ -114,6 +116,9 @@ describe("GET /api/devenvironments", () => {
     const [, ssh] = body.items;
     expect(ssh.phase).toBe("Stopped");
     expect(ssh.endpoints).toEqual([]);
+    // An ssh environment has no jupyter token, and the projection says so with
+    // a null rather than an empty record the UI would have to know to skip.
+    expect(ssh.jupyterTokenSecret).toBeNull();
     // gpu.vendor is taken as written and gpu.count falls back to the CRD's 1.
     expect(ssh.resources.gpu).toEqual({ vendor: "metax", count: 1 });
   });
@@ -128,7 +133,7 @@ describe("GET /api/devenvironments", () => {
             storage: { size: "100Gi", mountPath: "/data" },
             volumes: [{ name: "data-cache", pvcName: "data-cache", mountPath: "/cache", readOnly: true }],
             ports: [{ name: "api", containerPort: 8080 }],
-            runtime: { env: [{ name: "HF_TOKEN" }, { name: "HF_HOME" }], args: ["--port", "8080"] },
+            runtime: { env: [{ name: "HF_TOKEN" }, { name: "HF_HOME" }], command: ["python", "-m", "jupyter", "lab"], args: ["--port", "8080"] },
           },
         },
         {
@@ -136,6 +141,10 @@ describe("GET /api/devenvironments", () => {
           // spec.storage.size with no mountPath: the controller derives the
           // path, so the projection must say so rather than claim /workspace.
           spec: { type: "jupyter", storage: { size: "100Gi" } },
+          // A SecretReference's namespace is optional: the controller writes the
+          // token beside the environment, so the projection falls back to the
+          // environment's own namespace rather than carrying a blank.
+          status: { jupyterTokenSecret: { name: "derived-jupyter-token" } },
         },
       ],
     });
@@ -150,9 +159,12 @@ describe("GET /api/devenvironments", () => {
     // what say which variables the environment carries.
     expect(pinned.ports).toEqual([{ name: "api", type: "http", containerPort: 8080 }]);
     expect(pinned.envNames).toEqual(["HF_TOKEN", "HF_HOME"]);
+    expect(pinned.command).toEqual(["python", "-m", "jupyter", "lab"]);
     expect(pinned.args).toEqual(["--port", "8080"]);
+    expect(pinned.jupyterTokenSecret).toBeNull();
 
     expect(derived.storage).toEqual({ size: "100Gi", mountPath: null });
+    expect(derived.jupyterTokenSecret).toEqual({ name: "derived-jupyter-token", namespace: "project-a" });
   });
 
   it("defaults absent spec fields so rendering never crashes", async () => {
@@ -180,6 +192,7 @@ describe("GET /api/devenvironments", () => {
       storage: null,
       volumes: [],
       envNames: [],
+      command: [],
       args: [],
       ports: [],
       idleTimeout: 0,
@@ -189,6 +202,7 @@ describe("GET /api/devenvironments", () => {
       endpoints: [],
       conditions: [],
       sshClientKeySecret: null,
+      jupyterTokenSecret: null,
     });
   });
 });
@@ -586,7 +600,7 @@ describe("POST /api/devenvironments", () => {
     expect("volumes" in spec).toBe(false);
   });
 
-  it("adds spec.runtime.env and .args alongside the identity the image implies", async () => {
+  it("adds spec.runtime.env / .command / .args alongside the identity the image implies", async () => {
     createNamespacedCustomObject.mockResolvedValue({});
     listClusterCustomObject.mockResolvedValue({ items: [] });
     const { POST } = await importRoute();
@@ -599,6 +613,7 @@ describe("POST /api/devenvironments", () => {
           type: "jupyter",
           image: "harbor.isuanova.com/suanova/jupyter-minimal:latest",
           env: [{ name: "HF_HOME", value: "/data/hf" }],
+          command: 'python -m "my app"',
           args: '--port 8080 --name "a b"',
         }),
       }),
@@ -607,10 +622,13 @@ describe("POST /api/devenvironments", () => {
     expect(res.status).toBe(201);
     // Stating an environment variable does not unstate an identity: the two
     // are leaves of one spec.runtime, and the catalog still backs the account.
+    // command and args are split by the same rule but land on different keys —
+    // they override the image's ENTRYPOINT and its CMD respectively.
     expect(createNamespacedCustomObject.mock.calls[0][0].body.spec.runtime).toEqual({
       user: "jovyan",
       securityContext: { runAsGroup: 100 },
       env: [{ name: "HF_HOME", value: "/data/hf" }],
+      command: ["python", "-m", "my app"],
       args: ["--port", "8080", "--name", "a b"],
     });
   });
@@ -636,8 +654,14 @@ describe("POST /api/devenvironments", () => {
     expect(await rejectedPost({ args: '--name "a b' })).toContain("引号");
   });
 
-  it("omits args and env when they state nothing", async () => {
-    const spec = await postedSpec({ env: [{ name: "", value: "" }], args: "   " });
+  it("rejects an unbalanced quote in the command, naming that field", async () => {
+    // Shares splitArgs with the arguments, but not its error message: one
+    // shared wording would point the user at the box that is actually fine.
+    expect(await rejectedPost({ command: 'python -c "print(1)' })).toContain("启动命令");
+  });
+
+  it("omits args, command and env when they state nothing", async () => {
+    const spec = await postedSpec({ env: [{ name: "", value: "" }], args: "   ", command: "   " });
     expect("runtime" in spec).toBe(false);
   });
 

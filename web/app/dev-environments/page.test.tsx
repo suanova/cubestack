@@ -94,6 +94,7 @@ describe("dev environments page", () => {
     expect(container.textContent).toContain("200Gi · /home/ubuntu");
     expect(container.textContent).toContain("data-cache → /data");
     expect(container.textContent).toContain("HF_HOME · HF_TOKEN");
+    expect(container.textContent).toContain("python -m jupyter lab");
     expect(container.textContent).toContain("--port 8080");
     expect(container.textContent).toContain("api:8080/http");
 
@@ -106,6 +107,29 @@ describe("dev environments page", () => {
     expect(container.textContent).toContain("500Gi · 按运行身份自动派生");
     expect(container.textContent).toContain("shared-models → /models (只读)");
     expect(container.textContent).toContain("debug:9229/tcp");
+
+    act(() => root.unmount());
+  });
+
+  it("names the jupyter token's Secret and how to read it, and neither for an ssh environment", async () => {
+    stubData(devEnvironmentList());
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    // The value stays in the cluster — the portal has no cluster-wide Secret
+    // read — so the panel names the Secret and offers the command instead.
+    expect(container.textContent).toContain("Jupyter Token Secret");
+    expect(container.textContent).toContain("jupyter-nlp-ln-jupyter-token");
+    expect(container.textContent).toContain(
+      "kubectl -n project-a get secret jupyter-nlp-ln-jupyter-token -o jsonpath='{.data.token}' | base64 -d",
+    );
+
+    // An ssh environment has no token: no row, and no command to run.
+    await act(async () => {
+      (container.querySelector('[data-od-id="dev-row-ssh-dataset-prep"]') as HTMLElement).click();
+    });
+    expect(container.textContent).not.toContain("Jupyter Token Secret");
+    expect(container.textContent).not.toContain("kubectl -n");
 
     act(() => root.unmount());
   });
@@ -422,6 +446,11 @@ describe("create wizard", () => {
   /** Step 3's runtime args line. */
   function argsInput(): HTMLInputElement {
     return document.body.querySelector('[data-od-id="wizard-args"] input') as HTMLInputElement;
+  }
+
+  /** Step 3's runtime command line — the image's ENTRYPOINT override. */
+  function commandInput(): HTMLInputElement {
+    return document.body.querySelector('[data-od-id="wizard-command"] input') as HTMLInputElement;
   }
 
   /** The body of the POST the wizard sent to /api/devenvironments. */
@@ -753,11 +782,13 @@ describe("create wizard", () => {
     setInput(rowInputs("pvc-name")[0], "shared-models");
     setInput(rowInputs("pvc-path")[0], "/models");
 
-    // One variable, in the runtime section, plus a line of arguments.
+    // One variable, in the runtime section, plus a line of arguments and one of
+    // command.
     clickRow("row-add", 1);
     setInput(rowInputs("env-name")[0], "HF_HOME");
     setInput(rowInputs("env-value")[0], "/data/hf");
     setInput(argsInput(), "--port 8080");
+    setInput(commandInput(), 'python -m "my app"');
 
     // One port, in the network section.
     clickRow("row-add", 2);
@@ -779,7 +810,9 @@ describe("create wizard", () => {
       mountPath: "/data",
       volumes: [{ pvcName: "shared-models", mountPath: "/models" }],
       env: [{ name: "HF_HOME", value: "/data/hf" }],
-      // A single command line on the wire: the split into argv is the route's job.
+      // One command line each on the wire: the split into argv is the route's
+      // job, and the two land on different spec.runtime keys.
+      command: 'python -m "my app"',
       args: "--port 8080",
       ports: [{ name: "debug", containerPort: 9229, type: "http" }],
     });
@@ -787,7 +820,7 @@ describe("create wizard", () => {
     act(() => root.unmount());
   });
 
-  it("leaves the four new keys out of the body when the advanced step is untouched", async () => {
+  it("leaves the five new keys out of the body when the advanced step is untouched", async () => {
     const { container, root } = renderWithBoth();
     await act(async () => {});
     await toStep3(container);
@@ -804,6 +837,7 @@ describe("create wizard", () => {
     expect("mountPath" in body).toBe(false);
     expect("volumes" in body).toBe(false);
     expect("env" in body).toBe(false);
+    expect("command" in body).toBe(false);
     expect("args" in body).toBe(false);
     expect("ports" in body).toBe(false);
 
