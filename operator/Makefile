@@ -227,11 +227,10 @@ BASE_MIRRORS = JUPYTER_BASE=harbor.isuanova.com/mirrors/quay.io/jupyter/minimal-
 # the three fields unambiguously.
 base_arg = $(foreach m,$(filter $(1)=%,$(BASE_MIRRORS)),--build-arg $(firstword $(subst =, ,$(m)))=$(word 2,$(subst =, ,$(m))))
 # Manager image for the helm e2e flow. Defaults to the same registry image as
-# the top-of-file IMG default. The chart's own pull policy is Always, so
-# helm-e2e-install passes imagePullPolicy=IfNotPresent: this image is built
-# locally and kind-loaded under that same registry:tag, and Always would pull
-# the registry's copy of the tag instead of the one under test. Derives from
-# IMG when the caller sets IMG explicitly (command line or environment).
+# the top-of-file IMG default; the chart Deployment template bakes
+# imagePullPolicy=IfNotPresent, so the kind-loaded image wins over the
+# registry even for the :latest tag. Derives from IMG when the caller sets
+# IMG explicitly (command line or environment).
 ifeq ($(origin IMG),file)
 HELM_E2E_IMG ?= harbor.isuanova.com/suanova/cubestack-controller-manager:latest
 else
@@ -426,7 +425,6 @@ helm-e2e-install: helm-e2e-setup helm-e2e-images-load helm-e2e-crds-sync ## Inst
 		--namespace $(HELM_NAMESPACE) --create-namespace \
 		--set image.repository=$(HELM_E2E_IMAGE_REPO) \
 		--set image.tag=$(HELM_E2E_IMAGE_TAG) \
-		--set image.pullPolicy=IfNotPresent \
 		--wait --timeout 5m
 	@echo "manager rollout status:"
 	$(HELM_E2E_KUBECTL) rollout status deployment/cubestack-controller-manager -n $(HELM_NAMESPACE) --timeout=3m

@@ -207,21 +207,18 @@ helm install cubestack ./helm/cubestack-controller-manager-chart -n cubestack-sy
   --set image.tag=v1.2.3
 ```
 
-`image.pullPolicy` defaults to `Always`, as in the portal chart: the tag is
-often a mutable one, and a re-pushed image should reach the cluster without the
-pod being deleted. An install whose image is already on the node passes
-`IfNotPresent` instead:
+`image.pullPolicy` sets the manager container's `imagePullPolicy` and defaults
+to `IfNotPresent`. Local kind testing therefore works with the `:latest`
+default: the built image is kind-loaded into the cluster, and `IfNotPresent`
+makes the loaded image win over the registry instead of the kubelet's `Always`
+default for `latest` tags triggering a remote pull. Set it to `Always` where
+the tag is mutable and a re-pushed image should be picked up without the pod
+being deleted:
 
 ```bash
 helm install cubestack ./helm/cubestack-controller-manager-chart -n cubestack-system \
-  --create-namespace --set image.pullPolicy=IfNotPresent
+  --create-namespace --set image.pullPolicy=Always
 ```
-
-The kind e2e flow (`make helm-e2e-install`) is that kind of install: it builds
-the manager image and kind-loads it under the same `registry:tag` the chart is
-pointed at, where `Always` would pull the registry's copy of that tag instead —
-an image that is not the one under test — while `IfNotPresent` makes the loaded
-one win.
 
 ### Upgrading from a chart that created the Gateway
 

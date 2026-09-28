@@ -61,10 +61,10 @@ sed -i 's#^\(\s*\)image: example\.com/cubestack:v0\.0\.1$#\1image: "{{ .Values.i
 # stale hardcoded image in the chart while the drift gate stays green.
 grep -q 'image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"' "${OUT}" \
   || { echo "image rewrite no-op'd — update needle in update-helm-resources.sh"; exit 1; }
-# The pull policy is a values knob too, so an install whose image is already on
-# the node can say so. The literal in config/manager/manager.yaml stays the one
-# `make deploy` uses; only the chart's copy is rewritten, and the default lives
-# in values.yaml.
+# The pull policy is a values knob: values.yaml defaults it to IfNotPresent,
+# which is what lets a kind-loaded image win over the registry, and an install
+# with a mutable tag sets Always. The literal in config/manager/manager.yaml
+# stays the one `make deploy` uses; only the chart's copy is rewritten.
 sed -i 's#^\(\s*\)imagePullPolicy: IfNotPresent$#\1imagePullPolicy: {{ .Values.image.pullPolicy }}#' "${OUT}"
 # Fail loudly here too: a needle that stopped matching (the policy changed in
 # config/manager/manager.yaml) would leave the chart's hardcoded literal in
@@ -325,9 +325,11 @@ expect_render defaults present "^[[:space:]]*image: \"harbor\.isuanova\.com/suan
 # An explicit tag still wins, which is how a rolling install points at `latest`.
 expect_render image-tag-set present '^[[:space:]]*image: "harbor\.isuanova\.com/suanova/cubestack-controller-manager:v9\.9\.9"$' --set image.tag=v9.9.9
 # The pull policy is driven by values rather than baked in (section 2 rewrites
-# it): the default case fails if the template still carries a fixed
-# `IfNotPresent`, and the override proves the value reaches the container.
-expect_render defaults present '^[[:space:]]*imagePullPolicy: Always$' --namespace cubestack-system
-expect_render pull-policy-set present '^[[:space:]]*imagePullPolicy: IfNotPresent$' --set image.pullPolicy=IfNotPresent
+# it). The override is what proves that: the default is the same value the
+# kustomize base carries, so a template that ignored the value entirely would
+# still satisfy it — only `Always` reaching the container distinguishes an
+# interpolated policy from a literal one.
+expect_render defaults present '^[[:space:]]*imagePullPolicy: IfNotPresent$' --namespace cubestack-system
+expect_render pull-policy-set present '^[[:space:]]*imagePullPolicy: Always$' --set image.pullPolicy=Always
 
 echo "chart resources regenerated under ${CHART}"

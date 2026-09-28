@@ -3,11 +3,12 @@ image:
   # Empty means the chart's appVersion, so a released chart pulls the images
   # released with it. Set a tag to point the chart somewhere else.
   tag: ""
-  # Always, like the portal chart: the tag is often a mutable one, and a
-  # re-pushed image should reach the cluster without deleting the pod. An
-  # install that loads the image onto the node instead of pulling it — the
-  # kind e2e flow — sets IfNotPresent so the loaded copy wins.
-  pullPolicy: Always
+  # IfNotPresent, so local testing works with the chart's :latest default: the
+  # built image is kind-loaded into the cluster and wins over the registry,
+  # instead of the kubelet's Always default for latest tags triggering a remote
+  # pull. Set Always where the tag is mutable and a re-pushed image should be
+  # picked up without deleting the pod.
+  pullPolicy: IfNotPresent
 
 # Platform Gateway the operator publishes InferenceService catalog entries to
 # (spec.route.publish: true), and that DevEnvironment ListenerSets attach to.

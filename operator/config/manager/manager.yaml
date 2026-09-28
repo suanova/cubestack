@@ -88,10 +88,6 @@ spec:
           - --rdma-ib-resource=rdma/ib_shared_devices
           - --rdma-roce-resource=rdma/roce_shared_devices
         image: controller:latest
-        # `make deploy` uses this literal; the helm chart rewrites its copy of
-        # this line to its image.pullPolicy value (default Always), so changing
-        # the literal here also means updating the needle in
-        # hack/update-helm-resources.sh, which fails if it stops matching.
         imagePullPolicy: IfNotPresent
         name: manager
         ports:
