@@ -48,6 +48,14 @@ permissions: {}
 jobs:
   vendor:
     runs-on: ubuntu-latest
+    # `workflow_dispatch` can be pointed at any branch, and this workflow's whole
+    # contract is "vendor what is on main". Dispatched from a feature branch it
+    # would package that branch's chart and push it to the same rolling branch,
+    # opening a pull request against the operator that claims to come from main
+    # but carries unreleased content. Refuse anything but main rather than
+    # publish a branch build; the push trigger is already main-only, so this
+    # only ever skips a dispatch, and it makes the contract explicit.
+    if: github.ref == 'refs/heads/main'
     # Read-only for the GITHUB_TOKEN: it fetches this repo and nothing else.
     # Every write below — branch, pull request — goes through the App token.
     permissions:
@@ -163,6 +171,21 @@ jobs:
           # matters for more than attribution: the operator's PR workflows run for
           # an App's pull request and would be suppressed for a GITHUB_TOKEN one.
           token: ${{ steps.app-token.outputs.token }}
+      # Read the rolling branch's tip here, before the work below, and lease the
+      # push against that value. A lease read immediately before the push always
+      # matches whatever is on the branch by then, so it only rejects a push
+      # racing inside those few microseconds; read here it is a real
+      # precondition, and a commit that lands mid-run stops the push instead of
+      # being force-pushed away.
+      - name: Record the rolling branch's current tip
+        id: branch-tip
+        working-directory: target
+        env:
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          echo "sha=$(git ls-remote origin "refs/heads/${TARGET_BRANCH}" | cut -f1)" \
+            >> "$GITHUB_OUTPUT"
       - name: Re-vendor the archive and its pins
         working-directory: target
         env:
@@ -287,6 +310,9 @@ jobs:
         working-directory: target
         env:
           CATALOG_VERSION: ${{ steps.package.outputs.catalog-version }}
+          # The branch tip as of before this run's work; empty when the branch
+          # does not exist yet, which is the one case the lease has no value for.
+          EXPECTED_SHA: ${{ steps.branch-tip.outputs.sha }}
           # Fail rather than hang if the token is not accepted: git's fallback for
           # a rejected credential is to prompt, and there is no one to answer.
           GIT_TERMINAL_PROMPT: "0"
@@ -315,14 +341,15 @@ jobs:
 
           # One rolling branch per component: a later chart change refreshes the
           # pull request that is already open instead of stacking a stale one
-          # beside it. The lease is taken from the remote rather than from a local
-          # ref, because `ref: main` with fetch-depth 1 never fetched this branch
-          # — and it means a commit someone pushed onto the branch by hand is not
-          # silently lost.
+          # beside it. The lease is the tip read before this run started work
+          # (see "Record the rolling branch's current tip"), not one read here,
+          # so a push that lands while this run is in flight is rejected rather
+          # than clobbered. It does not preserve a commit already on the branch
+          # when the run began: the branch is bot-owned scratch state, re-derived
+          # from main on every run, so nothing is meant to accumulate there.
           target_ref="refs/heads/${TARGET_BRANCH}"
-          remote_sha="$(git ls-remote origin "$target_ref" | cut -f1)"
-          if [ -n "$remote_sha" ]; then
-            git push --force-with-lease="${target_ref}:${remote_sha}" origin "HEAD:${target_ref}"
+          if [ -n "$EXPECTED_SHA" ]; then
+            git push --force-with-lease="${target_ref}:${EXPECTED_SHA}" origin "HEAD:${target_ref}"
           else
             git push origin "HEAD:${target_ref}"
           fi
@@ -335,14 +362,7 @@ jobs:
           CATALOG_VERSION: ${{ steps.package.outputs.catalog-version }}
         run: |
           set -euo pipefail
-          existing="$(gh pr list --repo "$TARGET_REPO" --head "$TARGET_BRANCH" \
-            --state open --json number --jq '.[0].number')"
-          if [ -n "$existing" ]; then
-            # The force-push above has already carried the new commit into it.
-            echo "Refreshed the open pull request #${existing}."
-            exit 0
-          fi
-
+          title="chore(charts): vendor ${COMPONENT} ${CATALOG_VERSION}"
           body="${RUNNER_TEMP}/pr-body.md"
           printf 'The chart changed on `%s@%s`, so re-vendor it.\n\n- `assets/charts/%s-%s.tgz` — the archive, packaged from the chart at that commit\n- `assets/components/%s-%s.yaml` — the `oci.version` pin, which is the file name the operator resolves\n- `assets/charts/README.md` and `README.md` — the vendored-archive tables\n\nOpened by the `suanova-bot` App from [`.github/workflows/vendor-charts.yml`](https://github.com/%s/blob/main/.github/workflows/vendor-charts.yml). The archive is `//go:embed`ed into the operator binary, so it is committed here rather than pulled at reconcile time; merging this fires `publish.yml`, which is what actually puts the new chart in front of clusters.\n' \
             "$GITHUB_REPOSITORY" "${GITHUB_SHA:0:7}" "$COMPONENT" "$CATALOG_VERSION" \
@@ -358,6 +378,21 @@ jobs:
             } >> "$body"
           fi
 
+          existing="$(gh pr list --repo "$TARGET_REPO" --head "$TARGET_BRANCH" \
+            --state open --json number --jq '.[0].number')"
+          if [ -n "$existing" ]; then
+            # The force-push above has already carried the new commit into the
+            # branch, which is all that used to be refreshed. The title and the
+            # body name the version and the source commit and carry the chart
+            # diff, so a run that left them alone would have the previous
+            # version's text describing this run's commit — a reviewer reading
+            # the description reads it as the state of the pull request. Rewrite
+            # both, the same way the create path writes them.
+            gh pr edit "$existing" --repo "$TARGET_REPO" \
+              --title "$title" --body-file "$body"
+            echo "Refreshed the open pull request #${existing}."
+            exit 0
+          fi
+
           gh pr create --repo "$TARGET_REPO" --base main --head "$TARGET_BRANCH" \
-            --title "chore(charts): vendor ${COMPONENT} ${CATALOG_VERSION}" \
-            --body-file "$body"
+            --title "$title" --body-file "$body"
