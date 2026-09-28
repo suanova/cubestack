@@ -1,0 +1,72 @@
+# The platform Gateway, as the platform would supply it — and the
+# ClientTrafficPolicy that goes with it.
+#
+# The chart ships neither: it only tells the manager where to find them
+# (gateway.name / gateway.namespace). This file is what the e2e applies to stand
+# in for the platform, and it doubles as the reference shape the chart README
+# points at. Both objects land in envoy-gateway-system, next to the Envoy
+# Gateway controller and the class-level EnvoyProxy — which is also the default
+# the chart's gateway.namespace carries.
+#
+# The names below are spelled out rather than left to a kustomize namePrefix:
+# this file is applied on its own (`kubectl apply -f`), and the
+# ClientTrafficPolicy's targetRefs must name the Gateway exactly — nothing
+# rewrites that reference.
+---
+# The Gateway every published route attaches to. Its name is what the manager's
+# --gateway-name (helm: gateway.name) must match.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: cubestack-gateway
+  namespace: envoy-gateway-system
+spec:
+  # The GatewayClass owns the dataplane: Envoy Gateway derives the proxy
+  # Deployment and its Service from the EnvoyProxy the class references (in its
+  # spec.parametersRef), and only from there. Nothing here can set the proxy's
+  # Service type or image, so this Gateway must name a class that carries an
+  # EnvoyProxy setting both — a class with no parametersRef yields Envoy
+  # Gateway's defaults: a LoadBalancer Service, which never gets an address on a
+  # cluster with no load-balancer controller, and an image pulled from
+  # docker.io. See the chart README for the class the platform must provide.
+  gatewayClassName: eg
+  # ListenerSets contributed by tenant namespaces (one per DevEnvironment, see
+  # the L4 port pool) are rejected unless the Gateway opts in: the API default is
+  # "None", which refuses every one of them. "All" admits them and leaves who may
+  # publish to RBAC — anyone able to create a ListenerSet in their own namespace
+  # can contribute a listener.
+  allowedListeners:
+    namespaces:
+      from: All
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+      # Routes from every namespace may attach; allowedRoutes.kinds is left
+      # unset so the API derives them from the protocol (HTTPRoute, GRPCRoute).
+      allowedRoutes:
+        namespaces:
+          from: All
+---
+# The ClientTrafficPolicy that makes the Gateway usable for Agent Router traffic
+# (design D8): a connection buffer large enough for the request-body translation
+# every AI request goes through — it buffers the whole body to read the model
+# name out of it, which the CRD's own 32KiB default is too small for — and the
+# HTTP/2 flow-control windows restored to Envoy's native values, above the CRD's
+# defaults. It is a prerequisite of the Agent Router path, so it travels with the
+# Gateway and shares its lifecycle.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: ClientTrafficPolicy
+metadata:
+  name: cubestack-gateway-ai
+  namespace: envoy-gateway-system
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: cubestack-gateway
+  connection:
+    bufferLimit: 50Mi
+  http2:
+    initialStreamWindowSize: 16Mi
+    initialConnectionWindowSize: 24Mi

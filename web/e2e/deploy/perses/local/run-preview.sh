@@ -107,6 +107,6 @@ PERSES_SERVER_URL="http://127.0.0.1:${PERSES_PORT}" \
 NEXT_PID=$!
 
 echo
-echo "Open http://127.0.0.1:3000/dashboards"
+echo "Open http://127.0.0.1:3000/cubestack/dashboards"
 echo "Stop with Ctrl-C."
 wait

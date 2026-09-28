@@ -17,3 +17,7 @@
 !jupyter-maca-pytorch/**
 !ssh-maca-pytorch
 !ssh-maca-pytorch/**
+!jupyter-cuda-pytorch
+!jupyter-cuda-pytorch/**
+!ssh-cuda-pytorch
+!ssh-cuda-pytorch/**

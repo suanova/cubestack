@@ -28,6 +28,8 @@ import { BuiltinVariableDefinition } from "@perses-dev/spec";
 import { forwardRef, ReactNode, useMemo } from "react";
 import type { AnchorHTMLAttributes, RefAttributes } from "react";
 
+import { withBasePath } from "@/lib/base-path";
+import { PERSES_PROXY_BASE_PATH } from "@/lib/perses/config";
 import { PortalDatasourceApi } from "@/lib/perses/datasource-api";
 import {
   buildPlatformChartsTheme,
@@ -43,16 +45,23 @@ const queryClient = new QueryClient({
 
 // Perses's RouterProvider is built around react-router's <Link>, which navigates
 // with `to`. The dashboard is rendered inside a react-18 island with no Next
-// router, so navigate to `to` directly with a plain anchor.
+// router, so navigate to `to` directly with a plain anchor. Perses hands these
+// paths out already root-relative (/projects/…), and nothing here goes through
+// Next's Link rewriting, so the base path has to be applied by hand.
 type RouterLinkProps = { to: string } & AnchorHTMLAttributes<HTMLAnchorElement> &
   RefAttributes<HTMLAnchorElement>;
+
+/** Base-path an app-internal path; leave absolute and hash URLs alone. */
+function resolveTo(to: string): string {
+  return to.startsWith("/") ? withBasePath(to) : to;
+}
 
 const PlainLink = forwardRef<HTMLAnchorElement, RouterLinkProps>(function PlainLink(
   { to, children, ...anchorProps },
   ref,
 ) {
   return (
-    <a href={to} ref={ref} {...anchorProps}>
+    <a href={resolveTo(to)} ref={ref} {...anchorProps}>
       {children}
     </a>
   );
@@ -82,7 +91,7 @@ export function PersesProvider({
   const muiTheme = useMemo(() => buildPlatformMuiTheme(mode), [mode]);
   const chartsTheme = useMemo(() => buildPlatformChartsTheme(mode), [mode]);
   const pluginLoader = useMemo(
-    () => remotePluginLoader({ baseURL: "/api/perses", apiPrefix: "/api/perses" }),
+    () => remotePluginLoader({ baseURL: PERSES_PROXY_BASE_PATH, apiPrefix: PERSES_PROXY_BASE_PATH }),
     [],
   );
 
@@ -91,7 +100,7 @@ export function PersesProvider({
       <ThemeProvider theme={muiTheme}>
         <RouterProvider
           RouterComponent={PlainLink}
-          navigate={(to) => history.pushState(null, "", to)}
+          navigate={(to) => history.pushState(null, "", resolveTo(to))}
         >
           <ChartsProvider chartsTheme={chartsTheme}>
             <SnackbarProvider>

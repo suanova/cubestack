@@ -106,8 +106,11 @@ describe("upstreamPath — refused", () => {
   it("refuses an unknown sub-resource", () => {
     expect(upstreamPath("GET", ["api", "v1", "sessions", "k", "transcript"])).toBeNull();
     expect(upstreamPath("POST", ["api", "v1", "sessions", "k", "delete"])).toBeNull();
-    // turn/events is a real route upstream; this portal follows a turn by
-    // polling the transcript, so it is not one this proxy carries.
-    expect(upstreamPath("GET", ["api", "v1", "sessions", "k", "turn", "events"])).toBeNull();
+    // turn/events is the one the pane re-attaches to a parked run with, and it
+    // is a GET: the POST that would start a turn through it is not carried.
+    expect(upstreamPath("GET", ["api", "v1", "sessions", "k", "turn", "events"])).toBe(
+      "/api/v1/sessions/k/turn/events",
+    );
+    expect(upstreamPath("POST", ["api", "v1", "sessions", "k", "turn", "events"])).toBeNull();
   });
 });

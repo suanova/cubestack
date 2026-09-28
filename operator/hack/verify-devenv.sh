@@ -131,9 +131,21 @@ sed -e "s#__DEV_ENV_IMAGE__#${DEV_ENV_IMAGE}#" \
 # never accepted its routes is Ready=True. RouteReady is what the controller
 # gates status.endpoints on, so waiting for it is what makes an empty endpoints
 # list a failure rather than a race.
+#
+# The budget is dominated by the pod's own image pull, which helm-e2e-images
+# leaves to the registry on purpose — it loads the busybox init container's image
+# and not this one. 572 MB measured at ~1 MB/s on a CI runner is ~11m, which a
+# 10m budget spent before the container had started, so a healthy environment
+# failed on a slow day while every assertion below it would have passed. Past the
+# pull it covers scheduling, volume binding and startup; the operator's own share
+# is seconds, so a longer budget does not hide a controller that fails to
+# converge, it only delays the dump. The loop and the message both read this
+# number, so they cannot come to disagree about how long the wait was.
+UP_TIMEOUT_MINUTES=15
+UP_POLL_SECONDS=6
 echo -n "  waiting for phase Running, Ready and RouteReady"
 up=0
-for _ in $(seq 1 100); do
+for _ in $(seq 1 $((UP_TIMEOUT_MINUTES * 60 / UP_POLL_SECONDS))); do
   phase="$(devenv -o jsonpath='{.status.phase.name}' 2>/dev/null || true)"
   ready="$(devenv -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)"
   route="$(devenv -o jsonpath='{.status.conditions[?(@.type=="RouteReady")].status}' 2>/dev/null || true)"
@@ -142,13 +154,13 @@ for _ in $(seq 1 100); do
     break
   fi
   echo -n "."
-  sleep 6
+  sleep "${UP_POLL_SECONDS}"
 done
 echo
 if [ "${up}" = 1 ]; then
   ok "environment reached Running with Ready=True and RouteReady=True"
 else
-  bad "environment did not come up within 10m (phase '${phase:-?}', Ready '${ready:-?}', RouteReady '${route:-?}')"
+  bad "environment did not come up within ${UP_TIMEOUT_MINUTES}m (phase '${phase:-?}', Ready '${ready:-?}', RouteReady '${route:-?}')"
   dump
 fi
 

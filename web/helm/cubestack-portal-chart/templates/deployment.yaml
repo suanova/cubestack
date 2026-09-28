@@ -122,15 +122,17 @@ spec:
               name: {{ include "cubestack-portal-chart.fullname" . }}-session-secret
               key: session-secret
               {{- end }}
+        # Probes hit the pod directly, so they must carry the app's basePath
+        # (web/base-path.mjs) — a bare "/" 404s and the pod never goes Ready.
         livenessProbe:
           httpGet:
-            path: /
+            path: /cubestack
             port: 3000
           initialDelaySeconds: 30
           periodSeconds: 10
         readinessProbe:
           httpGet:
-            path: /
+            path: /cubestack
             port: 3000
           initialDelaySeconds: 5
           periodSeconds: 5

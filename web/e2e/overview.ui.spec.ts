@@ -27,7 +27,7 @@ function stubOverview(page: Page, payload: object) {
 test.describe("overview landing (mocked data)", () => {
   test("renders the KPI row and subtitle from the payload", async ({ page }) => {
     await stubOverview(page, overviewSummary());
-    await page.goto("/");
+    await page.goto("/cubestack");
 
     await expect(page.locator('[data-od-id="page-head"]')).toContainText(
       "Kubernetes v1.29 · 16 节点 · 双资源池(计算 / 推理)",
@@ -57,7 +57,7 @@ test.describe("overview landing (mocked data)", () => {
 
   test("renders the trend legend values and the allocation donut", async ({ page }) => {
     await stubOverview(page, overviewSummary());
-    await page.goto("/");
+    await page.goto("/cubestack");
 
     const trend = page.locator('[data-od-id="gpu-trend-card"]');
     await expect(trend).toContainText("GPU 集群利用率 · 近 24 小时");
@@ -79,7 +79,7 @@ test.describe("overview landing (mocked data)", () => {
 
   test("shows the empty trend state and hides the GPU foot when trend is null", async ({ page }) => {
     await stubOverview(page, overviewSummary({ trend: null }));
-    await page.goto("/");
+    await page.goto("/cubestack");
 
     await expect(page.locator('[data-od-id="trend-empty"]')).toContainText("暂无监控数据");
     const gpu = page.locator('[data-od-id="kpi-gpu"]');
@@ -99,7 +99,7 @@ test.describe("overview landing (mocked data)", () => {
       }
       return route.fulfill({ json: overviewSummary() });
     });
-    await page.goto("/");
+    await page.goto("/cubestack");
 
     const err = page.locator('[data-od-id="overview-error"]');
     // The page rejects non-ok responses with `HTTP <status>` regardless of body.
@@ -125,7 +125,7 @@ test.describe("overview landing (mocked data)", () => {
       return route.fulfill({ json: payload });
     });
     await page.clock.install();
-    await page.goto("/");
+    await page.goto("/cubestack");
 
     const nodes = page.locator('[data-od-id="kpi-nodes"]');
     await expect(nodes).toContainText("16");
@@ -137,7 +137,7 @@ test.describe("overview landing (mocked data)", () => {
   test("switches locale to English", async ({ page }) => {
     await pinLocale(page, "en");
     await stubOverview(page, overviewSummary());
-    await page.goto("/");
+    await page.goto("/cubestack");
 
     await expect(page.locator('[data-od-id="page-head"]')).toContainText(
       "Kubernetes v1.29 · 16 nodes · compute / inference pools",

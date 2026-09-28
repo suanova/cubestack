@@ -27,7 +27,9 @@ ingress:
   hosts:
     - host: ui.cubestack.local
       paths:
-        - path: /
+        # The portal is built with basePath /cubestack (web/base-path.mjs), so
+        # the ingress must route that prefix rather than "/".
+        - path: /cubestack
           pathType: Prefix
   tls: []
 

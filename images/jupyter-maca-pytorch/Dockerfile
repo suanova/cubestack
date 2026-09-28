@@ -99,9 +99,10 @@ RUN rm -f /etc/ssh/ssh_host_* \
     && mkdir -p -m 0700 /run/sshd
 
 # The vendor base ships no launcher and no ENTRYPOINT, so the platform supplies both the
-# entrypoint and the jupyter launch chain it hands off to.
+# entrypoint and the jupyter launch chain it hands off to — the latter shared with the CUDA
+# jupyter image, common/jupyter/start-jupyter.sh.
 COPY common/entrypoint.sh /usr/local/bin/cubestack-entrypoint.sh
-COPY jupyter-maca-pytorch/start-jupyter.sh /usr/local/bin/start-jupyter.sh
+COPY common/jupyter/start-jupyter.sh /usr/local/bin/start-jupyter.sh
 # Shared sshd config (common/), installed by the script that also owns its placeholders: this
 # image's ssh login account (which must match USER below) and the session environment. The
 # vendor's PATH, loader and linker paths and the MACA variables are named here so the ssh

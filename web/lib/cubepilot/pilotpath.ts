@@ -24,8 +24,10 @@ export const enc = (segments: string[]): string | null => {
  * contain slashes and the API recovers it by stripping a known suffix.
  *
  * It is the set of requests THIS portal makes, not the set the API offers.
- * `turn/events` is a real route upstream and deliberately absent: this pane
- * follows a turn by polling its transcript rather than by observing it.
+ * `turn/events` is here because a turn's events — including "a write needs your
+ * decision" — are written only to the stream the send opened: a pane that lost
+ * that stream (a reload, a dropped link, a pod that went away) has to re-attach
+ * to a parked run to be told about a card raised after it.
  */
 const SUBRESOURCE: Array<{ tail: string[]; method: string }> = [
   // The conversation itself, both halves: GET reads the transcript, POST
@@ -33,6 +35,9 @@ const SUBRESOURCE: Array<{ tail: string[]; method: string }> = [
   { tail: ["messages"], method: "GET" },
   { tail: ["messages"], method: "POST" },
   { tail: ["turn"], method: "GET" },
+  // Re-attach to a parked run (the API's observation stream, accepted only
+  // while the run waits on a human).
+  { tail: ["turn", "events"], method: "GET" },
   { tail: ["abort"], method: "POST" },
   { tail: ["approvals"], method: "GET" },
   { tail: ["approvals", "decision"], method: "POST" },

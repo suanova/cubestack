@@ -20,7 +20,8 @@ export default defineConfig({
   },
   webServer: {
     command: "npm run dev",
-    url: "http://localhost:3000",
+    // The readiness probe must hit the app's base path — a bare "/" 404s.
+    url: "http://localhost:3000/cubestack",
     timeout: 120_000,
     reuseExistingServer: !process.env.CI,
     env: {

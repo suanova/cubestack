@@ -26,7 +26,7 @@ test("real route renders cluster KPIs and a Prometheus trend", async ({ context,
     localStorage.setItem("cubestack-locale", "zh-CN");
     localStorage.setItem("cubestack-theme", "light");
   });
-  await page.goto("/");
+  await page.goto("/cubestack");
 
   // Subtitle reflects the real cluster version + node count.
   await expect(page.locator('[data-od-id="page-head"]')).toContainText(/Kubernetes v\d+\.\d+ · \d+ 节点/, { timeout: 20_000 });

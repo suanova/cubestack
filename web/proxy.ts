@@ -43,6 +43,12 @@ export const config = {
   // The perses plugin bundles under /perses-viewer are static and must load
   // for authenticated dashboards, so they pass through too.
   matcher: [
+    // The base path with nothing after it. Next prepends `basePath` to every
+    // pattern below, so the negative-lookahead pattern compiles to
+    // /cubestack/(?!api|…).* — which requires the trailing slash and therefore
+    // misses a request for /cubestack itself. Without this entry that URL skips
+    // the proxy and renders the shell to a signed-out visitor.
+    "/",
     "/((?!api|login|perses-viewer|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|ico|woff2?)$).*)",
   ],
 };

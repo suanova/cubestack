@@ -20,7 +20,8 @@ ingress:
   hosts:
     - host: ui.example.com
       paths:
-        - path: /
+        # The portal is built with basePath /cubestack (web/base-path.mjs).
+        - path: /cubestack
           pathType: Prefix
   tls:
     - secretName: ui-tls

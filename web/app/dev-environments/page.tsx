@@ -35,6 +35,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { DevEnvironmentSummary } from "@/app/api/devenvironments/route";
 import type { DevEnvImageOption, DevEnvOptionsResponse } from "@/app/api/devenvironments/options/route";
+import { apiFetch } from "@/lib/base-path";
 import { PLATFORM_GID, PLATFORM_UID, PLATFORM_USER } from "@/lib/devenvironments/images";
 import { useI18n } from "@/lib/i18n";
 
@@ -161,7 +162,7 @@ export default function DevEnvironmentsPage() {
 
   const load = useCallback(() => {
     const gen = ++loadGen.current;
-    fetch("/api/devenvironments")
+    apiFetch("/api/devenvironments")
       .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
       .then((d: { items: DevEnvironmentSummary[] }) => {
         if (gen !== loadGen.current) return; // a newer load started; ignore this one
@@ -219,7 +220,7 @@ export default function DevEnvironmentsPage() {
       patch({ namespace: e.namespace, name: e.name, running: true });
     } else if (act === "del") {
       if (!window.confirm(t("dev.delete.confirm", { name: e.name }))) return;
-      fetch("/api/devenvironments", {
+      apiFetch("/api/devenvironments", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ namespace: e.namespace, name: e.name }),
@@ -235,7 +236,7 @@ export default function DevEnvironmentsPage() {
 
   const patch = useCallback(
     ({ namespace, name, running }: { namespace: string; name: string; running: boolean }) => {
-      fetch("/api/devenvironments", {
+      apiFetch("/api/devenvironments", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ namespace, name, running }),
@@ -975,7 +976,7 @@ function CreateWizard({
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
-    fetch("/api/devenvironments/options")
+    apiFetch("/api/devenvironments/options")
       .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
       .then((d: DevEnvOptionsResponse) => {
         if (cancelled) return;
@@ -1177,7 +1178,7 @@ function CreateWizard({
           }
         : {}),
     };
-    fetch("/api/devenvironments", {
+    apiFetch("/api/devenvironments", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),

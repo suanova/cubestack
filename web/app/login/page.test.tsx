@@ -124,7 +124,7 @@ describe("login page", () => {
     submitForm(container);
     await act(async () => {});
 
-    expect(assign).toHaveBeenCalledWith("/dashboards?dashboard=x");
+    expect(assign).toHaveBeenCalledWith("/cubestack/dashboards?dashboard=x");
     act(() => root.unmount());
   });
 
@@ -138,7 +138,7 @@ describe("login page", () => {
     submitForm(container);
     await act(async () => {});
 
-    expect(assign).toHaveBeenCalledWith("/");
+    expect(assign).toHaveBeenCalledWith("/cubestack");
     act(() => root.unmount());
   });
 
@@ -153,7 +153,7 @@ describe("login page", () => {
       fillInput(container, "login-password", "correct");
       submitForm(container);
       await act(async () => {});
-      expect(assign).toHaveBeenCalledWith("/");
+      expect(assign).toHaveBeenCalledWith("/cubestack");
       act(() => root.unmount());
     }
   });
@@ -166,7 +166,7 @@ describe("login page", () => {
     fillInput(container, "login-password", "correct");
     submitForm(container);
     await act(async () => {});
-    expect(assign).toHaveBeenCalledWith("/dev-environments");
+    expect(assign).toHaveBeenCalledWith("/cubestack/dev-environments");
     act(() => root.unmount());
   });
 

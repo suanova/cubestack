@@ -178,7 +178,7 @@ test.beforeEach(async ({ context, page }) => {
 test.describe("global floating AI chat", () => {
   test("sits in the bottom-right corner of a portal page, closed", async ({ page }) => {
     await stubFloatingChat(page, TURN_DONE);
-    await page.goto("/");
+    await page.goto("/cubestack");
 
     const fab = page.locator('[data-od-id="fchat-fab"]');
     await expect(fab).toBeVisible();
@@ -196,7 +196,7 @@ test.describe("global floating AI chat", () => {
   test("is absent on the 智能助手 chat tab — that tab IS the conversation", async ({ page }) => {
     await stubFloatingChat(page, TURN_DONE);
     // Default tab is chat.
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
 
     await expect(page.locator('[data-od-id="fchat-fab"]')).toHaveCount(0);
     // The full pane is what is there instead.
@@ -208,7 +208,7 @@ test.describe("global floating AI chat", () => {
       localStorage.setItem("cubestack.cubepilot.tab", "tasks");
     });
     await stubFloatingChat(page, TURN_DONE);
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
 
     await expect(page.locator('[data-od-id="cp-tab-tasks"]')).toHaveAttribute("aria-selected", "true");
     const fab = page.locator('[data-od-id="fchat-fab"]');
@@ -235,7 +235,7 @@ test.describe("global floating AI chat", () => {
         { role: "assistant", content: [{ type: "text", text: "2 个节点 NotReady,已在 09:20 恢复。" }] },
       ],
     });
-    await page.goto("/");
+    await page.goto("/cubestack");
     await page.click('[data-od-id="fchat-fab"]');
     await expect(page.locator('[data-od-id="fchat-panel"]')).toContainText("上次巡检的结论?");
 
@@ -257,7 +257,7 @@ test.describe("global floating AI chat", () => {
     await stubFloatingChat(page, TURN_DONE, {
       historyOnce: [{ role: "user", content: "上次巡检的结论?" }, { role: "assistant", content: [{ type: "text", text: "2 个节点 NotReady。" }] }],
     });
-    await page.goto("/");
+    await page.goto("/cubestack");
     await page.click('[data-od-id="fchat-fab"]');
     await expect(page.locator('[data-od-id="fchat-panel"]')).toContainText("上次巡检的结论?");
 
@@ -273,7 +273,7 @@ test.describe("global floating AI chat", () => {
     // pins is the wiring it needs — the same name on the launcher, the panel and
     // the pane's thread, with never more than one of them on screen at a time.
     await stubFloatingChat(page, TURN_DONE);
-    await page.goto("/");
+    await page.goto("/cubestack");
     expect(await vtName(page, '[data-od-id="fchat-fab"]')).toBe("agent-chat");
 
     await page.click('[data-od-id="fchat-fab"]');
@@ -281,7 +281,7 @@ test.describe("global floating AI chat", () => {
     expect(await vtName(page, '[data-od-id="fchat-panel"]')).toBe("agent-chat");
     expect(await vtName(page, '[data-od-id="fchat-fab"]')).toBe("none");
 
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await expect(page.locator('[data-od-id="chat-thread"]')).toBeVisible();
     // Polled: the name arrives with the agent selection, which the pane makes
     // after its own mount (the same element serves the model playground, unnamed).
@@ -301,7 +301,7 @@ test.describe("global floating AI chat", () => {
       ],
       staleHistory: [{ role: "user", content: "很早以前的那次提问" }],
     });
-    await page.goto("/");
+    await page.goto("/cubestack");
     await page.click('[data-od-id="fchat-fab"]');
     await expect(page.locator('[data-od-id="fchat-panel"]')).toContainText("刚跑完的那次巡检结论。");
 
@@ -328,7 +328,7 @@ test.describe("global floating AI chat", () => {
       { role: "assistant", content: [{ type: "text", text: `第 ${i + 1} 个回答` }] },
     ]).flat();
     await stubFloatingChat(page, TURN_DONE, { historyOnce: long });
-    await page.goto("/");
+    await page.goto("/cubestack");
     await page.click('[data-od-id="fchat-fab"]');
 
     const thread = page.locator('[data-od-id="fchat-thread"]');
@@ -345,7 +345,7 @@ test.describe("global floating AI chat", () => {
     // hiding it would take it away exactly when a reader might want to ask about
     // what the model just said.
     await stubFloatingChat(page, TURN_DONE);
-    await page.goto("/cubepilot");
+    await page.goto("/cubestack/cubepilot");
     await expect(page.locator('[data-od-id="fchat-fab"]')).toHaveCount(0);
     // With the assistant selected, the thread is the named end of the morph…
     await expect.poll(() => vtName(page, '[data-od-id="chat-thread"]')).toBe("agent-chat");
@@ -366,7 +366,7 @@ test.describe("global floating AI chat", () => {
 
   test("opens the panel, greets from real data, and streams a turn to its end", async ({ page }) => {
     const captured = await stubFloatingChat(page, TURN_DONE);
-    await page.goto("/");
+    await page.goto("/cubestack");
 
     await page.click('[data-od-id="fchat-fab"]');
     const panel = page.locator('[data-od-id="fchat-panel"]');
@@ -402,7 +402,7 @@ test.describe("global floating AI chat", () => {
 
   test("parks on the approval card its turn raises, and answers it", async ({ page }) => {
     await stubFloatingChat(page, TURN_APPROVAL);
-    await page.goto("/");
+    await page.goto("/cubestack");
 
     await page.click('[data-od-id="fchat-fab"]');
     const panel = page.locator('[data-od-id="fchat-panel"]');
@@ -425,7 +425,7 @@ test.describe("global floating AI chat", () => {
 
   test("closes from its own close button", async ({ page }) => {
     await stubFloatingChat(page, TURN_DONE);
-    await page.goto("/");
+    await page.goto("/cubestack");
 
     const fab = page.locator('[data-od-id="fchat-fab"]');
     await fab.click();

@@ -428,6 +428,38 @@ export function openQuestions(msg: AgentMsg): AgentQuestion[] {
   return msg.questions.filter((q) => q.state === "pending" || q.state === "submitting");
 }
 
+/** Merge `cards` onto one message, dropping what it already holds. */
+function mergeOpenCards(msg: AgentMsg, approvals: AgentApproval[], questions: AgentQuestion[]): AgentMsg {
+  let out = approvals.reduce(addApproval, msg);
+  const known = new Set(out.questions.map((q) => q.callId));
+  const added = questions.filter((q) => !known.has(q.callId));
+  if (added.length > 0) out = { ...out, questions: [...out.questions, ...added] };
+  return out;
+}
+
+/** Carry the cards a reader still has open onto `next`, turn by turn: the
+ *  runtime's transcript has no cards, so a refresh that adopts it would drop the
+ *  controls a parked run is blocked on. The transcript is append-only, so the
+ *  i-th agent turn of `prev` is the i-th of `next`; a turn `next` has not
+ *  written yet falls back to its newest, which is where its cards were anyway.
+ *  Generic over the thread's own union: a pane's list also holds model bubbles. */
+export function carryOpenCards<T extends { role: string }>(prev: readonly T[], next: T[]): T[] {
+  const idx = next.reduce<number[]>((acc, m, i) => (m.role === "agent" ? [...acc, i] : acc), []);
+  if (idx.length === 0) return next;
+  let out: T[] | null = null;
+  const agents = prev.filter((m) => m.role === "agent") as unknown as AgentMsg[];
+  agents.forEach((from, i) => {
+    const approvals = openApprovals(from);
+    const questions = openQuestions(from);
+    if (approvals.length === 0 && questions.length === 0) return;
+    out ??= [...next];
+    const at = idx[Math.min(i, idx.length - 1)];
+    out[at] = mergeOpenCards(out[at] as unknown as AgentMsg, approvals, questions) as unknown as T;
+  });
+  // Nothing carried: the caller's own array, so no render is triggered.
+  return out ?? next;
+}
+
 /** Seconds left before the gateway expires the question, or undefined if it
  *  carries no deadline. */
 export function remainingSeconds(q: AgentQuestion, now: number): number | undefined {

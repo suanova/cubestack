@@ -12,6 +12,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { OverviewSummary } from "@/app/api/overview/route";
+import { apiFetch } from "@/lib/base-path";
 import { dictionaries } from "@/lib/i18n/dictionaries";
 import { MessageKey, useI18n } from "@/lib/i18n";
 import { platformPalette, usePlatformTheme } from "@/lib/perses/theme";
@@ -433,7 +434,7 @@ export default function OverviewPage() {
     let timer: ReturnType<typeof setInterval> | undefined;
 
     const load = () => {
-      fetch("/api/overview")
+      apiFetch("/api/overview")
         .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
         .then((d: OverviewSummary) => {
           if (cancelled) return;

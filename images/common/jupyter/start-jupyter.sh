@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Cubestack jupyter launch chain for the MACA image.
+# Cubestack jupyter launch chain, shared by the two vendor (GPU) jupyter images: the Metax MACA
+# one and the NVIDIA CUDA one.
 #
 # This is the image CMD. common/entrypoint.sh has already started sshd when the operator mounted
-# the ssh host key, and hands off here (mode jupyter). The vendor base ships no launcher, so this
-# is the platform's — and it stands in for docker-stacks' start.sh, which is what the CPU jupyter
-# image runs, because the controller injects the same two variables for both:
+# the ssh host key, and hands off here (mode jupyter). Neither vendor base ships a launcher — the
+# MACA one has no jupyter at all, the CUDA one ships JupyterLab but no command that starts it — so
+# this is the platform's, and it stands in for docker-stacks' start.sh, which is what the CPU
+# jupyter image runs, because the controller injects the same two variables for both:
 #
 #   JUPYTER_TOKEN  the operator injects it (a secretKeyRef to <env>-jupyter-token) for every
 #                  jupyter-type environment, and jupyter-server reads that variable itself.

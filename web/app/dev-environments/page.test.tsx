@@ -4,6 +4,7 @@ import { act } from "react-dom/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import DevEnvironmentsPage from "./page";
+import { withBasePath } from "@/lib/base-path";
 import { devEnvironmentList, devEnvironmentSummary } from "@/test/fixtures/devenvironments";
 
 // The test files avoid JSX because tsconfig sets jsx: "preserve" (for Next),
@@ -497,7 +498,9 @@ describe("create wizard", () => {
   /** The body of the POST the wizard sent to /api/devenvironments. */
   function createdBody(): Record<string, unknown> {
     const call = (globalThis.fetch as unknown as { mock: { calls: Array<[RequestInfo | URL, RequestInit?]> } }).mock.calls.find(
-      ([url, init]) => String(url) === "/api/devenvironments" && init?.method === "POST",
+      // The route goes through apiFetch, which carries the deployment's base
+      // path, so the URL asserted here is the one the helper would build.
+      ([url, init]) => String(url) === withBasePath("/api/devenvironments") && init?.method === "POST",
     );
     expect(call).toBeTruthy();
     const [, init] = call as [RequestInfo | URL, RequestInit];

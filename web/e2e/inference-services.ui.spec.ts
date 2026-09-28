@@ -57,7 +57,7 @@ test.beforeEach(async ({ context, page }) => {
 test.describe("inference services landing (mocked data)", () => {
   test("renders service rows with status, multi-line replicas and QPS/P95 dashes", async ({ page }) => {
     await stubList(page, { items: inferenceServiceList() });
-    await page.goto("/inference-services");
+    await page.goto("/cubestack/inference-services");
 
     const table = page.locator('[data-od-id="svc-table"]');
     await expect(table).toContainText("dsv4-pro-pd");
@@ -83,7 +83,7 @@ test.describe("inference services landing (mocked data)", () => {
       inferenceServiceSummary({ name: "dsv4-flash-pd", ready: false, progressing: true, routeModelName: "dsv4-flash" }),
     ];
     await stubList(page, { items: list });
-    await page.goto("/inference-services");
+    await page.goto("/cubestack/inference-services");
 
     const tabs = page.locator('[data-od-id="svc-toolbar"] [role="tab"]');
     await expect(tabs).toHaveCount(3);
@@ -105,7 +105,7 @@ test.describe("inference services landing (mocked data)", () => {
 
   test("selecting a service opens its detail panel", async ({ page }) => {
     await stubList(page, { items: inferenceServiceList() });
-    await page.goto("/inference-services");
+    await page.goto("/cubestack/inference-services");
 
     await page.locator('[data-od-id="svc-row-dsv4-pro-pd"]').click();
 
@@ -142,7 +142,7 @@ test.describe("inference services landing (mocked data)", () => {
         json: { items: created ? [inferenceServiceSummary({ name: created.name }), ...inferenceServiceList()] : inferenceServiceList() },
       });
     });
-    await page.goto("/inference-services");
+    await page.goto("/cubestack/inference-services");
 
     await page.locator('[data-od-id="deploy-btn"]').click();
     const wizard = page.locator('[data-od-id="deploy-wizard"]');

@@ -29,8 +29,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import type { PointerEvent as ReactPointerEvent } from "react";
 
+import { apiFetch } from "@/lib/base-path";
 import {
   addApproval,
+  carryOpenCards,
   greetingTexts,
   adoptsRestoredThread,
   applyAgentEvent,
@@ -200,6 +202,22 @@ const SESSION_KEY = "agent:main:conv-portal";
  *  is one small GET every few seconds. */
 const FOLLOW_INTERVAL_MS = 3000;
 
+/** How quiet a turn's stream has to go, while the server says the run is over,
+ *  before the pane stops treating it as the state of the turn. Longer than any
+ *  first token: the point is to tell a link that died from a model that is
+ *  thinking, and the cost of waiting is a few seconds of a stale bubble. */
+const STREAM_SILENCE_MS = 5000;
+
+/** The events the re-attach stream is read for: the ones that carry a human's
+ *  decision. Whatever else it carries is already in the runtime's transcript,
+ *  which the follow loop polls. */
+const ATTACH_EVENTS = new Set<AgentSseEvent["type"]>([
+  "approval_pending",
+  "approval_resolved",
+  "question_pending",
+  "question_resolved",
+]);
+
 export function ChatPane() {
   const { t } = useI18n();
   const { showToast, toastView } = useToast();
@@ -368,6 +386,20 @@ export function ChatPane() {
    *  it is watching now. Only a turn this pane did NOT author is watched that
    *  way, and its terminal read is what completes that transcript. */
   const followingRef = useRef(false);
+  /** When this pane's turn stream last carried anything. A link that dies takes
+   *  no notice of it: the read simply never returns, so silence is the only
+   *  evidence there is — and it is read together with the server's own "nothing
+   *  is running", never on its own. */
+  const lastStreamAtRef = useRef(0);
+  /** The re-attach stream open for a parked run, so the follow loop opens one at
+   *  a time. */
+  const attachRef = useRef<AbortController | null>(null);
+  /** The send whose stream is still open. Aborting it ends this pane's
+   *  observation of the turn — the run itself is untouched. */
+  const sendCtlRef = useRef<AbortController | null>(null);
+  /** Whether this pane's own stream reported the turn's terminal. Such a turn
+   *  needs no adoption: its output and its settled cards are already here. */
+  const ownTurnSettledRef = useRef(false);
 
   const svc = models.find((s) => s.id === svcId) ?? null;
   const endpointText = endpoint ? `${endpoint}/v1/chat/completions` : "";
@@ -393,10 +425,18 @@ export function ChatPane() {
     }
   }
 
+  /** Drop the re-attach stream: it belongs to the follow state being retired. */
+  function stopAttach(): void {
+    attachRef.current?.abort();
+    attachRef.current = null;
+  }
+
   function cancelInflight(): void {
     genRef.current++;
     followGenRef.current++;
     stopTurnPolling();
+    stopAttach();
+    sendCtlRef.current?.abort();
     // The turn and its follow state describe the session this pane is leaving.
     ownTurnRef.current = false;
     followingRef.current = false;
@@ -442,9 +482,9 @@ export function ChatPane() {
   async function loadAgentMeta(): Promise<AgentMeta> {
     try {
       const [stRes, cfgRes, skRes] = await Promise.all([
-        fetch("/api/cubepilot/agent/status"),
-        fetch("/api/cubepilot/agent/config"),
-        fetch("/api/cubepilot/skills"),
+        apiFetch("/api/cubepilot/agent/status"),
+        apiFetch("/api/cubepilot/agent/config"),
+        apiFetch("/api/cubepilot/skills"),
       ]);
       const [stBody, cfgBody, skBody] = await Promise.all([
         stRes.json().catch(() => null),
@@ -505,7 +545,7 @@ export function ChatPane() {
    *  that might not hold is worse than a button the user never sees. */
   async function loadConfirmPolicy(): Promise<string> {
     try {
-      const res = await fetch("/api/cubepilot/agent/confirm");
+      const res = await apiFetch("/api/cubepilot/agent/confirm");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const body = (await res.json()) as { confirmPolicy?: string };
       const policy = body.confirmPolicy ?? "";
@@ -645,7 +685,7 @@ export function ChatPane() {
    */
   async function checkTurnElsewhere(key: string, gen: number): Promise<boolean> {
     try {
-      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/turn`);
+      const res = await apiFetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/turn`);
       if (genRef.current !== gen) return false;
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const { active } = (await res.json()) as { active?: boolean };
@@ -684,7 +724,7 @@ export function ChatPane() {
   async function loadAgentHistory(key: string): Promise<boolean> {
     const gen = genRef.current;
     try {
-      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/messages`);
+      const res = await apiFetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/messages`);
       // 404 is "this conversation has not started", which is an ordinary empty
       // thread and NOT a failure (docs/cubepilot/api.md §4.3). Reporting it would
       // make a brand-new conversation look like an erased one.
@@ -740,7 +780,7 @@ export function ChatPane() {
       attachToNewest((x) => addApproval(x, card));
     };
     try {
-      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/approvals`);
+      const res = await apiFetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/approvals`);
       // A failed read is thrown so that it is reported rather than folded into
       // "nothing is parked": an empty collection is the ordinary answer for a
       // session that is not parked, and a read that could not be made is not
@@ -768,7 +808,7 @@ export function ChatPane() {
       }
     }
     try {
-      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/questions`);
+      const res = await apiFetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/questions`);
       // A failed read is thrown so that it is reported rather than folded into
       // "idle"; an empty collection is not a failure, it is nothing pending.
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -809,7 +849,7 @@ export function ChatPane() {
   async function refreshHistoryIfChanged(key: string): Promise<void> {
     const gen = genRef.current;
     try {
-      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/messages`);
+      const res = await apiFetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/messages`);
       if (!res.ok) return;
       const body = (await res.json()) as { items?: HistoryMessage[] };
       if (genRef.current !== gen) return;
@@ -829,10 +869,120 @@ export function ChatPane() {
       const raw = JSON.stringify(items);
       if (raw === lastHistoryRef.current) return;
       lastHistoryRef.current = raw;
-      setMsgs(historyToMsgs(items, nextId));
+      setMsgs((list) => carryOpenCards(list, historyToMsgs(items, nextId)));
     } catch {
       /* a dropped poll is not an error; the next one re-reads */
     }
+  }
+
+  /**
+   * Adopt the runtime's copy of the conversation.
+   *
+   * This is where a turn's outcome comes from once its stream is gone: the
+   * transcript is written as the run goes, so it is what a reader sees after a
+   * reload — and reading it is the only way an answer the stream never
+   * delivered reaches the page. The cards come with it: the history document
+   * carries no approvals or questions, so a run parked on a human would
+   * otherwise come back looking idle.
+   */
+  async function adoptServerState(key: string): Promise<void> {
+    // A half-open link can leave either stream parked in a read for good; give up
+    // on both, so `sending` (and the composer with it) is released and a later
+    // run can be re-attached to.
+    sendCtlRef.current?.abort();
+    stopAttach();
+    followingRef.current = false;
+    setRunningElsewhere(false);
+    setAgentNotice("");
+    await loadAgentHistory(key);
+    await restorePendingHitl(key);
+  }
+
+  /**
+   * Observe a parked run with the API's re-attach stream.
+   *
+   * A turn's events — "a write needs your decision" among them — are written
+   * only to the stream the send opened, so a pane that lost that stream never
+   * hears about a card raised afterwards (the runtime logs "no open stream for
+   * session …; push dropped"). Re-attaching is what makes such a card appear
+   * here, and stay answerable here: a decision taken elsewhere arrives on the
+   * same stream.
+   *
+   * The route accepts only a run that is PARKED, so a refusal is ordinary — 404
+   * when the run is not parked, 409 when another stream holds the session — and
+   * the polling that led here carries on either way. This stream is read for the
+   * cards alone: the transcript keeps coming from the poll, and taking both
+   * would write every delta twice.
+   */
+  async function attachToRun(key: string): Promise<void> {
+    if (attachRef.current) return;
+    const gen = genRef.current;
+    const ctl = new AbortController();
+    attachRef.current = ctl;
+    try {
+      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/turn/events`, {
+        signal: ctl.signal,
+      });
+      // 404 (not parked) and 409 (another stream holds the session) are the
+      // ordinary refusals; the polling carries on either way.
+      if (!res.ok || !res.body) return;
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      for (;;) {
+        let step: ReadableStreamReadResult<Uint8Array>;
+        try {
+          step = await reader.read();
+        } catch {
+          break; // the link died again; a later tick may re-attach
+        }
+        const { done, value } = step;
+        if (done) break;
+        if (genRef.current !== gen) {
+          try {
+            await reader.cancel();
+          } catch {
+            /* already closed */
+          }
+          return;
+        }
+        lastStreamAtRef.current = Date.now();
+        buffer += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice(5).trim();
+          if (!payload) continue;
+          let evt: AgentSseEvent;
+          try {
+            evt = JSON.parse(payload) as AgentSseEvent;
+          } catch {
+            continue;
+          }
+          if (genRef.current === gen && ATTACH_EVENTS.has(evt.type)) applyAttachedEvent(evt);
+        }
+      }
+    } catch {
+      /* the next tick tries again */
+    } finally {
+      // Only if this is still the current one: a newer attach must not be
+      // cleared by an older one ending.
+      if (attachRef.current === ctl) attachRef.current = null;
+    }
+  }
+
+  /** Apply an event from the re-attach stream to the newest agent bubble: the
+   *  stream describes the turn that bubble is showing, and the id the send used
+   *  may be gone — a transcript read can have replaced the thread under it. */
+  function applyAttachedEvent(evt: AgentSseEvent): void {
+    setMsgs((list) => {
+      const lastIdx = [...list].reverse().findIndex((x) => x.role === "agent");
+      if (lastIdx < 0) return list;
+      const i = list.length - 1 - lastIdx;
+      return list.map((x, xi) => (xi === i && x.role === "agent" ? applyAgentEvent(x, evt) : x));
+    });
   }
 
   /**
@@ -860,10 +1010,11 @@ export function ChatPane() {
    */
   function startFollowing(key: string): void {
     stopTurnPolling();
+    stopAttach();
     const gen = followGenRef.current;
 
     const tickOnce = async (): Promise<void> => {
-      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/turn`);
+      const res = await apiFetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/turn`);
       if (!res.ok || followGenRef.current !== gen) return;
       const { active } = (await res.json()) as { active?: boolean };
       if (followGenRef.current !== gen) return;
@@ -874,7 +1025,26 @@ export function ChatPane() {
         // cannot say that the stream died. The one thing a stream that has
         // already ended cannot tell the pane is whether the run is still going,
         // and that is all this read is for.
-        if (active !== true) ownTurnRef.current = false;
+        if (active !== true) {
+          // A turn this pane's own stream reported the terminal for is already
+          // complete here — output and settled cards both — and the transcript
+          // the adoption would fetch carries no cards. Retire it and stop.
+          if (ownTurnSettledRef.current) {
+            ownTurnRef.current = false;
+            ownTurnSettledRef.current = false;
+            // The terminal settles the turn; an open response must not keep the
+            // composer's Stop waiting on another read.
+            sendCtlRef.current?.abort();
+            return;
+          }
+          // Otherwise only once the stream has gone quiet: an early "nothing is
+          // running" (the run has not registered yet) must not retire this
+          // pane's own view — nothing else would adopt the transcript.
+          if (Date.now() - lastStreamAtRef.current >= STREAM_SILENCE_MS) {
+            ownTurnRef.current = false;
+            await adoptServerState(key);
+          }
+        }
         return;
       }
       if (active === true) {
@@ -887,19 +1057,18 @@ export function ChatPane() {
         // goes, so re-reading it is what makes the output appear at all.
         followingRef.current = true;
         await refreshHistoryIfChanged(key);
+        // A turn can now be parked on a human, and the card that says so is
+        // pushed to the session's own stream — the one this pane lost. Re-attach
+        // so the card arrives here rather than being dropped on the floor.
+        void attachToRun(key);
         return;
       }
       // A poll that fails is not the header's "could not check": the status is
       // already the server's own answer, and one dropped request in a 3s rhythm
       // is not worth replacing it with an alarm. Only a definite "nothing is
       // running" retires the state.
-      setRunningElsewhere(false);
-      if (followingRef.current) {
-        followingRef.current = false;
-        setAgentNotice("");
-        await loadAgentHistory(key);
-        await restorePendingHitl(key);
-      }
+      if (followingRef.current) await adoptServerState(key);
+      else setRunningElsewhere(false);
     };
 
     const tick = async (): Promise<void> => {
@@ -925,7 +1094,7 @@ export function ChatPane() {
   /** Load the gateway model catalog; on first load select the first model. */
   async function loadModels(): Promise<void> {
     try {
-      const res = await fetch("/api/cubepilot/playground/services");
+      const res = await apiFetch("/api/cubepilot/playground/services");
       const body = (await res.json().catch(() => null)) as
         | { models?: GatewayModel[]; endpoint?: string | null; error?: string }
         | null;
@@ -1017,7 +1186,7 @@ export function ChatPane() {
     if (!window.confirm(t("cubepilot.chat.clearConfirm"))) return;
     setClearing(true);
     try {
-      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}`, { method: "DELETE" });
+      const res = await apiFetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}`, { method: "DELETE" });
       const body = (await res.json().catch(() => null)) as { error?: string } | null;
       if (!res.ok) throw new Error(body?.error || `HTTP ${res.status}`);
       // Everything on screen described the session that is now gone: its
@@ -1060,6 +1229,9 @@ export function ChatPane() {
 
   async function sendAgent(text: string, gen: number, msgId: number): Promise<void> {
     let gotDone = false;
+    ownTurnSettledRef.current = false;
+    const ctl = new AbortController();
+    sendCtlRef.current = ctl;
     // The conversation is named by the path: a POST to a session's messages IS
     // that session's first (or next) turn, so a send with no key has nothing to
     // address. It cannot happen — the key starts as this pane's fixed
@@ -1077,10 +1249,11 @@ export function ChatPane() {
     // prevent.
     let sessionOfTurn: string | null = null;
     try {
-      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(sessionKey)}/messages`, {
+      const res = await apiFetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(sessionKey)}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content: text }),
+        signal: ctl.signal,
       });
       if (!res.ok) {
         // Request-phase failure (400/409/503-warming): surfaced as an error
@@ -1090,11 +1263,26 @@ export function ChatPane() {
         throw new Error(err?.error || `HTTP ${res.status}`);
       }
       if (!res.body) throw new Error(t("cubepilot.chat.emptyStream"));
+      // The stream is this pane's clock for the turn: silence since here is what
+      // tells the follow loop that the link, not the model, is what stopped.
+      lastStreamAtRef.current = Date.now();
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
       for (;;) {
-        const { done, value } = await reader.read();
+        let step: ReadableStreamReadResult<Uint8Array>;
+        try {
+          step = await reader.read();
+        } catch {
+          // Our own abort (a session switch, or adopting after silence) is not a
+          // transport failure. Anything else is the connection dying under the
+          // reader — the browser's "network error" — which ends the reading
+          // rather than becoming this turn's own error: the run may still be
+          // executing, so the lost-stream path below reports it.
+          if (ctl.signal.aborted) return;
+          break;
+        }
+        const { done, value } = step;
         if (done) break;
         if (genRef.current !== gen) {
           try {
@@ -1104,6 +1292,7 @@ export function ChatPane() {
           }
           return;
         }
+        lastStreamAtRef.current = Date.now();
         buffer += decoder.decode(value, { stream: true });
         let nl: number;
         while ((nl = buffer.indexOf("\n")) >= 0) {
@@ -1119,7 +1308,10 @@ export function ChatPane() {
             continue;
           }
           if (evt.type === "message_start") sessionOfTurn = evt.sessionId;
-          if (evt.type === "message_done") gotDone = true;
+          if (evt.type === "message_done") {
+            gotDone = true;
+            ownTurnSettledRef.current = true;
+          }
           if (genRef.current === gen) handleAgentEvent(evt, msgId);
         }
       }
@@ -1150,10 +1342,14 @@ export function ChatPane() {
         if (key) void checkTurnElsewhere(key, gen);
       }
     } catch (e) {
+      // Our own abort is this pane walking away, not a turn that failed.
+      if (sendCtlRef.current?.signal.aborted) return;
       if (genRef.current === gen) {
         setThinkingText(null);
         setMsgs((list) => list.map((x) => (x.id === msgId && x.role === "agent" ? { ...x, error: String(e instanceof Error ? e.message : e) } : x)));
       }
+    } finally {
+      if (sendCtlRef.current === ctl) sendCtlRef.current = null;
     }
   }
 
@@ -1185,7 +1381,7 @@ export function ChatPane() {
     // look like it landed immediately.
     patchApproval(callId, (a) => ({ ...a, state: "deciding", error: undefined }));
     try {
-      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(agentSessionKey)}/approvals/decision`, {
+      const res = await apiFetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(agentSessionKey)}/approvals/decision`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         // The id is required: a session can hold several pending approvals, and
@@ -1241,7 +1437,7 @@ export function ChatPane() {
   async function reopenOrExpireQuestion(callId: string): Promise<void> {
     if (!agentSessionKey) return;
     try {
-      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(agentSessionKey)}/questions`);
+      const res = await apiFetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(agentSessionKey)}/questions`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const { questions } = (await res.json()) as {
         questions?: Array<{ id?: string; questions?: AgentQuestionItem[]; timeoutSeconds?: number }>;
@@ -1279,7 +1475,7 @@ export function ChatPane() {
     if (!agentSessionKey) return;
     patchQuestion(callId, (q) => ({ ...q, state: "submitting", answers: cancel ? q.answers : answers, error: undefined }));
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `/api/cubepilot/pilot/api/v1/sessions/${enc(agentSessionKey)}/questions/${cancel ? "cancel" : "answer"}`,
         {
           method: "POST",
@@ -1314,7 +1510,7 @@ export function ChatPane() {
    */
   async function abortTurn(key: string): Promise<{ ok: true } | { ok: false; error: string }> {
     try {
-      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/abort`, { method: "POST" });
+      const res = await apiFetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/abort`, { method: "POST" });
       if (res.ok) return { ok: true };
       const body = (await res.json().catch(() => null)) as { error?: string } | null;
       return { ok: false, error: body?.error ?? `HTTP ${res.status}` };
@@ -1407,7 +1603,7 @@ export function ChatPane() {
           const started = Date.now();
           let full = "";
           try {
-            const res = await fetch("/api/cubepilot/playground/chat", {
+            const res = await apiFetch("/api/cubepilot/playground/chat", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({

@@ -220,7 +220,7 @@ async function pinLocale(page: Page): Promise<void> {
 /** Open the 自动化任务 tab (the panes all mount; only this one is visible). */
 async function openTasks(page: Page, stub: Stub = {}): Promise<Captured> {
   const captured = await stubTasks(page, stub);
-  await page.goto("/cubepilot");
+  await page.goto("/cubestack/cubepilot");
   await page.locator('[data-od-id="cp-tab-tasks"]').click();
   await expect(page.locator('[data-od-id="cp-tasks-pane"]')).toBeVisible();
   return captured;
@@ -361,9 +361,12 @@ test.describe("cubepilot tasks tab (CR-backed data)", () => {
     await expect(page.locator(`[data-od-id="cp-task-row-${TASK_DAILY.id}"]`)).toHaveCount(0);
     await expect(page.locator(`[data-od-id="cp-task-row-${TASK_TEST.id}"]`)).toBeVisible();
 
-    const paths = captured.requests.map((r) => `${r.method} ${r.path}`);
-    expect(paths).toContain(`POST /api/cubepilot/tasks/${TASK_DAILY.id}/toggle`);
-    expect(paths).toContain(`DELETE /api/cubepilot/tasks/${TASK_DAILY.id}`);
+    // Match on the path suffix: the portal is served under a base path, so the
+    // captured pathname carries a /cubestack prefix.
+    const requested = (method: string, suffix: string) =>
+      captured.requests.some((r) => r.method === method && r.path.endsWith(suffix));
+    expect(requested("POST", `/api/cubepilot/tasks/${TASK_DAILY.id}/toggle`)).toBe(true);
+    expect(requested("DELETE", `/api/cubepilot/tasks/${TASK_DAILY.id}`)).toBe(true);
   });
 
   test("creates a template task with its params, cron and rendered instruction", async ({ page }) => {

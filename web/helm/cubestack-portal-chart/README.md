@@ -46,7 +46,7 @@ The following table lists the configurable parameters of the Portal chart and th
 | `ingress.enabled` | Enable ingress | `false` |
 | `ingress.className` | Ingress class name | `""` |
 | `ingress.annotations` | Ingress annotations | `{}` |
-| `ingress.hosts` | Ingress hosts | `[{ host: ui.cubestack.local, path: / }]` |
+| `ingress.hosts` | Ingress hosts | `[{ host: ui.cubestack.local, path: /cubestack }]` |
 | `ingress.tls` | Ingress TLS | `[]` |
 | `resources.limits.cpu` | CPU limit | `500m` |
 | `resources.limits.memory` | Memory limit | `512Mi` |
@@ -198,7 +198,7 @@ Log levels (`logLevel` / `CUBESTACK_LOG_LEVEL`):
 | --- | --- |
 | `error` | cluster call failures, RBAC denials |
 | `warn` | the above plus failed API requests (5xx) and unresolved gateway/agent API bases |
-| `info` (default) | the above plus one line per API request (`[info] api: request method=GET path=/api/... user=admin status=200 ms=12`) |
+| `info` (default) | the above plus one line per API request (`[info] api: request method=GET path=/cubestack/api/... user=admin status=200 ms=12`) |
 | `debug` | the above plus every cluster call (`[debug] k8s: get plural=agenttemplates namespace=cubestack-system name=cubepilot`), gateway/agent API resolution and the startup line with the resolved namespaces |
 
 Secrets are never logged: credential handling prints the Secret name and
@@ -248,7 +248,7 @@ ingress:
   hosts:
     - host: ui.example.com
       paths:
-        - path: /
+        - path: /cubestack
           pathType: Prefix
   tls:
     - secretName: ui-tls

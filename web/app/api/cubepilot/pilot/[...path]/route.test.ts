@@ -58,6 +58,7 @@ describe("/api/cubepilot/pilot/[...path]", () => {
 
   it.each([
     [["turn"], "GET"],
+    [["turn", "events"], "GET"],
     [["approvals"], "GET"],
     [["questions"], "GET"],
     [["approvals", "decision"], "POST"],
@@ -98,7 +99,6 @@ describe("/api/cubepilot/pilot/[...path]", () => {
       [await authedGet(), ["api", "v1", "sessions", ...key, "delete"]], // unknown tail
       [await authedGet(), ["api", "v1", "sessions", ...key, "approvals", "decision"]], // action asked for with GET
       [await authedGet(), ["api", "v1", "sessions", ...key, "approvals", "pending"]], // the superseded two-segment tail
-      [await authedGet(), ["api", "v1", "sessions", ...key, "turn", "events"]], // a route the portal does not use
       [await authedGet(), ["api", "v1", "sessions", ...key, "approvals", "decision", "extra"]], // too deep
     ];
     for (const [req, path] of cases) {
