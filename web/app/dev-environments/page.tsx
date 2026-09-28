@@ -20,6 +20,8 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
+  Divider,
+  Menu,
   MenuItem,
   Select,
   Stepper,
@@ -425,11 +427,10 @@ function EnvTable({
         </Typography>
       </Box>
       <Box sx={{ overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 840 }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 760 }}>
           <thead>
             <tr>
-              <th style={{ ...thSx, width: "24%" }}>{t("dev.col.env")}</th>
-              <th style={thSx}>{t("dev.col.image")}</th>
+              <th style={{ ...thSx, width: "26%" }}>{t("dev.col.env")}</th>
               <th style={thSx}>{t("dev.col.resources")}</th>
               <th style={thSx}>{t("dev.col.gpu")}</th>
               <th style={thSx}>{t("dev.col.status")}</th>
@@ -474,11 +475,8 @@ function EnvTable({
                     </Box>
                   </td>
                   <td style={tdSx}>
-                    <Box component="span" sx={{ fontFamily: "var(--font-mono)", fontSize: 11.5, color: "text.secondary" }}>{e.image}</Box>
-                  </td>
-                  <td style={tdSx}>
                     <Box component="span" sx={{ fontFamily: "var(--font-mono)", fontSize: 12 }}>
-                      {gpuText} · {t("dev.cpu.cores", { n: e.resources.cpu })} / {e.resources.memory}
+                      {t("dev.cpu.cores", { n: e.resources.cpu })} / {e.resources.memory}
                     </Box>
                   </td>
                   <td style={tdSx}>
@@ -502,7 +500,7 @@ function EnvTable({
             })}
             {items.length === 0 && (
               <tr>
-                <td colSpan={7} style={{ ...tdSx, textAlign: "center", borderBottom: 0 }}>
+                <td colSpan={6} style={{ ...tdSx, textAlign: "center", borderBottom: 0 }}>
                   <Box sx={{ py: "20px", fontSize: 13, color: "text.secondary" }}>{t("dev.filter.none")}</Box>
                 </td>
               </tr>
@@ -522,53 +520,110 @@ const tdSx = {
   color: "var(--fg)",
 };
 
+/**
+ * A row's kebab menu. What an environment offers follows from its phase rather
+ * than its type: a Running one can only be stopped, since its work is live; a
+ * Stopped one can be started again — or deleted, the one destructive choice,
+ * which is why it sits behind a separator; and one that is Pending or
+ * Terminating is mid-transition, where the controller rather than the user
+ * decides what happens next, so the menu stays shut.
+ *
+ * The menu itself is a MUI `Menu` rather than the prototype's absolutely
+ * positioned box: the table sits in a scroll container, which would clip a
+ * menu laid out inside it.
+ */
 function RowActions({ e, onAct }: { e: DevEnvironmentSummary; onAct: (e: DevEnvironmentSummary, act: string) => void }) {
   const { t } = useI18n();
-  const btn = {
-    fontSize: 12,
+  const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+  const actionable = e.phase === "Running" || e.phase === "Stopped";
+  const itemSx = {
+    fontSize: 12.5,
     fontWeight: 550,
     px: "11px",
-    py: "4px",
-    border: 1,
-    borderColor: "divider",
+    py: "7px",
     borderRadius: "6px",
-    bgcolor: "background.paper",
-    color: "text.primary",
-    textTransform: "none" as const,
-    minWidth: 0,
-    "&:hover": { borderColor: "text.primary" },
   };
-  if (e.phase === "Running") {
-    return (
-      <Box onClick={(ev) => ev.stopPropagation()} sx={{ display: "inline-flex", gap: "8px" }}>
-        <Button size="small" data-od-id={`act-stop-${e.name}`} sx={btn} onClick={() => onAct(e, "stop")}>
-          {t("dev.act.stop")}
-        </Button>
-      </Box>
-    );
-  }
-  if (e.phase === "Stopped") {
-    return (
-      <Box onClick={(ev) => ev.stopPropagation()} sx={{ display: "inline-flex", gap: "8px" }}>
-        <Button size="small" data-od-id={`act-start-${e.name}`} sx={btn} onClick={() => onAct(e, "start")}>
-          {t("dev.act.start")}
-        </Button>
-        <Button
-          size="small"
-          data-od-id={`act-del-${e.name}`}
-          sx={{ ...btn, color: soft(STATUS_ERR, 70), "&:hover": { borderColor: soft(STATUS_ERR, 70), bgcolor: soft(STATUS_ERR, 10) } }}
-          onClick={() => onAct(e, "del")}
-        >
-          {t("dev.act.delete")}
-        </Button>
-      </Box>
-    );
-  }
+  const run = (act: string) => {
+    // Deleting removes the row — and with it the kebab MUI hands focus back to
+    // — which leaves the closing modal aria-hidden around a focused item. Drop
+    // that focus first so there is nothing to hide. Start and stop keep their
+    // row, so their item stays focused and the kebab takes the focus back.
+    if (act === "del") (document.activeElement as HTMLElement | null)?.blur();
+    setAnchor(null);
+    onAct(e, act);
+  };
   return (
-    <Box sx={{ display: "inline-flex" }}>
-      <Box component="span" sx={{ fontSize: 12, opacity: 0.45, color: "text.secondary" }}>
-        {t("dev.act.scheduling")}
-      </Box>
+    // The row itself is the selection control, so the kebab and its items must
+    // not reach it: one click means one thing.
+    <Box onClick={(ev) => ev.stopPropagation()} sx={{ display: "inline-flex" }}>
+      <Button
+        size="small"
+        data-od-id={`env-ops-${e.name}`}
+        disabled={!actionable}
+        aria-label={t("dev.col.ops")}
+        aria-haspopup="menu"
+        aria-expanded={anchor ? "true" : "false"}
+        onClick={(ev) => setAnchor(ev.currentTarget)}
+        sx={{
+          minWidth: 0,
+          width: 30,
+          height: 30,
+          p: 0,
+          border: 1,
+          borderColor: "divider",
+          borderRadius: "6px",
+          bgcolor: "background.paper",
+          color: "text.primary",
+          "&:hover": { borderColor: "text.primary", bgcolor: "var(--surface)" },
+        }}
+      >
+        <Box component="svg" viewBox="0 0 16 16" aria-hidden sx={{ width: 16, height: 16, fill: "currentColor" }}>
+          <circle cx="3" cy="8" r="1.5" />
+          <circle cx="8" cy="8" r="1.5" />
+          <circle cx="13" cy="8" r="1.5" />
+        </Box>
+      </Button>
+      <Menu
+        open={anchor !== null}
+        anchorEl={anchor}
+        onClose={() => setAnchor(null)}
+        anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+        transformOrigin={{ vertical: "top", horizontal: "right" }}
+        slotProps={{
+          paper: {
+            sx: {
+              minWidth: 128,
+              mt: "6px",
+              border: 1,
+              borderColor: "divider",
+              borderRadius: "8px",
+              boxShadow: "0 12px 28px color-mix(in oklch, var(--fg) 14%, transparent)",
+            },
+          },
+          list: { sx: { py: "4px", px: "4px" } },
+        }}
+      >
+        {e.phase === "Running" ? (
+          <MenuItem data-od-id={`act-stop-${e.name}`} onClick={() => run("stop")} sx={itemSx}>
+            {t("dev.act.stop")}
+          </MenuItem>
+        ) : null}
+        {e.phase === "Stopped" ? (
+          <MenuItem data-od-id={`act-start-${e.name}`} onClick={() => run("start")} sx={itemSx}>
+            {t("dev.act.start")}
+          </MenuItem>
+        ) : null}
+        {e.phase === "Stopped" ? <Divider sx={{ my: "4px", mx: "6px" }} /> : null}
+        {e.phase === "Stopped" ? (
+          <MenuItem
+            data-od-id={`act-del-${e.name}`}
+            onClick={() => run("del")}
+            sx={{ ...itemSx, color: soft(STATUS_ERR, 70), "&:hover": { bgcolor: soft(STATUS_ERR, 10), color: soft(STATUS_ERR, 70) } }}
+          >
+            {t("dev.act.delete")}
+          </MenuItem>
+        ) : null}
+      </Menu>
     </Box>
   );
 }

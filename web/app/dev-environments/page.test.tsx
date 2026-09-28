@@ -4,7 +4,7 @@ import { act } from "react-dom/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import DevEnvironmentsPage from "./page";
-import { devEnvironmentList } from "@/test/fixtures/devenvironments";
+import { devEnvironmentList, devEnvironmentSummary } from "@/test/fixtures/devenvironments";
 
 // The test files avoid JSX because tsconfig sets jsx: "preserve" (for Next),
 // which vitest's import-analysis can't transform.
@@ -46,6 +46,27 @@ describe("dev environments page", () => {
       "fetch",
       vi.fn(async () => ({ ok, status: ok ? 200 : 500, json: async () => (ok ? { items } : { error: "boom" }) })),
     );
+  }
+
+  /**
+   * Run one of a row's actions. They live behind a kebab button now, so it
+   * takes two clicks, and the menu lands in a portal on document.body rather
+   * than inside the container the page rendered into.
+   */
+  function rowAct(name: string, kind: "start" | "stop" | "del") {
+    act(() => {
+      (document.body.querySelector(`[data-od-id="env-ops-${name}"]`) as HTMLElement).click();
+    });
+    const item = document.body.querySelector(`[data-od-id="act-${kind}-${name}"]`);
+    expect(item).not.toBeNull();
+    act(() => {
+      (item as HTMLElement).click();
+    });
+  }
+
+  /** A row's kebab button. */
+  function kebab(container: HTMLElement, name: string): HTMLButtonElement {
+    return container.querySelector(`[data-od-id="env-ops-${name}"]`) as HTMLButtonElement;
   }
 
   it("shows a loading state until the cluster request resolves", () => {
@@ -189,17 +210,48 @@ describe("dev environments page", () => {
         return { ok: true, status: 200, json: async () => ({ items: devEnvironmentList() }) };
       }),
     );
-    const { container, root } = renderPage();
+    const { root } = renderPage();
     await act(async () => {});
 
-    const startBtn = container.querySelector('[data-od-id="act-start-ssh-dataset-prep"]');
-    expect(startBtn).not.toBeNull();
-    await act(async () => {
-      (startBtn as HTMLElement).click();
-    });
+    rowAct("ssh-dataset-prep", "start");
     await act(async () => {});
     expect(patches).toHaveLength(1);
     expect(patches[0]).toMatchObject({ namespace: "project-a", name: "ssh-dataset-prep", running: true });
+
+    act(() => root.unmount());
+  });
+
+  it("gives a row only the actions its phase allows", async () => {
+    stubData([
+      devEnvironmentSummary(),
+      devEnvironmentSummary({ name: "sleeping-env", phase: "Stopped", endpoints: [], conditions: [] }),
+      devEnvironmentSummary({ name: "booting-env", phase: "Pending", endpoints: [], conditions: [] }),
+    ]);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    const open = (name: string) =>
+      act(() => {
+        kebab(container, name).click();
+      });
+    const item = (kind: string, name: string) => document.body.querySelector(`[data-od-id="act-${kind}-${name}"]`);
+
+    // Running: stop, and nothing else. Deleting an environment that is in the
+    // middle of work is not a choice a row should put one click away.
+    open("jupyter-nlp-ln");
+    expect(item("stop", "jupyter-nlp-ln")).not.toBeNull();
+    expect(item("start", "jupyter-nlp-ln")).toBeNull();
+    expect(item("del", "jupyter-nlp-ln")).toBeNull();
+
+    // Stopped: start, plus the one destructive choice.
+    open("sleeping-env");
+    expect(item("start", "sleeping-env")).not.toBeNull();
+    expect(item("del", "sleeping-env")).not.toBeNull();
+    expect(item("stop", "sleeping-env")).toBeNull();
+
+    // Pending: mid-transition, where the controller rather than the user decides
+    // what happens next — so there is no menu to open.
+    expect(kebab(container, "booting-env").disabled).toBe(true);
 
     act(() => root.unmount());
   });
@@ -217,14 +269,10 @@ describe("dev environments page", () => {
       }),
     );
     vi.spyOn(window, "confirm").mockReturnValue(true);
-    const { container, root } = renderPage();
+    const { root } = renderPage();
     await act(async () => {});
 
-    const delBtn = container.querySelector('[data-od-id="act-del-ssh-dataset-prep"]');
-    expect(delBtn).not.toBeNull();
-    await act(async () => {
-      (delBtn as HTMLElement).click();
-    });
+    rowAct("ssh-dataset-prep", "del");
     await act(async () => {});
     expect(deletes).toHaveLength(1);
     expect(deletes[0]).toEqual({ namespace: "project-a", name: "ssh-dataset-prep" });
@@ -242,13 +290,10 @@ describe("dev environments page", () => {
       }),
     );
     vi.spyOn(window, "confirm").mockReturnValue(false);
-    const { container, root } = renderPage();
+    const { root } = renderPage();
     await act(async () => {});
 
-    const delBtn = container.querySelector('[data-od-id="act-del-ssh-dataset-prep"]');
-    await act(async () => {
-      (delBtn as HTMLElement).click();
-    });
+    rowAct("ssh-dataset-prep", "del");
     await act(async () => {});
     expect(deletes).toHaveLength(0);
 
@@ -280,11 +325,7 @@ describe("dev environments page", () => {
     expect(row?.textContent).toContain("Running");
 
     // Stop via the row action -> triggers a refresh that returns Stopped.
-    const stopBtn = container.querySelector('[data-od-id="act-stop-jupyter-nlp-ln"]');
-    expect(stopBtn).not.toBeNull();
-    await act(async () => {
-      (stopBtn as HTMLElement).click();
-    });
+    rowAct("jupyter-nlp-ln", "stop");
     await act(async () => {});
     expect(row?.textContent).toContain("Stopped");
 

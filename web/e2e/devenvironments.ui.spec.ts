@@ -59,7 +59,6 @@ test.describe("dev environments landing (mocked data)", () => {
 
     const jupyter = page.locator('[data-od-id="dev-row-jupyter-nlp-ln"]');
     await expect(jupyter).toContainText("JUPYTER");
-    await expect(jupyter).toContainText("harbor.isuanova.com/suanova/base-cuda:latest");
     await expect(jupyter).toContainText("1 × GPU");
     await expect(jupyter).toContainText("Running");
     await expect(jupyter).toContainText("project-a");
@@ -68,11 +67,17 @@ test.describe("dev environments landing (mocked data)", () => {
     await expect(ssh).toContainText("SSH");
     // A CPU image with no accelerator: spec.resources.gpu is absent, so the
     // cell says so rather than inventing a card.
-    await expect(ssh).toContainText("harbor.isuanova.com/suanova/ssh-ubuntu22.04:latest");
     await expect(ssh).toContainText("无加速卡");
     await expect(ssh).toContainText("Stopped");
-    await expect(ssh.locator('[data-od-id="act-start-ssh-dataset-prep"]')).toBeVisible();
-    await expect(ssh.locator('[data-od-id="act-del-ssh-dataset-prep"]')).toBeVisible();
+    // The image is a detail-panel fact, not a column: a long registry path in
+    // every row is what made the table unreadable.
+    await expect(table).not.toContainText("base-cuda:latest");
+    await expect(table).not.toContainText("ssh-ubuntu22.04:latest");
+
+    // The row's actions live behind the kebab, which is what one clicks first.
+    await ssh.locator('[data-od-id="env-ops-ssh-dataset-prep"]').click();
+    await expect(page.locator('[data-od-id="act-start-ssh-dataset-prep"]')).toBeVisible();
+    await expect(page.locator('[data-od-id="act-del-ssh-dataset-prep"]')).toBeVisible();
   });
 
   test("filters rows by Running / Stopped tab", async ({ page }) => {
@@ -131,6 +136,9 @@ test.describe("dev environments landing (mocked data)", () => {
     });
     await page.goto("/dev-environments");
 
+    // A stopped environment offers start behind the kebab; the patch follows
+    // the menu item, not the row.
+    await page.locator('[data-od-id="env-ops-ssh-dataset-prep"]').click();
     await page.locator('[data-od-id="act-start-ssh-dataset-prep"]').click();
     await expect.poll(() => patches).toHaveLength(1);
     expect(patches[0]).toMatchObject({ namespace: "project-a", name: "ssh-dataset-prep", running: true });
