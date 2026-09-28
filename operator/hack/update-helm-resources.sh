@@ -61,6 +61,17 @@ sed -i 's#^\(\s*\)image: example\.com/cubestack:v0\.0\.1$#\1image: "{{ .Values.i
 # stale hardcoded image in the chart while the drift gate stays green.
 grep -q 'image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"' "${OUT}" \
   || { echo "image rewrite no-op'd — update needle in update-helm-resources.sh"; exit 1; }
+# The pull policy is a values knob too, so an install whose image is already on
+# the node can say so. The literal in config/manager/manager.yaml stays the one
+# `make deploy` uses; only the chart's copy is rewritten, and the default lives
+# in values.yaml.
+sed -i 's#^\(\s*\)imagePullPolicy: IfNotPresent$#\1imagePullPolicy: {{ .Values.image.pullPolicy }}#' "${OUT}"
+# Fail loudly here too: a needle that stopped matching (the policy changed in
+# config/manager/manager.yaml) would leave the chart's hardcoded literal in
+# place while values.yaml claims to drive it — and the drift gate would pass,
+# because the script is the only thing that produces the template.
+grep -q 'imagePullPolicy: {{ .Values.image.pullPolicy }}' "${OUT}" \
+  || { echo "imagePullPolicy rewrite no-op'd — update needle in update-helm-resources.sh"; exit 1; }
 # Replace the hardcoded namespace (metadata + binding subjects) with the release ns.
 sed -i 's|namespace: cubestack-system|namespace: {{ .Release.Namespace }}|g' "${OUT}"
 
@@ -313,5 +324,10 @@ CHART_APP_VERSION="$(helm show chart "${CHART}" | awk '/^appVersion:/{gsub(/"/,"
 expect_render defaults present "^[[:space:]]*image: \"harbor\.isuanova\.com/suanova/cubestack-controller-manager:${CHART_APP_VERSION}\"$" --namespace cubestack-system
 # An explicit tag still wins, which is how a rolling install points at `latest`.
 expect_render image-tag-set present '^[[:space:]]*image: "harbor\.isuanova\.com/suanova/cubestack-controller-manager:v9\.9\.9"$' --set image.tag=v9.9.9
+# The pull policy is driven by values rather than baked in (section 2 rewrites
+# it): the default case fails if the template still carries a fixed
+# `IfNotPresent`, and the override proves the value reaches the container.
+expect_render defaults present '^[[:space:]]*imagePullPolicy: Always$' --namespace cubestack-system
+expect_render pull-policy-set present '^[[:space:]]*imagePullPolicy: IfNotPresent$' --set image.pullPolicy=IfNotPresent
 
 echo "chart resources regenerated under ${CHART}"
