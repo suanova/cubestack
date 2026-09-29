@@ -2,8 +2,7 @@
 
 # Image settings
 image:
-  registry: harbor.isuanova.com
-  repository: suanova/cubestack-ui
+  repository: harbor.isuanova.com/suanova/cubestack-ui
   tag: "latest"
   pullPolicy: IfNotPresent
 
