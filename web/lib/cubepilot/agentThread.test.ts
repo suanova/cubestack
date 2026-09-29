@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   adoptsRestoredThread,
+  phaseText,
+  waitingSeconds,
   carryOpenCards,
   greetingTexts,
   applyAgentEvent,
@@ -771,5 +773,32 @@ describe("carryOpenCards — a refresh keeps the reader's cards", () => {
 
   it("nothing to carry leaves the refreshed transcript alone", () => {
     expect(carryOpenCards([user, { ...newAgentMsg(1, T0), phase: "done" as const }], refreshed)).toBe(refreshed);
+  });
+});
+
+describe("phaseText — the instance phase in the reader's words", () => {
+  const t = (key: string) => key;
+  it("names the three the platform uses", () => {
+    expect(phaseText(t, "Ready")).toBe("cubepilot.config.instPhaseReady");
+    expect(phaseText(t, "Creating")).toBe("cubepilot.config.instPhaseCreating");
+    expect(phaseText(t, "Failed")).toBe("cubepilot.config.instPhaseFailed");
+  });
+
+  it("passes anything else through rather than inventing a word", () => {
+    expect(phaseText(t, "Pending")).toBe("Pending");
+    expect(phaseText(t, undefined)).toBe("");
+  });
+});
+
+describe("waitingSeconds — how long the instance has been coming up", () => {
+  const now = Date.parse("2026-09-29T10:00:30Z");
+  it("counts from the instance's creation", () => {
+    expect(waitingSeconds("2026-09-29T09:59:30Z", now)).toBe(60);
+  });
+
+  it("is null when there is nothing to count from, and never negative", () => {
+    expect(waitingSeconds(undefined, now)).toBeNull();
+    expect(waitingSeconds("not a date", now)).toBeNull();
+    expect(waitingSeconds("2026-09-29T10:01:00Z", now)).toBe(0);
   });
 });

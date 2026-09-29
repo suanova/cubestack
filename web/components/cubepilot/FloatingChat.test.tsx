@@ -210,8 +210,8 @@ describe("floating chat (global AI assistant)", () => {
     expect(greeted).toBe(true);
     expect(container.querySelector('[data-od-id="fchat-panel"]')).not.toBeNull();
     expect(fab.getAttribute("aria-expanded")).toBe("true");
-    // The instance's phase under the title.
-    expect(container.textContent).toContain("Ready");
+    // The instance's phase under the title, in the reader's words.
+    expect(container.textContent).toContain("就绪");
     // The mockup's quick prompts, offered while the conversation is fresh.
     expect(container.querySelector('[data-od-id="fchat-quick"]')).not.toBeNull();
     act(() => root.unmount());

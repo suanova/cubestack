@@ -11,6 +11,7 @@ import { Box } from "@mui/material";
 import { ReactNode, useCallback, useEffect, useRef, useState } from "react";
 
 import { apiFetch } from "@/lib/base-path";
+import { phaseText, waitingSeconds } from "@/lib/cubepilot/agentThread";
 import { MAX_PROVIDER_MODELS, modelIdError, modelKey } from "@/lib/cubepilot/llm";
 import {
   PLATFORM_MODEL_NAME,
@@ -26,7 +27,7 @@ import { useI18n } from "@/lib/i18n";
 import { ruleKey } from "@/lib/cubepilot/allowlist";
 
 import { fmtSeconds } from "./format";
-import { Btn, Card, CardHead, CpInput, CpTextArea, Icons, Pill, inputSx, monoSx, useToast } from "./ui";
+import { Btn, Card, CardHead, CpInput, CpTextArea, Icons, Pill, Spinner, inputSx, monoSx, useToast } from "./ui";
 
 /** The policy the select shows: the override when it is one we offer, else the
  *  effective policy when that is, else Allowlist. */
@@ -151,8 +152,41 @@ export function ConfigPane() {
   }, []);
   /* eslint-enable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps */
 
+  /** The waiting line counts seconds, so the card needs a clock while the
+   *  instance is coming up — and only then. */
+  const [now, setNow] = useState(() => Date.now());
+  /** Guards the status reads above against landing out of order. */
+  const statusGenRef = useRef(0);
+  useEffect(() => {
+    if (!status || status.phase === "Ready") return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [status]);
+
+  // A save leaves the instance starting (its identity is minted, then the pod
+  // comes up), so the card asks again until it is Ready instead of sitting on
+  // "Creating" until a reload.
+  useEffect(() => {
+    if (!status || status.phase === "Ready") return;
+    const id = setInterval(() => {
+      // Only the newest read counts: a slow one must not put an older phase
+      // back on the card after a newer one said Ready.
+      const gen = ++statusGenRef.current;
+      void apiFetch("/api/cubepilot/agent/status")
+        .then((r) => (r.ok ? r.json() : null))
+        .then((s) => {
+          if (s && statusGenRef.current === gen) setStatus(s as AgentStatus);
+        })
+        .catch(() => undefined);
+    }, 4000);
+    return () => clearInterval(id);
+  }, [status]);
+
   async function saveConfig() {
     if (saving) return;
+    // A first save only starts the instance, which is not "saved" in the sense
+    // the reader expects.
+    const wasMissing = !config.exists;
     setSaving(true);
     try {
       const res = await apiFetch("/api/cubepilot/agent/config", {
@@ -168,7 +202,7 @@ export function ConfigPane() {
       }
       const body = (await res.json()) as { config: AgentConfig };
       setConfig(body.config);
-      showToast(t("cubepilot.config.saved"));
+      showToast(t(wasMissing ? "cubepilot.config.savedCreating" : "cubepilot.config.saved"));
       // The first save provisions the instance — refresh status/confirm.
       void loadAll();
     } catch (e) {
@@ -753,9 +787,22 @@ export function ConfigPane() {
           <CardHead
             title={t("cubepilot.config.instTitle")}
             actions={
-              <Pill variant={hasInstance ? (status?.phase === "Ready" ? "ok" : "warn") : "neutral"} dot pulse={hasInstance && status?.phase === "Ready"}>
-                {hasInstance ? (status?.phase || t("cubepilot.config.instPending")) : "—"}
-              </Pill>
+              <>
+                {/* The pulse belongs to a start in progress, not to a finished one. */}
+                <Pill
+                  variant={hasInstance ? (status?.phase === "Ready" ? "ok" : status?.phase === "Failed" ? "danger" : "warn") : "neutral"}
+                  dot
+                  pulse={hasInstance && status?.phase !== "Ready"}
+                >
+                  {hasInstance ? phaseText(t, status?.phase) || t("cubepilot.config.instPending") : "—"}
+                </Pill>
+                {hasInstance && status?.phase !== "Ready" ? (
+                  <Box sx={{ display: "inline-flex", alignItems: "center", gap: "6px", fontSize: 12, color: "text.secondary", ml: "8px" }}>
+                    <Spinner size={12} />
+                    {t("cubepilot.config.instWaiting", { secs: String(waitingSeconds(status?.startedAt, now) ?? 0) })}
+                  </Box>
+                ) : null}
+              </>
             }
           />
           <Box sx={{ p: "16px", display: "grid", gridTemplateColumns: "1fr", gap: "12px" }}>

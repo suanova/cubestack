@@ -595,9 +595,9 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     await stubAgent(page);
     await page.goto("/cubestack/cubepilot");
 
-    // The object entry carries the instance's real phase.
+    // The object entry carries the instance's real phase, in the reader's words.
     const obj = page.locator('[data-od-id="obj-cubepilot"]');
-    await expect(obj).toContainText("Ready");
+    await expect(obj).toContainText("就绪");
     await obj.click();
 
     const thread = page.locator('[data-od-id="chat-thread"]');
@@ -612,7 +612,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
 
     // The chat tab has no context rail: the instance state lives in the card
     // header (phase pill + activity line), not in a right-hand card column.
-    await expect(page.locator('[data-od-id="chat-card"]')).toContainText("Ready");
+    await expect(page.locator('[data-od-id="chat-card"]')).toContainText("就绪");
     await expect(page.locator('[data-od-id="allowlist-card"]')).toHaveCount(0);
     await expect(page.locator('[data-od-id="tool-whitelist-card"]')).toHaveCount(0);
     await expect(page.locator('[data-od-id="agent-status-card"]')).toHaveCount(0);
@@ -629,8 +629,17 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     await obj.click();
 
     const thread = page.locator('[data-od-id="chat-thread"]');
-    await expect(thread).toContainText("Agent 实例尚未创建");
-    await expect(thread).toContainText("「配置」页保存一次模型配置");
+    await expect(thread).toContainText("智能助手还没有创建");
+    await expect(thread).toContainText("首次启动约一分钟");
+
+    // Nothing can answer yet, so the composer says so and offers the one place
+    // that creates the instance: Send is disabled, the way forward is beside it.
+    await expect(page.locator('[data-od-id="agent-not-ready"]')).toContainText("助手还没创建");
+    // Btn marks itself with aria-disabled rather than the native attribute, and
+    // the send path refuses on the same condition.
+    await expect(page.locator('[data-od-id="send-btn"]')).toHaveAttribute("aria-disabled", "true");
+    await page.locator('[data-od-id="agent-go-config"]').click();
+    await expect(page.locator('[data-od-id="cp-tab-config"]')).toHaveAttribute("aria-selected", "true");
 
     // No instance → the card header carries the not-provisioned line and no
     // context rail is rendered.
@@ -1565,7 +1574,7 @@ test.describe("cubepilot config (AgentInstance CR + AgentTemplate catalog)", () 
     // Instance status card (CR spec + status).
     const status = page.locator('[data-od-id="cp-config-status"]');
     await expect(status).toContainText("admin-cubepilot");
-    await expect(status).toContainText("Ready");
+    await expect(status).toContainText("就绪");
     await expect(status).toContainText("cubepilot-admin-7d9f");
     await expect(status).toContainText("pvc-admin-cubepilot");
 

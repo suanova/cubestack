@@ -42,6 +42,8 @@ import {
   newQuestion,
   openApprovals,
   openQuestions,
+  phaseText,
+  waitingSeconds,
   turnStatus,
   waitingOnUser,
   type AgentApproval,
@@ -67,9 +69,10 @@ import { HitlDock, type ApprovalDecision } from "./HitlDock";
 import { CopyBtn, ParamsPanel, SampleParams } from "./Playground";
 import { AgentThread } from "./AgentThread";
 import { subscribeAgentHandoff, takeAgentHandoff } from "./agentHandoff";
+import { setStoredTab } from "./tabStore";
 import { setPaneObject } from "./paneObject";
 import { AGENT_CHAT_TRANSITION, withViewTransition } from "./viewTransition";
-import { Btn, Card, CpTextArea, Icons, Pill, monoSx, useToast } from "./ui";
+import { Btn, Card, CpTextArea, Icons, Pill, Spinner, monoSx, useToast } from "./ui";
 
 // The agent's identity colour is the violet globals.css derives from --accent,
 // so the object list reads that token rather than hardcoding its own hue. The
@@ -270,6 +273,15 @@ export function ChatPane() {
 
   // Agent (CubePilot) state — real data from the agent CRs + agent API.
   const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null);
+  /** Only a Ready instance can answer: it is what the config tab creates, and
+   *  where a start that failed says why. */
+  const agentReady = agentStatus?.exists === true && agentStatus.phase === "Ready";
+  /** Only the newest status read may be applied: a slow poll can land after a
+   *  newer one and put an older phase back on screen. */
+  const statusGenRef = useRef(0);
+  /** Set when the last select skipped its restore because there was no
+   *  instance — the one case a start that finishes later owes a restore. */
+  const awaitingInstanceRef = useRef(false);
   // Seeded with the fixed key, never null: a send that found it null would
   // mint a NEW session and quietly leave the user with two conversations again.
   const [agentSessionKey, setAgentSessionKey] = useState<string | null>(SESSION_KEY);
@@ -479,7 +491,23 @@ export function ChatPane() {
    * CRs. Returns the fresh values (the state they set is one render stale
    * inside the calling async flow).
    */
+  /** Re-read just the instance status: the poll below runs it while the pane is
+   *  waiting for an instance, and the full meta read is three requests. */
+  async function refreshAgentStatus(): Promise<void> {
+    const gen = ++statusGenRef.current;
+    try {
+      const res = await apiFetch("/api/cubepilot/agent/status");
+      if (!res.ok || statusGenRef.current !== gen) return;
+      const body = (await res.json()) as AgentStatus;
+      if (statusGenRef.current !== gen) return;
+      setAgentStatus(body);
+    } catch {
+      /* the next tick asks again */
+    }
+  }
+
   async function loadAgentMeta(): Promise<AgentMeta> {
+    const gen = ++statusGenRef.current;
     try {
       const [stRes, cfgRes, skRes] = await Promise.all([
         apiFetch("/api/cubepilot/agent/status"),
@@ -497,9 +525,12 @@ export function ChatPane() {
       // auto-selection bumped that generation while these requests were in
       // flight (otherwise the object entry stays "loading" forever).
       const status = stBody as AgentStatus;
+      // A full read races the poll the same way a poll races itself; only the
+      // newest of all of them may set the phase.
+      const newestStatus = statusGenRef.current === gen;
       const config = cfgRes.ok ? ((cfgBody as { config?: AgentConfig } | null)?.config ?? null) : null;
       const skills = skRes.ok ? ((skBody as { skills?: SkillInfo[] } | null)?.skills ?? []) : [];
-      setAgentStatus(status);
+      if (newestStatus) setAgentStatus(status);
       // config and skills travel in the returned meta and are read from there;
       // they used to have state of their own, which only the agent branch of
       // clearChat read, and that branch is gone with the fixed session key.
@@ -538,6 +569,26 @@ export function ChatPane() {
       },
     ];
   }
+
+  // Until the instance is Ready this pane can only report its absence, so it
+  // asks again: a reader should not have to reload to be let in.
+  useEffect(() => {
+    if (!isAgent || agentReady) return;
+    const id = setInterval(() => void refreshAgentStatus(), 5000);
+    return () => clearInterval(id);
+  }, [isAgent, agentReady]);
+
+  useEffect(() => {
+    if (!isAgent || !agentReady) return;
+    // Only a restore the select SKIPPED (no instance) is owed here: one that
+    // ran has the thread already, and running it twice is two history reads.
+    if (!awaitingInstanceRef.current) return;
+    awaitingInstanceRef.current = false;
+    void (async () => {
+      await restoreAgentSession(await loadAgentMeta());
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAgent, agentReady]);
 
   /** Read the instance's confirm policy once, which decides whether the durable
    *  "always allow" decision is worth offering at all. A read that fails leaves
@@ -580,8 +631,10 @@ export function ChatPane() {
       const meta = await loadAgentMeta();
       if (genRef.current !== gen) return;
       if (meta.status?.exists) {
+        awaitingInstanceRef.current = false;
         await restoreAgentSession(meta);
       } else {
+        awaitingInstanceRef.current = true;
         setMsgs(greetingMsgs(meta.status, meta.config, meta.skills, await loadConfirmPolicy()));
       }
     })();
@@ -1578,6 +1631,9 @@ export function ChatPane() {
       // offered in this window; Enter is, which is why the guard has to be here
       // too.
       if (stoppingElsewhere) return;
+      // Nothing to talk to until the instance is Ready; the hint above the
+      // composer says so and offers the way to the config tab.
+      if (objKind === "agent" && !agentReady) return;
 
       if (objKind === "model") {
         if (!svc) return;
@@ -1730,7 +1786,7 @@ export function ChatPane() {
         })();
       }
     },
-    [msgs, objKind, svc, sending, stoppingElsewhere, runningElsewhere, turnCheckFailed, params, nextId, showToast, t, agentSessionKey],
+    [msgs, objKind, svc, sending, stoppingElsewhere, runningElsewhere, turnCheckFailed, params, nextId, showToast, t, agentSessionKey, agentReady],
   );
   // sendAgent/handleAgentEvent are plain closures over this render's state;
   // the deps above (incl. agentSessionKey, which sendAgent reads) are what
@@ -1741,7 +1797,7 @@ export function ChatPane() {
     ? t("cubepilot.chat.agentMetaLoading")
     : !agentStatus.exists
       ? t("cubepilot.chat.agentNotProvisioned")
-      : agentStatus.phase || t("cubepilot.chat.agentStarting");
+      : phaseText(t, agentStatus.phase) || t("cubepilot.chat.agentStarting");
 
   const objName = isAgent ? "CubePilot" : (svc?.id ?? "—");
   const objRole = isAgent ? agentRoleLine : svc ? t("cubepilot.chat.roleModel") : "";
@@ -1994,8 +2050,8 @@ export function ChatPane() {
               </Box>
               {objKind ? (
                 isAgent ? (
-                  <Pill variant={agentPillVariant} dot sx={{ ml: "4px" }}>
-                    {agentStatus?.phase || "…"}
+                  <Pill variant={agentPillVariant} dot pulse={!agentReady} sx={{ ml: "4px" }}>
+                    {agentStatus ? phaseText(t, agentStatus.phase) : "…"}
                   </Pill>
                 ) : (
                   <Pill variant="ok" dot sx={{ ml: "4px" }}>
@@ -2208,6 +2264,53 @@ export function ChatPane() {
                 onAnswer={(callId, answers, cancel) => void submitQuestion(callId, answers, cancel)}
               />
             ) : null}
+            {isAgent && !agentReady ? (
+              // A callout, not a line of grey text: it is the only thing the
+              // reader can act on until the instance is Ready. Amber for "not
+              // there yet", the danger tone for a start that failed.
+              <Box
+                data-od-id="agent-not-ready"
+                sx={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "12px",
+                  mb: "8px",
+                  border: 1,
+                  borderColor:
+                    agentStatus?.phase === "Failed"
+                      ? "color-mix(in oklch, #e15c5c 45%, var(--border))"
+                      : "color-mix(in oklch, #e0a13a 45%, var(--border))",
+                  bgcolor:
+                    agentStatus?.phase === "Failed"
+                      ? "color-mix(in oklch, #e15c5c 8%, transparent)"
+                      : "color-mix(in oklch, #e0a13a 8%, transparent)",
+                  borderRadius: "8px",
+                  p: "10px 12px",
+                }}
+              >
+                {/* A start in progress is the one state worth animating: it is
+                    the only one that ends by itself. */}
+                {agentStatus?.exists && agentStatus.phase !== "Failed" ? <Spinner size={14} /> : null}
+                <Box sx={{ flex: 1, fontSize: 13, fontWeight: 600, lineHeight: 1.6 }}>
+                  {!agentStatus
+                    ? t("cubepilot.chat.agentMetaLoading")
+                    : !agentStatus.exists
+                      ? t("cubepilot.chat.notReadyMissing")
+                      : agentStatus.phase === "Failed"
+                        ? t("cubepilot.chat.notReadyFailed")
+                        : t("cubepilot.chat.agentStarting", {
+                            secs: String(waitingSeconds(agentStatus.startedAt, now) ?? 0),
+                          })}
+                </Box>
+                {/* Nothing to configure while it is starting: the config tab
+                    would only show the same state back. */}
+                {agentStatus && agentStatus.exists && agentStatus.phase !== "Failed" ? null : (
+                  <Btn variant="primary" onClick={() => setStoredTab("config")} data-od-id="agent-go-config">
+                    {t("cubepilot.chat.goConfig")}
+                  </Btn>
+                )}
+              </Box>
+            ) : null}
             <Box
               sx={{
                 display: "flex",
@@ -2319,7 +2422,13 @@ export function ChatPane() {
                     {t("cubepilot.chat.stop")}
                   </Btn>
                 ) : (
-                  <Btn variant="primary" small disabled={sending || !objKind} onClick={() => sendMessage()} data-od-id="send-btn">
+                  <Btn
+                    variant="primary"
+                    small
+                    disabled={sending || !objKind || (isAgent && !agentReady)}
+                    onClick={() => sendMessage()}
+                    data-od-id="send-btn"
+                  >
                     {t("cubepilot.chat.send")}
                   </Btn>
                 )}

@@ -23,6 +23,12 @@ function stubApi(
     activePolls?: number;
     transcript?: Array<{ role: string; content: string }>;
     attach?: { events?: unknown[]; emit?: (ev: unknown) => void; calls?: number };
+    /** When set, a status answer waits for the test to release it (in order). */
+    agentStatusPending?: Array<(s: unknown) => void>;
+    /** Counts POST /messages, so a test can assert that nothing was sent. */
+    turnPosts?: { n: number };
+    /** The instance state the status route reports (defaults to Ready). */
+    agentStatus?: { exists?: boolean; phase?: string; startedAt?: string };
     /** What POST /api/cubepilot/agent/llm-models answers. */
     fetchModels?: {
       models?: string[];
@@ -72,12 +78,18 @@ function stubApi(
             fm.error ? { error: fm.error } : { models: fm.models ?? [], ...(fm.warning ? { warning: fm.warning } : {}) },
         };
       }
+      if (url.includes("/api/cubepilot/agent/status") && opts.agentStatusPending) {
+        return new Promise((resolve) => {
+          opts.agentStatusPending?.push((body: unknown) => resolve({ ok: true, status: 200, json: async () => body }));
+        });
+      }
       if (url.includes("/api/cubepilot/agent/status"))
         return json({
-          exists: true,
+          exists: opts.agentStatus?.exists ?? true,
           id: "tester-cubepilot",
-          phase: "Ready",
-          startedAt: new Date(Date.now() - 3600 * 1000).toISOString(),
+          // A missing instance reports no phase, as the route does.
+          phase: opts.agentStatus?.phase ?? ((opts.agentStatus?.exists ?? true) ? "Ready" : ""),
+          startedAt: opts.agentStatus?.startedAt ?? new Date(Date.now() - 3600 * 1000).toISOString(),
           uptimeSeconds: 3600,
           user: "tester",
           message: "ready",
@@ -105,6 +117,7 @@ function stubApi(
       // only the method tells them apart.
       if (url.endsWith("/messages") && method === "POST") {
         sent = true;
+        if (opts.turnPosts) opts.turnPosts.n += 1;
         // The agent turn: real SSE events (the client accumulates deltas,
         // pairs the tool result by callId, and renders the HITL card).
         //
@@ -891,6 +904,119 @@ describe("cubepilot page", () => {
     await act(async () => {});
 
     expect(document.body.textContent ?? "").toContain("请输入 apiKey");
+    act(() => root.unmount());
+  });
+
+  it("guides to the config tab until the assistant is Ready", async () => {
+    // Nothing can answer before the instance exists: the composer says so and
+    // offers the one place that creates it.
+    const posts = { n: 0 };
+    stubApi(EXTERNAL_ONLY, { agentStatus: { exists: false }, turnPosts: posts });
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    const hint = container.querySelector('[data-od-id="agent-not-ready"]') as HTMLElement;
+    expect(hint).not.toBeNull();
+    expect(hint.textContent).toContain("助手还没创建");
+
+    // Enter takes the same door as the button, which is not offered here.
+    const input = container.querySelector('[data-od-id="chat-input"]') as HTMLTextAreaElement;
+    const setValue = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")!.set!;
+    act(() => {
+      setValue.call(input, "在吗");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    await act(async () => {});
+    // Neither door sent anything.
+    expect(posts.n).toBe(0);
+
+    act(() => (container.querySelector('[data-od-id="agent-go-config"]') as HTMLElement).click());
+    await act(async () => {});
+    expect((container.querySelector('[data-od-id="cp-tab-config"]') as HTMLElement).getAttribute("aria-selected")).toBe("true");
+    act(() => root.unmount());
+  });
+
+  it("keeps the newest status when answers land out of order", async () => {
+    // A slow poll must not put an older phase back on screen: the guidance
+    // would reappear after the assistant was already up.
+    const pending: Array<(s: unknown) => void> = [];
+    stubApi(EXTERNAL_ONLY, { agentStatus: { exists: true, phase: "Creating" }, agentStatusPending: pending });
+    const { container, root } = renderPage();
+    await act(async () => {});
+    // The mount's own read is held too, so nothing has a phase yet.
+    expect(container.querySelector('[data-od-id="agent-not-ready"]')).not.toBeNull();
+
+    // The mount's read is still out when a poll's answer (Ready) comes back.
+    expect(await waitFor(() => pending.length >= 2, 300)).toBe(true);
+    act(() => pending[1]?.({ exists: true, phase: "Ready" }));
+    await act(async () => {});
+    expect(await waitFor(() => container.querySelector('[data-od-id="agent-not-ready"]') === null)).toBe(true);
+
+    // The older answer lands late and is dropped.
+    act(() => pending[0]?.({ exists: true, phase: "Creating" }));
+    await act(async () => {});
+    expect(container.querySelector('[data-od-id="agent-not-ready"]')).toBeNull();
+    act(() => root.unmount());
+  }, 45000);
+
+  it("counts the seconds while the instance is coming up", async () => {
+    // The wait is the part that ends by itself, so the callout shows how long
+    // it has been going (the box also carries a spinner).
+    stubApi(EXTERNAL_ONLY, {
+      agentStatus: { exists: true, phase: "Creating", startedAt: new Date(Date.now() - 42_000).toISOString() },
+    });
+    const { container, root } = renderPage();
+    await act(async () => {});
+    const hint = container.querySelector('[data-od-id="agent-not-ready"]') as HTMLElement;
+    expect(hint.textContent).toContain("启动中");
+    // Counted from the instance's creation time, not from this page load.
+    expect(hint.textContent).toMatch(/已等待 4[0-9]s/);
+    act(() => root.unmount());
+  });
+
+  it("lifts the guidance by itself once the instance is Ready", async () => {
+    // The pane cannot know when a start finishes, so it asks again: a reader who
+    // saved a moment ago should not have to reload to be let in.
+    const st: { exists?: boolean; phase?: string } = { exists: false, phase: "" };
+    const posts = { n: 0 };
+    stubApi(EXTERNAL_ONLY, { agentStatus: st, turnPosts: posts });
+    const { container, root } = renderPage();
+    await act(async () => {});
+    expect(container.querySelector('[data-od-id="agent-not-ready"]')).not.toBeNull();
+
+    // The operator brings it up while the page is open.
+    st.exists = true;
+    st.phase = "Ready";
+    expect(await waitFor(() => container.querySelector('[data-od-id="agent-not-ready"]') === null)).toBe(true);
+
+    // The restore the mount skipped (there was no instance) is what the thread
+    // gets, so the greeting is no longer the "not provisioned" one.
+    expect(await waitFor(() => (container.textContent ?? "").includes("技能"))).toBe(true);
+
+    const input = container.querySelector('[data-od-id="chat-input"]') as HTMLTextAreaElement;
+    const setValue = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")!.set!;
+    act(() => {
+      setValue.call(input, "现在呢");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    await act(async () => {});
+    // The send went through, which is what "Ready" is for.
+    expect(posts.n).toBe(1);
+    act(() => root.unmount());
+  }, 30000);
+
+  it("says a first save started the assistant rather than that it is ready", async () => {
+    stubApi({ exists: false, selectedModel: "", userInstructions: "", providers: [], gatewayModels: [] });
+    const { container, root } = renderPage();
+    await act(async () => {});
+    act(() => (container.querySelector('[data-od-id="cp-tab-config"]') as HTMLElement).click());
+    await act(async () => {});
+    act(() => (container.querySelector('[data-od-id="cp-config-save"]') as HTMLElement).click());
+    await act(async () => {});
+
+    expect(document.body.textContent ?? "").toContain("助手正在创建");
     act(() => root.unmount());
   });
 

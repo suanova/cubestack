@@ -736,6 +736,33 @@ export function adoptsRestoredThread(restored: unknown[], handedOver: boolean): 
   return restored.length > 0 && !handedOver;
 }
 
+/** The instance phase in the reader's words. The CRD's values are its own
+ *  vocabulary, and one of them ("Creating") is on screen for a minute at a
+ *  time; an unknown phase is reported as it is, so nothing new goes unnamed. */
+export function phaseText(
+  t: (key: MessageKey, params?: Record<string, string>) => string,
+  phase: string | undefined,
+): string {
+  switch (phase) {
+    case "Ready":
+      return t("cubepilot.config.instPhaseReady");
+    case "Creating":
+      return t("cubepilot.config.instPhaseCreating");
+    case "Failed":
+      return t("cubepilot.config.instPhaseFailed");
+    default:
+      return phase ?? "";
+  }
+}
+
+/** Seconds since the instance was created, or null when that is unknown. */
+export function waitingSeconds(startedAt: string | undefined, now: number): number | null {
+  if (!startedAt) return null;
+  const t0 = new Date(startedAt).getTime();
+  if (!Number.isFinite(t0)) return null;
+  return Math.max(0, Math.floor((now - t0) / 1000));
+}
+
 /** True when the turn is parked on a human, in any part of the transcript. */
 export function waitingOnUser(msgs: ThreadMsg[]): "approval" | "question" | null {
   const agentMsgs = msgs.filter((m) => m.role === "agent");

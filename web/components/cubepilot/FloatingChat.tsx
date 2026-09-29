@@ -27,6 +27,8 @@ import {
   addApproval,
   carryOpenCards,
   greetingTexts,
+  phaseText,
+  waitingSeconds,
   applyAgentEvent,
   historyToMsgs,
   newAgentMsg,
@@ -57,7 +59,7 @@ import { useI18n } from "@/lib/i18n";
 
 import { AgentThread } from "./AgentThread";
 import { HitlDock, type ApprovalDecision } from "./HitlDock";
-import { Btn, CpTextArea, Icons, Pill, monoSx, useToast } from "./ui";
+import { Btn, CpTextArea, Icons, Pill, Spinner, monoSx, useToast } from "./ui";
 import { offerHandoffFromFloatingChat, registerFloatingThread } from "./agentHandoff";
 import { setStoredTab } from "./tabStore";
 import { AGENT_CHAT_TRANSITION, withViewTransition } from "./viewTransition";
@@ -105,7 +107,11 @@ interface AgentMeta {
 
 /** The instance line under the title: what the agent is looking at. */
 function agentRoleLine(status: AgentStatus | null, t: (key: MessageKey, params?: Record<string, string | number>) => string): string {
-  return !status ? t("cubepilot.chat.agentMetaLoading") : !status.exists ? t("cubepilot.chat.agentNotProvisioned") : status.phase || t("cubepilot.chat.agentStarting");
+  return !status
+    ? t("cubepilot.chat.agentMetaLoading")
+    : !status.exists
+      ? t("cubepilot.chat.agentNotProvisioned")
+      : phaseText(t, status.phase) || t("cubepilot.chat.agentStarting");
 }
 
 /** One quick prompt of the mockup's "try asking me" list (copilot.html). */
@@ -121,6 +127,13 @@ export function FloatingChat() {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null);
+  /** Only a Ready instance can answer; the config tab is where it is created. */
+  const agentReady = agentStatus?.exists === true && agentStatus.phase === "Ready";
+  /** Only the newest status read may be applied (a slow poll can land late). */
+  const statusGenRef = useRef(0);
+  /** Set when an open found no instance to restore for; the instance appearing
+   *  later is what that restore was waiting for. */
+  const awaitingInstanceRef = useRef(false);
   const [agentNotice, setAgentNotice] = useState("");
   /** A turn is running for this session with no stream of this surface's own —
    *  one the chat tab started, or one that outlived a close. */
@@ -234,6 +247,20 @@ export function FloatingChat() {
    *  Applied even when the generation moved while it was in flight: it is
    *  global to the surface (the header line), not part of a conversation
    *  generation. */
+  /** Re-read just the instance status, which is what the poll below needs. */
+  async function refreshAgentStatus(): Promise<void> {
+    const gen = ++statusGenRef.current;
+    try {
+      const res = await apiFetch("/api/cubepilot/agent/status");
+      if (!res.ok || statusGenRef.current !== gen) return;
+      const body = (await res.json()) as AgentStatus;
+      if (statusGenRef.current !== gen) return;
+      setAgentStatus(body);
+    } catch {
+      /* the next tick asks again */
+    }
+  }
+
   async function loadAgentMeta(): Promise<AgentMeta> {
     try {
       const [stRes, cfgRes, skRes] = await Promise.all([
@@ -655,6 +682,8 @@ export function FloatingChat() {
     void (async () => {
       const meta = await loadAgentMeta();
       if (genRef.current !== gen) return;
+      // Nothing to restore into yet: the instance appearing later owes this one.
+      awaitingInstanceRef.current = !meta.status?.exists;
       // While we are driving our own turn, the stream is the state: adopting
       // the history document now would take the bubble it is writing to with
       // it (the history carries no HITL cards either).
@@ -721,6 +750,27 @@ export function FloatingChat() {
   }, [open, msgs]);
 
   // Focus the composer on open, so Enter starts talking immediately.
+  // Until the instance is Ready the panel can only report its absence, so it
+  // asks again: the reader should not have to reopen it to be let in.
+  useEffect(() => {
+    if (!open || agentReady) return;
+    const id = setInterval(() => void refreshAgentStatus(), 5000);
+    return () => clearInterval(id);
+  }, [open, agentReady]);
+
+  useEffect(() => {
+    if (!open || !agentReady) return;
+    // Only an open that had no instance to restore for is owed one; a normal
+    // open already read the history, and a second read breaks its callers.
+    if (!awaitingInstanceRef.current) return;
+    awaitingInstanceRef.current = false;
+    void (async () => {
+      await loadAgentHistory(SESSION_KEY);
+      await restorePendingHitl(SESSION_KEY);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, agentReady]);
+
   useEffect(() => {
     if (!open) return;
     const id = requestAnimationFrame(() => inputEl.current?.focus());
@@ -1019,6 +1069,9 @@ export function FloatingChat() {
     // A Stop is in flight, so the turn it is stopping is still running
     // server-side: refusing here is what keeps this send from racing it.
     if (stoppingElsewhere) return;
+    // Nothing to talk to until the instance is Ready; the hint above the
+    // composer says so and offers the way.
+    if (!agentReady) return;
 
     const gen = ++genRef.current;
     const agentMsgId = nextId();
@@ -1367,6 +1420,54 @@ export function FloatingChat() {
               onDecide={(callId, decision) => void decideApproval(callId, decision)}
               onAnswer={(callId, answers, cancel) => void submitQuestion(callId, answers, cancel)}
             />
+            {!agentReady ? (
+              <Box
+                data-od-id="fchat-not-ready"
+                sx={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "10px",
+                  mb: "8px",
+                  border: 1,
+                  borderColor:
+                    agentStatus?.phase === "Failed"
+                      ? "color-mix(in oklch, #e15c5c 45%, var(--border))"
+                      : "color-mix(in oklch, #e0a13a 45%, var(--border))",
+                  bgcolor:
+                    agentStatus?.phase === "Failed"
+                      ? "color-mix(in oklch, #e15c5c 8%, transparent)"
+                      : "color-mix(in oklch, #e0a13a 8%, transparent)",
+                  borderRadius: "8px",
+                  p: "8px 10px",
+                }}
+              >
+                {agentStatus?.exists && agentStatus.phase !== "Failed" ? <Spinner size={13} /> : null}
+                <Box sx={{ flex: 1, fontSize: 12.5, fontWeight: 600, lineHeight: 1.6 }}>
+                  {!agentStatus
+                    ? t("cubepilot.chat.agentMetaLoading")
+                    : !agentStatus.exists
+                      ? t("cubepilot.chat.notReadyMissing")
+                      : agentStatus.phase === "Failed"
+                        ? t("cubepilot.chat.notReadyFailed")
+                        : t("cubepilot.chat.agentStarting", {
+                            secs: String(waitingSeconds(agentStatus.startedAt, now) ?? 0),
+                          })}
+                </Box>
+                {agentStatus && agentStatus.exists && agentStatus.phase !== "Failed" ? null : (
+                  <Btn
+                    small
+                    variant="primary"
+                    onClick={() => {
+                      setStoredTab("config");
+                      router.push("/cubepilot");
+                    }}
+                    data-od-id="fchat-go-config"
+                  >
+                    {t("cubepilot.chat.goConfig")}
+                  </Btn>
+                )}
+              </Box>
+            ) : null}
             <Box
               sx={{
                 display: "flex",
@@ -1423,7 +1524,13 @@ export function FloatingChat() {
                     {t("cubepilot.chat.stop")}
                   </Btn>
                 ) : (
-                  <Btn variant="primary" small disabled={sending} onClick={() => sendMessage()} data-od-id="fchat-send">
+                  <Btn
+                    variant="primary"
+                    small
+                    disabled={sending || !agentReady}
+                    onClick={() => sendMessage()}
+                    data-od-id="fchat-send"
+                  >
                     {t("cubepilot.chat.send")}
                   </Btn>
                 )}
