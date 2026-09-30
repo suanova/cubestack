@@ -19,6 +19,8 @@ function stubApi(
   config?: Record<string, unknown>,
   opts: {
     catalogUnavailable?: boolean;
+    /** Fails the config read, so the config pane shows its load-error card. */
+    configUnavailable?: boolean;
     stream?: "end" | "error" | "stall" | "terminal";
     activePolls?: number;
     transcript?: Array<{ role: string; content: string }>;
@@ -51,7 +53,14 @@ function stubApi(
       if (url.includes("/api/cubepilot/tasktemplates"))
         return json({ taskTemplates: [] });
       if (url.includes("/api/cubepilot/tasks")) return json({ tasks: [], reports: [] });
-      if (url.includes("/api/cubepilot/agent/config"))
+      if (url.includes("/api/cubepilot/agent/config")) {
+        if (opts.configUnavailable) {
+          return {
+            ok: false,
+            status: 502,
+            json: async () => ({ error: "Error: HTTP 502" }),
+          };
+        }
         return json({
           config: config ?? {
             exists: true,
@@ -61,6 +70,7 @@ function stubApi(
             models: [{ name: "glm-5.2-chat", endpoint: "http://gw.test:8080" }],
           },
         });
+      }
       if (url.includes("/api/cubepilot/agent/llm-models")) {
         const fm = opts.fetchModels ?? {};
         if (fm.pending) {
@@ -330,6 +340,24 @@ describe("cubepilot page", () => {
     expect(container.querySelector('[data-od-id="objects-models"]')).toBeNull();
     expect(document.body.textContent).not.toContain("操作失败");
     expect(document.body.textContent).not.toContain("fetch failed");
+    act(() => root.unmount());
+  });
+
+  // The load-error card's tuning hint names the namespace env var, the CRD and
+  // the portal's ServiceAccount: what whoever fixes a broken install needs, and
+  // what the reader of the card does not. It stays in the card, folded.
+  it("folds a failed load's tuning hint behind a closed disclosure", async () => {
+    stubApi(undefined, { configUnavailable: true });
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    const card = container.querySelector('[data-od-id="cp-config-load-error"]') as HTMLElement;
+    expect(card).not.toBeNull();
+    const details = card.querySelector("details") as HTMLDetailsElement;
+    expect(details).not.toBeNull();
+    expect(details.hasAttribute("open")).toBe(false);
+    // Folded, not dropped: the hint is the one place those names still earn it.
+    expect(details.textContent ?? "").toContain("CUBESTACK_LOG_LEVEL");
     act(() => root.unmount());
   });
 
