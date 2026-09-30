@@ -120,7 +120,6 @@ export function greetingTexts(
   const lines = [t("cubepilot.chat.greeting", { tools: String(opts.skills), model: opts.model })];
   if (opts.policy === "None") lines.push(t("cubepilot.chat.approvalNone"));
   else if (opts.policy === "Allowlist") lines.push(t("cubepilot.chat.approvalAllowlist"));
-  lines.push(t("cubepilot.chat.greetingMeta"));
   return lines;
 }
 

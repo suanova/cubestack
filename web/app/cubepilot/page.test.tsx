@@ -472,7 +472,7 @@ describe("cubepilot page", () => {
       greeted =
         (container.textContent ?? "").includes("技能 2 项") &&
         (container.textContent ?? "").includes("当前模型 glm-5.2-chat") &&
-        (container.textContent ?? "").includes("会话审计已开启");
+        (container.textContent ?? "").includes("白名单内的写操作直接执行");
     }
     expect(greeted).toBe(true);
 
