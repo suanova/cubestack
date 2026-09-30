@@ -540,6 +540,79 @@ helm-e2e-uninstall: ## Uninstall the helm release; CRDs intentionally remain
 helm-e2e-cleanup: ## Delete the dedicated kind cluster
 	@$(KIND) delete cluster --name $(KIND_CLUSTER_HELM)
 
+# ---- DevEnvironment conformance suite (an existing cluster, never one we build) ----
+#
+# Not a CI target and not to become one. The helm-e2e family above builds the
+# cluster its subject runs on; this one runs against a cluster someone else owns —
+# their Gateway, their L4 port pool, their storage class, their pulls — and
+# creates and destroys real environments in a real namespace. CI invokes targets
+# by name with no wildcard, so a target nothing references is inert, and this is
+# deliberately referenced by nothing.
+#
+#   make -C operator devenv-e2e KUBECONFIG=~/.kube/kubeconfig.cs3
+#   make -C operator devenv-e2e-list
+#   make -C operator devenv-e2e-cleanup KUBECONFIG=~/.kube/kubeconfig.cs3
+#
+# KUBECONFIG falls through to the ambient one, and the targets pass it explicitly
+# rather than using --context: the point is to run against whichever cluster the
+# caller names, including one not in the kubeconfig's context list.
+#
+# DEVENV_E2E_LABELS is a Ginkgo label filter and the only selection mechanism —
+# there is no per-family or per-case variable, because Ginkgo's filter language
+# already has one:
+#
+#   DEVENV_E2E_LABELS='devenv-conformance && p0'
+#   DEVENV_E2E_LABELS='devenv-conformance && identity:root'
+#   DEVENV_E2E_LABELS='devenv-conformance && image:jupyter-minimal'
+#
+# It duplicates the constants in test/e2e/devenv/labels.go, which a Makefile cannot
+# import. Keep the two adjacent in review and do not add a third copy.
+#
+# Everything else the suite needs comes from the environment, which make passes
+# through to the recipe — it is not repeated here because the file that declares
+# each one also declares its default. The one worth knowing about: DEVENV_E2E_PROXY
+# takes a SOCKS5 URL (socks5h://127.0.0.1:1080) for a cluster whose addresses a
+# workstation reaches only through a proxy. Without it the suite dials the
+# Gateway's address directly, which is right on a node and wrong here.
+#
+# DEVENV_E2E_TIMEOUT is go test's -timeout, and it is a hard stop rather than a
+# per-case budget: when it expires the binary panics mid-run and the namespaces it
+# had open are left behind (see devenv-e2e-cleanup). Sizing it is therefore about
+# the whole selection, and the full twelve-environment matrix is a slow thing —
+# each environment pulls its image, waits for a pod, and C4 restarts the pod and
+# stops and starts the environment before its cases are done. Four of the six
+# images are vendor builds of tens of gigabytes. The default is the full matrix
+# with room to spare; a narrower filter finishes long before it and pays nothing.
+DEVENV_E2E_KUBECONFIG ?= $(KUBECONFIG)
+DEVENV_E2E_LABELS     ?= devenv-conformance
+DEVENV_E2E_TIMEOUT    ?= 240m
+
+.PHONY: devenv-e2e
+devenv-e2e: ## Run the DevEnvironment conformance cases against an existing cluster (KUBECONFIG=...)
+	DEVENV_E2E=1 KUBECONFIG="$(DEVENV_E2E_KUBECONFIG)" \
+		go test -tags=e2e ./test/e2e/ -v -timeout $(DEVENV_E2E_TIMEOUT) \
+		-ginkgo.label-filter='$(DEVENV_E2E_LABELS)'
+
+# Ginkgo's dry run reports what a filter selects and exits before BeforeSuite, so
+# this reads no cluster, needs no KUBECONFIG and deliberately does not set
+# DEVENV_E2E: passing it would imply the target needs a cluster it does not.
+#
+# -v is go test's, not Ginkgo's: without it the package's output is swallowed on
+# success and the target prints nothing at all.
+.PHONY: devenv-e2e-list
+devenv-e2e-list: ## Print what a label filter would run, without a cluster
+	go test -tags=e2e ./test/e2e/ -v -ginkgo.dry-run -ginkgo.v \
+		-ginkgo.label-filter='$(DEVENV_E2E_LABELS)'
+
+# For a run that was killed before its teardown: the suite names every namespace it
+# makes devenv-e2e-<run id> and labels it, so the leftovers are findable without
+# knowing the run id. Deleting the namespace takes the environments with it and
+# skips the controller's withdrawal path, which is the right trade for a rescue.
+.PHONY: devenv-e2e-cleanup
+devenv-e2e-cleanup: ## Delete namespaces left behind by an interrupted run
+	$(KUBECTL) --kubeconfig "$(DEVENV_E2E_KUBECONFIG)" \
+		delete namespaces -l e2e.cubestack.io/run=devenv-conformance --wait=false
+
 .PHONY: helm-crds-sync
 helm-crds-sync: ## Copy the ai.cubestack.io CRDs from config/crd/bases into the chart (crds/ is not committed)
 	rm -rf $(HELM_CHART_DIR)/crds

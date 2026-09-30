@@ -28,6 +28,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/suanova/cubestack/test/e2e/devenv"
 	"github.com/suanova/cubestack/test/utils"
 )
 
@@ -44,13 +45,34 @@ var (
 // To enable kubectl kuberc (use custom kubectl configurations), set: KUBECTL_KUBERC=true
 // By default, kuberc is disabled to ensure consistent test behavior across different environments.
 // To skip CertManager installation, set: CERT_MANAGER_INSTALL_SKIP=true
+//
+// To run the DevEnvironment conformance cases against an existing cluster instead,
+// set DEVENV_E2E=1 and KUBECONFIG — see the devenv-e2e make target.
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
 	_, _ = fmt.Fprintf(GinkgoWriter, "Starting cubestack e2e test suite\n")
-	RunSpecs(t, "e2e suite")
+
+	suiteConfig, reporterConfig := GinkgoConfiguration()
+	if suiteConfig.LabelFilter == "" {
+		// A run that named no filter gets this suite's historical scope, which is
+		// the specs that build their own kind cluster. The conformance cases want a
+		// cluster nobody here built and pull images measured in gigabytes, so
+		// reaching them takes either a label filter or the devenv-e2e target —
+		// forgetting one has to land on the cheap side.
+		suiteConfig.LabelFilter = "!" + devenv.LabelConformance
+	}
+	RunSpecs(t, "e2e suite", suiteConfig, reporterConfig)
 }
 
 var _ = BeforeSuite(func() {
+	if os.Getenv(envDevEnvConformance) == "1" {
+		// The subject here is a cluster somebody else owns: the kind cluster, the
+		// manager image and cert-manager all belong to the other path, and building
+		// any of them would be building them for a cluster that is not being used.
+		setupDevEnvConformance()
+		return
+	}
+
 	verifyKindContext()
 
 	By("building the manager image")
@@ -69,6 +91,16 @@ var _ = BeforeSuite(func() {
 })
 
 var _ = AfterSuite(func() {
+	if os.Getenv(envDevEnvConformance) == "1" {
+		// Teardown first, and unconditionally. The report fails when a run tested
+		// two artifacts under one image name, and an Expect failure ends this
+		// function where it stands — so a report placed first leaks the run's
+		// namespace and every environment in it, which is exactly the run that is
+		// already telling you something went wrong.
+		teardownDevEnvConformance()
+		reportDevEnvImageDigests()
+		return
+	}
 	teardownCertManager()
 })
 
