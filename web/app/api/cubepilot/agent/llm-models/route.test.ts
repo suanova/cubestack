@@ -83,6 +83,15 @@ describe("/api/cubepilot/agent/llm-models", () => {
     expect(mock).not.toHaveBeenCalled();
   });
 
+  it("refuses an endpoint that would swallow the path this route appends", async () => {
+    const mock = stubFetch(async () => serves(["m"]));
+    // A fragment is never sent, so a trailing "#' would leave the caller naming
+    // the path requested; a query puts the appended /models in the query.
+    expect((await call({ endpoint: "https://api.test/v1#", apiKey: "sk-x" })).status).toBe(400);
+    expect((await call({ endpoint: "https://api.test/v1?api-version=1", apiKey: "sk-x" })).status).toBe(400);
+    expect(mock).not.toHaveBeenCalled();
+  });
+
   it("reports the upstream status without its body", async () => {
     stubFetch(async () => new Response("secret upstream detail", { status: 401 }));
     const res = await call({ endpoint: "https://api.test/v1", apiKey: "sk-bad" });

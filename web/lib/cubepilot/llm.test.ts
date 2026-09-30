@@ -102,6 +102,21 @@ describe("normalizeEndpoint", () => {
     expect(() => normalizeEndpoint("")).toThrow("valid URL");
     expect(() => normalizeEndpoint("/v1")).toThrow("valid URL");
   });
+
+  it("refuses a fragment, a bare trailing '#' among them", () => {
+    // The callers append their own path to this value and fetch never sends a
+    // fragment: either one would leave the caller naming the path requested.
+    expect(() => normalizeEndpoint("https://api.example.com/v1#")).toThrow("'#'");
+    expect(() => normalizeEndpoint("https://api.example.com/v1#x")).toThrow("'#'");
+  });
+
+  it("refuses a query string, which swallows the appended path the same way", () => {
+    expect(() => normalizeEndpoint("https://api.example.com/v1?api-version=1")).toThrow("query");
+  });
+
+  it("keeps an encoded '?' or '#', which stays in the path", () => {
+    expect(normalizeEndpoint("https://api.example.com/v1%3Fx")).toBe("https://api.example.com/v1%3Fx");
+  });
 });
 
 describe("credentialChoiceError", () => {

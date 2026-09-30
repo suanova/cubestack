@@ -5,9 +5,9 @@
 // be called from the page (CORS), and the key being typed has not been stored
 // yet. What the endpoint may be is therefore bounded here — http(s) only, no
 // redirects (a host the caller named must not bounce the request somewhere it
-// never named), the metadata/loopback/link-local hosts refused, a key never over
-// plain http, plus a 12s timeout and a body cap (OpenClaw's own numbers for
-// scanning a provider catalogue).
+// never named), the endpoint reduced to the API root so the appended path is
+// this route's, a key never over plain http, plus a 12s timeout and a body cap
+// (OpenClaw's own numbers for scanning a provider catalogue).
 
 import { credentialChoiceError, normalizeEndpoint } from "@/lib/cubepilot/llm";
 import { logger } from "@/lib/log";
@@ -19,11 +19,11 @@ export const dynamic = "force-dynamic";
 const TIMEOUT_MS = 12_000;
 const BODY_MAX_BYTES = 16 * 1024 * 1024;
 
-/** Hosts the portal will not fetch from: the cloud credentials endpoints, and
- *  the addresses that only ever mean "this machine" or "this link". Private
- *  ranges stay allowed — a self-hosted vLLM on the cluster network is the
- *  ordinary case for this card, and the platform already lets it be saved as a
- *  provider. */
+/** Refused by literal host only — a name resolving to one still gets through.
+ *  The cloud credential endpoints, and the addresses that only ever mean "this
+ *  machine" or "this link". Private ranges stay allowed: a self-hosted vLLM on
+ *  the cluster network is the ordinary case for this card, and the platform
+ *  already lets it be saved as a provider. */
 const BLOCKED_HOSTS = new Set(["metadata.google.internal", "metadata", "169.254.169.254", "fd00:ec2::254"]);
 
 function blockedHost(hostname: string): boolean {

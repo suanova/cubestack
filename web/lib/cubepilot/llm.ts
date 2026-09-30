@@ -131,10 +131,16 @@ export function modelKey(provider: string, modelId: string): string {
  * stripped, and a missing /v1 is never added — a root endpoint is correct for
  * some providers, so guessing a path prefix would break them.
  *
+ * The endpoint names the root, nothing past it: a query or a fragment would
+ * swallow the path each caller appends. Rejected on the string, because a bare
+ * trailing "#" is not a url.hash.
+ *
  * Throws with the message to return to the caller.
  */
 export function normalizeEndpoint(raw: string): string {
   const endpoint = (raw ?? "").trim().replace(/\/+$/, "");
+  if (endpoint.includes("#")) throw new Error("endpoint must not contain a '#' fragment");
+  if (endpoint.includes("?")) throw new Error("endpoint must not contain a query string");
   const suffix = "/chat/completions";
   const trimmed =
     endpoint.length >= suffix.length && endpoint.slice(-suffix.length).toLowerCase() === suffix
