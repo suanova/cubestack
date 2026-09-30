@@ -432,7 +432,13 @@ export function ConfigPane() {
           sx={{ mb: "14px", border: 1, borderColor: "color-mix(in oklch, #e0a13a 45%, var(--border))", bgcolor: "color-mix(in oklch, #e0a13a 8%, transparent)", borderRadius: "8px", p: "12px 14px", fontSize: 12.5, lineHeight: 1.7 }}
         >
           <Box sx={{ fontWeight: 650, mb: "3px" }}>{t("cubepilot.config.templateMissing")}</Box>
-          <Box sx={{ color: "text.secondary" }}>{t("cubepilot.config.templateMissingHint")}</Box>
+          {/* The hint names env vars and custom resources: worth keeping for
+              whoever has to fix this, not worth showing to everyone who reads
+              the card, so it starts folded. */}
+          <Box component="details" sx={{ color: "text.secondary" }}>
+            <Box component="summary" sx={{ cursor: "pointer" }}>{t("cubepilot.config.troubleshoot")}</Box>
+            <Box sx={{ mt: "4px" }}>{t("cubepilot.config.templateMissingHint")}</Box>
+          </Box>
         </Box>
       ) : null}
       {loadError ? (
@@ -442,7 +448,10 @@ export function ConfigPane() {
         >
           <Box sx={{ fontWeight: 650, mb: "3px" }}>{t("cubepilot.config.loadFailed")}</Box>
           <Box sx={{ ...monoSx, fontSize: 11.5 }}>{loadError}</Box>
-          <Box sx={{ color: "text.secondary", mt: "6px" }}>{t("cubepilot.config.loadFailedHint")}</Box>
+          <Box component="details" sx={{ color: "text.secondary", mt: "6px" }}>
+            <Box component="summary" sx={{ cursor: "pointer" }}>{t("cubepilot.config.troubleshoot")}</Box>
+            <Box sx={{ mt: "4px" }}>{t("cubepilot.config.loadFailedHint")}</Box>
+          </Box>
         </Box>
       ) : null}
       {/* head */}
