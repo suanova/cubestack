@@ -603,7 +603,9 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     const thread = page.locator('[data-od-id="chat-thread"]');
     // The greeting is data-driven: the instance's skills and model from the CRs.
     await expect(thread).toContainText("技能 2 项,当前模型 qwen38-27b");
-    await expect(thread).toContainText("会话审计已开启");
+    // The greeting no longer claims the session is audited: nothing in the
+    // portal shows audit entries, so it promised nothing the reader could check.
+    await expect(thread).not.toContainText("审计");
     // …and what it says about write operations follows the instance's EFFECTIVE
     // policy (the stub's confirm view says Allowlist). It used to promise an
     // approval queue unconditionally, which was a lie for any other policy.
@@ -1689,7 +1691,7 @@ test.describe("cubepilot config (AgentInstance CR + AgentTemplate catalog)", () 
     await expect(note).not.toContainText("glm-5.2-chat/glm-5.2-chat");
     await expect(note).not.toContainText("/v1");
     await page.locator('[data-od-id="cp-config-save"]').click();
-    await expect(page.getByText("配置已保存,模型与系统提示词下轮生效")).toBeVisible();
+    await expect(page.getByText("配置已保存,模型与系统提示词下一轮对话生效")).toBeVisible();
     expect(captured.configPuts.at(-1)).toEqual({
       selectedModel: "glm-5.2-chat/glm-5.2-chat",
       userInstructions: "巡检优先,写操作全部走审批",
@@ -1727,7 +1729,7 @@ test.describe("cubepilot config (AgentInstance CR + AgentTemplate catalog)", () 
     const confirmCard = page.locator('[data-od-id="cp-config-confirm"]');
     await expect(confirmCard).toContainText("生效");
     await expect(confirmCard).toContainText("你已覆盖");
-    await expect(confirmCard).toContainText("None 直通全部操作(已审计) — 白名单不生效。");
+    await expect(confirmCard).toContainText("全部放行:不再逐条确认;白名单不生效。");
     await expect(page.locator('[data-od-id="cp-allowlist-default"]')).toHaveCount(0);
     await expect(page.locator('[data-od-id="cp-config-rule-pattern"]')).toHaveCount(0);
     expect(captured.confirmPuts.at(-1)).toEqual({ confirmPolicy: "None" });
