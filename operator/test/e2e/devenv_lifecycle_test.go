@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 	"time"
@@ -41,7 +42,8 @@ import (
 // running order. So each group here brings up its own environment — on the
 // cheapest image, which for these questions is representative: stopping is the
 // platform's, and a bare `ssh-ubuntu22.04` is the environment with the least in
-// it to confuse the answer.
+// it to confuse the answer. G8 is the one exception, and brings up a notebook
+// because the type is the whole of what it asks about.
 
 // holdFinalizer is a finalizer this suite adds to an environment it is about to
 // delete.
@@ -58,6 +60,7 @@ const holdFinalizer = "e2e.cubestack.io/hold"
 
 func describeLifecycle() {
 	describeStopStart()
+	describeHttpStop()
 	describeDeletion()
 	describeRetention()
 }
@@ -203,7 +206,16 @@ func describeStopStart() {
 					// The address goes. status.endpoints is what the platform tells a
 					// user to connect to, and a stopped environment serves nothing, so
 					// publishing it anyway would hand out an address that answers
-					// nowhere — which is what RouteReady reports as not ready.
+					// nowhere.
+					//
+					// The withdrawal is the platform's and belongs to the phase, not
+					// to this exposure's route — but for this exposure the two are
+					// still visible together, and it is worth saying which is which: a
+					// stopped environment's L4 route has no ready endpoints behind it,
+					// so the gateway refuses it and RouteReady reads false here as
+					// well. An HTTP environment has no such route to be refused and
+					// keeps its RouteReady; G8 is this same contract on that type,
+					// where nothing but the platform can take the address away.
 					//
 					// This is the withdrawal a *stop* performs, and it is narrower
 					// than the one a spec change performs: turning an exposure off
@@ -278,6 +290,102 @@ func describeStopStart() {
 						To(Equal(workspaceMarker),
 							"the file the environment wrote before it was stopped is gone, so the "+
 								"workspace did not survive the stop")
+				})
+		},
+	}.declare()
+}
+
+// describeHttpStop is G8: the address of a stopped environment whose exposure is
+// the HTTP route.
+//
+// G3 states this contract on an ssh environment, where a second thing happens
+// with it: the workload is gone, so the L4 route has no ready endpoints behind
+// it, the gateway refuses it, and the platform withdraws the address. An HTTP
+// environment has no L4 route to be refused, so the same stop would leave its
+// address published and routing to a 503 — the platform handing a user an
+// address that answers nowhere, which is the whole of what the contract is for.
+//
+// Which is why the environment here has no ssh exposure, even though the
+// catalogue would give a notebook one: with it, the refusal G3 is about would
+// take this environment's address away too, and the case would pass on an
+// implementation that withdraws nothing.
+func describeHttpStop() {
+	draftCase{
+		Name:     "lifecycle-stop-http",
+		Image:    devenv.MustImage("jupyter-minimal"),
+		Identity: devenv.NonRoot,
+		Shape: func(env *aiv1alpha1.DevEnvironment) {
+			// The HTTP route alone, so that the address can only go because the
+			// platform withheld it.
+			env.Spec.SSH = nil
+		},
+		Cases: func(open func() *devenv.Environment) {
+			It("G8 withdraws the address of a stopped environment whose only route is HTTP",
+				Label(devenv.TierP1, devenv.LabelFamily("G")), func(ctx SpecContext) {
+					env := open()
+					running(ctx, env)
+
+					// What the stop has to take: the address it published and a
+					// notebook answering on it. Both are read while it is up — read
+					// after the stop there is no address to have seen published.
+					ep, ok := env.WebEndpoint()
+					Expect(ok).To(BeTrue(), "status published no %q endpoint (has %v)",
+						env.Image.Type, env.EndpointNames())
+					base, err := withTrailingSlash(ep.Address)
+					Expect(err).NotTo(HaveOccurred())
+					token, err := env.JupyterToken(ctx)
+					Expect(err).NotTo(HaveOccurred())
+					client := conformance.Dialer.HTTPClient()
+					Eventually(func() int {
+						code, _, _ := get(ctx, client, base+"api/status?token="+token)
+						return code
+					}).WithTimeout(3*time.Minute).WithPolling(5*time.Second).
+						Should(Equal(http.StatusOK),
+							"api/status on the environment's own published address %s before the stop", base)
+
+					Expect(env.SetRunning(ctx, false)).To(Succeed())
+					stopped(ctx, env)
+
+					// The address goes. Same contract as G3's, and reached by a
+					// different route to it: nothing but the platform is here to take
+					// it away.
+					Eventually(func() []string {
+						_ = env.Refresh(ctx)
+						return env.EndpointNames()
+					}).WithTimeout(3*time.Minute).WithPolling(3*time.Second).
+						Should(BeEmpty(), "a stopped environment still publishes an address")
+
+					// And what is withheld is the address and not the exposure: the
+					// HTTP route is still published and still accepted, so RouteReady
+					// stays true. A false here would report a publication that failed,
+					// which is a different finding from an address withheld — and the
+					// difference in this condition is the whole of why the SSH case's
+					// address going away proves nothing about this one.
+					routeReady := env.Condition(aiv1alpha1.ConditionRouteReady)
+					Expect(routeReady).NotTo(BeNil(), "RouteReady is not recorded")
+					Expect(routeReady.Status).To(Equal(metav1.ConditionTrue),
+						"the stopped environment's route reads %s (%s)",
+						routeReady.Status, routeReady.Reason)
+
+					// The start gives the address back, answering. Withheld is a
+					// statement about the phase, and not a withdrawal the next start
+					// has to earn back from something the stop took away: the route
+					// and the ListenerSet were kept, and the address is recomputed
+					// from them.
+					Expect(env.SetRunning(ctx, true)).To(Succeed())
+					running(ctx, env)
+					back, ok := env.WebEndpoint()
+					Expect(ok).To(BeTrue(), "status published no %q endpoint after the restart (has %v)",
+						env.Image.Type, env.EndpointNames())
+					Expect(back.Address).To(Equal(ep.Address),
+						"the environment came back at %s, having published %s before it stopped",
+						back.Address, ep.Address)
+					Eventually(func() int {
+						code, _, _ := get(ctx, client, base+"api/status?token="+token)
+						return code
+					}).WithTimeout(3*time.Minute).WithPolling(5*time.Second).
+						Should(Equal(http.StatusOK),
+							"api/status on %s with the token it published before the stop", base)
 				})
 		},
 	}.declare()

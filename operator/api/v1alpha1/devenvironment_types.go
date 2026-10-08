@@ -494,7 +494,10 @@ type DevEnvironmentStatus struct {
 	LastActivityTime *metav1.Time `json:"lastActivityTime,omitempty"`
 
 	// Endpoints are the access addresses of the environment: the web (Jupyter)
-	// URL, the SSH address, and any extra application port exposures.
+	// URL, the SSH address, and any extra application port exposures. The list is
+	// withheld while the environment is stopped: nothing is listening behind the
+	// routes, so an address published then would lead nowhere. It is restored when
+	// the environment starts again, the SSH address on the port it held.
 	// +optional
 	Endpoints []Endpoint `json:"endpoints,omitempty"`
 

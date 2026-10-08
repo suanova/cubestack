@@ -662,7 +662,10 @@ spec:
               endpoints:
                 description: |-
                   Endpoints are the access addresses of the environment: the web (Jupyter)
-                  URL, the SSH address, and any extra application port exposures.
+                  URL, the SSH address, and any extra application port exposures. The list is
+                  withheld while the environment is stopped: nothing is listening behind the
+                  routes, so an address published then would lead nowhere. It is restored when
+                  the environment starts again, the SSH address on the port it held.
                 items:
                   description: |-
                     Endpoint describes an access address of the environment: the web (Jupyter)

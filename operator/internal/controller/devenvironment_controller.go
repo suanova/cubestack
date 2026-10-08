@@ -149,6 +149,7 @@ const (
 	reasonOverridden             = "Overridden"
 	reasonBrandMismatch          = "BrandMismatch"
 	reasonNotebookArgsUnusable   = "NotebookArgsUnusable"
+	reasonPortCollision          = "PortCollision"
 	reasonPublished              = "Published"
 	reasonGatewayNotFound        = "GatewayNotFound"
 	reasonGatewayNotReady        = "GatewayNotReady"
@@ -575,6 +576,9 @@ func (r *DevEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 	setPodScheduledCondition(&desired.Status.Conditions, pod)
 	r.setPhaseAndReady(&env, &desired.Status, pod)
+	// The phase is the one statement of what state the environment is in, so what
+	// an address means follows from it rather than being decided again here.
+	withdrawStoppedEndpoints(&desired.Status)
 
 	// 6. Idle auto-stop (design §4.2 step 4). The mark is written here and only
 	// here, from the phase just derived and the pod just observed; the replicas
@@ -1785,6 +1789,7 @@ func specFindings(env *aiv1alpha1.DevEnvironment) []specFinding {
 			reason: reasonNotebookArgsUnusable, field: "runtime.env[" + notebookArgsEnv + "]", detail: reason, mustUpdate: true,
 		})
 	}
+	findings = append(findings, portCollisionFindings(env)...)
 	if env.Spec.Runtime == nil {
 		return findings
 	}
@@ -2267,9 +2272,21 @@ func (r *DevEnvironmentReconciler) desiredVolumeClaimTemplates(env *aiv1alpha1.D
 	return []corev1.PersistentVolumeClaim{pvc}
 }
 
-// desiredService renders the ClusterIP Service with the main port, the SSH
-// port (when exposed and not the main port), and the extra application ports.
-func (r *DevEnvironmentReconciler) desiredService(env *aiv1alpha1.DevEnvironment) *corev1.Service {
+// servicePortKey identifies a Service port the way the API server does: the
+// number and the protocol together are what a Service may carry only once,
+// however the entries are named.
+func servicePortKey(port int32, protocol corev1.Protocol) string {
+	return fmt.Sprintf("%d/%s", port, protocol)
+}
+
+// platformServicePorts is what an environment's Service publishes on the
+// platform's own account, and so what a spec.ports entry can find already taken:
+// the type's main port, and the number sshd is bridged from when one is exposed.
+//
+// It is a function of the spec and not of cluster state, which is what lets
+// specFindings report on the collisions such an entry causes before anything is
+// applied, and lets desiredService render from it rather than repeat it.
+func platformServicePorts(env *aiv1alpha1.DevEnvironment) []corev1.ServicePort {
 	mainPort := mainContainerPort(env.Spec.Type)
 	// The ssh container listens on the unprivileged sshContainerPort but is
 	// published on the conventional sshServicePort; every other type publishes
@@ -2281,8 +2298,96 @@ func (r *DevEnvironmentReconciler) desiredService(env *aiv1alpha1.DevEnvironment
 	ports := []corev1.ServicePort{
 		{Name: mainPortName, Port: mainServicePort, TargetPort: intstr.FromInt32(mainPort), Protocol: corev1.ProtocolTCP},
 	}
+	// The ssh entry is guarded by type, as the container port list guards its
+	// own: for the ssh type the two entries are the same port, and the main one
+	// is what names it.
 	if sshExposed(env) && env.Spec.Type != aiv1alpha1.DevEnvironmentTypeSSH {
-		ports = append(ports, corev1.ServicePort{Name: sshPortName, Port: sshServicePort, TargetPort: intstr.FromInt32(sshContainerPort), Protocol: corev1.ProtocolTCP})
+		ports = append(ports, corev1.ServicePort{
+			Name: sshPortName, Port: sshServicePort, TargetPort: intstr.FromInt32(sshContainerPort), Protocol: corev1.ProtocolTCP,
+		})
+	}
+	return ports
+}
+
+// portCollisionFindings reports every spec.ports entry the Service does not
+// publish under the name it was declared with, because a (port, protocol) it
+// names is already taken by an entry that precedes it (::desiredService).
+//
+// The two ways that can happen are separated rather than reported as one,
+// because what they cost the user differs in kind. An entry folded into one that
+// forwards to the same container port — every fold into a type's own main port,
+// and every repeat of an earlier spec.ports entry — is served exactly as
+// declared, so the environment runs and Accepted reports the fold. An entry
+// folded into one that forwards somewhere else is not served at all: the ssh
+// bridge is published at 22 and forwards to the sshd on 2222, so an exposure
+// declaring container port 22 would have its route reach sshd rather than the
+// workload it named, and no other port carries it. Only the user can choose
+// another one.
+func portCollisionFindings(env *aiv1alpha1.DevEnvironment) []specFinding {
+	var findings []specFinding
+	// The entries that precede each spec.ports entry, in the order desiredService
+	// adds them: the platform's own first, then the spec's.
+	taken := map[string]corev1.ServicePort{}
+	for _, sp := range platformServicePorts(env) {
+		taken[servicePortKey(sp.Port, sp.Protocol)] = sp
+	}
+	for i, p := range env.Spec.Ports {
+		protocol := portProtocol(p)
+		key := servicePortKey(p.ContainerPort, protocol)
+		owner, collides := taken[key]
+		if !collides {
+			taken[key] = corev1.ServicePort{
+				Name: p.Name, Port: p.ContainerPort, TargetPort: intstr.FromInt32(p.ContainerPort), Protocol: protocol,
+			}
+			continue
+		}
+		field := fmt.Sprintf("ports[%d]", i)
+		if owner.TargetPort.IntVal == p.ContainerPort {
+			findings = append(findings, specFinding{
+				field: field,
+				detail: fmt.Sprintf("the Service already publishes %d/%s as %q, which forwards to container port %d — the one this entry declares — so the exposure is served by that entry and the name %q goes unused",
+					p.ContainerPort, protocol, owner.Name, owner.TargetPort.IntVal, p.Name),
+			})
+			continue
+		}
+		findings = append(findings, specFinding{
+			reason:     reasonPortCollision,
+			mustUpdate: true,
+			field:      field,
+			detail: fmt.Sprintf("the Service already publishes %d/%s as %q, which forwards to container port %d rather than the %d this entry declares, so the exposure's route would reach whatever listens on %d. Declare a container port the Service does not already publish",
+				p.ContainerPort, protocol, owner.Name, owner.TargetPort.IntVal, p.ContainerPort, owner.TargetPort.IntVal),
+		})
+	}
+	return findings
+}
+
+// desiredService renders the ClusterIP Service with the main port, the SSH
+// port (when exposed and not the main port), and the extra application ports.
+//
+// Like the container port list it is rendered beside (::desiredContainerPorts),
+// the list dedupes on port and protocol: spec.ports is free to repeat a port the
+// platform already declared, and a Service carrying one (port, protocol) twice
+// is refused by the API server outright. The platform's own entries are added
+// first and are what a repeat is folded into, so the number the exposure asked
+// for is still published and a route still reaches it — by number rather than by
+// name (::serviceBackendRef). What that folding costs the exposure is not this
+// function's to decide and is reported on Accepted (::portCollisionFindings).
+func (r *DevEnvironmentReconciler) desiredService(env *aiv1alpha1.DevEnvironment) *corev1.Service {
+	// The seen set is keyed by port and protocol, as desiredContainerPorts keys
+	// its own: the same number under another protocol is a different Service
+	// port and survives.
+	var ports []corev1.ServicePort
+	seen := map[string]bool{}
+	add := func(sp corev1.ServicePort) {
+		key := servicePortKey(sp.Port, sp.Protocol)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		ports = append(ports, sp)
+	}
+	for _, sp := range platformServicePorts(env) {
+		add(sp)
 	}
 	for _, p := range env.Spec.Ports {
 		// The Service port carries the protocol the exposure speaks: a UDPRoute
@@ -2290,7 +2395,9 @@ func (r *DevEnvironmentReconciler) desiredService(env *aiv1alpha1.DevEnvironment
 		// that same one. A udp port that stayed TCP here would be accepted and
 		// then forward nothing, since a TCP Service port does not listen for
 		// datagrams.
-		ports = append(ports, corev1.ServicePort{Name: p.Name, Port: p.ContainerPort, TargetPort: intstr.FromInt32(p.ContainerPort), Protocol: portProtocol(p)})
+		add(corev1.ServicePort{
+			Name: p.Name, Port: p.ContainerPort, TargetPort: intstr.FromInt32(p.ContainerPort), Protocol: portProtocol(p),
+		})
 	}
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: env.Name, Namespace: env.Namespace, Labels: r.envLabels(env.Name)},
@@ -4598,6 +4705,23 @@ func (r *DevEnvironmentReconciler) setPhaseAndReady(env *aiv1alpha1.DevEnvironme
 	default:
 		setPhase(status, aiv1alpha1.PhasePending, reasonPending)
 		setDevEnvironmentReadyCondition(&status.Conditions, metav1.ConditionFalse, reasonPending, "Environment pod is being created")
+	}
+}
+
+// withdrawStoppedEndpoints drops the access addresses of a stopped environment:
+// its workload is scaled to zero, so nothing answers behind the routes, and the
+// phase already says why. Withheld here rather than where the routes are
+// published so that one rule covers every stop — a user's spec.running=false, an
+// idle auto-stop, and an environment that has never been started — the way it
+// already covers them for an ssh exposure, whose L4 route the gateway rejects
+// once its Service has no ready endpoints.
+//
+// The routes and the ListenerSet are left in place: the address is recomputed on
+// the next start, and for an L4 exposure heldPorts recovers the port it held from
+// the ListenerSet (::heldPorts), so the environment comes back on the same one.
+func withdrawStoppedEndpoints(status *aiv1alpha1.DevEnvironmentStatus) {
+	if status.Phase != nil && status.Phase.Name == aiv1alpha1.PhaseStopped {
+		status.Endpoints = nil
 	}
 }
 

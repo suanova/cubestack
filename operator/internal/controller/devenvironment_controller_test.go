@@ -84,6 +84,10 @@ const (
 	testMetricsPortName           = "metrics"
 	// testSyslogPortName is the extra udp port the UDP specs expose.
 	testSyslogPortName = "syslog"
+	// testCollidingPortName is the extra tcp port the specs exposing the Service
+	// port the ssh bridge is published on declare: an exposure the bridge would
+	// answer for rather than the workload the entry named.
+	testCollidingPortName = "user-app"
 	// testDevEnvKind is the kind as the API server writes it into an
 	// ownerReference.
 	testDevEnvKind = "DevEnvironment"
@@ -1525,6 +1529,15 @@ var _ = Describe("DevEnvironment object rendering and publishing", func() {
 				}},
 			})
 		}
+		// An extra application port, and an ssh exposure for it to collide with.
+		exposing := func(env *aiv1alpha1.DevEnvironment, ports ...aiv1alpha1.PortSpec) *aiv1alpha1.DevEnvironment {
+			env.Spec.Ports = append(env.Spec.Ports, ports...)
+			return env
+		}
+		withSSH := func(env *aiv1alpha1.DevEnvironment) *aiv1alpha1.DevEnvironment {
+			env.Spec.SSH = &aiv1alpha1.SSHSpec{Enabled: true}
+			return env
+		}
 
 		// Each entry states the disposition it expects, not just that something was
 		// reported: the whole point of the condition is which of the two a value
@@ -1566,6 +1579,38 @@ var _ = Describe("DevEnvironment object rendering and publishing", func() {
 			Entry("a home the derivation cannot use",
 				claiming(homeFrom(newJupyter())), 0,
 				[]string{"spec.runtime.env[HOME]: ignored — "}),
+			// An exposure on a port the Service already publishes is folded into the
+			// entry that carries it, and which disposition it gets is decided by
+			// where that entry forwards (::portCollisionFindings).
+			//
+			// A repeat of the type's own main port folds into an entry forwarding to
+			// the same container port, so the exposure is served exactly as declared
+			// and only the name it was declared under goes unused.
+			Entry("a repeat of the notebook's own port is ignored",
+				exposing(newJupyter(), aiv1alpha1.PortSpec{
+					Name: "notebook-again", Type: aiv1alpha1.PortTypeHTTP,
+					ContainerPort: mainContainerPort(aiv1alpha1.DevEnvironmentTypeJupyter),
+				}), 0, []string{"spec.ports[0]: ignored — "}),
+			// As does a repeat of an earlier exposure: the Service carries the number
+			// once, and both entries forward to the port they name.
+			Entry("a second exposure on one container port is ignored",
+				exposing(newJupyter(),
+					aiv1alpha1.PortSpec{Name: testMetricsPortName, Type: aiv1alpha1.PortTypeTCP, ContainerPort: 9090},
+					aiv1alpha1.PortSpec{Name: "metrics-again", Type: aiv1alpha1.PortTypeTCP, ContainerPort: 9090},
+				), 0, []string{"spec.ports[1]: ignored — "}),
+			// The other side of the ssh bridge is not published, so an exposure on it
+			// is an entry of its own rather than a repeat.
+			Entry("an exposure on the port the ssh bridge forwards to",
+				exposing(withSSH(newJupyter()), aiv1alpha1.PortSpec{
+					Name: "raw-ssh", Type: aiv1alpha1.PortTypeTCP, ContainerPort: sshContainerPort,
+				}), 0, nil),
+			// The same number under another protocol is a different Service port, so
+			// neither folds into the other.
+			Entry("a udp exposure on the notebook's port",
+				exposing(newJupyter(), aiv1alpha1.PortSpec{
+					Name: testSyslogPortName, Type: aiv1alpha1.PortTypeUDP,
+					ContainerPort: mainContainerPort(aiv1alpha1.DevEnvironmentTypeJupyter),
+				}), 0, nil),
 			// Both dispositions in one spec: the refusal is what the phase follows,
 			// and the resolved value is reported beside it rather than instead of it.
 			Entry("reports a refusal and a resolved value together",
@@ -1575,6 +1620,34 @@ var _ = Describe("DevEnvironment object rendering and publishing", func() {
 					"spec.runtime.env[NB_UID]: ignored — ",
 				}),
 		)
+
+		// The fold that is not lossless, and so is not a resolved value: the ssh
+		// bridge is published at 22 and forwards to the sshd on 2222, so an exposure
+		// declaring container port 22 would have its route reach sshd rather than
+		// the workload it named, and no other port carries what it asks for. Only
+		// the user can choose another port, which is what mustUpdate says.
+		It("fails an exposure the ssh bridge would answer for", func() {
+			env := exposing(withSSH(newJupyter()),
+				aiv1alpha1.PortSpec{Name: testCollidingPortName, Type: aiv1alpha1.PortTypeTCP, ContainerPort: sshServicePort})
+			blocking := mustUpdateFindings(specFindings(env))
+			Expect(blocking).To(HaveLen(1))
+			Expect(blocking[0].reason).To(Equal(reasonPortCollision))
+			Expect(blocking[0].field).To(Equal("ports[0]"))
+			Expect(blocking[0].detail).To(ContainSubstring(
+				fmt.Sprintf("forwards to container port %d rather than the %d this entry declares",
+					sshContainerPort, sshServicePort)))
+		})
+
+		// The ssh type publishes its own bridge as the main entry, so its two sides
+		// are the same divergence and the same refusal.
+		It("fails an exposure on the ssh type's own bridge port", func() {
+			env := exposing(&aiv1alpha1.DevEnvironment{Spec: aiv1alpha1.DevEnvironmentSpec{
+				Type: aiv1alpha1.DevEnvironmentTypeSSH, Image: testDevImage,
+			}}, aiv1alpha1.PortSpec{Name: testCollidingPortName, Type: aiv1alpha1.PortTypeTCP, ContainerPort: sshServicePort})
+			blocking := mustUpdateFindings(specFindings(env))
+			Expect(blocking).To(HaveLen(1))
+			Expect(blocking[0].reason).To(Equal(reasonPortCollision))
+		})
 
 		It("fails the environment on the brand mismatch before any other refusal", func() {
 			env := fromValueFrom()
@@ -1938,6 +2011,47 @@ var _ = Describe("DevEnvironment object rendering and publishing", func() {
 				Address:      fmt.Sprintf("ssh://%s@%s:20001", rootRuntimeUser, testGatewayIP),
 				ListenerPort: 20001,
 			}))
+		})
+	})
+
+	Describe("withdrawStoppedEndpoints", func() {
+		// The phase is what says an environment is stopped, and both its reasons —
+		// a user's running=false and an idle auto-stop — land on the same name, so
+		// one rule covers them both (::setPhaseAndReady).
+		endpoints := func() []aiv1alpha1.Endpoint {
+			return []aiv1alpha1.Endpoint{{
+				Name: sshPortName, Address: testGatewayIP + ":20001", ListenerPort: 20001,
+			}}
+		}
+
+		It("withdraws the address of a stopped environment", func() {
+			// An ssh exposure loses its address whether this withholds it or not:
+			// the gateway rejects its L4 route once the workload is scaled to zero.
+			// A web address has no such route to go away for it, which is what makes
+			// this the case the rule exists for.
+			status := &aiv1alpha1.DevEnvironmentStatus{
+				Phase:     &aiv1alpha1.Phase{Name: aiv1alpha1.PhaseStopped},
+				Endpoints: endpoints(),
+			}
+			withdrawStoppedEndpoints(status)
+			Expect(status.Endpoints).To(BeEmpty())
+		})
+
+		It("keeps the address of a running environment", func() {
+			status := &aiv1alpha1.DevEnvironmentStatus{
+				Phase:     &aiv1alpha1.Phase{Name: aiv1alpha1.PhaseRunning},
+				Endpoints: endpoints(),
+			}
+			withdrawStoppedEndpoints(status)
+			Expect(status.Endpoints).To(HaveLen(1))
+		})
+
+		It("keeps the address of an environment whose phase is not recorded yet", func() {
+			// Nothing about an absent phase says the environment is stopped, and the
+			// address is what a user was handed the moment it was published.
+			status := &aiv1alpha1.DevEnvironmentStatus{Endpoints: endpoints()}
+			withdrawStoppedEndpoints(status)
+			Expect(status.Endpoints).To(HaveLen(1))
 		})
 	})
 
@@ -2788,6 +2902,49 @@ var _ = Describe("DevEnvironment object rendering and publishing", func() {
 			Expect(svc.Spec.Ports).To(HaveLen(1))
 			Expect(svc.Spec.Ports[0].Port).To(Equal(int32(8080)))
 			Expect(svc.Spec.Ports[0].TargetPort.IntVal).To(Equal(int32(8080)))
+		})
+
+		// spec.ports is free to name a port the platform already publishes, and
+		// the platform publishes two the user did not write: the type's main port
+		// and, with ssh, the number sshd is bridged from. A Service may not carry
+		// one (port, protocol) twice — the API server refuses the write outright,
+		// and that error aborts the reconcile before its status write — so the
+		// list dedupes the way the container port list does (::desiredContainerPorts).
+		// The exposure is not lost by that: the Service keeps publishing the
+		// number, and a route names a Service port by number, not by name.
+		It("publishes each Service port once, per protocol", func() {
+			svc := render(func(env *aiv1alpha1.DevEnvironment) {
+				env.Spec.Type = aiv1alpha1.DevEnvironmentTypeJupyter
+				env.Spec.SSH = &aiv1alpha1.SSHSpec{Enabled: true}
+				env.Spec.Ports = []aiv1alpha1.PortSpec{
+					{Name: "jupyter-again", Type: aiv1alpha1.PortTypeHTTP, ContainerPort: 8888},
+					{Name: "sshd-again", Type: aiv1alpha1.PortTypeTCP, ContainerPort: sshServicePort},
+					{Name: testSyslogPortName, Type: aiv1alpha1.PortTypeUDP, ContainerPort: 8888},
+				}
+			})
+			// Both repeats of a platform-published port are gone; the udp entry
+			// on the same number as the notebook is a different port and stays.
+			Expect(svc.Spec.Ports).To(Equal([]corev1.ServicePort{
+				{Name: mainPortName, Port: 8888, TargetPort: intstr.FromInt32(8888), Protocol: corev1.ProtocolTCP},
+				{Name: sshPortName, Port: sshServicePort, TargetPort: intstr.FromInt32(sshContainerPort), Protocol: corev1.ProtocolTCP},
+				{Name: testSyslogPortName, Port: 8888, TargetPort: intstr.FromInt32(8888), Protocol: corev1.ProtocolUDP},
+			}))
+		})
+
+		// The ssh type publishes its main port at 22 targeting the container's
+		// 2222, so the two sides of the bridge diverge and only the Service side
+		// can collide there.
+		It("keeps a spec port on the ssh type's container port, which the Service does not carry", func() {
+			svc := render(func(env *aiv1alpha1.DevEnvironment) {
+				env.Spec.Type = aiv1alpha1.DevEnvironmentTypeSSH
+				env.Spec.Ports = []aiv1alpha1.PortSpec{
+					{Name: "sshd-direct", Type: aiv1alpha1.PortTypeTCP, ContainerPort: sshContainerPort},
+				}
+			})
+			Expect(svc.Spec.Ports).To(Equal([]corev1.ServicePort{
+				{Name: mainPortName, Port: sshServicePort, TargetPort: intstr.FromInt32(sshContainerPort), Protocol: corev1.ProtocolTCP},
+				{Name: "sshd-direct", Port: sshContainerPort, TargetPort: intstr.FromInt32(sshContainerPort), Protocol: corev1.ProtocolTCP},
+			}))
 		})
 	})
 
@@ -5517,6 +5674,114 @@ var _ = Describe("DevEnvironment controller", func() {
 				aiv1alpha1.Endpoint{Name: testJupyterName, Address: "http://" + testGatewayIP + ":80" + webRootPath + env.Name + "/", ListenerPort: 80}))
 		})
 
+		// An exposure repeating a port the Service already publishes is a spec the
+		// controller resolves rather than refuses (::desiredService). It used to be
+		// the API server that refused it: the duplicate ServicePort failed the
+		// Service write, and because applyService errors before the status write the
+		// environment was left with no Service, no pod and no status at all. So this
+		// asserts both halves — the write is accepted, and the environment has a
+		// status at all — plus that the exposure's own route survives the folding,
+		// which is what makes resolving it rather than refusing it the honest call.
+		It("settles an exposure that repeats the Service's own port", func() {
+			createGateway(true)
+			defer deleteGateway()
+
+			const repeatName = "notebook-again"
+			notebookPort := mainContainerPort(aiv1alpha1.DevEnvironmentTypeJupyter)
+
+			env := validDevEnvironment("de-svc-repeat")
+			env.Spec.Ports = []aiv1alpha1.PortSpec{
+				{Name: repeatName, Type: aiv1alpha1.PortTypeHTTP, ContainerPort: notebookPort},
+			}
+			Expect(k8sClient.Create(ctx, env)).To(Succeed())
+			defer deleteEnv(env.Name)
+
+			// The Service carries the notebook's port once: the repeat is folded
+			// into the platform's own entry rather than written beside it.
+			Eventually(func(g Gomega) {
+				svc := &corev1.Service{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: env.Name, Namespace: env.Namespace}, svc)).To(Succeed())
+				g.Expect(svc.Spec.Ports).To(HaveLen(1))
+				g.Expect(svc.Spec.Ports[0].Name).To(Equal(mainPortName))
+				g.Expect(svc.Spec.Ports[0].Port).To(Equal(notebookPort))
+			}, "15s", "200ms").Should(Succeed())
+
+			// The reconcile got past the Service, which is what the duplicate
+			// ServicePort used to take away: a status at all, written for the
+			// generation that is current.
+			Eventually(func(g Gomega) {
+				stampDevEnvRoutes(g, env.Name, true, "", "")
+				got := &aiv1alpha1.DevEnvironment{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), got)).To(Succeed())
+				g.Expect(got.Status.Phase).NotTo(BeNil())
+				g.Expect(got.Status.Phase.Name).NotTo(BeEmpty())
+				g.Expect(got.Status.ObservedGeneration).To(Equal(got.Generation))
+				g.Expect(meta.IsStatusConditionTrue(got.Status.Conditions, aiv1alpha1.ConditionRouteReady)).To(BeTrue())
+				// And the fold is stated rather than passed over: this one is
+				// lossless, so the environment runs and Accepted reports it.
+				accepted := meta.FindStatusCondition(got.Status.Conditions, aiv1alpha1.ConditionAccepted)
+				g.Expect(accepted).NotTo(BeNil())
+				g.Expect(accepted.Status).To(Equal(metav1.ConditionTrue))
+				g.Expect(accepted.Reason).To(Equal(reasonOverridden))
+				g.Expect(accepted.Message).To(ContainSubstring("spec.ports[0]: ignored"))
+			}, "15s", "200ms").Should(Succeed())
+
+			// Nothing was taken from the user: the repeat's exposure is still
+			// published on its own path, reaching the Service by number — which is
+			// why the name it was declared under can go unused.
+			route := &gatewayv1.HTTPRoute{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: webRouteName(env), Namespace: env.Namespace}, route)).To(Succeed())
+			repeatPath := fmt.Sprintf("/dev/%s/%s/port/%s/", env.Namespace, env.Name, repeatName)
+			var matched bool
+			for _, rule := range route.Spec.Rules {
+				if len(rule.Matches) == 0 || rule.Matches[0].Path == nil || rule.Matches[0].Path.Value == nil {
+					continue
+				}
+				if *rule.Matches[0].Path.Value != repeatPath {
+					continue
+				}
+				matched = true
+				Expect(rule.BackendRefs).To(HaveLen(1))
+				Expect(rule.BackendRefs[0].Name).To(Equal(gatewayv1.ObjectName(env.Name)))
+				Expect(rule.BackendRefs[0].Port).To(Equal(ptrTo(notebookPort)))
+			}
+			Expect(matched).To(BeTrue(), "the repeat's exposure lost its route")
+		})
+
+		// The fold that is not lossless, driven through the API server: the ssh
+		// bridge publishes 22 and forwards to the sshd on 2222, so an exposure
+		// declaring container port 22 would reach sshd rather than the workload it
+		// named. Resolving that is not the controller's to do — no port carries what
+		// the user asked for — so the environment fails with the entry named, which
+		// is the only place the finding is reported.
+		It("fails an exposure the Service's own entry would answer for", func() {
+			env := validDevEnvironment("de-svc-collide")
+			env.Spec.SSH = &aiv1alpha1.SSHSpec{Enabled: true}
+			env.Spec.Ports = []aiv1alpha1.PortSpec{
+				{Name: testCollidingPortName, Type: aiv1alpha1.PortTypeTCP, ContainerPort: sshServicePort},
+			}
+			Expect(k8sClient.Create(ctx, env)).To(Succeed())
+			defer deleteEnv(env.Name)
+
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.DevEnvironment{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), got)).To(Succeed())
+				g.Expect(got.Status.Phase).NotTo(BeNil())
+				g.Expect(got.Status.Phase.Name).To(Equal(aiv1alpha1.PhaseFailed))
+				g.Expect(got.Status.Phase.Reason).To(Equal(reasonPortCollision))
+				g.Expect(meta.IsStatusConditionFalse(got.Status.Conditions, aiv1alpha1.ConditionAccepted)).To(BeTrue())
+				g.Expect(meta.IsStatusConditionFalse(got.Status.Conditions, aiv1alpha1.ConditionReady)).To(BeTrue())
+				accepted := meta.FindStatusCondition(got.Status.Conditions, aiv1alpha1.ConditionAccepted)
+				g.Expect(accepted).NotTo(BeNil())
+				g.Expect(accepted.Reason).To(Equal(reasonPortCollision))
+				g.Expect(accepted.Message).To(ContainSubstring("spec.ports[0]: must be updated"))
+				g.Expect(accepted.Message).To(ContainSubstring(fmt.Sprintf("container port %d", sshContainerPort)))
+			}, "15s", "200ms").Should(Succeed())
+
+			sts := &appsv1.StatefulSet{}
+			Expect(apierrors.IsNotFound(k8sClient.Get(ctx, envKey(env.Name), sts))).To(BeTrue())
+		})
+
 		It("holds a udp port and a tcp port on different numbers", func() {
 			// tcp and udp share one pool (design §8.3): a udp port takes its
 			// number out of the same range and never shares it with a tcp one,
@@ -6194,6 +6459,72 @@ var _ = Describe("DevEnvironment controller", func() {
 				g.Expect(k8sClient.Get(ctx, envKey(env.Name), got)).To(Succeed())
 				g.Expect(meta.IsStatusConditionTrue(got.Status.Conditions, aiv1alpha1.ConditionRouteReady)).To(BeTrue())
 				g.Expect(devEnvEndpointPort(got.Status.Endpoints, sshPortName)).To(Equal(before))
+			}, "15s", "200ms").Should(Succeed())
+		})
+
+		It("withdraws the address of a stopped environment, and not its route", func() {
+			// A stop and a gateway failure both end with no address, and what tells
+			// them apart is RouteReady: the route is still published and still
+			// accepted, so the condition goes on saying so while the address goes.
+			// Only a web environment can tell the two apart — an ssh exposure loses
+			// its address either way, the gateway rejecting its L4 route once nothing
+			// is behind the Service — so this is the case the rule exists for.
+			createGateway(true)
+			defer deleteGateway()
+
+			// No ssh, so the web address is the only endpoint this environment
+			// publishes and nothing else can be what withdrew it. The timeout is what
+			// makes an auto-stop mark survive: with the feature off the mark is stale
+			// by definition, and the controller clears it before the phase is derived
+			// (::clearSupersededAutoStop).
+			env := validDevEnvironment("de-gw-stopped")
+			env.Spec.Lifecycle = &aiv1alpha1.LifecycleSpec{IdleTimeout: 600}
+			Expect(k8sClient.Create(ctx, env)).To(Succeed())
+			defer deleteEnv(env.Name)
+
+			webAddressPublished := func(g Gomega) {
+				stampDevEnvRoutes(g, env.Name, true, "", "")
+				got := &aiv1alpha1.DevEnvironment{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), got)).To(Succeed())
+				g.Expect(meta.IsStatusConditionTrue(got.Status.Conditions, aiv1alpha1.ConditionRouteReady)).To(BeTrue())
+				g.Expect(got.Status.Endpoints).To(HaveLen(1))
+				g.Expect(got.Status.Endpoints[0].Name).To(Equal(string(aiv1alpha1.DevEnvironmentTypeJupyter)))
+			}
+			Eventually(webAddressPublished, "15s", "200ms").Should(Succeed())
+
+			// A user's stop.
+			updateEnvSpec(env.Name, func(e *aiv1alpha1.DevEnvironment) { e.Spec.Running = false })
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.DevEnvironment{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), got)).To(Succeed())
+				g.Expect(got.Status.Phase).NotTo(BeNil())
+				g.Expect(got.Status.Phase.Name).To(Equal(aiv1alpha1.PhaseStopped))
+				g.Expect(got.Status.Endpoints).To(BeEmpty())
+				g.Expect(meta.IsStatusConditionTrue(got.Status.Conditions, aiv1alpha1.ConditionRouteReady)).To(BeTrue())
+			}, "15s", "200ms").Should(Succeed())
+
+			// And it is the address that went, not the routes: starting again is
+			// handed the same one rather than provisioned afresh.
+			updateEnvSpec(env.Name, func(e *aiv1alpha1.DevEnvironment) { e.Spec.Running = true })
+			Eventually(webAddressPublished, "15s", "200ms").Should(Succeed())
+
+			// The other reason a phase becomes Stopped, and the one no user asked
+			// for. The mark is written by hand because driving the idle clock is the
+			// idle suite's subject; the state is the one that suite produces.
+			updateEnvSpec(env.Name, func(e *aiv1alpha1.DevEnvironment) {
+				if e.Annotations == nil {
+					e.Annotations = map[string]string{}
+				}
+				e.Annotations[autoStoppedAnnotationKey] = autoStoppedValue
+			})
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.DevEnvironment{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), got)).To(Succeed())
+				g.Expect(got.Status.Phase).NotTo(BeNil())
+				g.Expect(got.Status.Phase.Name).To(Equal(aiv1alpha1.PhaseStopped))
+				g.Expect(got.Status.Phase.Reason).To(Equal(reasonIdleTimeout))
+				g.Expect(got.Status.Endpoints).To(BeEmpty())
+				g.Expect(meta.IsStatusConditionTrue(got.Status.Conditions, aiv1alpha1.ConditionRouteReady)).To(BeTrue())
 			}, "15s", "200ms").Should(Succeed())
 		})
 
