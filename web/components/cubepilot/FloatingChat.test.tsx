@@ -205,7 +205,7 @@ describe("floating chat (global AI assistant)", () => {
     // The greeting is data-driven: skills from the CRs, model from the CR.
     const greeted = await waitFor(root, () => {
       const text = container.textContent ?? "";
-      return text.includes("技能 2 项") && text.includes("当前模型 glm-5.2-chat") && text.includes("会话审计已开启");
+      return text.includes("技能 2 项") && text.includes("当前模型 glm-5.2-chat") && text.includes("白名单内的写操作直接执行");
     });
     expect(greeted).toBe(true);
     expect(container.querySelector('[data-od-id="fchat-panel"]')).not.toBeNull();
@@ -224,7 +224,7 @@ describe("floating chat (global AI assistant)", () => {
     act(() => {
       (container.querySelector('[data-od-id="fchat-fab"]') as HTMLElement).click();
     });
-    await waitFor(root, () => (container.textContent ?? "").includes("会话审计已开启"));
+    await waitFor(root, () => (container.textContent ?? "").includes("当前会话已接入集群真实数据"));
 
     const input = container.querySelector('[data-od-id="fchat-input"]') as HTMLTextAreaElement;
     setValue(input, "集群状态如何?");
@@ -280,7 +280,7 @@ describe("floating chat (global AI assistant)", () => {
     act(() => {
       (container.querySelector('[data-od-id="fchat-fab"]') as HTMLElement).click();
     });
-    await waitFor(root, () => (container.textContent ?? "").includes("会话审计已开启"));
+    await waitFor(root, () => (container.textContent ?? "").includes("当前会话已接入集群真实数据"));
 
     const expand = container.querySelector('[data-od-id="fchat-expand"]') as HTMLElement;
     expect(expand).not.toBeNull();
@@ -308,7 +308,7 @@ describe("floating chat (global AI assistant)", () => {
     act(() => {
       (container.querySelector('[data-od-id="fchat-fab"]') as HTMLElement).click();
     });
-    await waitFor(root, () => (container.textContent ?? "").includes("会话审计已开启"));
+    await waitFor(root, () => (container.textContent ?? "").includes("当前会话已接入集群真实数据"));
 
     const input = container.querySelector('[data-od-id="fchat-input"]') as HTMLTextAreaElement;
     setValue(input, "分析 Ceph OSD 使用率告警");
@@ -343,7 +343,7 @@ describe("floating chat (global AI assistant)", () => {
     act(() => {
       (container.querySelector('[data-od-id="fchat-fab"]') as HTMLElement).click();
     });
-    const greeted = await waitFor(root, () => (container.textContent ?? "").includes("会话审计已开启"));
+    const greeted = await waitFor(root, () => (container.textContent ?? "").includes("当前会话已接入集群真实数据"));
     expect(greeted).toBe(true);
 
     act(() => {
@@ -366,7 +366,7 @@ describe("floating chat (global AI assistant)", () => {
     act(() => {
       fab.click();
     });
-    await waitFor(root, () => (container.textContent ?? "").includes("会话审计已开启"));
+    await waitFor(root, () => (container.textContent ?? "").includes("当前会话已接入集群真实数据"));
     expect(fab.getAttribute("aria-expanded")).toBe("true");
 
     act(() => {
