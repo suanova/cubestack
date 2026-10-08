@@ -156,6 +156,30 @@ var _ = Describe("ModelVersion L1 admission", func() {
 			Expect(k8sClient.Create(ctx, mv)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, mv)).To(Succeed())
 		})
+
+		It("accepts a ModelVersion whose name extends <model>-<version> with a suffix", func() {
+			// A second registration of the same model version (e.g. at another
+			// storage location) is named <model>-<version>-<suffix>: one ISVC
+			// must be able to reference each registration.
+			setupModelVersionVAP()
+			defer cleanupModelVersionVAP()
+
+			mv := validModelVersion(testModelName + "-" + testModelVersion + "-s3")
+			Expect(k8sClient.Create(ctx, mv)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, mv)).To(Succeed())
+		})
+
+		It("rejects a name extending <model>-<version> without a '-' separator", func() {
+			// The extension must be dash-separated: "…-w8a8-v1s3" is neither
+			// <model>-<version> nor a suffixed registration of it.
+			setupModelVersionVAP()
+			defer cleanupModelVersionVAP()
+
+			mv := validModelVersion(testModelName + "-" + testModelVersion + "s3")
+			err := k8sClient.Create(ctx, mv)
+			Expect(err).To(HaveOccurred())
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid error, got: %v", err)
+		})
 	})
 
 	Context("spec immutability", func() {

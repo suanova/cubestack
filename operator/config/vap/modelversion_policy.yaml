@@ -1,5 +1,8 @@
 # L1 validation for ModelVersion per docs/design/isvc/api.md §3.1:
-# - metadata.name must equal <model>-<version> (CREATE)
+# - metadata.name must equal <model>-<version>, or start with <model>-<version>-
+#   (CREATE). The suffix disambiguates another registration of the same model
+#   version — e.g. a second storage location (qwen38-27b-fp16 vs
+#   qwen38-27b-fp16-s3); it is a naming convention, not validated against spec.
 # - spec is immutable (UPDATE)
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
@@ -18,8 +21,8 @@ spec:
   # name does not match the naming rule (created before this policy was
   # deployed) must stay updatable for metadata changes. spec changes are still
   # blocked by the immutability rule below.
-  - expression: "request.operation != 'CREATE' || object.metadata.name == object.spec.model + '-' + object.spec.version"
-    message: "metadata.name must equal <model>-<version>"
+  - expression: "request.operation != 'CREATE' || object.metadata.name == object.spec.model + '-' + object.spec.version || object.metadata.name.startsWith(object.spec.model + '-' + object.spec.version + '-')"
+    message: "metadata.name must equal <model>-<version>, or <model>-<version>-<suffix>"
     reason: Invalid
   - expression: "oldObject == null || object.spec == oldObject.spec"
     message: "spec is immutable"

@@ -104,8 +104,12 @@ spec:
 
 | 规则 | 内容 |
 |---|---|
-| 命名绑定（CREATE） | `.metadata.name == .spec.model + '-' + .spec.version`。|
+| 命名绑定（CREATE） | `.metadata.name == .spec.model + '-' + .spec.version`，或以 `<model>-<version>-` 为前缀（尾接区分后缀，见「同名内容的追加注册」）。|
 | `spec` 不可变（UPDATE） | 通过 VAP 强制 `spec` 不可变（`object.spec == oldObject.spec`）。管理员需要变更模型内容时，必须创建新的 `ModelVersion` 对象。`metadata` 不受该规则限制，可继续用于维护 `annotation`、`label` 等可变信息。 |
+
+**同名内容的追加注册**
+
+同一份模型内容（`model` 与 `version` 均相同）可以有多个注册：内容在多个存储位置/方式各有一份（如 cephfs 的 `HostPath` 副本与 S3 副本）时，每个副本都需要一个能被 `InferenceService` 分别引用的 `ModelVersion`。首个注册使用裸名 `<model>-<version>`；追加注册在名字末尾加简短区分后缀，例如 `qwen38-27b-fp16` 之外再注册 `qwen38-27b-fp16-s3`。后缀是命名约定，平台不校验其内容——各注册区别的事实来源始终是 `spec.storage`；后缀也不进入内容寻址，`storage.s3.uri` 仍按 `<bucket>/<prefix>/<model>/<version>` 约定（见 S3 策略小节）。
 
 **同名重建** 
 
@@ -145,7 +149,7 @@ VAP 校验无法防止 DELETE+CREATE 组合操作，平台允许该组合操作�
 
 `Static` 引用管理员/存储管理的 Controller 预建的专用存储单元（当前后端为 CephFS subvolume）。存储侧机制——供给流程、`getpath` 解析与 quota 读取、静态 PV 属性、平台常量与生命周期——由模型存储设计文档承载，本文只约定 API 契约：
 
-- **粒度不变量**：一个 `ModelVersion` 对应一个存储单元，存储单元名 = `metadata.name`（即 `<model>-<version>`），不设显式字段；与 `spec` 不可变一致——模型内容或存储变更 = 新建 `ModelVersion` = 新建存储单元。
+- **粒度不变量**：一个 `ModelVersion` 对应一个存储单元，存储单元名 = `metadata.name`（`<model>-<version>`，或带区分后缀的追加注册形式，见命名规则），不设显式字段；与 `spec` 不可变一致——模型内容或存储变更 = 新建 `ModelVersion` = 新建存储单元。
 - **`status.rootPath`**：存储侧解析出的真实路径（含存储生成的 uuid），按解析产物归 status 的约定由 controller 回显，不由管理员填写；服务渲染静态 PV 时消费。
 - **`StorageResolved`（Static）**：存储单元可解析且满足声明——存在（`SubvolumeNotFound`）、quota 已设置（`QuotaNotSet`）、`spec.static.capacity ≤ quota`（`CapacityExceedsQuota`）、Ceph 不可达（`CephUnavailable`，退避重试）。
 - **渲染契约**：controller 在用户 namespace 创建 ROX PVC（ownerRef → isvc），通过 `spec.selector` 匹配静态 PV 标签 `ai.cubestack.io/model-version: <mv-name>` 绑定（叠加 `storageClassName` 匹配）。Kubernetes 中一个 PV 只能绑定一个 PVC，因此同一 `ModelVersion` 的每个并发消费者各自需要一个静态 PV；同一存储单元的多个 PV 语义等价（同 rootPath、同 StorageClass），任一 Available PV 均可绑定。volumeMount 不带 `subPath`——存储单元即模型根目录（`subPath` 是 `Dynamic` 的卷内寻址字段，见 §4.5）。静态 PV 的创建主体与 Released 回收见 §7 TODO。
