@@ -24,6 +24,10 @@ function stubApi(
     stream?: "end" | "error" | "stall" | "terminal";
     activePolls?: number;
     transcript?: Array<{ role: string; content: string }>;
+    /** A conversation the runtime already holds, served to the mount's own read.
+     *  `transcript` is the other case: it only exists once this test has sent a
+     *  turn, so a mount read cannot satisfy an adoption assertion by accident. */
+    history?: Array<{ role: string; content: string }>;
     attach?: { events?: unknown[]; emit?: (ev: unknown) => void; calls?: number };
     /** When set, a status answer waits for the test to release it (in order). */
     agentStatusPending?: Array<(s: unknown) => void>;
@@ -207,6 +211,9 @@ function stubApi(
         if (!sent) return json({ active: false });
         turnPolls += 1;
         return json({ active: turnPolls <= opts.activePolls });
+      }
+      if (url.endsWith("/messages") && opts.history) {
+        return json({ items: opts.history });
       }
       if (url.endsWith("/messages") && opts.transcript) {
         // The runtime writes a turn as it goes, so the stub's transcript only
@@ -989,7 +996,7 @@ describe("cubepilot page", () => {
     // The poll's read is issued while the mount's is still out (5s interval).
     // Three are out by then: the chat pane's mount read, the config pane's own
     // read, and the poll's.
-    expect(await waitFor(() => pending.length >= 3, 8000)).toBe(true);
+    expect(await waitFor(() => pending.length >= 3, 200)).toBe(true);
     // Answer everything but the oldest read: the phase is known now.
     act(() =>
       pending.forEach((release, i) => {
@@ -1025,6 +1032,20 @@ describe("cubepilot page", () => {
     await act(async () => {});
 
     expect(container.textContent).not.toContain("实例状态加载中");
+    expect(configPending.length).toBeGreaterThan(0); // still out: that is the point
+    act(() => root.unmount());
+  });
+
+  it("shows the conversation as soon as the history answers, with config still out", async () => {
+    // The thread is keyed by the fixed session key and needs nothing from the
+    // meta, so it must not wait for the meta read — which waits on the AI
+    // Gateway's catalog. Restoring it used to start only after that read landed,
+    // which put the conversation 3.5s into the page.
+    const configPending: Array<(c: unknown) => void> = [];
+    stubApi(EXTERNAL_ONLY, { configPending, history: [{ role: "user", content: "历史消息甲" }] });
+    const { container, root } = renderPage();
+    await act(async () => {});
+    expect(await waitFor(() => container.textContent?.includes("历史消息甲") === true, 20)).toBe(true);
     expect(configPending.length).toBeGreaterThan(0); // still out: that is the point
     act(() => root.unmount());
   });

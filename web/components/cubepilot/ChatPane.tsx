@@ -657,11 +657,15 @@ export function ChatPane() {
     setAgentNotice("");
     void (async () => {
       const gen = genRef.current;
+      // Start the conversation read before the meta: it needs nothing from it,
+      // and the meta read waits on the AI Gateway's catalog (up to 2.5s). The
+      // thread renders when this lands, instead of after the meta did.
+      const history = loadAgentHistory(SESSION_KEY);
       const meta = await loadAgentMeta();
       if (genRef.current !== gen) return;
       if (meta.status?.exists) {
         awaitingInstanceRef.current = false;
-        await restoreAgentSession(meta);
+        await restoreAgentSession(meta, history);
       } else {
         awaitingInstanceRef.current = true;
         setMsgs(greetingMsgs(meta.status, meta.config, meta.skills, await loadConfirmPolicy()));
@@ -728,11 +732,14 @@ export function ChatPane() {
    * "…is owned by …:run:…, not …" — which is what a user saw on opening this
    * page. A key we chose cannot name one of them.
    */
-  async function restoreAgentSession(meta: AgentMeta): Promise<void> {
+  async function restoreAgentSession(meta: AgentMeta, history?: Promise<boolean>): Promise<void> {
     const gen = genRef.current;
     const key = SESSION_KEY;
     setAgentSessionKey(key);
-    const hadHistory = await loadAgentHistory(key);
+    // The caller may already have this read in flight (see selectAgent): it is
+    // keyed by the fixed session key and needs nothing from the meta, so it can
+    // run while the meta read waits on the AI Gateway's catalog.
+    const hadHistory = await (history ?? loadAgentHistory(key));
     if (genRef.current !== gen) return;
     // Nothing under this key yet: a conversation has not started, so greet. An
     // empty thread with no prompt is the one thing a first-time visitor must not
