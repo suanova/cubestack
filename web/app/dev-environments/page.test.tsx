@@ -149,6 +149,70 @@ describe("dev environments page", () => {
     act(() => root.unmount());
   });
 
+  it("reads each condition's status as text, not as the colour of a dot", async () => {
+    stubData([
+      devEnvironmentSummary({
+        name: "half-broken-env",
+        conditions: [
+          { type: "Accepted", status: "True", reason: "Accepted", message: "" },
+          { type: "RouteReady", status: "True", reason: "Published", message: "" },
+          { type: "PodScheduled", status: "True", reason: "Scheduled", message: "" },
+          { type: "Ready", status: "False", reason: "Running", message: "Environment pod is running but not ready" },
+        ],
+      }),
+    ]);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    // The status is the whole point of the row and it used to be carried by a 6px
+    // dot alone: `Ready=False` and `Ready=True` rendered as the same word.
+    expect(container.querySelector('[data-od-id="cond-Ready"]')?.textContent).toBe("ReadyFalse");
+    expect(container.querySelector('[data-od-id="cond-Accepted"]')?.textContent).toBe("AcceptedTrue");
+
+    // The dot decorates text that already says it, so it is hidden from a screen
+    // reader rather than left as an unlabelled colour.
+    const dot = container.querySelector('[data-od-id="cond-Ready"] span');
+    expect(dot?.getAttribute("aria-hidden")).toBe("true");
+    expect(dot?.getAttribute("aria-label")).toBeNull();
+
+    act(() => root.unmount());
+  });
+
+  it("prints the reason and message of a condition that is not True", async () => {
+    stubData([
+      devEnvironmentSummary({
+        name: "half-broken-env",
+        conditions: [
+          { type: "Accepted", status: "True", reason: "Accepted", message: "" },
+          // The sentence the object carries for the 503 this environment serves,
+          // and the remediation the brand gate carries. Both were unreachable
+          // from the console.
+          { type: "Ready", status: "False", reason: "Running", message: "Environment pod is running but not ready" },
+          { type: "BrandOk", status: "False", reason: "BrandMismatch", message: 'image "x" does not match gpu.vendor metax' },
+        ],
+      }),
+    ]);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    expect(container.querySelector('[data-od-id="cond-note-Ready"]')?.textContent).toBe(
+      "Ready (Running): Environment pod is running but not ready",
+    );
+    expect(container.querySelector('[data-od-id="cond-note-BrandOk"]')?.textContent).toBe(
+      'BrandOk (BrandMismatch): image "x" does not match gpu.vendor metax',
+    );
+    // A True condition has nothing to explain, so it takes no line of its own —
+    // its reason is still reachable on hover, which is where every condition's
+    // own sentence lives.
+    expect(container.querySelector('[data-od-id="cond-note-Accepted"]')).toBeNull();
+    expect(container.querySelector('[data-od-id="cond-Accepted"]')?.getAttribute("title")).toBe("Accepted True (Accepted)");
+    expect(container.querySelector('[data-od-id="cond-Ready"]')?.getAttribute("title")).toBe(
+      "Ready False (Running) Environment pod is running but not ready",
+    );
+
+    act(() => root.unmount());
+  });
+
   it("names the jupyter token's Secret and how to read it, and neither for an ssh environment", async () => {
     stubData(devEnvironmentList());
     const { container, root } = renderPage();

@@ -813,53 +813,83 @@ function SpecCard({ e }: { e: DevEnvironmentSummary }) {
   return (
     <Card title={t("dev.spec.title")} meta={t("dev.spec.meta")}>
       <Kvs rows={rows} />
-      <Box sx={{ display: "flex", gap: "8px", flexWrap: "wrap", px: "18px", py: "12px", borderTop: 1, borderColor: "divider" }}>
+      <Box sx={{ display: "flex", flexDirection: "column", gap: "8px", px: "18px", py: "12px", borderTop: 1, borderColor: "divider" }}>
         {e.conditions.length === 0 ? (
           <Typography data-od-id="env-conds-empty" sx={{ fontSize: 12, color: "text.secondary" }}>{t("dev.cond.empty")}</Typography>
         ) : (
-          e.conditions.map((c) => {
-            // Green only for an observed True condition; False (a real failure
-            // or an expected non-ready state like a stopped Ready) and Unknown
-            // (pending) get distinct non-success styling.
-            const cls = c.status === "True" ? "ok" : c.status === "Unknown" ? "pending" : "err";
-            const [chip, dot] =
-              cls === "ok"
-                ? [STATUS_OK, STATUS_OK]
-                : cls === "pending"
-                  ? [STATUS_WARN, STATUS_WARN]
-                  : [soft(STATUS_ERR, 55), STATUS_ERR];
-            return (
-              <Box
-                key={c.type}
-                data-od-id={`cond-${c.type}`}
-                component="span"
-                sx={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: "6px",
-                  px: "9px",
-                  py: "2px",
-                  borderRadius: 999,
-                  fontSize: 12,
-                  bgcolor: cls === "ok" ? soft(STATUS_OK) : soft(chip),
-                  color: cls === "ok" ? "inherit" : `color-mix(in oklch, ${chip} 66%, var(--fg))`,
-                  whiteSpace: "nowrap",
-                }}
-              >
-                <Box
-                  component="span"
-                  sx={{
-                    width: 6,
-                    height: 6,
-                    borderRadius: "50%",
-                    bgcolor: dot,
-                    flex: "none",
-                  }}
-                />
-                {c.type}
-              </Box>
-            );
-          })
+          <>
+            <Box sx={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+              {e.conditions.map((c) => {
+                // Green only for an observed True condition; False (a real failure
+                // or an expected non-ready state like a stopped Ready) and Unknown
+                // (pending) get distinct non-success styling.
+                const cls = c.status === "True" ? "ok" : c.status === "Unknown" ? "pending" : "err";
+                const [chip, dot] =
+                  cls === "ok"
+                    ? [STATUS_OK, STATUS_OK]
+                    : cls === "pending"
+                      ? [STATUS_WARN, STATUS_WARN]
+                      : [soft(STATUS_ERR, 55), STATUS_ERR];
+                // The object's own sentence about this condition, in the shape
+                // `kubectl describe` prints it. It is the diagnosis for whatever
+                // the environment is doing wrong — a Ready=False reads "the pod
+                // is running but not ready", which is what a 503 from the route
+                // means — and until now nothing in the console reached it.
+                const detail = [c.reason ? `(${c.reason})` : "", c.message].filter(Boolean).join(" ");
+                return (
+                  <Box
+                    key={c.type}
+                    data-od-id={`cond-${c.type}`}
+                    component="span"
+                    // A hover on the pill answers for every condition, including
+                    // the True ones, which carry no line of their own.
+                    title={detail ? `${c.type} ${c.status} ${detail}` : undefined}
+                    sx={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: "6px",
+                      px: "9px",
+                      py: "2px",
+                      borderRadius: 999,
+                      fontSize: 12,
+                      bgcolor: cls === "ok" ? soft(STATUS_OK) : soft(chip),
+                      color: cls === "ok" ? "inherit" : `color-mix(in oklch, ${chip} 66%, var(--fg))`,
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    <Box
+                      component="span"
+                      // Decorative once the status is text beside it: hue was the
+                      // only carrier, which reads as nothing to a screen reader and
+                      // little to a colour-blind one.
+                      aria-hidden="true"
+                      sx={{
+                        width: 6,
+                        height: 6,
+                        borderRadius: "50%",
+                        bgcolor: dot,
+                        flex: "none",
+                      }}
+                    />
+                    {c.type}
+                    {/* The status itself, as the object states it. It is a
+                        Kubernetes enum, so it reads the same in every locale —
+                        the way an unrecognised phase already does. */}
+                    <Box component="span" sx={{ fontWeight: 600, opacity: 0.75 }}>{c.status}</Box>
+                  </Box>
+                );
+              })}
+            </Box>
+            {e.conditions
+              .filter((c) => c.status !== "True" && (c.reason || c.message))
+              .map((c) => (
+                <Typography key={c.type} data-od-id={`cond-note-${c.type}`} sx={{ fontSize: 11.5, color: "text.secondary", lineHeight: 1.6 }}>
+                  <Box component="span" sx={{ fontFamily: "var(--font-mono)" }}>{c.type}</Box>
+                  {c.reason ? <Box component="span" sx={{ fontFamily: "var(--font-mono)" }}>{` (${c.reason})`}</Box> : null}
+                  {c.message ? `: ${c.message}` : ""}
+                </Typography>
+              ))}
+          </>
         )}
       </Box>
     </Card>
