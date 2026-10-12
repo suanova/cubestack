@@ -27,6 +27,8 @@ function stubApi(
     attach?: { events?: unknown[]; emit?: (ev: unknown) => void; calls?: number };
     /** When set, a status answer waits for the test to release it (in order). */
     agentStatusPending?: Array<(s: unknown) => void>;
+    /** When set, a config answer waits for the test to release it (in order). */
+    configPending?: Array<(c: unknown) => void>;
     /** Counts POST /messages, so a test can assert that nothing was sent. */
     turnPosts?: { n: number };
     /** The instance state the status route reports (defaults to Ready). */
@@ -54,6 +56,13 @@ function stubApi(
         return json({ taskTemplates: [] });
       if (url.includes("/api/cubepilot/tasks")) return json({ tasks: [], reports: [] });
       if (url.includes("/api/cubepilot/agent/config")) {
+        if (opts.configPending) {
+          return new Promise((resolve) => {
+            opts.configPending?.push((body: unknown) =>
+              resolve({ ok: true, status: 200, json: async () => body }),
+            );
+          });
+        }
         if (opts.configUnavailable) {
           return {
             ok: false,
@@ -966,8 +975,10 @@ describe("cubepilot page", () => {
   });
 
   it("keeps the newest status when answers land out of order", async () => {
-    // A slow poll must not put an older phase back on screen: the guidance
-    // would reappear after the assistant was already up.
+    // A slow read must not put an older phase back on screen: the guidance
+    // would reappear after the assistant was already up. The read that comes
+    // back first here is the poll's — the pane polls while it has no phase yet,
+    // and the mount's own read is held until the end.
     const pending: Array<(s: unknown) => void> = [];
     stubApi(EXTERNAL_ONLY, { agentStatus: { exists: true, phase: "Creating" }, agentStatusPending: pending });
     const { container, root } = renderPage();
@@ -975,18 +986,64 @@ describe("cubepilot page", () => {
     // The mount's own read is held too, so nothing has a phase yet.
     expect(container.querySelector('[data-od-id="agent-not-ready"]')).not.toBeNull();
 
-    // The mount's read is still out when a poll's answer (Ready) comes back.
-    expect(await waitFor(() => pending.length >= 2, 300)).toBe(true);
-    act(() => pending[1]?.({ exists: true, phase: "Ready" }));
+    // The poll's read is issued while the mount's is still out (5s interval).
+    // Three are out by then: the chat pane's mount read, the config pane's own
+    // read, and the poll's.
+    expect(await waitFor(() => pending.length >= 3, 8000)).toBe(true);
+    // Answer everything but the oldest read: the phase is known now.
+    act(() =>
+      pending.forEach((release, i) => {
+        if (i > 0) release({ exists: true, phase: "Ready" });
+      }),
+    );
     await act(async () => {});
     expect(await waitFor(() => container.querySelector('[data-od-id="agent-not-ready"]') === null)).toBe(true);
 
-    // The older answer lands late and is dropped.
+    // The oldest answer lands late and is dropped.
     act(() => pending[0]?.({ exists: true, phase: "Creating" }));
     await act(async () => {});
     expect(container.querySelector('[data-od-id="agent-not-ready"]')).toBeNull();
     act(() => root.unmount());
   }, 45000);
+
+  it("shows the instance phase as soon as the status answer lands, with config still out", async () => {
+    // The phase must not wait for the whole meta read. Config carries the AI
+    // Gateway's model catalog, which a slow gateway holds for up to its 2.5s
+    // bound; the loading line used to survive that read and only cleared when
+    // the 5s status poll came around.
+    const statusPending: Array<(s: unknown) => void> = [];
+    const configPending: Array<(c: unknown) => void> = [];
+    stubApi(EXTERNAL_ONLY, { agentStatusPending: statusPending, configPending });
+    const { container, root } = renderPage();
+    await act(async () => {});
+    expect(container.textContent).toContain("实例状态加载中");
+
+    // Every status answer that is out — the mount's read and the auto-select's —
+    // comes back Ready while config has not answered yet.
+    expect(statusPending.length).toBeGreaterThan(0);
+    act(() => statusPending.forEach((release) => release({ exists: true, phase: "Ready" })));
+    await act(async () => {});
+
+    expect(container.textContent).not.toContain("实例状态加载中");
+    expect(configPending.length).toBeGreaterThan(0); // still out: that is the point
+    act(() => root.unmount());
+  });
+
+  it("does not read the agent meta twice for one open", async () => {
+    // Two readers exist on this page: the chat pane's meta read, and the config
+    // pane's read of the same endpoint for its model card. Opening the pane used
+    // to add a third — the mount effect loaded the meta and then auto-selected
+    // the assistant, which loaded it again, and the duplicate answers superseded
+    // each other while queueing on the server.
+    stubApi(EXTERNAL_ONLY, {});
+    const { root } = renderPage();
+    await act(async () => {});
+    const configReads = (globalThis.fetch as unknown as { mock: { calls: Array<[unknown]> } }).mock.calls
+      .map((call) => String(call[0]))
+      .filter((url) => url.includes("/api/cubepilot/agent/config")).length;
+    expect(configReads).toBe(2);
+    act(() => root.unmount());
+  });
 
   it("counts the seconds while the instance is coming up", async () => {
     // The wait is the part that ends by itself, so the callout shows how long

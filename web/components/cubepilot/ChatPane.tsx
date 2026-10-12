@@ -280,6 +280,15 @@ export function ChatPane() {
   /** Only the newest status read may be applied: a slow poll can land after a
    *  newer one and put an older phase back on screen. */
   const statusGenRef = useRef(0);
+  /** The newest read that actually landed. A read that lands first is applied
+   *  even while a slower one is still out — which is what lets the pane show the
+   *  phase without waiting for the whole meta read (config carries the AI
+   *  Gateway's catalog, held for up to its 2.5s bound). */
+  const statusAppliedRef = useRef(0);
+  /** The meta read in flight, so the mount's own load and the auto-select's
+   *  share one round of requests instead of firing several — whose answers
+   *  would then supersede each other and queue on the server. */
+  const metaInflightRef = useRef<Promise<AgentMeta> | null>(null);
   /** Set when the last select skipped its restore because there was no
    *  instance — the one case a start that finishes later owes a restore. */
   const awaitingInstanceRef = useRef(false);
@@ -498,44 +507,63 @@ export function ChatPane() {
     const gen = ++statusGenRef.current;
     try {
       const res = await apiFetch("/api/cubepilot/agent/status");
-      if (!res.ok || statusGenRef.current !== gen) return;
+      if (!res.ok) return;
       const body = (await res.json()) as AgentStatus;
-      if (statusGenRef.current !== gen) return;
+      // Landing order decides, not issue order: this answer applies unless a
+      // newer one already landed (a slow poll must not put an older phase back
+      // on screen), and it applies even while a slower read is still out.
+      if (gen < statusAppliedRef.current) return;
+      statusAppliedRef.current = gen;
       setAgentStatus(body);
     } catch {
       /* the next tick asks again */
     }
   }
 
-  async function loadAgentMeta(): Promise<AgentMeta> {
+  /** The agent meta (instance status, config, skills). One read serves every
+   *  concurrent caller: the mount's own load and the auto-select are the same
+   *  read, not two rounds of the same three requests. */
+  function loadAgentMeta(): Promise<AgentMeta> {
+    if (metaInflightRef.current) return metaInflightRef.current;
+    const run = readAgentMeta();
+    metaInflightRef.current = run;
+    void run.finally(() => {
+      if (metaInflightRef.current === run) metaInflightRef.current = null;
+    });
+    return run;
+  }
+
+  async function readAgentMeta(): Promise<AgentMeta> {
     const gen = ++statusGenRef.current;
     try {
-      const [stRes, cfgRes, skRes] = await Promise.all([
-        apiFetch("/api/cubepilot/agent/status"),
+      // The status leg publishes on its own, as soon as it lands: the pane's
+      // phase must not wait for the other two reads. Same landing rule as
+      // refreshAgentStatus above.
+      const statusLeg = (async () => {
+        const res = await apiFetch("/api/cubepilot/agent/status");
+        const body = res.ok ? ((await res.json().catch(() => null)) as AgentStatus | null) : null;
+        if (body && gen >= statusAppliedRef.current) {
+          statusAppliedRef.current = gen;
+          setAgentStatus(body);
+        }
+        return { res, body };
+      })();
+      const [st, cfgRes, skRes] = await Promise.all([
+        statusLeg,
         apiFetch("/api/cubepilot/agent/config"),
         apiFetch("/api/cubepilot/skills"),
       ]);
-      const [stBody, cfgBody, skBody] = await Promise.all([
-        stRes.json().catch(() => null),
-        cfgRes.json().catch(() => null),
-        skRes.json().catch(() => null),
-      ]);
-      if (!stRes.ok) throw new Error((stBody as { error?: string } | null)?.error ?? `HTTP ${stRes.status}`);
-      // The agent meta is global (the object list entry + the card header),
-      // not part of the conversation generation: apply it even when a model
-      // auto-selection bumped that generation while these requests were in
-      // flight (otherwise the object entry stays "loading" forever).
-      const status = stBody as AgentStatus;
-      // A full read races the poll the same way a poll races itself; only the
-      // newest of all of them may set the phase.
-      const newestStatus = statusGenRef.current === gen;
-      const config = cfgRes.ok ? ((cfgBody as { config?: AgentConfig } | null)?.config ?? null) : null;
-      const skills = skRes.ok ? ((skBody as { skills?: SkillInfo[] } | null)?.skills ?? []) : [];
-      if (newestStatus) setAgentStatus(status);
+      if (!st.res.ok) throw new Error((st.body as { error?: string } | null)?.error ?? `HTTP ${st.res.status}`);
+      const config = cfgRes.ok
+        ? (((await cfgRes.json().catch(() => null)) as { config?: AgentConfig } | null)?.config ?? null)
+        : null;
+      const skills = skRes.ok
+        ? (((await skRes.json().catch(() => null)) as { skills?: SkillInfo[] } | null)?.skills ?? [])
+        : [];
       // config and skills travel in the returned meta and are read from there;
       // they used to have state of their own, which only the agent branch of
       // clearChat read, and that branch is gone with the fixed session key.
-      return { status, config, skills };
+      return { status: st.body as AgentStatus, config, skills };
     } catch {
       return { status: null, config: null, skills: [] };
     }
