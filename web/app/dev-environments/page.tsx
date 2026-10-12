@@ -727,6 +727,15 @@ function ConnectionCard({ e, onAct }: { e: DevEnvironmentSummary; onAct: (e: Dev
             />
           ) : null}
           <Typography sx={{ fontSize: 11, color: "text.secondary", lineHeight: 1.7 }}>{t("dev.conn.guide")}</Typography>
+          {/* Said only when it is true of this environment: the idle clause used
+              to be part of the guide, so an environment created with the timeout
+              disabled still claimed an expiry on the same screen that showed
+              "disabled". */}
+          {e.idleTimeout > 0 ? (
+            <Typography sx={{ fontSize: 11, color: "text.secondary", lineHeight: 1.7 }}>
+              {t("dev.conn.idle", { minutes: String(Math.round(e.idleTimeout / 60)) })}
+            </Typography>
+          ) : null}
         </Box>
       </Card>
     );
@@ -875,6 +884,10 @@ const DNS_LABEL_RE = /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/;
 const RUNTIME_USER_RE = /^[a-z_][a-z0-9_-]*$/;
 const RUNTIME_USER_MAX = 32;
 const RUN_AS_ID_MAX = 2147483647;
+// spec.lifecycle.idleTimeout is an int32 in seconds, 0 meaning "never shut down",
+// and the CRD bounds it no further, so an int32 is the ceiling. Mirrored from the
+// create route, so the custom box cannot walk the user to a 400.
+const IDLE_TIMEOUT_MAX = 2147483647;
 // The create route's own rules, mirrored so the wizard cannot walk the user to a
 // spec the server would refuse. corev1.EnvVar.name, and the CRD's port type enum.
 const ENV_NAME_RE = /^[-._a-zA-Z][-._a-zA-Z0-9]*$/;
@@ -917,6 +930,11 @@ interface Draft {
   // on, stated rather than implied so the choice is visible before it is made.
   pvcRetention: "retain" | "delete";
   idle: number;
+  // The presets cover the common choices; the custom branch carries everything
+  // else, in minutes as typed — held as a string like the uid/gid boxes, since
+  // an empty box is not 0 (which means "never shut down").
+  idleCustom: boolean;
+  idleMinutes: string;
   // The runtime identity. uid and gid are held as strings, not numbers: a
   // number field would turn an empty box into 0, and 0 is not a missing uid —
   // it is the request to run as root.
@@ -1003,6 +1021,8 @@ function CreateWizard({
     storageGi: 200,
     pvcRetention: "delete",
     idle: 0,
+    idleCustom: false,
+    idleMinutes: "",
     runAsRoot: false,
     runtimeUser: "",
     runAsUser: String(PLATFORM_UID),
@@ -1155,9 +1175,19 @@ function CreateWizard({
   const gpuRequested = draft.accelerator !== "none";
   const gpuValid = !gpuRequested || (Number.isInteger(draft.gpuCount) && draft.gpuCount >= 1 && draft.gpuCount <= 16);
   const storageValid = Number.isInteger(draft.storageGi) && draft.storageGi >= 20 && draft.storageGi <= 800;
-  const step2Valid = gpuValid && storageValid;
+  // spec.lifecycle.idleTimeout is whatever the user needs it to be, not one of
+  // four values: 30 minutes — the shortest preset — is short enough to stop an
+  // environment someone is reading a notebook in. The custom box is minutes, as
+  // the presets are, and is bounded only by the int32 the CRD holds.
+  const idleMinutes = draft.idleMinutes.trim();
+  const idleCustomValid =
+    /^\d+$/.test(idleMinutes) && Number(idleMinutes) * 60 <= IDLE_TIMEOUT_MAX;
+  const idleValid = !draft.idleCustom || idleCustomValid;
+  const idleTimeoutSeconds = draft.idleCustom ? Number(idleMinutes) * 60 : draft.idle;
+  const step2Valid = gpuValid && storageValid && idleValid;
   const [gpuError, setGpuError] = useState(false);
   const [storageError, setStorageError] = useState(false);
+  const [idleError, setIdleError] = useState(false);
 
   // Root is expressed as uid 0 alone, so the identity the user typed is kept in
   // the draft and only overridden for display and for submission. Turning root
@@ -1225,6 +1255,7 @@ function CreateWizard({
     } else if (step === 2) {
       setGpuError(!gpuValid);
       setStorageError(!storageValid);
+      setIdleError(!idleValid);
       if (!step2Valid) return;
     } else if (step === 3) {
       setAccountError(!accountValid);
@@ -1244,6 +1275,7 @@ function CreateWizard({
     // manipulated directly.
     setGpuError(!gpuValid);
     setStorageError(!storageValid);
+    setIdleError(!idleValid);
     setAccountError(!accountValid);
     setUidGidError(!uidGidValid);
     setMountPathError(!mountPathValid);
@@ -1269,7 +1301,7 @@ function CreateWizard({
       // the CRD's default, and stating it would put a decision in the body the
       // user never made.
       ...(draft.pvcRetention === "retain" ? { pvcRetention: "retain" } : {}),
-      idleTimeout: draft.idle,
+      idleTimeout: idleTimeoutSeconds,
       // Root is requested by runAsUser 0 alone; the operator serves "root" and
       // ignores spec.runtime.user, so no account is sent with it — sending one
       // would only be reported back as an overridden field.
@@ -1358,7 +1390,7 @@ function CreateWizard({
       t("dev.wizard.pvcRetention"),
       draft.pvcRetention === "retain" ? t("dev.wizard.pvcRetentionRetain") : t("dev.wizard.pvcRetentionDelete"),
     ],
-    [t("dev.wizard.idle"), draft.idle === 0 ? t("dev.spec.idleOff") : t("dev.spec.idleMin", { minutes: String(draft.idle / 60) })],
+    [t("dev.wizard.idle"), idleTimeoutSeconds === 0 ? t("dev.spec.idleOff") : t("dev.spec.idleMin", { minutes: String(idleTimeoutSeconds / 60) })],
     [
       t("dev.wizard.identity"),
       draft.runAsRoot
@@ -1531,13 +1563,47 @@ function CreateWizard({
                     <TextField size="small" fullWidth type="number" inputProps={{ min: 20, max: 800 }} value={draft.storageGi} onChange={(e) => setField("storageGi", Number(e.target.value))} />
                   </WizField>
                   <WizField label={t("dev.wizard.idle")} hint={t("dev.wizard.idleHint")}>
-                    <Select size="small" fullWidth value={draft.idle} onChange={(e) => setField("idle", Number(e.target.value))}>
-                      <MenuItem value={0}>{t("dev.wizard.idle0")}</MenuItem>
-                      <MenuItem value={1800}>30</MenuItem>
-                      <MenuItem value={3600}>60</MenuItem>
-                      <MenuItem value={14400}>240</MenuItem>
+                    <Select
+                      size="small"
+                      fullWidth
+                      data-od-id="wizard-idle"
+                      value={draft.idleCustom ? "custom" : String(draft.idle)}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        // Choosing custom keeps whatever was in the minutes box,
+                        // so switching back and forth does not lose the value.
+                        setDraft((prev) =>
+                          v === "custom"
+                            ? { ...prev, idleCustom: true, idleMinutes: prev.idleMinutes || (prev.idle ? String(prev.idle / 60) : "") }
+                            : { ...prev, idleCustom: false, idle: Number(v) },
+                        );
+                      }}
+                    >
+                      <MenuItem value="0">{t("dev.wizard.idle0")}</MenuItem>
+                      <MenuItem value="1800">30</MenuItem>
+                      <MenuItem value="3600">60</MenuItem>
+                      <MenuItem value="14400">240</MenuItem>
+                      <MenuItem value="custom">{t("dev.wizard.idleCustom")}</MenuItem>
                     </Select>
                   </WizField>
+                  {draft.idleCustom ? (
+                    <WizField
+                      label={t("dev.wizard.idleMinutes")}
+                      hint={t("dev.wizard.idleMinutesHint")}
+                      error={idleError && !idleCustomValid}
+                      errorText={t("dev.wizard.errIdleCustom")}
+                    >
+                      <TextField
+                        size="small"
+                        fullWidth
+                        type="number"
+                        inputProps={{ min: 0 }}
+                        data-od-id="wizard-idle-minutes"
+                        value={draft.idleMinutes}
+                        onChange={(e) => setField("idleMinutes", e.target.value)}
+                      />
+                    </WizField>
+                  ) : null}
                 </Box>
               </Box>
             )}

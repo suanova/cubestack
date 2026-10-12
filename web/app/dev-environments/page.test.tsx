@@ -327,6 +327,31 @@ describe("dev environments page", () => {
     act(() => root.unmount());
   });
 
+  it("claims an idle expiry only for an environment that has one", async () => {
+    // The guide used to state the idle clause unconditionally, so an
+    // environment created with the timeout disabled carried it on the same
+    // screen that showed "disabled" — and named an auth proxy a cluster
+    // without the Agent Router does not have.
+    stubData([devEnvironmentSummary({ name: "never-idle-env", idleTimeout: 0 })]);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    expect(container.textContent).not.toContain("空闲超时生效");
+    expect(container.textContent).not.toContain("AI Gateway 鉴权代理");
+
+    act(() => root.unmount());
+  });
+
+  it("states the idle timeout the environment carries, in minutes", async () => {
+    stubData([devEnvironmentSummary({ name: "idle-env", idleTimeout: 3600 })]);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    expect(container.textContent).toContain("超过 60 分钟无活动即停止");
+
+    act(() => root.unmount());
+  });
+
   it("Delete is confirmed: sends DELETE for the selected environment", async () => {
     const deletes: Array<Record<string, unknown> | undefined> = [];
     vi.stubGlobal(
@@ -608,6 +633,63 @@ describe("create wizard", () => {
     const [, init] = call as [RequestInfo | URL, RequestInit];
     return JSON.parse(init.body as string);
   }
+
+  it("takes an idle timeout that is not one of the four presets", async () => {
+    const { container, root } = renderWithBoth();
+    await act(async () => {});
+    await toStep2(container);
+
+    // The presets are offered, plus the custom case: the CRD takes any second
+    // count, and 30 minutes — the shortest preset — is short enough to stop an
+    // environment someone is reading a notebook in.
+    const idle = step2Selects()[3];
+    expect(idle.textContent).toBe("不启用");
+    expect(await selectOption(idle, "自定义…")).toEqual(["不启用", "30", "60", "240", "自定义…"]);
+
+    // The custom branch is minutes, as the presets are, and reaches the API as
+    // seconds.
+    setInput(document.body.querySelector('[data-od-id="wizard-idle-minutes"] input') as HTMLInputElement, "5");
+
+    await nextStep();
+    expect(document.body.querySelector('[data-step="3"]')).not.toBeNull();
+    await nextStep();
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="wizard-create"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    expect(createdBody()).toMatchObject({ idleTimeout: 300 });
+
+    act(() => root.unmount());
+  });
+
+  it("blocks the step on a custom idle that is not a whole number of minutes", async () => {
+    const { container, root } = renderWithBoth();
+    await act(async () => {});
+    await toStep2(container);
+
+    await selectOption(step2Selects()[3], "自定义…");
+    const minutes = document.body.querySelector('[data-od-id="wizard-idle-minutes"] input') as HTMLInputElement;
+
+    // Empty is not 0: 0 means "never shut down", which the presets state.
+    await nextStep();
+    expect(document.body.querySelector('[data-step="3"]')).toBeNull();
+    expect(document.body.textContent).toContain("请输入非负整数分钟数");
+
+    setInput(minutes, "1.5");
+    await nextStep();
+    expect(document.body.querySelector('[data-step="3"]')).toBeNull();
+
+    setInput(minutes, "-30");
+    await nextStep();
+    expect(document.body.querySelector('[data-step="3"]')).toBeNull();
+
+    setInput(minutes, "30");
+    await nextStep();
+    expect(document.body.querySelector('[data-step="3"]')).not.toBeNull();
+
+    act(() => root.unmount());
+  });
 
   it("offers 1/2/4/8/16 cores, and lists only the memory sizes those cores allow", async () => {
     const { container, root } = renderWithBoth();

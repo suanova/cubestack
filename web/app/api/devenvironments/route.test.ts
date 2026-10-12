@@ -258,6 +258,19 @@ describe("POST /api/devenvironments", () => {
     expect(createNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
+  it("takes any idle timeout an int32 can hold, and refuses what it cannot", async () => {
+    // spec.lifecycle.idleTimeout is an int32 in seconds, 0 meaning "never shut
+    // down", and the CRD bounds it no further — so the wizard's four presets are
+    // not the API's rule. Anything wider than an int32 would come back from the
+    // API server as an opaque 422, which is what this bound exists to prevent.
+    expect(await postedSpec({ idleTimeout: 300 })).toMatchObject({ lifecycle: { idleTimeout: 300 } });
+    expect(await postedSpec({ idleTimeout: 2147483647 })).toMatchObject({ lifecycle: { idleTimeout: 2147483647 } });
+
+    expect(await rejectedPost({ idleTimeout: -1 })).toContain("idleTimeout");
+    expect(await rejectedPost({ idleTimeout: 1.5 })).toContain("idleTimeout");
+    expect(await rejectedPost({ idleTimeout: 2147483648 })).toContain("idleTimeout");
+  });
+
   it("creates the CR with CRD-backed fields and carries over optional cpu/memory", async () => {
     createNamespacedCustomObject.mockResolvedValue({});
     listClusterCustomObject.mockResolvedValue({ items: [{ metadata: { name: "jupyter-nlp-ln", namespace: "project-a" } }] });

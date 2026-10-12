@@ -227,6 +227,10 @@ const RUNTIME_USER_MAX = 32;
 // int32 is a uid or gid, and a value past it would be rejected by the API
 // server as an opaque 422 rather than here.
 const RUN_AS_ID_MAX = 2147483647;
+// spec.lifecycle.idleTimeout is an int32 in seconds with no narrower bound in the
+// CRD, so that is its ceiling: a larger value would reach the API server and come
+// back as an opaque 422 the user cannot act on.
+const IDLE_TIMEOUT_MAX = 2147483647;
 const DEVENV_TYPES = ["jupyter", "ssh", "vscode"] as const;
 // The accelerator is a single choice, "none" included, mirroring
 // spec.resources.gpu.vendor plus the absence of the block.
@@ -380,8 +384,8 @@ export const POST = withAuth(async (req) => {
       return ValidationError("storageGi 需在 20–800 之间。");
     }
     const idleTimeout = body.idleTimeout === undefined ? 0 : body.idleTimeout;
-    if (!Number.isInteger(idleTimeout) || idleTimeout < 0) {
-      return ValidationError("idleTimeout 需为非负整数(秒)。");
+    if (!Number.isInteger(idleTimeout) || idleTimeout < 0 || idleTimeout > IDLE_TIMEOUT_MAX) {
+      return ValidationError(`idleTimeout 需为 0–${IDLE_TIMEOUT_MAX} 之间的整数(秒),0 表示不启用。`);
     }
 
     // The runtime identity. An empty account is "not stated", not an account:
