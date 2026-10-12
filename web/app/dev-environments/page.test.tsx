@@ -1639,7 +1639,10 @@ describe("create wizard", () => {
     });
     await act(async () => {});
 
-    expect(createdBody()).toMatchObject({ storageGi: 200, pvcRetention: "retain" });
+    // 20Gi is the wizard's starting size, left untouched here: the claim is
+    // provisioned at its full size up front, so the default is the smallest the
+    // route accepts rather than the largest it allows.
+    expect(createdBody()).toMatchObject({ storageGi: 20, pvcRetention: "retain" });
 
     act(() => root.unmount());
   });

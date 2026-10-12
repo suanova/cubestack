@@ -1075,7 +1075,11 @@ function CreateWizard({
     gpuCount: 1,
     cpu: "2",
     memory: "4Gi",
-    storageGi: 200,
+    // The smallest workspace the route accepts, not the largest: a claim is
+    // provisioned at its full size up front, and 200Gi is 200Gi of the cluster
+    // spent on a wizard nobody has edited yet. The field is editable, and the
+    // summary step states the size before it is created.
+    storageGi: 20,
     pvcRetention: "delete",
     idle: 0,
     idleCustom: false,
