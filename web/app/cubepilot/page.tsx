@@ -40,6 +40,22 @@ export default function CubepilotPage() {
         // The chat tab fills to the window bottom (its floating composer is
         // pinned to the viewport's bottom edge), so no page bottom padding.
         paddingBottom: tab === "chat" ? 0 : "64px",
+        // …and it takes the height that is actually left, as a flex column: the
+        // head is as tall as its text needs (a translated subtitle can wrap
+        // where another does not), and the conversation absorbs the difference
+        // instead of being pushed off the bottom edge. 77px is the app chrome
+        // above this page -- the sticky topbar plus this box's top padding.
+        ...(tab === "chat"
+          ? {
+              height: "calc(100dvh - 77px)",
+              display: "flex",
+              flexDirection: "column",
+              minHeight: 0,
+              // Narrow: the card goes back to its own height and the page
+              // scrolls, which is what this layout has always done.
+              "@media (max-width: 1180px)": { height: "auto", display: "block" },
+            }
+          : {}),
         mx: "auto",
         width: "100%",
       }}
@@ -109,7 +125,16 @@ export default function CubepilotPage() {
         </Box>
       </Box>
 
-      <Box hidden={tab !== "chat"} role="tabpanel" id="pane-chat" aria-labelledby="tab-chat" data-od-id="pane-chat">
+      <Box
+        hidden={tab !== "chat"}
+        role="tabpanel"
+        id="pane-chat"
+        aria-labelledby="tab-chat"
+        data-od-id="pane-chat"
+        // The chat pane is what absorbs the leftover height: a flex container,
+        // so the card inside it stretches rather than being told a number.
+        sx={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
+      >
         <ChatPane />
       </Box>
       <Box hidden={tab !== "tasks"} role="tabpanel" id="pane-tasks" aria-labelledby="tab-tasks" data-od-id="pane-tasks">

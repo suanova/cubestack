@@ -94,12 +94,19 @@ const LIST_COL_MIN = 120;
 const LIST_COL_MAX = 460;
 
 const chatGridSx = (listW: number, collapsed: boolean): SxProps<Theme> => ({
+  // The grid takes the height the pane's flex column leaves it, and its single
+  // row takes the grid's: the card stretches into whatever is left instead of
+  // being handed a number that only holds while the head keeps its height.
+  flex: 1,
+  minHeight: 0,
   display: "grid",
   // Collapsed takes the column *and* its gutter out of the template, so the
   // card takes the width instead of leaving an empty 16px strip between them.
   gridTemplateColumns: collapsed ? "minmax(0,1fr)" : `${listW}px 16px minmax(0,1fr)`,
-  alignItems: "start",
-  "@media (max-width: 1180px)": { gridTemplateColumns: "1fr" },
+  gridTemplateRows: "minmax(0, 1fr)",
+  // Narrow: the list sits above the card, so the rows go back to their content
+  // and the page scrolls as it always did.
+  "@media (max-width: 1180px)": { flex: "none", gridTemplateColumns: "1fr", gridTemplateRows: "auto" },
 });
 
 // 14px glyphs for the composer's sampling-params chip (DSH access-mode look).
@@ -1856,7 +1863,18 @@ export function ChatPane() {
             : { tone: "done", key: "cubepilot.chat.statusDone" };
 
   return (
-    <Box>
+    // The pane fills the height the page's flex column leaves it: this wrapper
+    // is the flex item, the grid below takes the height it is given, and the
+    // card stretches inside the grid's single row.
+    <Box
+      sx={{
+        flex: 1,
+        minHeight: 0,
+        display: "flex",
+        flexDirection: "column",
+        "@media (max-width: 1180px)": { flex: "none", display: "block" },
+      }}
+    >
       {toastView}
 
       <Box sx={chatGridSx(listW, listCollapsed)}>
@@ -2011,18 +2029,17 @@ export function ChatPane() {
         />
 
         {/* ── chat card ── */}
-        {/* The card fills the viewport below the app chrome (141px above:
-            sticky topbar + page head + tabs + pane sub; the chat tab has no
-            page bottom padding), so the thread is the flex filler that
-            scrolls inside its own scrollbar and the floating composer sits
-            at the window's bottom edge. */}
+        {/* The card stretches into whatever height the flex column above
+            leaves it — the head is text, so its height is whatever a given
+            language needs — and the thread is the flex filler that scrolls
+            inside its own scrollbar, with the composer at the card's bottom
+            edge. */}
         <Card
           data-od-id="chat-card"
           sx={{
             display: "flex",
             flexDirection: "column",
-            height: "calc(100dvh - 141px)",
-            minHeight: 480,
+            minHeight: 320,
             // Visible so the floating composer's shadow is not clipped at the
             // card's bottom edge.
             overflow: "visible",
