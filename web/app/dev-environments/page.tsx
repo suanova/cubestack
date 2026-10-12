@@ -539,12 +539,13 @@ const tdSx = {
 };
 
 /**
- * A row's kebab menu. What an environment offers follows from its phase rather
- * than its type: a Running one can only be stopped, since its work is live; a
- * Stopped one can be started again — or deleted, the one destructive choice,
- * which is why it sits behind a separator; and one that is Pending or
- * Terminating is mid-transition, where the controller rather than the user
- * decides what happens next, so the menu stays shut.
+ * A row's kebab menu. Start and stop follow from the phase rather than the type:
+ * a Running environment can only be stopped, since its work is live; a Stopped
+ * one can be started again. Deleting is outside that gate — it is offered in
+ * every phase, including the ones the console does not know (an empty phase, a
+ * Failed one), because an environment a user can see is one they must be able to
+ * remove: a phase allowlist would otherwise leave a stuck object that no console
+ * action can reach, and the storage behind it unreclaimable too.
  *
  * The menu itself is a MUI `Menu` rather than the prototype's absolutely
  * positioned box: the table sits in a scroll container, which would clip a
@@ -553,7 +554,8 @@ const tdSx = {
 function RowActions({ e, onAct }: { e: DevEnvironmentSummary; onAct: (e: DevEnvironmentSummary, act: string) => void }) {
   const { t } = useI18n();
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
-  const actionable = e.phase === "Running" || e.phase === "Stopped";
+  const canStop = e.phase === "Running";
+  const canStart = e.phase === "Stopped";
   const itemSx = {
     fontSize: 12.5,
     fontWeight: 550,
@@ -577,7 +579,6 @@ function RowActions({ e, onAct }: { e: DevEnvironmentSummary; onAct: (e: DevEnvi
       <Button
         size="small"
         data-od-id={`env-ops-${e.name}`}
-        disabled={!actionable}
         aria-label={t("dev.col.ops")}
         aria-haspopup="menu"
         aria-expanded={anchor ? "true" : "false"}
@@ -621,26 +622,24 @@ function RowActions({ e, onAct }: { e: DevEnvironmentSummary; onAct: (e: DevEnvi
           list: { sx: { py: "4px", px: "4px" } },
         }}
       >
-        {e.phase === "Running" ? (
+        {canStop ? (
           <MenuItem data-od-id={`act-stop-${e.name}`} onClick={() => run("stop")} sx={itemSx}>
             {t("dev.act.stop")}
           </MenuItem>
         ) : null}
-        {e.phase === "Stopped" ? (
+        {canStart ? (
           <MenuItem data-od-id={`act-start-${e.name}`} onClick={() => run("start")} sx={itemSx}>
             {t("dev.act.start")}
           </MenuItem>
         ) : null}
-        {e.phase === "Stopped" ? <Divider sx={{ my: "4px", mx: "6px" }} /> : null}
-        {e.phase === "Stopped" ? (
-          <MenuItem
-            data-od-id={`act-del-${e.name}`}
-            onClick={() => run("del")}
-            sx={{ ...itemSx, color: soft(STATUS_ERR, 70), "&:hover": { bgcolor: soft(STATUS_ERR, 10), color: soft(STATUS_ERR, 70) } }}
-          >
-            {t("dev.act.delete")}
-          </MenuItem>
-        ) : null}
+        {canStop || canStart ? <Divider sx={{ my: "4px", mx: "6px" }} /> : null}
+        <MenuItem
+          data-od-id={`act-del-${e.name}`}
+          onClick={() => run("del")}
+          sx={{ ...itemSx, color: soft(STATUS_ERR, 70), "&:hover": { bgcolor: soft(STATUS_ERR, 10), color: soft(STATUS_ERR, 70) } }}
+        >
+          {t("dev.act.delete")}
+        </MenuItem>
       </Menu>
     </Box>
   );
@@ -736,7 +735,12 @@ function ConnectionCard({ e, onAct }: { e: DevEnvironmentSummary; onAct: (e: Dev
     <Card title={t("dev.conn.title")} meta={t("dev.conn.meta")}>
       <Box sx={{ px: "18px", py: "20px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "16px" }}>
         <Typography sx={{ fontSize: 13, color: "text.secondary" }}>
-          {t("dev.conn.none", { phase: e.phase ?? "—" })}
+          {/* The line states a phase only when the environment reports one: an
+              environment whose controller failed before the status write has
+              none, and interpolating it made the card read "The environment is
+              —". What is true without a phase is that there is nothing to
+              connect to yet. */}
+          {e.phase ? t("dev.conn.none", { phase: e.phase }) : t("dev.conn.noPhase")}
         </Typography>
         {e.phase === "Stopped" ? (
           <Button

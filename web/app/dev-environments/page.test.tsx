@@ -232,11 +232,16 @@ describe("dev environments page", () => {
     act(() => root.unmount());
   });
 
-  it("gives a row only the actions its phase allows", async () => {
+  it("gates start/stop on the phase and never gates delete on it", async () => {
     stubData([
       devEnvironmentSummary(),
       devEnvironmentSummary({ name: "sleeping-env", phase: "Stopped", endpoints: [], conditions: [] }),
       devEnvironmentSummary({ name: "booting-env", phase: "Pending", endpoints: [], conditions: [] }),
+      // The two phases the console does not offer a transition for. An empty
+      // phase is what a controller failure before the status write leaves
+      // behind; Failed is what the controller writes when it refuses the spec.
+      devEnvironmentSummary({ name: "phaseless-env", phase: null, endpoints: [], conditions: [] }),
+      devEnvironmentSummary({ name: "failed-env", phase: "Failed", endpoints: [], conditions: [] }),
     ]);
     const { container, root } = renderPage();
     await act(async () => {});
@@ -247,22 +252,73 @@ describe("dev environments page", () => {
       });
     const item = (kind: string, name: string) => document.body.querySelector(`[data-od-id="act-${kind}-${name}"]`);
 
-    // Running: stop, and nothing else. Deleting an environment that is in the
-    // middle of work is not a choice a row should put one click away.
+    // Running: stop, and no start — but the way out is still there.
     open("jupyter-nlp-ln");
     expect(item("stop", "jupyter-nlp-ln")).not.toBeNull();
     expect(item("start", "jupyter-nlp-ln")).toBeNull();
-    expect(item("del", "jupyter-nlp-ln")).toBeNull();
+    expect(item("del", "jupyter-nlp-ln")).not.toBeNull();
 
-    // Stopped: start, plus the one destructive choice.
+    // Stopped: start, and delete.
     open("sleeping-env");
     expect(item("start", "sleeping-env")).not.toBeNull();
     expect(item("del", "sleeping-env")).not.toBeNull();
     expect(item("stop", "sleeping-env")).toBeNull();
 
-    // Pending: mid-transition, where the controller rather than the user decides
-    // what happens next — so there is no menu to open.
-    expect(kebab(container, "booting-env").disabled).toBe(true);
+    // Pending, empty and Failed: no transition to offer — the controller owns
+    // that — but the environment is still one the user can remove.
+    for (const name of ["booting-env", "phaseless-env", "failed-env"]) {
+      expect(kebab(container, name).disabled).toBe(false);
+      open(name);
+      expect(item("start", name)).toBeNull();
+      expect(item("stop", name)).toBeNull();
+      expect(item("del", name)).not.toBeNull();
+    }
+
+    act(() => root.unmount());
+  });
+
+  it("deletes an environment whose phase the controller never wrote", async () => {
+    const deletes: Array<Record<string, unknown> | undefined> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method === "DELETE") {
+          deletes.push(JSON.parse(String(init.body)));
+          return { ok: true, status: 200, json: async () => ({ ok: true }) };
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            items: [devEnvironmentSummary({ name: "phaseless-env", phase: null, endpoints: [], conditions: [] })],
+          }),
+        };
+      }),
+    );
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const { root } = renderPage();
+    await act(async () => {});
+
+    rowAct("phaseless-env", "del");
+    await act(async () => {});
+
+    // Without this the object is a dead end: no phase the menu could match, and
+    // no other delete path in the console.
+    expect(deletes).toEqual([{ namespace: "project-a", name: "phaseless-env" }]);
+
+    act(() => root.unmount());
+  });
+
+  it("does not read a missing phase into the connection card's copy", async () => {
+    stubData([
+      devEnvironmentSummary({ name: "phaseless-env", phase: null, endpoints: [], conditions: [] }),
+    ]);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    // "The environment is —" is what interpolating a null phase rendered.
+    expect(container.textContent).toContain("环境尚未上报状态");
+    expect(container.textContent).not.toContain("环境当前—");
 
     act(() => root.unmount());
   });
