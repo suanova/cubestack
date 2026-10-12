@@ -81,15 +81,21 @@ describe("dev environments page", () => {
   }
 
   /**
-   * Run one of a row's actions. They live behind a kebab button now, so it
-   * takes two clicks, and the menu lands in a portal on document.body rather
-   * than inside the container the page rendered into.
+   * Run one of a row's actions. An expanded row lays them out in the row itself;
+   * a closed one keeps them behind a kebab, which takes a second click and lands
+   * its menu in a portal on document.body rather than inside the container the
+   * page rendered into.
    */
   function rowAct(name: string, kind: "start" | "stop" | "del") {
-    act(() => {
-      (document.body.querySelector(`[data-od-id="env-ops-${name}"]`) as HTMLElement).click();
-    });
-    const item = document.body.querySelector(`[data-od-id="act-${kind}-${name}"]`);
+    const selector = `[data-od-id="act-${kind}-${name}"]`;
+    if (!document.body.querySelector(selector)) {
+      // Still behind the kebab. An expanded row has none, so only reach for it
+      // when the row is actually closed; otherwise the action simply is not
+      // offered and the assertion below should say so.
+      const ops = document.body.querySelector(`[data-od-id="env-ops-${name}"]`);
+      if (ops) act(() => { (ops as HTMLElement).click(); });
+    }
+    const item = document.body.querySelector(selector);
     expect(item).not.toBeNull();
     act(() => {
       (item as HTMLElement).click();
@@ -99,6 +105,25 @@ describe("dev environments page", () => {
   /** A row's kebab button. */
   function kebab(container: HTMLElement, name: string): HTMLButtonElement {
     return container.querySelector(`[data-od-id="env-ops-${name}"]`) as HTMLButtonElement;
+  }
+
+  /**
+   * Answer the delete dialog. It replaced window.confirm, so deleting is now the
+   * row's click plus a click here — and like the menu, it renders into a portal
+   * on document.body rather than inside the container the page rendered into.
+   */
+  async function answerDelete(ok: boolean) {
+    const btn = document.body.querySelector(`[data-od-id="delete-${ok ? "confirm" : "cancel"}"]`);
+    expect(btn).not.toBeNull();
+    await act(async () => {
+      (btn as HTMLElement).click();
+    });
+    await act(async () => {});
+  }
+
+  /** What the delete dialog says deleting this environment does to its workspace. */
+  function deletePrompt(): string {
+    return document.body.querySelector('[data-od-id="delete-prompt"]')?.textContent ?? "";
   }
 
   it("shows a loading state until the cluster request resolves", () => {
@@ -128,7 +153,8 @@ describe("dev environments page", () => {
     // First row selected -> its connection info and spec show.
     expect(container.textContent).toContain("连接信息");
     expect(container.textContent).toContain("https://dev.cubestack.local/ws/jupyter-nlp-ln");
-    expect(container.textContent).toContain("规格与状态");
+    expect(container.textContent).toContain("规格");
+    expect(container.textContent).toContain("状态");
     expect(container.textContent).toContain("harbor.isuanova.com/suanova/jupyter-cuda-pytorch:latest");
     // The GPU environment's accelerator, and the stopped one's absence of one.
     expect(container.textContent).toContain("1 × nvidia");
@@ -228,12 +254,16 @@ describe("dev environments page", () => {
     act(() => root.unmount());
   });
 
-  it("prints the reason and message of a condition that is not True", async () => {
+  it("prints every condition beside its pill, True ones included", async () => {
     stubData([
       devEnvironmentSummary({
         name: "half-broken-env",
         conditions: [
+          // A True condition whose message is empty: the pill is the whole line.
           { type: "Accepted", status: "True", reason: "Accepted", message: "" },
+          // A True condition with a sentence: the controller saying what it did,
+          // on the same line as its pill.
+          { type: "RouteReady", status: "True", reason: "Published", message: "Routes are published on the gateway" },
           // The sentence the object carries for the 503 this environment serves,
           // and the remediation the brand gate carries. Both were unreachable
           // from the console.
@@ -245,16 +275,21 @@ describe("dev environments page", () => {
     const { container, root } = renderPage();
     await act(async () => {});
 
+    expect(container.querySelector('[data-od-id="cond-note-RouteReady"]')?.textContent).toBe(
+      ": Routes are published on the gateway",
+    );
     expect(container.querySelector('[data-od-id="cond-note-Ready"]')?.textContent).toBe(
-      "Ready (Running): Environment pod is running but not ready",
+      ": Environment pod is running but not ready",
     );
     expect(container.querySelector('[data-od-id="cond-note-BrandOk"]')?.textContent).toBe(
-      'BrandOk (BrandMismatch): image "x" does not match gpu.vendor metax',
+      ': image "x" does not match gpu.vendor metax',
     );
-    // A True condition has nothing to explain, so it takes no line of its own —
-    // its reason is still reachable on hover, which is where every condition's
-    // own sentence lives.
+    // An empty message takes no line: ": " on its own reads as a message that
+    // failed to arrive. The pill still states the condition.
     expect(container.querySelector('[data-od-id="cond-note-Accepted"]')).toBeNull();
+    expect(container.querySelector('[data-od-id="cond-Accepted"]')?.textContent).toBe("AcceptedTrue");
+    // The reason is off the line but not out of reach: the pill's hover carries
+    // it beside the message.
     expect(container.querySelector('[data-od-id="cond-Accepted"]')?.getAttribute("title")).toBe("Accepted True (Accepted)");
     expect(container.querySelector('[data-od-id="cond-Ready"]')?.getAttribute("title")).toBe(
       "Ready False (Running) Environment pod is running but not ready",
@@ -446,6 +481,48 @@ describe("dev environments page", () => {
     act(() => root.unmount());
   });
 
+  it("carries the detail under its own row, and closes it on a second click", async () => {
+    stubData(devEnvironmentList());
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    // The panel is a sibling of the row it belongs to, inside the table: no
+    // column beside the table carries it.
+    const row = container.querySelector('[data-od-id="dev-row-jupyter-nlp-ln"]') as HTMLElement;
+    const panel = container.querySelector('[data-od-id="dev-detail-jupyter-nlp-ln"]') as HTMLElement;
+    expect(panel).not.toBeNull();
+    expect(panel.previousElementSibling).toBe(row);
+    expect(panel.closest('[data-od-id="dev-table"]')).not.toBeNull();
+    expect(row.getAttribute("aria-expanded")).toBe("true");
+
+    // The open row is a disclosure: a second click closes it, and the detail
+    // goes with it rather than staying behind as a column would.
+    await act(async () => {
+      row.click();
+    });
+    expect(container.querySelector('[data-od-id="dev-detail-jupyter-nlp-ln"]')).toBeNull();
+    expect(container.querySelector('[data-od-id="dev-row-jupyter-nlp-ln"]')?.getAttribute("aria-expanded")).toBe("false");
+
+    // ...and it opens its own detail again, not another environment's.
+    await act(async () => {
+      (container.querySelector('[data-od-id="dev-row-jupyter-nlp-ln"]') as HTMLElement).click();
+    });
+    expect(container.querySelectorAll('[data-od-id^="dev-detail-"]')).toHaveLength(1);
+    expect(container.querySelector('[data-od-id="dev-detail-jupyter-nlp-ln"]')).not.toBeNull();
+
+    act(() => root.unmount());
+  });
+
+  it("says the list is empty in the table, where the column used to say it", async () => {
+    stubData([]);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    expect(container.querySelector('[data-od-id="dev-table"]')?.textContent).toContain("暂无开发环境");
+
+    act(() => root.unmount());
+  });
+
   it("filters the table by status", async () => {
     stubData(devEnvironmentList());
     const { container, root } = renderPage();
@@ -507,20 +584,27 @@ describe("dev environments page", () => {
     const { container, root } = renderPage();
     await act(async () => {});
 
-    const open = (name: string) =>
-      act(() => {
-        kebab(container, name).click();
-      });
+    // Selecting a row lays its actions out in it, so what a phase offers can be
+    // read straight off the row. The first row is already selected on load, so
+    // only click the ones that are not.
+    const select = (name: string) => {
+      const row = container.querySelector(`[data-od-id="dev-row-${name}"]`) as HTMLElement;
+      if (row.getAttribute("aria-expanded") !== "true") {
+        act(() => {
+          row.click();
+        });
+      }
+    };
     const item = (kind: string, name: string) => document.body.querySelector(`[data-od-id="act-${kind}-${name}"]`);
 
     // Running: stop, and no start — but the way out is still there.
-    open("jupyter-nlp-ln");
+    select("jupyter-nlp-ln");
     expect(item("stop", "jupyter-nlp-ln")).not.toBeNull();
     expect(item("start", "jupyter-nlp-ln")).toBeNull();
     expect(item("del", "jupyter-nlp-ln")).not.toBeNull();
 
     // Stopped: start, and delete.
-    open("sleeping-env");
+    select("sleeping-env");
     expect(item("start", "sleeping-env")).not.toBeNull();
     expect(item("del", "sleeping-env")).not.toBeNull();
     expect(item("stop", "sleeping-env")).toBeNull();
@@ -528,12 +612,17 @@ describe("dev environments page", () => {
     // Pending, empty and Failed: no transition to offer — the controller owns
     // that — but the environment is still one the user can remove.
     for (const name of ["booting-env", "phaseless-env", "failed-env"]) {
-      expect(kebab(container, name).disabled).toBe(false);
-      open(name);
+      select(name);
       expect(item("start", name)).toBeNull();
       expect(item("stop", name)).toBeNull();
       expect(item("del", name)).not.toBeNull();
     }
+
+    // A closed row keeps them behind the kebab: selecting another row puts the
+    // buttons away and the kebab back.
+    select("jupyter-nlp-ln");
+    expect(kebab(container, "failed-env").disabled).toBe(false);
+    expect(item("del", "failed-env")).toBeNull();
 
     act(() => root.unmount());
   });
@@ -556,12 +645,11 @@ describe("dev environments page", () => {
         };
       }),
     );
-    vi.spyOn(window, "confirm").mockReturnValue(true);
     const { root } = renderPage();
     await act(async () => {});
 
     rowAct("phaseless-env", "del");
-    await act(async () => {});
+    await answerDelete(true);
 
     // Without this the object is a dead end: no phase the menu could match, and
     // no other delete path in the console.
@@ -609,7 +697,7 @@ describe("dev environments page", () => {
     act(() => root.unmount());
   });
 
-  it("Delete is confirmed: sends DELETE for the selected environment", async () => {
+  it("Delete asks first, and sends DELETE only once the dialog is confirmed", async () => {
     const deletes: Array<Record<string, unknown> | undefined> = [];
     vi.stubGlobal(
       "fetch",
@@ -621,14 +709,20 @@ describe("dev environments page", () => {
         return { ok: true, status: 200, json: async () => ({ items: devEnvironmentList() }) };
       }),
     );
-    vi.spyOn(window, "confirm").mockReturnValue(true);
     const { root } = renderPage();
     await act(async () => {});
 
     rowAct("ssh-dataset-prep", "del");
     await act(async () => {});
+    // Clicking Delete opens the dialog and nothing else: the request is the
+    // user's answer, not the click that asks the question.
+    expect(document.body.querySelector('[data-od-id="delete-dialog"]')).not.toBeNull();
+    expect(deletes).toHaveLength(0);
+
+    await answerDelete(true);
     expect(deletes).toHaveLength(1);
     expect(deletes[0]).toEqual({ namespace: "project-a", name: "ssh-dataset-prep" });
+    expect(document.body.querySelector('[data-od-id="delete-dialog"]')).toBeNull();
 
     act(() => root.unmount());
   });
@@ -642,13 +736,51 @@ describe("dev environments page", () => {
         return { ok: true, status: 200, json: async () => ({ items: devEnvironmentList() }) };
       }),
     );
-    vi.spyOn(window, "confirm").mockReturnValue(false);
     const { root } = renderPage();
     await act(async () => {});
 
     rowAct("ssh-dataset-prep", "del");
-    await act(async () => {});
+    await answerDelete(false);
     expect(deletes).toHaveLength(0);
+    expect(document.body.querySelector('[data-od-id="delete-dialog"]')).toBeNull();
+
+    act(() => root.unmount());
+  });
+
+  it("reports a failed action in the console's dialog, not the browser's", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method === "PATCH") {
+          // What the route answers when the environment went away under the
+          // click: a code, and the values its sentence needs.
+          return { ok: false, status: 404, json: async () => ({ error: "nameMissing", params: { name: "jupyter-nlp-ln" } }) };
+        }
+        return { ok: true, status: 200, json: async () => ({ items: devEnvironmentList() }) };
+      }),
+    );
+    const alerts = vi.spyOn(window, "alert").mockImplementation(() => {});
+    const { root } = renderPage();
+    await act(async () => {});
+
+    rowAct("jupyter-nlp-ln", "stop");
+    await act(async () => {});
+
+    // The API's sentence, in the console's own dialog: the browser alert could
+    // be styled by neither the console nor this test.
+    expect(alerts).not.toHaveBeenCalled();
+    expect(document.body.querySelector('[data-od-id="error-dialog"]')).not.toBeNull();
+    const message = document.body.querySelector('[data-od-id="error-message"]')?.textContent ?? "";
+    // The code the route sent, resolved in the user's language — not the bare
+    // code, and not "HTTP 404".
+    expect(message).toContain("jupyter-nlp-ln");
+    expect(message).not.toContain("nameMissing");
+
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="error-close"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    expect(document.body.querySelector('[data-od-id="error-dialog"]')).toBeNull();
 
     act(() => root.unmount());
   });
@@ -658,26 +790,25 @@ describe("dev environments page", () => {
       devEnvironmentSummary({ name: "kept-env", phase: "Stopped", endpoints: [], conditions: [], storage: { size: "20Gi", mountPath: null, pvcRetention: "retain" } }),
       devEnvironmentSummary({ name: "purged-env", phase: "Stopped", endpoints: [], conditions: [], storage: { size: "200Gi", mountPath: null, pvcRetention: "delete" } }),
     ]);
-    const prompts: string[] = [];
-    // Answering "no" keeps the request off the wire: what is under test is the
-    // sentence the user reads at the moment of the decision, not the delete.
-    vi.spyOn(window, "confirm").mockImplementation((message?: string) => {
-      prompts.push(String(message));
-      return false;
-    });
     const { root } = renderPage();
     await act(async () => {});
 
+    // Cancelling each one keeps the request off the wire: what is under test is
+    // the sentence the user reads at the moment of the decision, not the delete.
     rowAct("kept-env", "del");
+    const kept = deletePrompt();
+    await answerDelete(false);
     rowAct("purged-env", "del");
+    const purged = deletePrompt();
+    await answerDelete(false);
 
     // A retained workspace outlives the environment and nothing else names it,
-    // so the confirmation does — it is how one is found again.
-    expect(prompts[0]).toContain("workspace-kept-env-0");
-    expect(prompts[0]).toContain("20Gi");
+    // so the dialog does — it is how one is found again.
+    expect(kept).toContain("workspace-kept-env-0");
+    expect(kept).toContain("20Gi");
     // The default policy is stated as the loss it is, not as the field name.
-    expect(prompts[1]).toContain("workspace-purged-env-0");
-    expect(prompts[1]).toContain("200Gi");
+    expect(purged).toContain("workspace-purged-env-0");
+    expect(purged).toContain("200Gi");
 
     act(() => root.unmount());
   });

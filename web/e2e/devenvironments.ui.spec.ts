@@ -87,11 +87,14 @@ test.describe("dev environments landing (mocked data)", () => {
     await expect(ssh).toContainText("无加速卡");
     await expect(ssh).toContainText("Stopped");
     // The image is a detail-panel fact, not a column: a long registry path in
-    // every row is what made the table unreadable.
-    await expect(table).not.toContainText("jupyter-cuda-pytorch:latest");
-    await expect(table).not.toContainText("ssh-ubuntu22.04:latest");
+    // every row is what made the table unreadable. It belongs to the panel under
+    // the row, which is why the rows are what carry no image rather than the
+    // table — the table now holds the open panel too.
+    await expect(jupyter).not.toContainText("jupyter-cuda-pytorch:latest");
+    await expect(ssh).not.toContainText("ssh-ubuntu22.04:latest");
 
-    // The row's actions live behind the kebab, which is what one clicks first.
+    // A closed row keeps its actions behind the kebab, which is what one
+    // clicks first.
     await ssh.locator('[data-od-id="env-ops-ssh-dataset-prep"]').click();
     await expect(page.locator('[data-od-id="act-start-ssh-dataset-prep"]')).toBeVisible();
     await expect(page.locator('[data-od-id="act-del-ssh-dataset-prep"]')).toBeVisible();
@@ -118,7 +121,21 @@ test.describe("dev environments landing (mocked data)", () => {
     const requests = stubToken(page);
     await page.goto("/cubestack/dev-environments");
 
-    await page.locator('[data-od-id="dev-row-jupyter-nlp-ln"]').click();
+    // The detail sits under the row it belongs to, so the row is a disclosure:
+    // the first environment is open on arrival, a click closes it, and the next
+    // click opens it again.
+    const row = page.locator('[data-od-id="dev-row-jupyter-nlp-ln"]');
+    await expect(page.locator('[data-od-id="dev-detail-jupyter-nlp-ln"]')).toBeVisible();
+    // The open row lays its actions out in the row; the kebab is what a closed
+    // row keeps them behind, and it comes back when the row closes.
+    await expect(page.locator('[data-od-id="act-stop-jupyter-nlp-ln"]')).toBeVisible();
+    await expect(page.locator('[data-od-id="env-ops-jupyter-nlp-ln"]')).toHaveCount(0);
+    await row.click();
+    await expect(page.locator('[data-od-id="dev-detail-jupyter-nlp-ln"]')).toHaveCount(0);
+    await expect(page.locator('[data-od-id="env-ops-jupyter-nlp-ln"]')).toHaveCount(1);
+    await expect(page.locator('[data-od-id="act-stop-jupyter-nlp-ln"]')).toHaveCount(0);
+    await row.click();
+    await expect(page.locator('[data-od-id="dev-detail-jupyter-nlp-ln"]')).toBeVisible();
 
     const detail = page.locator("body");
     await expect(detail).toContainText("连接信息");
@@ -129,7 +146,10 @@ test.describe("dev environments landing (mocked data)", () => {
     await expect(endpoint).toHaveAttribute("href", "https://dev.cubestack.local/ws/jupyter-nlp-ln");
     await expect(endpoint).toHaveAttribute("target", "_blank");
     await expect(detail.getByRole("button", { name: "复制" }).first()).toBeVisible();
-    await expect(detail).toContainText("规格与状态");
+    // The spec and the status are separate sections, so each is asserted by its
+    // own title rather than by one heading that covered both.
+    await expect(detail).toContainText("规格");
+    await expect(detail).toContainText("状态");
     await expect(detail).toContainText("harbor.isuanova.com/suanova/jupyter-cuda-pytorch:latest");
     await expect(detail).toContainText("1 × nvidia");
     // Step 3's three new sections each get a row, and the storage row carries
@@ -178,28 +198,68 @@ test.describe("dev environments landing (mocked data)", () => {
     expect(patches[0]).toMatchObject({ namespace: "project-a", name: "ssh-dataset-prep", running: true });
   });
 
+  test("delete asks in the console's own dialog, and cancelling sends nothing", async ({ page }) => {
+    const deletes: Array<Record<string, unknown>> = [];
+    await stubList(page, { items: devEnvironmentList() });
+    await page.route("**/api/devenvironments", (route) => {
+      if (route.request().method() === "DELETE") {
+        deletes.push(route.request().postDataJSON());
+        return route.fulfill({ json: { ok: true } });
+      }
+      return route.fulfill({ json: { items: devEnvironmentList() } });
+    });
+    await page.goto("/cubestack/dev-environments");
+
+    await page.locator('[data-od-id="env-ops-ssh-dataset-prep"]').click();
+    await page.locator('[data-od-id="act-del-ssh-dataset-prep"]').click();
+
+    // The console's dialog rather than the browser's: a native confirm would
+    // block the page and leave nothing to query, and it could not be composed
+    // from what the console knows — the workspace's fate, named per environment.
+    const dialog = page.locator('[data-od-id="delete-dialog"]');
+    await expect(dialog).toBeVisible();
+    await expect(page.locator('[data-od-id="delete-prompt"]')).toContainText("ssh-dataset-prep");
+    await expect(page.locator('[data-od-id="delete-confirm"]')).toContainText("删除");
+    expect(deletes).toHaveLength(0);
+
+    await page.locator('[data-od-id="delete-cancel"]').click();
+    await expect(dialog).toHaveCount(0);
+    expect(deletes).toHaveLength(0);
+
+    // Confirming is what sends it.
+    await page.locator('[data-od-id="env-ops-ssh-dataset-prep"]').click();
+    await page.locator('[data-od-id="act-del-ssh-dataset-prep"]').click();
+    await page.locator('[data-od-id="delete-confirm"]').click();
+    await expect.poll(() => deletes).toHaveLength(1);
+    expect(deletes[0]).toEqual({ namespace: "project-a", name: "ssh-dataset-prep" });
+  });
+
   test("creates an environment through the wizard and selects it", async ({ page }) => {
     await stubOptions(page);
-    let created: { name: string } | null = null;
+    // The namespace is carried through from the POST: the console selects the
+    // environment it just created by `${namespace}/${name}`, so a stub that
+    // answers in the fixture's own namespace would leave the selection silently
+    // pointing at the environment that was selected before.
+    let created: { name: string; namespace: string } | null = null;
+    const createdSummary = () =>
+      devEnvironmentSummary({ name: created?.name, namespace: created?.namespace, endpoints: [] });
     const posts: Array<Record<string, unknown>> = [];
     await page.route("**/api/devenvironments?*", (route) =>
       route.fulfill({
         json: {
-          items: created
-            ? [devEnvironmentSummary({ name: created.name, endpoints: [] }), ...devEnvironmentList()]
-            : devEnvironmentList(),
+          items: created ? [createdSummary(), ...devEnvironmentList()] : devEnvironmentList(),
         },
       }),
     );
     await page.route("**/api/devenvironments", (route) => {
       if (route.request().method() === "POST") {
-        const body = route.request().postDataJSON() as { name?: string };
+        const body = route.request().postDataJSON() as { name?: string; namespace?: string };
         posts.push(body);
-        created = { name: body.name ?? "unknown" };
+        created = { name: body.name ?? "unknown", namespace: body.namespace ?? "default" };
         return route.fulfill({ status: 201, contentType: "application/json", body: JSON.stringify({ created: true, name: created.name }) });
       }
       return route.fulfill({
-        json: { items: created ? [devEnvironmentSummary({ name: created.name, endpoints: [] }), ...devEnvironmentList()] : devEnvironmentList() },
+        json: { items: created ? [createdSummary(), ...devEnvironmentList()] : devEnvironmentList() },
       });
     });
     await page.goto("/cubestack/dev-environments");
@@ -228,6 +288,8 @@ test.describe("dev environments landing (mocked data)", () => {
     // Step 4: create and expect the new env to appear and be selected.
     await page.locator('[data-od-id="wizard-create"]').click();
     await expect(page.locator('[data-od-id="dev-row-my-env"]')).toBeVisible();
+    // Selected means opened: the detail is under the row, and it is this one's.
+    await expect(page.locator('[data-od-id="dev-detail-my-env"]')).toBeVisible();
     await expect(page.locator('[data-od-id="create-wizard"]')).toBeHidden();
 
     // The wizard walks the untouched defaults through to the API: the catalog

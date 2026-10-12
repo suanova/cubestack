@@ -156,6 +156,12 @@ export default function DevEnvironmentsPage() {
   const [errorMsg, setErrorMsg] = useState("");
   const [reloadKey, setReloadKey] = useState(0);
   const [wizardOpen, setWizardOpen] = useState(false);
+  // The environment the delete dialog is about, or null when it is closed.
+  const [pendingDelete, setPendingDelete] = useState<DevEnvironmentSummary | null>(null);
+  // The message of an action that failed, or null when none has. One slot for
+  // start, stop and delete alike: only one action can be in flight at a time, so
+  // a queue of them would be a queue of one.
+  const [actionError, setActionError] = useState<string | null>(null);
 
   // After a successful create, select the just-created env on next reload.
   const selectAfterLoad = useRef<string | null>(null);
@@ -174,13 +180,17 @@ export default function DevEnvironmentsPage() {
         setLoading(false);
         setFailed(false);
         setErrorMsg("");
+        // Read what the wizard asked to select before clearing it: the updater
+        // below runs at render, by which point the ref has long been nulled, so
+        // reading it inside left the environment just created unselected.
+        const justCreated = selectAfterLoad.current;
+        selectAfterLoad.current = null;
         setSelKey((prev) => {
-          if (selectAfterLoad.current && d.items.some((s) => envKey(s) === selectAfterLoad.current)) {
-            return selectAfterLoad.current;
+          if (justCreated && d.items.some((s) => envKey(s) === justCreated)) {
+            return justCreated;
           }
           return prev && d.items.some((s) => envKey(s) === prev) ? prev : d.items[0] ? envKey(d.items[0]) : null;
         });
-        selectAfterLoad.current = null;
       })
       .catch((err: Error) => {
         if (gen !== loadGen.current) return; // a newer load started; ignore this one
@@ -218,40 +228,40 @@ export default function DevEnvironmentsPage() {
   });
 
   /**
-   * What deleting this environment does to its workspace, stated as the
-   * consequence for this environment rather than as the field that decides it:
-   * pvcRetention is chosen once, in the wizard, and never seen again — naming it
-   * at the moment of deletion tells the user nothing. The claim name is the same
-   * one the StatefulSet provisions (workspace-<name>-0), which is how a retained
-   * workspace can be found again after the environment is gone.
+   * The row's click only marks the target. What deleting does to the workspace
+   * is a sentence the user has to read before it happens, so the request waits
+   * for the dialog's answer rather than firing under the prompt.
    */
-  const deletePrompt = (e: DevEnvironmentSummary) => {
-    if (!e.storage) return t("dev.delete.confirm", { name: e.name });
-    const claim = `workspace-${e.name}-0`;
-    return e.storage.pvcRetention === "retain"
-      ? t("dev.delete.confirmRetain", { name: e.name, size: e.storage.size, claim })
-      : t("dev.delete.confirmDelete", { name: e.name, size: e.storage.size, claim });
-  };
-
   const runAction = (e: DevEnvironmentSummary, act: string) => {
     if (act === "stop") {
       patch({ namespace: e.namespace, name: e.name, running: false });
     } else if (act === "start") {
       patch({ namespace: e.namespace, name: e.name, running: true });
     } else if (act === "del") {
-      if (!window.confirm(deletePrompt(e))) return;
-      apiFetch("/api/devenvironments", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ namespace: e.namespace, name: e.name }),
-      })
-        .then(async (res) => {
-          const body = (await res.json().catch(() => ({}))) as ValidationErrorBody;
-          if (!res.ok) throw new Error(validationMessage(t, body, res.status, "dev"));
-          load();
-        })
-        .catch((err: Error) => window.alert(err.message));
+      setPendingDelete(e);
     }
+  };
+
+  /**
+   * Delete the environment the dialog is about. It comes off the dialog's state
+   * rather than the row's: the confirming click is the dialog's, and by the time
+   * it fires the row it names may be behind a menu that has already closed.
+   */
+  const confirmDelete = () => {
+    if (!pendingDelete) return;
+    const { namespace, name } = pendingDelete;
+    setPendingDelete(null);
+    apiFetch("/api/devenvironments", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ namespace, name }),
+    })
+      .then(async (res) => {
+        const body = (await res.json().catch(() => ({}))) as ValidationErrorBody;
+        if (!res.ok) throw new Error(validationMessage(t, body, res.status, "dev"));
+        load();
+      })
+      .catch((err: Error) => setActionError(err.message));
   };
 
   const patch = useCallback(
@@ -266,7 +276,7 @@ export default function DevEnvironmentsPage() {
           if (!res.ok) throw new Error(validationMessage(t, body, res.status, "dev"));
           load();
         })
-        .catch((err: Error) => window.alert(err.message));
+        .catch((err: Error) => setActionError(err.message));
     },
     [load, t],
   );
@@ -383,18 +393,16 @@ export default function DevEnvironmentsPage() {
               </Typography>
             </Box>
 
-            <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", lg: "minmax(0,1fr) 348px" }, gap: "14px", alignItems: "start" }}>
-              <EnvTable items={visible} selectedKey={selected ? envKey(selected) : null} onSelect={setSelKey} onAct={runAction} />
-              {items.length === 0 ? (
-                <Box sx={{ border: 1, borderColor: "divider", borderRadius: "var(--radius)", bgcolor: "background.paper", p: "48px 20px", textAlign: "center", fontSize: 13, color: "text.secondary" }}>
-                  {t("dev.empty")}
-                </Box>
-              ) : selected ? (
-                <DetailPanel e={selected} onAct={runAction} />
-              ) : (
-                <Box sx={{ p: "48px 20px", textAlign: "center", fontSize: 13, color: "text.secondary" }}>{t("dev.filter.none")}</Box>
-              )}
-            </Box>
+            {/* The table carries the detail itself, under the row it belongs to,
+                so a row click is a disclosure: a second click on the open row
+                closes it again. */}
+            <EnvTable
+              items={visible}
+              total={items.length}
+              selectedKey={selected ? envKey(selected) : null}
+              onSelect={(key) => setSelKey((prev) => (prev === key ? null : key))}
+              onAct={runAction}
+            />
           </>
         )}
       </Box>
@@ -410,19 +418,138 @@ export default function DevEnvironmentsPage() {
           load();
         }}
       />
+
+      {/* Mounted only while there is something to delete, so the prompt cannot
+          outlive the environment it names. */}
+      {pendingDelete ? (
+        <DeleteEnvDialog
+          e={pendingDelete}
+          onClose={() => setPendingDelete(null)}
+          onConfirm={confirmDelete}
+        />
+      ) : null}
+
+      {actionError ? <ErrorDialog message={actionError} onClose={() => setActionError(null)} /> : null}
     </>
+  );
+}
+
+/**
+ * Deleting an environment asks first, in the console's own dialog rather than
+ * the browser's. The prompt is not a courtesy: it is the only place the
+ * workspace's fate is stated, and what it says depends on `pvcRetention`, which
+ * is chosen once in the wizard and never shown again — so it names the
+ * consequence for this environment rather than the field that decides it, and
+ * the claim by the name the StatefulSet provisions (`workspace-<name>-0`), which
+ * is how a retained workspace is found again once the environment is gone.
+ *
+ * The caller mounts it only while there is a target, so `open` is the mount.
+ */
+function DeleteEnvDialog({ e, onClose, onConfirm }: { e: DevEnvironmentSummary; onClose: () => void; onConfirm: () => void }) {
+  const { t } = useI18n();
+  const claim = `workspace-${e.name}-0`;
+  const prompt = !e.storage
+    ? t("dev.delete.confirm", { name: e.name })
+    : e.storage.pvcRetention === "retain"
+      ? t("dev.delete.confirmRetain", { name: e.name, size: e.storage.size, claim })
+      : t("dev.delete.confirmDelete", { name: e.name, size: e.storage.size, claim });
+  return (
+    <Dialog open onClose={onClose} maxWidth="xs" fullWidth data-od-id="delete-dialog">
+      <DialogTitle sx={{ fontSize: 15, fontWeight: 650 }}>{t("dev.delete.title")}</DialogTitle>
+      <DialogContent dividers>
+        <Typography data-od-id="delete-prompt" sx={{ fontSize: 13, lineHeight: 1.8, color: "text.secondary" }}>
+          {prompt}
+        </Typography>
+      </DialogContent>
+      <DialogActions sx={{ px: "24px", py: "14px" }}>
+        <Button data-od-id="delete-cancel" onClick={onClose} sx={{ textTransform: "none", fontSize: 12.5 }}>
+          {t("dev.delete.cancel")}
+        </Button>
+        <Button
+          data-od-id="delete-confirm"
+          variant="contained"
+          disableElevation
+          color="error"
+          onClick={onConfirm}
+          sx={{ textTransform: "none", fontSize: 12.5 }}
+        >
+          {t("dev.act.delete")}
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+/**
+ * An action that failed, said in the console's own dialog rather than the
+ * browser's alert — the message is the API's, and where it lands should be the
+ * console's too. One button, because there is nothing to decide: the action did
+ * not happen, and the row behind this dialog is unchanged.
+ *
+ * The caller mounts it only while there is a message, so `open` is the mount.
+ */
+function ErrorDialog({ message, onClose }: { message: string; onClose: () => void }) {
+  const { t } = useI18n();
+  return (
+    <Dialog open onClose={onClose} maxWidth="xs" fullWidth data-od-id="error-dialog">
+      <DialogTitle sx={{ fontSize: 15, fontWeight: 650 }}>{t("dev.error.title")}</DialogTitle>
+      <DialogContent dividers>
+        <Typography data-od-id="error-message" sx={{ fontSize: 13, lineHeight: 1.8, color: "text.secondary" }}>
+          {message}
+        </Typography>
+      </DialogContent>
+      <DialogActions sx={{ px: "24px", py: "14px" }}>
+        <Button
+          data-od-id="error-close"
+          variant="contained"
+          disableElevation
+          onClick={onClose}
+          sx={{ textTransform: "none", fontSize: 12.5 }}
+        >
+          {t("dev.error.close")}
+        </Button>
+      </DialogActions>
+    </Dialog>
   );
 }
 
 // ── environment table ────────────────────────────────────────────────────────
 
+/** The disclosure arrow a row carries: it turns as the row opens, so the table
+ *  says which row holds the open detail without reading the panel. */
+function Caret({ open }: { open: boolean }) {
+  return (
+    <Box
+      component="span"
+      aria-hidden="true"
+      sx={{
+        display: "inline-flex",
+        flex: "none",
+        color: open ? "var(--accent-strong)" : "var(--muted)",
+        transition: "transform .16s ease",
+        transform: open ? "rotate(90deg)" : "none",
+        "@media (prefers-reduced-motion: reduce)": { transition: "none" },
+      }}
+    >
+      <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round">
+        <path d="m9 6 6 6-6 6" />
+      </svg>
+    </Box>
+  );
+}
+
 function EnvTable({
   items,
+  total,
   selectedKey,
   onSelect,
   onAct,
 }: {
   items: DevEnvironmentSummary[];
+  /** How many environments exist before the filter: the table is empty because
+   *  nothing matched only when the filter is not why, and the two say so
+   *  differently. */
+  total: number;
   selectedKey: string | null;
   onSelect: (key: string) => void;
   onAct: (e: DevEnvironmentSummary, act: string) => void;
@@ -461,7 +588,7 @@ function EnvTable({
             </tr>
           </thead>
           <tbody>
-            {items.map((e) => {
+            {items.flatMap((e) => {
               const sel = envKey(e) === selectedKey;
               // The accelerator cell: "2 × nvidia", or the no-accelerator label
               // when the environment carries no spec.resources.gpu block.
@@ -469,12 +596,16 @@ function EnvTable({
               const gpuText = gpu
                 ? `${gpu.count} × ${gpu.vendor === "metax" ? "metax" : "GPU"}`
                 : t("dev.gpu.none");
-              return (
+              const row = (
                 <tr
                   key={envKey(e)}
                   data-od-id={`dev-row-${e.name}`}
                   tabIndex={0}
                   aria-selected={sel}
+                  // The row discloses the detail below it rather than pointing at
+                  // a column beside the table, so its open state is announced the
+                  // way a disclosure's is.
+                  aria-expanded={sel}
                   onClick={() => onSelect(envKey(e))}
                   onKeyDown={(ev) => {
                     if (ev.key === "Enter" || ev.key === " ") {
@@ -492,6 +623,7 @@ function EnvTable({
                 >
                   <td style={tdSx}>
                     <Box sx={{ display: "flex", alignItems: "center", gap: "9px", fontWeight: 600, fontSize: 13.5 }}>
+                      <Caret open={sel} />
                       {e.name}
                       <TypeBadge type={e.type} />
                     </Box>
@@ -515,15 +647,34 @@ function EnvTable({
                     </Box>
                   </td>
                   <td style={{ ...tdSx, textAlign: "right" }}>
-                    <RowActions e={e} onAct={onAct} />
+                    <RowActions e={e} onAct={onAct} open={sel} />
                   </td>
                 </tr>
               );
+              if (!sel) return [row];
+              // The detail, in the table rather than in a column beside it: the
+              // panel keeps the environment's own row in view while it is read,
+              // and its row stays outside the `dev-row-` family the table counts.
+              return [
+                row,
+                <tr key={`${envKey(e)}/detail`} data-od-id={`dev-detail-${e.name}`}>
+                  <td
+                    colSpan={6}
+                    style={{ padding: 0, background: "var(--surface)", borderBottom: "1px solid var(--border)" }}
+                  >
+                    <Box sx={{ p: "18px 20px 20px" }}>
+                      <DetailPanel e={e} onAct={onAct} />
+                    </Box>
+                  </td>
+                </tr>,
+              ];
             })}
             {items.length === 0 && (
               <tr>
                 <td colSpan={6} style={{ ...tdSx, textAlign: "center", borderBottom: 0 }}>
-                  <Box sx={{ py: "20px", fontSize: 13, color: "text.secondary" }}>{t("dev.filter.none")}</Box>
+                  <Box sx={{ py: "20px", fontSize: 13, color: "text.secondary" }}>
+                    {total === 0 ? t("dev.empty") : t("dev.filter.none")}
+                  </Box>
                 </td>
               </tr>
             )}
@@ -543,7 +694,7 @@ const tdSx = {
 };
 
 /**
- * A row's kebab menu. Start and stop follow from the phase rather than the type:
+ * A row's actions. Start and stop follow from the phase rather than the type:
  * a Running environment can only be stopped, since its work is live; a Stopped
  * one can be started again. Deleting is outside that gate — it is offered in
  * every phase, including the ones the console does not know (an empty phase, a
@@ -551,11 +702,13 @@ const tdSx = {
  * remove: a phase allowlist would otherwise leave a stuck object that no console
  * action can reach, and the storage behind it unreclaimable too.
  *
- * The menu itself is a MUI `Menu` rather than the prototype's absolutely
- * positioned box: the table sits in a scroll container, which would clip a
- * menu laid out inside it.
+ * A closed row keeps them behind a kebab, where they cost one column and the
+ * table stays a table. The open row has the width to lay them out, so it does
+ * (`open`). The menu is a MUI `Menu` rather than the prototype's absolutely
+ * positioned box: the table sits in a scroll container, which would clip a menu
+ * laid out inside it.
  */
-function RowActions({ e, onAct }: { e: DevEnvironmentSummary; onAct: (e: DevEnvironmentSummary, act: string) => void }) {
+function RowActions({ e, onAct, open }: { e: DevEnvironmentSummary; onAct: (e: DevEnvironmentSummary, act: string) => void; open: boolean }) {
   const { t } = useI18n();
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   const canStop = e.phase === "Running";
@@ -576,6 +729,46 @@ function RowActions({ e, onAct }: { e: DevEnvironmentSummary; onAct: (e: DevEnvi
     setAnchor(null);
     onAct(e, act);
   };
+  // Worn by a button whether it is drawn flat or in the menu, so the two
+  // layouts cannot drift apart on what each action is styled as.
+  const flatSx = {
+    minWidth: 0,
+    px: "10px",
+    py: "3px",
+    fontSize: 12,
+    textTransform: "none",
+    whiteSpace: "nowrap",
+    borderColor: "divider",
+    bgcolor: "background.paper",
+  } as const;
+  // The row is open, so its actions are laid out in it: a menu the user has to
+  // open to reach a button the open row has room to show is a click that buys
+  // nothing.
+  if (open) {
+    return (
+      <Box onClick={(ev) => ev.stopPropagation()} sx={{ display: "inline-flex", gap: "6px" }}>
+        {canStop ? (
+          <Button size="small" variant="outlined" data-od-id={`act-stop-${e.name}`} onClick={() => run("stop")} sx={flatSx}>
+            {t("dev.act.stop")}
+          </Button>
+        ) : null}
+        {canStart ? (
+          <Button size="small" variant="outlined" data-od-id={`act-start-${e.name}`} onClick={() => run("start")} sx={flatSx}>
+            {t("dev.act.start")}
+          </Button>
+        ) : null}
+        <Button
+          size="small"
+          variant="outlined"
+          data-od-id={`act-del-${e.name}`}
+          onClick={() => run("del")}
+          sx={{ ...flatSx, color: STATUS_ERR, borderColor: soft(STATUS_ERR, 55), "&:hover": { borderColor: STATUS_ERR, bgcolor: soft(STATUS_ERR, 10) } }}
+        >
+          {t("dev.act.delete")}
+        </Button>
+      </Box>
+    );
+  }
   return (
     // The row itself is the selection control, so the kebab and its items must
     // not reach it: one click means one thing.
@@ -640,7 +833,7 @@ function RowActions({ e, onAct }: { e: DevEnvironmentSummary; onAct: (e: DevEnvi
         <MenuItem
           data-od-id={`act-del-${e.name}`}
           onClick={() => run("del")}
-          sx={{ ...itemSx, color: soft(STATUS_ERR, 70), "&:hover": { bgcolor: soft(STATUS_ERR, 10), color: soft(STATUS_ERR, 70) } }}
+          sx={{ ...itemSx, color: STATUS_ERR, "&:hover": { bgcolor: soft(STATUS_ERR, 10), color: STATUS_ERR } }}
         >
           {t("dev.act.delete")}
         </MenuItem>
@@ -665,7 +858,19 @@ function Card({ title, meta, children }: { title: string; meta?: string; childre
 
 function Kvs({ rows }: { rows: Array<[string, string]> }) {
   return (
-    <Box sx={{ px: "18px", py: "4px" }}>
+    // Two columns of rows, filled left to right: with the card this wide a single
+    // column would set every value the width of the table away from its label.
+    // The dashed rule separates rows within a column, so it starts on the second
+    // grid row rather than the second item.
+    <Box
+      sx={{
+        px: "18px",
+        py: "4px",
+        display: "grid",
+        gridTemplateColumns: { xs: "1fr", lg: "1fr 1fr" },
+        columnGap: "28px",
+      }}
+    >
       {rows.map(([k, v], i) => (
         <Box
           key={k}
@@ -676,7 +881,7 @@ function Kvs({ rows }: { rows: Array<[string, string]> }) {
             gap: "14px",
             py: "7px",
             fontSize: 13,
-            ...(i > 0 ? { borderTop: "1px dashed var(--border)" } : {}),
+            ...(i >= 2 ? { borderTop: "1px dashed var(--border)" } : {}),
           }}
         >
           <Box component="span" sx={{ color: "text.secondary", flex: "none" }}>{k}</Box>
@@ -756,8 +961,10 @@ const CONN_VALUE_SX = {
 
 function EndpointRow({ label, value }: { label: string; value: string }) {
   return (
-    <Box sx={{ mb: "12px" }}>
-      <Typography sx={{ fontSize: 11, color: "text.secondary", mb: "8px" }}>{label}</Typography>
+    <Box>
+      {/* Endpoint names are lowercase DNS labels in the CR ("jupyter"); the row
+          shows one as a name, so it is capitalised here rather than in the data. */}
+      <Typography sx={{ fontSize: 11, color: "text.secondary", mb: "8px", textTransform: "capitalize" }}>{label}</Typography>
       <Box sx={CONN_ROW_SX}>
         {/* The address is the thing the user came for, and a Jupyter URL they
             have to select, copy and paste themselves is a step that only exists
@@ -858,7 +1065,7 @@ function TokenRow({
   }, [name, namespace, t, token]);
 
   return (
-    <Box sx={{ mb: "12px" }}>
+    <Box>
       <Typography sx={{ fontSize: 11, color: "text.secondary", mb: "8px" }}>{t("dev.conn.token")}</Typography>
       <Box sx={CONN_ROW_SX}>
         <Box component="span" data-od-id="token-value" sx={{ ...CONN_VALUE_SX, color: error ? STATUS_ERR : "text.secondary" }}>
@@ -898,7 +1105,20 @@ function ConnectionCard({ e, onAct }: { e: DevEnvironmentSummary; onAct: (e: Dev
   if (e.phase === "Running" && e.endpoints.length > 0) {
     return (
       <Card title={t("dev.conn.title")} meta={t("dev.conn.meta")}>
-        <Box sx={{ px: "18px", py: "14px" }}>
+        {/* One column per row rather than a column of rows: an address and the
+            token that opens it are read together, and side by side neither is
+            pushed under the other when one of them wraps. */}
+        <Box
+          sx={{
+            px: "18px",
+            py: "14px",
+            display: "grid",
+            gridTemplateColumns: { xs: "1fr", lg: "repeat(2, minmax(0, 1fr))" },
+            columnGap: "28px",
+            rowGap: "14px",
+            alignItems: "start",
+          }}
+        >
           {e.endpoints.map((ep) => (
             <EndpointRow key={ep.name} label={ep.name} value={ep.address} />
           ))}
@@ -912,17 +1132,16 @@ function ConnectionCard({ e, onAct }: { e: DevEnvironmentSummary; onAct: (e: Dev
             // environment's credential — when the next row is clicked.
             <TokenRow key={`${e.namespace}/${e.name}`} name={e.name} namespace={e.namespace} secret={e.jupyterTokenSecret} />
           ) : null}
-          <Typography sx={{ fontSize: 11, color: "text.secondary", lineHeight: 1.7 }}>{t("dev.conn.guide")}</Typography>
-          {/* Said only when it is true of this environment: the idle clause used
-              to be part of the guide, so an environment created with the timeout
-              disabled still claimed an expiry on the same screen that showed
-              "disabled". */}
-          {e.idleTimeout > 0 ? (
-            <Typography sx={{ fontSize: 11, color: "text.secondary", lineHeight: 1.7 }}>
-              {t("dev.conn.idle", { minutes: String(Math.round(e.idleTimeout / 60)) })}
-            </Typography>
-          ) : null}
         </Box>
+        {/* Said only when it is true of this environment: the idle clause used to
+            be part of the guide, so an environment created with the timeout
+            disabled still claimed an expiry on the same screen that showed
+            "disabled". */}
+        {e.idleTimeout > 0 ? (
+          <Typography sx={{ fontSize: 11, color: "text.secondary", lineHeight: 1.7, px: "18px", pb: "14px" }}>
+            {t("dev.conn.idle", { minutes: String(Math.round(e.idleTimeout / 60)) })}
+          </Typography>
+        ) : null}
       </Card>
     );
   }
@@ -999,83 +1218,95 @@ function SpecCard({ e }: { e: DevEnvironmentSummary }) {
   return (
     <Card title={t("dev.spec.title")} meta={t("dev.spec.meta")}>
       <Kvs rows={rows} />
-      <Box sx={{ display: "flex", flexDirection: "column", gap: "8px", px: "18px", py: "12px", borderTop: 1, borderColor: "divider" }}>
+    </Card>
+  );
+}
+
+/**
+ * The environment's conditions, in their own section rather than under the spec
+ * rows: what the object *is* and what it is *doing* are read for different
+ * reasons, and the status is what a failing environment is diagnosed from.
+ */
+function StatusCard({ e }: { e: DevEnvironmentSummary }) {
+  const { t } = useI18n();
+  return (
+    <Card title={t("dev.status.title")} meta={t("dev.status.meta")}>
+      <Box sx={{ display: "flex", flexDirection: "column", gap: "8px", px: "18px", py: "12px" }}>
         {e.conditions.length === 0 ? (
           <Typography data-od-id="env-conds-empty" sx={{ fontSize: 12, color: "text.secondary" }}>{t("dev.cond.empty")}</Typography>
         ) : (
-          <>
-            <Box sx={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-              {e.conditions.map((c) => {
-                // Green only for an observed True condition; False (a real failure
-                // or an expected non-ready state like a stopped Ready) and Unknown
-                // (pending) get distinct non-success styling.
-                const cls = c.status === "True" ? "ok" : c.status === "Unknown" ? "pending" : "err";
-                const [chip, dot] =
-                  cls === "ok"
-                    ? [STATUS_OK, STATUS_OK]
-                    : cls === "pending"
-                      ? [STATUS_WARN, STATUS_WARN]
-                      : [soft(STATUS_ERR, 55), STATUS_ERR];
-                // The object's own sentence about this condition, in the shape
-                // `kubectl describe` prints it. It is the diagnosis for whatever
-                // the environment is doing wrong — a Ready=False reads "the pod
-                // is running but not ready", which is what a 503 from the route
-                // means — and until now nothing in the console reached it.
-                const detail = [c.reason ? `(${c.reason})` : "", c.message].filter(Boolean).join(" ");
-                return (
+          // One line per condition, pill first: the pill already names the
+          // condition and states its status, so the object's own sentence about
+          // it follows on the same line instead of in a second list keyed by
+          // type. Every condition is listed, not only the ones that are False —
+          // a True one's sentence is the controller saying what it did, and
+          // reading them in order is how a half-converged environment (routes
+          // published, pod not scheduled) is told from a working one.
+          e.conditions.map((c) => {
+            // Green only for an observed True condition; False (a real failure
+            // or an expected non-ready state like a stopped Ready) and Unknown
+            // (pending) get distinct non-success styling.
+            const cls = c.status === "True" ? "ok" : c.status === "Unknown" ? "pending" : "err";
+            const [chip, dot] =
+              cls === "ok"
+                ? [STATUS_OK, STATUS_OK]
+                : cls === "pending"
+                  ? [STATUS_WARN, STATUS_WARN]
+                  : [soft(STATUS_ERR, 55), STATUS_ERR];
+            // The reason stays off the line: the pill names the condition
+            // already, and for most of them the reason repeats it ("Accepted",
+            // "Scheduled"). It is still on the hover, beside the message.
+            const detail = [c.reason ? `(${c.reason})` : "", c.message].filter(Boolean).join(" ");
+            return (
+              <Box key={c.type} sx={{ fontSize: 12, color: "text.secondary", lineHeight: 2 }}>
+                <Box
+                  data-od-id={`cond-${c.type}`}
+                  component="span"
+                  title={detail ? `${c.type} ${c.status} ${detail}` : undefined}
+                  sx={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "6px",
+                    px: "9px",
+                    py: "2px",
+                    mr: "5px",
+                    borderRadius: 999,
+                    fontSize: 12,
+                    verticalAlign: "middle",
+                    bgcolor: cls === "ok" ? soft(STATUS_OK) : soft(chip),
+                    color: cls === "ok" ? "inherit" : `color-mix(in oklch, ${chip} 66%, var(--fg))`,
+                    whiteSpace: "nowrap",
+                  }}
+                >
                   <Box
-                    key={c.type}
-                    data-od-id={`cond-${c.type}`}
                     component="span"
-                    // A hover on the pill answers for every condition, including
-                    // the True ones, which carry no line of their own.
-                    title={detail ? `${c.type} ${c.status} ${detail}` : undefined}
+                    // Decorative once the status is text beside it: hue was the
+                    // only carrier, which reads as nothing to a screen reader and
+                    // little to a colour-blind one.
+                    aria-hidden="true"
                     sx={{
-                      display: "inline-flex",
-                      alignItems: "center",
-                      gap: "6px",
-                      px: "9px",
-                      py: "2px",
-                      borderRadius: 999,
-                      fontSize: 12,
-                      bgcolor: cls === "ok" ? soft(STATUS_OK) : soft(chip),
-                      color: cls === "ok" ? "inherit" : `color-mix(in oklch, ${chip} 66%, var(--fg))`,
-                      whiteSpace: "nowrap",
+                      width: 6,
+                      height: 6,
+                      borderRadius: "50%",
+                      bgcolor: dot,
+                      flex: "none",
                     }}
-                  >
-                    <Box
-                      component="span"
-                      // Decorative once the status is text beside it: hue was the
-                      // only carrier, which reads as nothing to a screen reader and
-                      // little to a colour-blind one.
-                      aria-hidden="true"
-                      sx={{
-                        width: 6,
-                        height: 6,
-                        borderRadius: "50%",
-                        bgcolor: dot,
-                        flex: "none",
-                      }}
-                    />
-                    {c.type}
-                    {/* The status itself, as the object states it. It is a
-                        Kubernetes enum, so it reads the same in every locale —
-                        the way an unrecognised phase already does. */}
-                    <Box component="span" sx={{ fontWeight: 600, opacity: 0.75 }}>{c.status}</Box>
-                  </Box>
-                );
-              })}
-            </Box>
-            {e.conditions
-              .filter((c) => c.status !== "True" && (c.reason || c.message))
-              .map((c) => (
-                <Typography key={c.type} data-od-id={`cond-note-${c.type}`} sx={{ fontSize: 11.5, color: "text.secondary", lineHeight: 1.6 }}>
-                  <Box component="span" sx={{ fontFamily: "var(--font-mono)" }}>{c.type}</Box>
-                  {c.reason ? <Box component="span" sx={{ fontFamily: "var(--font-mono)" }}>{` (${c.reason})`}</Box> : null}
-                  {c.message ? `: ${c.message}` : ""}
-                </Typography>
-              ))}
-          </>
+                  />
+                  {c.type}
+                  {/* The status itself, as the object states it. It is a
+                      Kubernetes enum, so it reads the same in every locale —
+                      the way an unrecognised phase already does. */}
+                  <Box component="span" sx={{ fontWeight: 600, opacity: 0.75 }}>{c.status}</Box>
+                </Box>
+                {/* A condition with no message has nothing to add to its pill,
+                    and an empty ": " would read as a message that failed to
+                    arrive. */}
+                {c.message ? (
+                  <Box component="span" data-od-id={`cond-note-${c.type}`}>{`: ${c.message}`}</Box>
+                ) : null}
+              </Box>
+            );
+          })
         )}
       </Box>
     </Card>
@@ -1084,9 +1315,20 @@ function SpecCard({ e }: { e: DevEnvironmentSummary }) {
 
 function DetailPanel({ e, onAct }: { e: DevEnvironmentSummary; onAct: (e: DevEnvironmentSummary, act: string) => void }) {
   return (
-    <Box sx={{ display: "flex", flexDirection: "column", gap: "14px", minWidth: 0 }}>
+    // One card per row: the panel spans the table, so side by side each card got
+    // half of it. Stacked they get the whole width, and the two columns are drawn
+    // inside each card instead, around the rows themselves.
+    <Box
+      sx={{
+        display: "grid",
+        gridTemplateColumns: "1fr",
+        gap: "14px",
+        minWidth: 0,
+      }}
+    >
       <ConnectionCard e={e} onAct={onAct} />
       <SpecCard e={e} />
+      <StatusCard e={e} />
     </Box>
   );
 }
