@@ -72,7 +72,6 @@ jobs:
           password: ${{ secrets.CI_BOT_PASSWORD }}
       - name: Build and push images
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
@@ -99,17 +98,29 @@ jobs:
           # A release publishes the version it names and does not move `latest`,
           # which tracks main.
           #
-          # Only refresh a mutable tag if this run's commit is still the head of
-          # main. An older run can finish after a newer main commit; pushing its
-          # image as `latest` would mislabel which commit is newest.
-          CURRENT_MAIN=""
+          # "Is this commit still the head of main" is the wrong question. A later
+          # merge that changes nothing under these paths does not make these images
+          # newer, and skipping on it would strand `latest` on an older build until
+          # some future operator change happened along to move it — the deferral
+          # hands the tag to a run that then builds nothing.
+          #
+          # The question is whether main's copy of what decides these images still
+          # matches this commit's: if it does, they are the newest there are and
+          # `latest` is theirs to take. The pathspec is the `changes` filter above —
+          # the same rule that decided these images are being published at all,
+          # which is what keeps the gate from drifting from the trigger.
+          #
+          # Fetched rather than asked of the API so the answer is the trees
+          # themselves, with no cap on how many changed files a comparison will
+          # report. The repository is public, so this needs no credentials.
+          MOVE_LATEST=false
           if [ -z "${RELEASE_VERSION}" ]; then
-            CURRENT_MAIN="$(
-              curl -fsSL \
-                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-                "https://api.github.com/repos/${GITHUB_REPOSITORY}/branches/main" \
-                | jq -r .commit.sha
-            )"
+            git fetch --no-tags --depth=1 origin main
+            if git diff --quiet "${GITHUB_SHA}" FETCH_HEAD -- operator Makefile .github; then
+              MOVE_LATEST=true
+            else
+              echo "Skipping 'latest': a later commit changed what these images are built from"
+            fi
           fi
 
           # Both images take the same tags. A release where one of them carried
@@ -122,10 +133,8 @@ jobs:
               docker push "${IMAGE}:${RELEASE_VERSION}"
               continue
             fi
-            if [ "${CURRENT_MAIN}" = "${SHA_TAG}" ]; then
+            if [ "${MOVE_LATEST}" = "true" ]; then
               docker tag "${IMAGE}:${SHA_TAG}" "${IMAGE}:latest"
               docker push "${IMAGE}:latest"
-            else
-              echo "Skipping '${IMAGE}:latest': ${SHA_TAG} is no longer the head of main (current: ${CURRENT_MAIN})"
             fi
           done

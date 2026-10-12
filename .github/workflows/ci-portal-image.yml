@@ -71,7 +71,6 @@ jobs:
           password: ${{ secrets.CI_BOT_PASSWORD }}
       - name: Build and push image
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
@@ -91,18 +90,26 @@ jobs:
             exit 0
           fi
 
-          # Only refresh the mutable `latest` tag if this run's commit is still
-          # the head of main. An older run can finish after a newer main commit;
-          # pushing its image as `latest` would mislabel which commit is newest.
-          CURRENT_MAIN="$(
-            curl -fsSL \
-              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-              "https://api.github.com/repos/${GITHUB_REPOSITORY}/branches/main" \
-              | jq -r .commit.sha
-          )"
-          if [ "${CURRENT_MAIN}" = "${SHA_TAG}" ]; then
-            docker tag "${IMAGE}:${SHA_TAG}" "${IMAGE}:latest"
-            docker push "${IMAGE}:latest"
-          else
-            echo "Skipping 'latest': ${SHA_TAG} is no longer the head of main (current: ${CURRENT_MAIN})"
+          # "Is this commit still the head of main" is the wrong question. A later
+          # merge that changes nothing under these paths does not make this image
+          # newer, and skipping on it would strand `latest` on an older build until
+          # some future portal change happened along to move it — the deferral hands
+          # the tag to a run that then builds nothing.
+          #
+          # The question is whether main's copy of what decides this image still
+          # matches this commit's: if it does, this image is the newest there is and
+          # `latest` is its to take. The pathspec is the `changes` filter above — the
+          # same rule that decided this image is being published at all, which is
+          # what keeps the gate from drifting from the trigger.
+          #
+          # Fetched rather than asked of the API so the answer is the trees
+          # themselves, with no cap on how many changed files a comparison will
+          # report. The repository is public, so this needs no credentials.
+          git fetch --no-tags --depth=1 origin main
+          if ! git diff --quiet "${GITHUB_SHA}" FETCH_HEAD -- web .github; then
+            echo "Skipping 'latest': a later commit changed what this image is built from"
+            exit 0
           fi
+
+          docker tag "${IMAGE}:${SHA_TAG}" "${IMAGE}:latest"
+          docker push "${IMAGE}:latest"
