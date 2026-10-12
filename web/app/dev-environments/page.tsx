@@ -37,6 +37,7 @@ import type { DevEnvironmentSummary } from "@/app/api/devenvironments/route";
 import type { DevEnvImageOption, DevEnvOptionsResponse } from "@/app/api/devenvironments/options/route";
 import type { SshKeySecretOption } from "@/app/api/devenvironments/ssh-keys/route";
 import { apiFetch } from "@/lib/base-path";
+import { copyText } from "@/lib/clipboard";
 import { PLATFORM_GID, PLATFORM_UID, PLATFORM_USER } from "@/lib/devenvironments/images";
 import { useI18n } from "@/lib/i18n";
 
@@ -685,7 +686,11 @@ function Kvs({ rows }: { rows: Array<[string, string]> }) {
 
 function EndpointRow({ label, value }: { label: string; value: string }) {
   const { t } = useI18n();
-  const [copied, setCopied] = useState(false);
+  // idle → copied → idle, or idle → failed, which stays long enough to be read
+  // and to be retried by hand: the clipboard is unavailable on the plain-HTTP
+  // deployment this serves, so a silent no-op is the one outcome a copy button
+  // may not have.
+  const [copied, setCopied] = useState<"idle" | "ok" | "fail">("idle");
   return (
     <Box sx={{ mb: "12px" }}>
       <Typography sx={{ fontSize: 11, color: "text.secondary", mb: "8px" }}>{label}</Typography>
@@ -693,15 +698,22 @@ function EndpointRow({ label, value }: { label: string; value: string }) {
         <Box component="span" sx={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>{value}</Box>
         <Button
           disableRipple
-          onClick={() => {
-            navigator.clipboard?.writeText(value).then(() => {
-              setCopied(true);
-              setTimeout(() => setCopied(false), 1200);
-            });
+          onClick={async () => {
+            const ok = await copyText(value);
+            setCopied(ok ? "ok" : "fail");
+            setTimeout(() => setCopied("idle"), ok ? 1200 : 4000);
           }}
-          sx={{ p: 0, minWidth: 0, fontSize: 11, fontFamily: "var(--font-mono)", color: "var(--accent-strong)", textTransform: "none", "&:hover": { textDecoration: "underline" } }}
+          sx={{
+            p: 0,
+            minWidth: 0,
+            fontSize: 11,
+            fontFamily: "var(--font-mono)",
+            color: copied === "fail" ? STATUS_ERR : "var(--accent-strong)",
+            textTransform: "none",
+            "&:hover": { textDecoration: "underline" },
+          }}
         >
-          {copied ? t("dev.conn.copied") : t("dev.conn.copy")}
+          {copied === "ok" ? t("dev.conn.copied") : copied === "fail" ? t("dev.conn.copyFailed") : t("dev.conn.copy")}
         </Button>
       </Box>
     </Box>

@@ -64,6 +64,7 @@ import type {
   SkillInfo,
 } from "@/lib/cubepilot/types";
 import { useI18n } from "@/lib/i18n";
+import { copyText } from "@/lib/clipboard";
 
 import { HitlDock, type ApprovalDecision } from "./HitlDock";
 import { CopyBtn, ParamsPanel, SampleParams } from "./Playground";
@@ -1255,13 +1256,15 @@ export function ChatPane() {
     }
   }
 
-  function copyText(text: string, which: "endpoint"): void {
+  function copyEndpoint(text: string, which: "endpoint"): void {
     const done = () => {
       setCopied(which);
       setTimeout(() => setCopied((c) => (c === which ? null : c)), 1400);
     };
-    if (navigator.clipboard?.writeText) navigator.clipboard.writeText(text).then(done, done);
-    else done();
+    // The label may only confirm a copy that happened. This used to answer
+    // "copied" whenever the Clipboard API was missing — which it is on the
+    // plain-HTTP deployment — so the button reported success for a no-op.
+    void copyText(text).then((ok) => (ok ? done() : showToast(t("dev.conn.copyFailed"), "error")));
   }
 
   // ── agent conversation (real SSE via the pilot proxy) ───────────────────
@@ -2085,7 +2088,7 @@ export function ChatPane() {
                 </Box>
                 <CopyBtn
                   text={copied === "endpoint" ? t("cubepilot.playground.copied") : t("cubepilot.playground.copy")}
-                  onClick={() => copyText(endpointText, "endpoint")}
+                  onClick={() => copyEndpoint(endpointText, "endpoint")}
                 />
               </Box>
             ) : null}

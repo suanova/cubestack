@@ -213,6 +213,49 @@ describe("dev environments page", () => {
     act(() => root.unmount());
   });
 
+  it("confirms a copy it made, and reports one it could not make", async () => {
+    stubData(devEnvironmentList());
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    // The deployment this portal serves is plain HTTP, where the Clipboard API
+    // does not exist and `document.execCommand` is the only mechanism there is.
+    // The button may not report a copy that did not happen.
+    Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true, writable: true });
+    let outcome = true;
+    let copies = 0;
+    Object.defineProperty(document, "execCommand", {
+      configurable: true,
+      writable: true,
+      value: () => {
+        copies += 1;
+        return outcome;
+      },
+    });
+
+    const copyBtn = () =>
+      Array.from(container.querySelectorAll("button")).find((b) =>
+        ["复制", "已复制", "复制失败,请手动选择文本"].includes(b.textContent ?? ""),
+      ) as HTMLElement;
+
+    await act(async () => {
+      copyBtn().click();
+    });
+    expect(copies).toBe(1);
+    expect(copyBtn().textContent).toBe("已复制");
+
+    // ...and when neither path can copy, it says so rather than silently doing
+    // nothing — which is what the optional-chained call did on cs7.
+    outcome = false;
+    await act(async () => {
+      copyBtn().click();
+    });
+    expect(copies).toBe(2);
+    expect(copyBtn().textContent).toBe("复制失败,请手动选择文本");
+
+    act(() => root.unmount());
+  });
+
   it("names the jupyter token's Secret and how to read it, and neither for an ssh environment", async () => {
     stubData(devEnvironmentList());
     const { container, root } = renderPage();

@@ -14,6 +14,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { CreateOptionsResponse } from "@/app/api/inferenceservices/options/route";
 import type { InferenceServiceSummary } from "@/app/api/inferenceservices/route";
 import { apiFetch } from "@/lib/base-path";
+import { copyText } from "@/lib/clipboard";
 import { useI18n } from "@/lib/i18n";
 import { platformPalette, usePlatformTheme } from "@/lib/perses/theme";
 
@@ -569,7 +570,10 @@ function EndpointsCard({ s }: { s: InferenceServiceSummary }) {
 
 function EndpointRow({ label, value, hint }: { label: string; value: string; hint?: string }) {
   const { t } = useI18n();
-  const [copied, setCopied] = useState(false);
+  // idle → ✓ → idle, or idle → failed, which stays long enough to be read: the
+  // Clipboard API does not exist on the plain-HTTP deployment this serves, so
+  // "nothing happened" is not an outcome the button may report as success.
+  const [copied, setCopied] = useState<"idle" | "ok" | "fail">("idle");
   return (
     <Box sx={{ mb: "12px" }}>
       <Typography sx={{ fontSize: 11, color: "text.secondary", mb: "8px" }}>{label}</Typography>
@@ -578,15 +582,22 @@ function EndpointRow({ label, value, hint }: { label: string; value: string; hin
         {value !== "—" ? (
           <Button
             disableRipple
-            onClick={() => {
-              navigator.clipboard?.writeText(value).then(() => {
-                setCopied(true);
-                setTimeout(() => setCopied(false), 1200);
-              });
+            onClick={async () => {
+              const ok = await copyText(value);
+              setCopied(ok ? "ok" : "fail");
+              setTimeout(() => setCopied("idle"), ok ? 1200 : 4000);
             }}
-            sx={{ p: 0, minWidth: 0, fontSize: 11, fontFamily: "var(--font-mono)", color: "var(--accent-strong)", textTransform: "none", "&:hover": { textDecoration: "underline" } }}
+            sx={{
+              p: 0,
+              minWidth: 0,
+              fontSize: 11,
+              fontFamily: "var(--font-mono)",
+              color: copied === "fail" ? STATUS_ERR : "var(--accent-strong)",
+              textTransform: "none",
+              "&:hover": { textDecoration: "underline" },
+            }}
           >
-            {copied ? "✓" : t("inf.endpoints.copy")}
+            {copied === "ok" ? "✓" : copied === "fail" ? t("dev.conn.copyFailed") : t("inf.endpoints.copy")}
           </Button>
         ) : null}
       </Box>
