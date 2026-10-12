@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   PLATFORM_THEME_STORAGE_KEY,
   applyPlatformTheme,
+  applyStoredTheme,
   getStoredTheme,
   togglePlatformTheme,
 } from "./theme-storage";
@@ -58,6 +59,42 @@ describe("applyPlatformTheme", () => {
     mockMatchMedia(true);
     applyPlatformTheme();
     expect(document.documentElement.dataset.theme).toBe("dark");
+  });
+
+  it("keeps a theme the document already carries", () => {
+    // This is the first paint of `?theme=dark` with nothing stored: the root
+    // layout's inline script stamps "dark" before hydration, and re-applying the
+    // stored/OS theme here is what painted the override away again (light at
+    // ~3ms, measured on cs7).
+    localStorage.setItem(PLATFORM_THEME_STORAGE_KEY, "light");
+    mockMatchMedia(false);
+    document.documentElement.dataset.theme = "dark";
+
+    applyPlatformTheme();
+
+    expect(document.documentElement.dataset.theme).toBe("dark");
+  });
+
+  it("replaces a stamp it cannot read", () => {
+    document.documentElement.dataset.theme = "neon";
+    localStorage.setItem(PLATFORM_THEME_STORAGE_KEY, "dark");
+
+    applyPlatformTheme();
+
+    expect(document.documentElement.dataset.theme).toBe("dark");
+  });
+});
+
+describe("applyStoredTheme", () => {
+  it("stamps the stored theme over the document's own", () => {
+    // The cross-tab path: another tab has just picked a theme, and its choice is
+    // newer than this document's stamp.
+    document.documentElement.dataset.theme = "dark";
+    localStorage.setItem(PLATFORM_THEME_STORAGE_KEY, "light");
+
+    applyStoredTheme();
+
+    expect(document.documentElement.dataset.theme).toBe("light");
   });
 });
 

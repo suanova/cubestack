@@ -24,8 +24,26 @@ export function getStoredTheme(): PaletteMode {
     : "light";
 }
 
-/** Stamp the stored/OS theme onto <html data-theme>. Idempotent. */
+/**
+ * Stamp a theme onto <html data-theme>.
+ *
+ * A document that already carries one keeps it: the root layout's inline script
+ * has already painted that value, and it is the only one that knows about a
+ * `?theme=` override — which localStorage does not record. Falling back to the
+ * stored/OS theme is therefore what happens on a document that was never
+ * stamped at all, not what happens on every mount.
+ */
 export function applyPlatformTheme(): void {
+  const stamped = document.documentElement.dataset.theme;
+  document.documentElement.dataset.theme = isTheme(stamped) ? stamped : getStoredTheme();
+}
+
+/**
+ * Stamp the *stored* theme onto <html data-theme>, whatever the document already
+ * carries. This is the cross-tab path: another tab's choice has just arrived
+ * through localStorage, and it is the newer one.
+ */
+export function applyStoredTheme(): void {
   document.documentElement.dataset.theme = getStoredTheme();
 }
 

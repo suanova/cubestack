@@ -21,13 +21,14 @@ import { useEffect, useSyncExternalStore } from "react";
 
 import {
   applyPlatformTheme,
+  applyStoredTheme,
   PLATFORM_THEME_STORAGE_KEY,
   togglePlatformTheme,
 } from "./theme-storage";
 
 // Re-export so existing consumers (ThemeToggle, PersesProvider) keep importing
 // from this module.
-export { applyPlatformTheme, togglePlatformTheme, PLATFORM_THEME_STORAGE_KEY };
+export { applyPlatformTheme, applyStoredTheme, togglePlatformTheme, PLATFORM_THEME_STORAGE_KEY };
 
 export const PLATFORM_FONT_FAMILY =
   'Inter, system-ui, -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif';
@@ -152,9 +153,11 @@ function subscribeToPlatformTheme(onStoreChange: () => void): () => void {
   const onStorage = (event: StorageEvent) => {
     // key === null covers localStorage.clear(). Apply the persisted theme to
     // this document before notifying, so getThemeSnapshot re-reads the new
-    // value instead of this tab's stale data-theme.
+    // value instead of this tab's stale data-theme. The stored value wins here
+    // even over a `?theme=` stamp: this tab's override belongs to this tab's URL,
+    // and the other tab has just chosen something else.
     if (event.key === PLATFORM_THEME_STORAGE_KEY || event.key === null) {
-      applyPlatformTheme();
+      applyStoredTheme();
       onStoreChange();
     }
   };
@@ -171,7 +174,11 @@ function subscribeToPlatformTheme(onStoreChange: () => void): () => void {
  */
 export function usePlatformTheme(): PaletteMode {
   // Belt and suspenders: the root layout's inline script stamps data-theme
-  // before hydration, but re-apply on mount in case it was stripped.
+  // before hydration, but re-apply on mount in case it was stripped. It is
+  // re-applied only where the document carries no theme: the stamp that is
+  // already painted may be a `?theme=` override, which this module has no other
+  // way to learn about (it was never written to localStorage), and deriving the
+  // theme from storage instead is what made the override invisible.
   useEffect(() => {
     applyPlatformTheme();
   }, []);
