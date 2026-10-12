@@ -311,6 +311,13 @@ interface CreateBody {
   // no RDMA, so the block is omitted rather than written as a false flag.
   rdmaEnabled?: boolean; // → spec.network.rdmaEnabled
   rdmaType?: string; // → spec.network.rdmaType
+  // spec.ssh: independent of the environment's type — ssh.enabled opens the SSH
+  // endpoint on any type (a jupyter + ssh environment), and authorizedKeysSecret
+  // points at the user's own key Secret. Absent / false = no ssh block (the
+  // type-ssh case is already exposed unconditionally by the operator).
+  sshEnabled?: boolean; // → spec.ssh.enabled
+  sshKeysSecret?: string; // → spec.ssh.authorizedKeysSecret.name
+  sshKeysKey?: string; // → spec.ssh.authorizedKeysSecret.key
 }
 
 /**
@@ -505,6 +512,20 @@ export const POST = withAuth(async (req) => {
       return ValidationError(`rdmaType 必须为 ${RDMA_TYPES.join(" / ")} 之一。`);
     }
 
+    // spec.ssh: written only when sshEnabled (independent of type — a jupyter or
+    // vscode environment can still expose SSH). When a key Secret is named it
+    // must also name a data entry (the CRD requires self.key != ""); the Secret
+    // itself must carry the operator's delegation label, which the operator
+    // checks, not this route.
+    const sshEnabled = body.sshEnabled === true;
+    let sshAuthorizedKeysSecret: { name: string; key: string } | undefined;
+    if (sshEnabled && body.sshKeysSecret) {
+      if (!body.sshKeysKey) {
+        return ValidationError("sshKeysKey 必须指定 Secret 的数据条目。");
+      }
+      sshAuthorizedKeysSecret = { name: body.sshKeysSecret, key: body.sshKeysKey };
+    }
+
     const core = getCoreClient();
     const co = getCustomObjectsClient();
 
@@ -589,6 +610,18 @@ export const POST = withAuth(async (req) => {
         // Written only when RDMA is on: absence is the one spelling of "no
         // RDMA", so a false flag is never sent for the operator to interpret.
         ...(rdmaEnabled ? { network: { rdmaEnabled: true, rdmaType } } : {}),
+        // Written only when sshEnabled: absence is the one spelling of "no ssh
+        // switch", so a false flag is never sent. The type-ssh case is already
+        // exposed unconditionally by the operator, so this block only carries
+        // the explicit switch and the optional user-supplied key Secret.
+        ...(sshEnabled
+          ? {
+              ssh: {
+                enabled: true,
+                ...(sshAuthorizedKeysSecret ? { authorizedKeysSecret: sshAuthorizedKeysSecret } : {}),
+              },
+            }
+          : {}),
       },
     };
 

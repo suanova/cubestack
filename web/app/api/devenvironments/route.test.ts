@@ -731,6 +731,27 @@ describe("POST /api/devenvironments", () => {
   it("rejects an rdmaType outside the CRD's enum", async () => {
     expect(await rejectedPost({ rdmaEnabled: true, rdmaType: "ethernet" })).toContain("rdmaType");
   });
+
+  it("states spec.ssh only when SSH is on, with the optional bring-your-own key Secret", async () => {
+    const withSsh = await postedSpec({ sshEnabled: true });
+    // The block is written only when sshEnabled; with no bring-your-own key
+    // Secret, the operator mints a keypair for the environment.
+    expect(withSsh.ssh).toEqual({ enabled: true });
+
+    const withKey = await postedSpec({ sshEnabled: true, sshKeysSecret: "alice-keys", sshKeysKey: "alice@laptop" });
+    expect(withKey.ssh).toEqual({
+      enabled: true,
+      authorizedKeysSecret: { name: "alice-keys", key: "alice@laptop" },
+    });
+
+    // Off: the block is absent, not a false flag the operator would have to read.
+    const off = await postedSpec({});
+    expect("ssh" in off).toBe(false);
+  });
+
+  it("rejects a bring-your-own key Secret that names no data entry", async () => {
+    expect(await rejectedPost({ sshEnabled: true, sshKeysSecret: "alice-keys" })).toContain("sshKeysKey");
+  });
 });
 
 describe("PATCH /api/devenvironments", () => {

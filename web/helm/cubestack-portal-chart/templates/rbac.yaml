@@ -60,6 +60,16 @@ rules:
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["list"]
+  # List Secrets to back the SSH key picker in the dev-environment wizard: it
+  # offers only the Secrets that carry the operator's delegation label
+  # (ai.cubestack.io/ssh-keys-delegated) in the namespace the user picks, so the
+  # picker never surfaces a key Secret the controller would refuse. The namespace
+  # is user-chosen (any namespace), so this is cluster-wide. List only — the
+  # endpoint returns each Secret's name and data keys, never its values, and the
+  # portal does no other Secret read outside the namespaced roles above.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["list"]
   # Read and write the operator's CRs. Reads are cluster-wide because the UI
   # aggregates them (listClusterCustomObject) and the CRDs are a mix of
   # namespaced and cluster scope. Writes are cluster-wide because the UI creates

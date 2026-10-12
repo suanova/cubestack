@@ -35,6 +35,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { DevEnvironmentSummary } from "@/app/api/devenvironments/route";
 import type { DevEnvImageOption, DevEnvOptionsResponse } from "@/app/api/devenvironments/options/route";
+import type { SshKeySecretOption } from "@/app/api/devenvironments/ssh-keys/route";
 import { apiFetch } from "@/lib/base-path";
 import { PLATFORM_GID, PLATFORM_UID, PLATFORM_USER } from "@/lib/devenvironments/images";
 import { useI18n } from "@/lib/i18n";
@@ -917,6 +918,14 @@ interface Draft {
   // Pending — so the choice is offered with a hint rather than hidden.
   rdmaEnabled: boolean;
   rdmaType: "roce" | "infiniband";
+  // spec.ssh: independent of the environment's type. sshEnabled opens the SSH
+  // endpoint on any type (a jupyter + ssh environment); sshKeysSecret /
+  // sshKeysKey point at the user's own key Secret — one of the labelled Secrets
+  // in the namespace, with a data entry to mount as authorized_keys. Empty means
+  // "let the operator mint a keypair" (the default).
+  sshEnabled: boolean;
+  sshKeysSecret: string;
+  sshKeysKey: string;
 }
 
 // CPU is picked in cores and memory follows it: the platform offers 1x, 2x or 4x
@@ -976,7 +985,16 @@ function CreateWizard({
     ports: [],
     rdmaEnabled: false,
     rdmaType: "roce",
+    sshEnabled: false,
+    sshKeysSecret: "",
+    sshKeysKey: "",
   });
+  // The labelled key Secrets in the current namespace, for the SSH picker.
+  // Loaded on demand (when the SSH toggle is turned on) rather than with the
+  // other options, because it depends on the namespace the user picks in step 1.
+  const [sshSecrets, setSshSecrets] = useState<SshKeySecretOption[]>([]);
+  const [sshSecretsLoading, setSshSecretsLoading] = useState(false);
+  const [sshSecretsError, setSshSecretsError] = useState<string | null>(null);
   const [nameError, setNameError] = useState(false);
   const [createBusy, setCreateBusy] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
@@ -1006,6 +1024,66 @@ function CreateWizard({
   }, [open]);
 
   const setField = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft((prev) => ({ ...prev, [key]: value }));
+
+  // Loads the labelled key Secrets for one namespace, so the SSH picker can
+  // offer only the Secrets the operator will actually mount. Runs on demand
+  // (when the SSH toggle is turned on) and again if the namespace changes while
+  // SSH is on. A failure or an empty list does not block the step — the user can
+  // still create the environment without a bring-your-own key (the operator
+  // mints a keypair in that case) — so the picker degrades to a hint.
+  const loadSshSecrets = useCallback(async (namespace: string) => {
+    if (!namespace) {
+      setSshSecrets([]);
+      return;
+    }
+    setSshSecretsLoading(true);
+    setSshSecretsError(null);
+    try {
+      const res = await apiFetch(`/api/devenvironments/ssh-keys?namespace=${encodeURIComponent(namespace)}`);
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      const d = (await res.json()) as { secrets: SshKeySecretOption[] };
+      setSshSecrets(d.secrets ?? []);
+    } catch (err) {
+      setSshSecrets([]);
+      setSshSecretsError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSshSecretsLoading(false);
+    }
+  }, []);
+
+  // The namespace is picked in step 1; the SSH picker (step 3) is scoped to it.
+  // Changing the namespace while SSH is on invalidates the loaded key Secrets,
+  // so they are cleared and re-fetched for the new namespace.
+  const changeNamespace = (namespace: string) => {
+    setDraft((prev) => ({ ...prev, namespace, sshKeysSecret: "", sshKeysKey: "" }));
+    if (draft.sshEnabled) {
+      void loadSshSecrets(namespace);
+    }
+  };
+
+  // The SSH toggle: turning it on loads the labelled key Secrets for the current
+  // namespace (so the picker can offer them); turning it off clears the
+  // bring-your-own key selection.
+  const toggleSsh = (enabled: boolean) => {
+    setDraft((prev) => ({
+      ...prev,
+      sshEnabled: enabled,
+      ...(enabled ? {} : { sshKeysSecret: "", sshKeysKey: "" }),
+    }));
+    if (enabled) {
+      void loadSshSecrets(draft.namespace);
+    }
+  };
+
+  // Selecting a key Secret also picks its first data entry as the default
+  // authorized_keys key, so the user only has to change it if the Secret holds
+  // several entries.
+  const changeSshSecret = (name: string) => {
+    const secret = sshSecrets.find((s) => s.name === name);
+    setDraft((prev) => ({ ...prev, sshKeysSecret: name, sshKeysKey: secret?.keys[0] ?? "" }));
+  };
 
   // Monotonic ids for the step-3 rows, so a row keeps its identity across
   // edits and a deletion removes the row that was clicked rather than whatever
@@ -1188,6 +1266,17 @@ function CreateWizard({
       // spec.network: sent only when RDMA is on; rdmaType names the fabric the
       // environment joins. Off, the block is absent — the one spelling of no RDMA.
       ...(draft.rdmaEnabled ? { rdmaEnabled: true, rdmaType: draft.rdmaType } : {}),
+      // spec.ssh: sent only when SSH is on (independent of type). The bring-your-
+      // own key Secret is included only when one is chosen; otherwise the operator
+      // mints a keypair for the environment.
+      ...(draft.sshEnabled
+        ? {
+            sshEnabled: true,
+            ...(draft.sshKeysSecret
+              ? { sshKeysSecret: draft.sshKeysSecret, sshKeysKey: draft.sshKeysKey }
+              : {}),
+          }
+        : {}),
     };
     apiFetch("/api/devenvironments", {
       method: "POST",
@@ -1245,6 +1334,12 @@ function CreateWizard({
   if (draft.rdmaEnabled) {
     summaryRows.push([t("dev.wizard.rdma"), draft.rdmaType === "roce" ? "RoCE" : "InfiniBand"]);
   }
+  if (draft.sshEnabled) {
+    summaryRows.push([
+      t("dev.wizard.ssh"),
+      draft.sshKeysSecret ? `${draft.sshKeysSecret}:${draft.sshKeysKey}` : t("dev.wizard.sshKeysPlatform"),
+    ]);
+  }
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth data-od-id="create-wizard" sx={{ "& .MuiDialog-paper": { maxHeight: "88vh" } }}>
@@ -1276,7 +1371,7 @@ function CreateWizard({
                   <TextField size="small" fullWidth autoFocus value={draft.name} onChange={(e) => setField("name", e.target.value)} placeholder="e.g. jupyter-nlp-ln" />
                 </WizField>
                 <WizField label={t("dev.wizard.namespace")}>
-                  <Select size="small" fullWidth value={draft.namespace} onChange={(e) => setField("namespace", e.target.value)}>
+                  <Select size="small" fullWidth value={draft.namespace} onChange={(e) => changeNamespace(e.target.value)}>
                     {options.namespaces.map((n) => (
                       <MenuItem key={n.name} value={n.name}>{n.name}</MenuItem>
                     ))}
@@ -1582,6 +1677,51 @@ function CreateWizard({
                         <MenuItem value="roce">RoCE</MenuItem>
                         <MenuItem value="infiniband">InfiniBand</MenuItem>
                       </Select>
+                    </WizField>
+                  ) : null}
+                </WizSection>
+
+                <WizSection odId="sec-ssh" title={t("dev.wizard.ssh")} badge="ssh">
+                  <Box sx={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "12px", py: "8px" }}>
+                    <Box>
+                      <Box sx={{ fontSize: 12.5 }}>{t("dev.wizard.sshEnabled")}</Box>
+                      <Box sx={{ fontSize: 11, color: "text.secondary", mt: "2px" }}>{t("dev.wizard.sshHint")}</Box>
+                    </Box>
+                    <Switch size="small" checked={draft.sshEnabled} onChange={(e) => toggleSsh(e.target.checked)} data-od-id="wizard-ssh" />
+                  </Box>
+                  {draft.sshEnabled ? (
+                    <WizField label={t("dev.wizard.sshKeysSecret")} hint={t("dev.wizard.sshKeysSecretHint")}>
+                      {sshSecretsLoading ? (
+                        <Typography sx={{ fontSize: 12, color: "text.secondary" }} data-od-id="wizard-ssh-keys-loading">
+                          {t("dev.wizard.sshKeysLoading")}
+                        </Typography>
+                      ) : sshSecretsError ? (
+                        <Typography sx={{ fontSize: 12, color: "text.secondary" }} data-od-id="wizard-ssh-keys-error">
+                          {t("dev.wizard.sshKeysError", { error: sshSecretsError })}
+                        </Typography>
+                      ) : sshSecrets.length === 0 ? (
+                        <Typography sx={{ fontSize: 12, color: "text.secondary" }} data-od-id="wizard-ssh-keys-empty">
+                          {t("dev.wizard.sshKeysEmpty")}
+                        </Typography>
+                      ) : (
+                        <>
+                          <Select size="small" fullWidth value={draft.sshKeysSecret} onChange={(e) => changeSshSecret(e.target.value)} data-od-id="wizard-ssh-secret">
+                            <MenuItem value="">{t("dev.wizard.sshKeysPlatform")}</MenuItem>
+                            {sshSecrets.map((s) => (
+                              <MenuItem key={s.name} value={s.name}>{s.name}</MenuItem>
+                            ))}
+                          </Select>
+                          {draft.sshKeysSecret ? (
+                            <WizField label={t("dev.wizard.sshKeysKey")} hint={t("dev.wizard.sshKeysKeyHint")}>
+                              <Select size="small" value={draft.sshKeysKey} onChange={(e) => setField("sshKeysKey", e.target.value)} data-od-id="wizard-ssh-key">
+                                {(sshSecrets.find((s) => s.name === draft.sshKeysSecret)?.keys ?? []).map((k) => (
+                                  <MenuItem key={k} value={k}>{k}</MenuItem>
+                                ))}
+                              </Select>
+                            </WizField>
+                          ) : null}
+                        </>
+                      )}
                     </WizField>
                   ) : null}
                 </WizSection>

@@ -19,6 +19,16 @@ const OPTIONS = {
   ],
 };
 
+// The labelled key Secrets the wizard's SSH picker loads when the SSH toggle is
+// turned on (served by /api/devenvironments/ssh-keys).
+const SSH_KEYS = {
+  namespace: "project-a",
+  secrets: [
+    { name: "alice-keys", keys: ["alice@laptop", "alice@phone"] },
+    { name: "bob-keys", keys: ["bob@desktop"] },
+  ],
+};
+
 describe("dev environments page", () => {
   beforeEach(() => {
     localStorage.clear();
@@ -362,6 +372,9 @@ describe("create wizard", () => {
         const url = String(input);
         if (url.includes("/options")) {
           return Promise.resolve({ ok: true, status: 200, json: async () => OPTIONS });
+        }
+        if (url.includes("/ssh-keys")) {
+          return Promise.resolve({ ok: true, status: 200, json: async () => SSH_KEYS });
         }
         return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: devEnvironmentList() }) });
       }),
@@ -986,6 +999,45 @@ describe("create wizard", () => {
     await act(async () => {});
 
     expect(createdBody()).toMatchObject({ rdmaEnabled: true, rdmaType: "roce" });
+
+    act(() => root.unmount());
+  });
+
+  it("sends spec.ssh with a bring-your-own key Secret when SSH is on", async () => {
+    const { container, root } = renderWithBoth();
+    await act(async () => {});
+    await toStep3(container);
+
+    // Turning on the SSH toggle loads the labelled key Secrets for the namespace
+    // and exposes the picker (independent of the environment's type).
+    const sshSwitch = document.body.querySelector('[data-od-id="wizard-ssh"] input') as HTMLInputElement;
+    await act(async () => {
+      sshSwitch.click();
+    });
+    // Let the ssh-keys fetch resolve before interacting with the picker.
+    await act(async () => {});
+
+    // Select a labelled key Secret; the key defaults to its first data entry.
+    // The picker opens from its inner combobox, as MUI attaches the mousedown
+    // handler there and the od-id sits on the field root.
+    const sshSecretSelect = document.body.querySelector(
+      '[data-od-id="wizard-ssh-secret"] [role="combobox"]',
+    ) as HTMLElement;
+    expect(sshSecretSelect).not.toBeNull();
+    await selectOption(sshSecretSelect, "alice-keys");
+
+    await nextStep();
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="wizard-create"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    const body = createdBody();
+    expect(body).toMatchObject({
+      sshEnabled: true,
+      sshKeysSecret: "alice-keys",
+      sshKeysKey: "alice@laptop",
+    });
 
     act(() => root.unmount());
   });
