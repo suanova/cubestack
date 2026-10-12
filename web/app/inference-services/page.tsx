@@ -357,6 +357,7 @@ export default function InferenceServicesPage() {
     <DeployWizard
       key={deployOpen ? "open" : "closed"}
       open={deployOpen}
+      services={items}
       onClose={() => setDeployOpen(false)}
       onCreated={(namespace, name) => {
         selectAfterLoad.current = `${namespace}/${name}`;
@@ -930,10 +931,13 @@ type OverrideDecl = CreateOptionsResponse["profiles"][number]["overrides"][numbe
 
 function DeployWizard({
   open,
+  services,
   onClose,
   onCreated,
 }: {
   open: boolean;
+  /** What exists now, for the name check step 1 makes against the namespace. */
+  services: InferenceServiceSummary[];
   onClose: () => void;
   onCreated: (namespace: string, name: string) => void;
 }) {
@@ -995,8 +999,16 @@ function DeployWizard({
   const setField = <K extends keyof DeployDraft>(key: K, value: DeployDraft[K]) =>
     setDraft((prev) => ({ ...prev, [key]: value }));
 
+  // The field's message promises an already-taken check, so it makes one: the
+  // namespace's services are already in hand (the table behind this dialog renders
+  // them). The same name in another namespace is a different service. Losing the
+  // race is still the server's to report — it answers `nameTaken`.
+  const nameTaken = services.some(
+    (s) => s.namespace === draft.namespace && s.name === draft.name.trim(),
+  );
   const nameValid = DNS_LABEL_RE.test(draft.name.trim());
-  const step1Valid = nameValid && draft.name.trim().length > 0 && !!draft.namespace && !!draft.profileRef;
+  const step1Valid =
+    nameValid && !nameTaken && draft.name.trim().length > 0 && !!draft.namespace && !!draft.profileRef;
   const step2Valid = !!draft.modelRef;
 
   // Default override value, or the declared default.
@@ -1015,7 +1027,7 @@ function DeployWizard({
   const next = () => {
     if (step === 1) {
       if (!step1Valid) {
-        setNameError(!nameValid);
+        setNameError(!nameValid || nameTaken);
         return;
       }
       setNameError(false);

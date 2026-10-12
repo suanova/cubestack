@@ -1117,6 +1117,51 @@ describe("create wizard", () => {
     act(() => root.unmount());
   });
 
+  it("refuses a name already taken in the selected namespace, and only there", async () => {
+    // The list the dialog is opened from is the list the check reads: a name that
+    // exists in project-a cannot be created in project-a, while the same name in
+    // another namespace is a different environment and is no clash at all.
+    const { container, root } = renderWithBoth();
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="create-env-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    // Same name as the fixture environment, which lives in project-a.
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="wizard-namespace"] [role="combobox"]') as HTMLElement).dispatchEvent(
+        new MouseEvent("mousedown", { bubbles: true }),
+      );
+    });
+    const projectA = Array.from(document.body.querySelectorAll('[role="option"]')).find((o) => o.textContent === "project-a");
+    await act(async () => {
+      (projectA as HTMLElement).click();
+    });
+    const nameInput = document.body.querySelector('input[placeholder="e.g. jupyter-nlp-ln"]') as HTMLInputElement;
+    setInput(nameInput, "jupyter-nlp-ln");
+    await nextStep();
+
+    // Step 1 holds, and says why.
+    expect(document.body.querySelector('[data-step="2"]')).toBeNull();
+    expect(document.body.querySelector('[data-od-id="field-error"]')?.textContent).toBe("名称不合法或已被占用。");
+
+    // The same name under another namespace goes through.
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="wizard-namespace"] [role="combobox"]') as HTMLElement).dispatchEvent(
+        new MouseEvent("mousedown", { bubbles: true }),
+      );
+    });
+    const def = Array.from(document.body.querySelectorAll('[role="option"]')).find((o) => o.textContent === "default");
+    await act(async () => {
+      (def as HTMLElement).click();
+    });
+    await nextStep();
+    expect(document.body.querySelector('[data-step="2"]')).not.toBeNull();
+
+    act(() => root.unmount());
+  });
+
   it("renders a refusal the route sent as a code, in the user's language", async () => {
     // The route answers with `{ error: "nameTaken", params: { name } }` and no
     // prose of its own, so the sentence below comes from the console's

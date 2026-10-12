@@ -401,6 +401,7 @@ export default function DevEnvironmentsPage() {
       <CreateWizard
         key={wizardOpen ? "open" : "closed"}
         open={wizardOpen}
+        environments={items}
         onClose={() => setWizardOpen(false)}
         onCreated={(namespace, name) => {
           selectAfterLoad.current = `${namespace}/${name}`;
@@ -1049,10 +1050,13 @@ function identityOf(image: DevEnvImageOption | undefined) {
 
 function CreateWizard({
   open,
+  environments,
   onClose,
   onCreated,
 }: {
   open: boolean;
+  /** What exists now, for the name check step 1 makes against the namespace. */
+  environments: DevEnvironmentSummary[];
   onClose: () => void;
   onCreated: (namespace: string, name: string) => void;
 }) {
@@ -1220,8 +1224,18 @@ function CreateWizard({
       tag === prev.image ? prev : { ...prev, image: tag, ...identityOf(options?.images.find((i) => i.tag === tag)) },
     );
 
+  // The name is checked against the target namespace's existing environments, not
+  // only against the DNS-1123 pattern: the field's own message promises an
+  // already-taken check ("Invalid or already-taken name"), and the list is already
+  // in hand — the table behind this dialog renders it. Same name in another
+  // namespace is a different environment and is not a clash. This is a
+  // convenience: an environment created by someone else in the meantime is still
+  // the server's to refuse, and its `nameTaken` is what the user then reads.
+  const nameTaken = environments.some(
+    (e) => e.namespace === draft.namespace && e.name === draft.name.trim(),
+  );
   const nameValid = DNS_LABEL_RE.test(draft.name.trim()) && draft.name.trim().length > 0;
-  const step1Valid = nameValid && !!draft.namespace && !!draft.image;
+  const step1Valid = nameValid && !nameTaken && !!draft.namespace && !!draft.image;
   // Client-side validation mirrors the server (POST) rules so a user cannot
   // advance or submit out-of-range / fractional GPU or storage values. A card
   // count is only asked for, and only checked, when an accelerator is wanted:
@@ -1302,7 +1316,7 @@ function CreateWizard({
   const next = () => {
     if (step === 1) {
       if (!step1Valid) {
-        setNameError(!nameValid);
+        setNameError(!nameValid || nameTaken);
         setImageError(!draft.image);
         return;
       }

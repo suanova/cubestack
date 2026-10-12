@@ -489,6 +489,34 @@ describe("deploy wizard", () => {
     await act(async () => {});
   }
 
+  it("refuses a name already taken in the selected namespace", async () => {
+    // The wizard opens on project-a and the fixture list has `dsv4-flash-pd`
+    // there: the field's message promises this check, and the list it needs is
+    // the one the table behind the dialog already rendered.
+    const { container, root } = renderWithBoth();
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    const input = document.body.querySelector('input[placeholder="e.g. dsv4-flash-serve"]') as HTMLInputElement;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
+      setter.call(input, "dsv4-flash-pd");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      (Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent === "下一步") as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    expect(document.body.textContent).toContain("名称不合法或已被占用。");
+    expect(document.body.textContent).toContain("基本信息");
+
+    act(() => root.unmount());
+  });
+
   it("renders per-role GPU type selects for a pd-separation profile", async () => {
     const { container, root } = renderWithBoth();
     await act(async () => {});
