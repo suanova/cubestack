@@ -1,6 +1,9 @@
 import { getCoreClient } from "@/lib/kubernetes";
 import { withAuth } from "@/lib/auth/guard";
 import { DEV_IMAGES } from "@/lib/devenvironments/images";
+// The configured/default/first rule, shared with the inference wizard: filtering
+// above has already confined "first" to a namespace that is not the platform's.
+import { defaultNamespaceOf } from "@/lib/namespaces";
 
 // @kubernetes/client-node needs Node APIs (TLS, fs), not the Edge runtime.
 export const runtime = "nodejs";
@@ -59,21 +62,6 @@ const PLATFORM_NAMESPACES = new Set([
 /** Whether a namespace may be offered as a home for a development environment. */
 function offered(name: string): boolean {
   return !name.startsWith("kube-") && !PLATFORM_NAMESPACES.has(name);
-}
-
-/**
- * The namespace the wizard opens on: the platform's configured one when there
- * is one (CUBESTACK_DEFAULT_NAMESPACE, set through the chart's `env` value — an
- * explicit decision, so it wins), else `default`, else the first namespace
- * offered — which filtering has already confined to one that is not the
- * platform's, so "whatever sorts first" can no longer pick a platform
- * namespace. Null only when the cluster offers none at all.
- */
-function defaultNamespaceOf(names: string[]): string | null {
-  const configured = (process.env.CUBESTACK_DEFAULT_NAMESPACE ?? "").trim();
-  if (configured && names.includes(configured)) return configured;
-  if (names.includes("default")) return "default";
-  return names[0] ?? null;
 }
 
 /** Catalog the create wizard needs, read from the live cluster. */

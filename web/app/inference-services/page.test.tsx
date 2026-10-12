@@ -374,6 +374,9 @@ describe("inference services page", () => {
 });
 const OPTIONS = {
   namespaces: [{ name: "project-a" }, { name: "default" }],
+  // The API names the namespace the wizard opens on: `default` here, even though
+  // project-a sorts first.
+  defaultNamespace: "default",
   profiles: [
     {
       name: "metax-sglang-dsv4-pd",
@@ -489,16 +492,29 @@ describe("deploy wizard", () => {
     await act(async () => {});
   }
 
-  it("refuses a name already taken in the selected namespace", async () => {
-    // The wizard opens on project-a and the fixture list has `dsv4-flash-pd`
-    // there: the field's message promises this check, and the list it needs is
-    // the one the table behind the dialog already rendered.
+  it("opens on the namespace the API names, and refuses a name taken there", async () => {
+    // The wizard opens on `default` — not on whichever namespace sorts first —
+    // and the field's message promises an already-taken check, which reads the
+    // services the table behind the dialog already rendered.
     const { container, root } = renderWithBoth();
     await act(async () => {});
     await act(async () => {
       (container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement).click();
     });
     await act(async () => {});
+    expect(document.body.querySelector('[data-od-id="deploy-namespace"]')?.textContent).toContain("default");
+
+    // ...and the check is per namespace: move to project-a, where the fixture's
+    // services live, and take one of their names.
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="deploy-namespace"] [role="combobox"]') as HTMLElement).dispatchEvent(
+        new MouseEvent("mousedown", { bubbles: true }),
+      );
+    });
+    const projectA = Array.from(document.body.querySelectorAll('[role="option"]')).find((o) => o.textContent === "project-a");
+    await act(async () => {
+      (projectA as HTMLElement).click();
+    });
 
     const input = document.body.querySelector('input[placeholder="e.g. dsv4-flash-serve"]') as HTMLInputElement;
     await act(async () => {

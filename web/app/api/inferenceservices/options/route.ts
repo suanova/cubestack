@@ -1,5 +1,6 @@
 import { getCoreClient, getCustomObjectsClient } from "@/lib/kubernetes";
 import { withAuth } from "@/lib/auth/guard";
+import { defaultNamespaceOf } from "@/lib/namespaces";
 
 // @kubernetes/client-node needs Node APIs (TLS, fs), not the Edge runtime.
 export const runtime = "nodejs";
@@ -19,6 +20,13 @@ const VERSION = "v1alpha1";
  */
 export interface CreateOptionsResponse {
   namespaces: Array<{ name: string }>;
+  /**
+   * The namespace the wizard opens on: the platform's configured one, else
+   * `default`, else the first offered. Answered here rather than guessed by the
+   * wizard — it used to prefer `project-a` by name and otherwise take whatever
+   * sorted first, which is a platform namespace on a real install.
+   */
+  defaultNamespace: string | null;
   profiles: Array<{
     name: string;
     engine: string | null;
@@ -104,12 +112,14 @@ export const GET = withAuth(async () => {
     const profiles: Profile[] = profileRes.items ?? [];
     const modelversions: ModelVersion[] = mvRes.items ?? [];
 
+    const names = (nsRes.items ?? [])
+      .map((ns) => ns.metadata?.name)
+      .filter((n): n is string => Boolean(n))
+      .sort();
+
     const response: CreateOptionsResponse = {
-      namespaces: (nsRes.items ?? [])
-        .map((ns) => ns.metadata?.name)
-        .filter((n): n is string => Boolean(n))
-        .sort()
-        .map((name) => ({ name })),
+      namespaces: names.map((name) => ({ name })),
+      defaultNamespace: defaultNamespaceOf(names),
       profiles: profiles.map((p) => {
         const spec = p.spec ?? {};
         const gpuPerPod = spec.roles?.reduce(
