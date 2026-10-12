@@ -15,6 +15,7 @@ import type { OverviewSummary } from "@/app/api/overview/route";
 import { apiFetch } from "@/lib/base-path";
 import { dictionaries } from "@/lib/i18n/dictionaries";
 import { MessageKey, useI18n } from "@/lib/i18n";
+import { DEFAULT_DASHBOARD_NAME } from "@/lib/perses/config";
 import { platformPalette, usePlatformTheme } from "@/lib/perses/theme";
 
 // Platform chart hues derived from the accent in the prototype (overview.html);
@@ -489,7 +490,7 @@ export default function OverviewPage() {
           },
           // Nodes drill into the /dashboards landing with Resource Overview
           // preselected: the full per-node CPU/GPU/Memory/RDMA usage rows.
-          href: "/dashboards?dashboard=resource-overview-dashboard",
+          href: `/dashboards?dashboard=${DEFAULT_DASHBOARD_NAME}`,
         },
         {
           dataOdId: "kpi-gpu",
@@ -504,7 +505,7 @@ export default function OverviewPage() {
           // The GPU card lands on the same Resource Overview but GPU-scoped
           // (?scope=gpu): the node CPU/Memory/RDMA rows are dropped on arrival,
           // leaving the per-GPU utilization/temperature/power panels.
-          href: "/dashboards?dashboard=resource-overview-dashboard&scope=gpu",
+          href: `/dashboards?dashboard=${DEFAULT_DASHBOARD_NAME}&scope=gpu`,
         },
         {
           dataOdId: "kpi-inference",

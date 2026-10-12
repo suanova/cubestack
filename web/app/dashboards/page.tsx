@@ -3,8 +3,10 @@
 // Monitoring landing: a dropdown of the provisioned dashboards, with the
 // selected dashboard's panels rendered inline beside it (via the react-18
 // perses island). The dropdown and the dashboard's variable filters share one
-// line. Defaults to the first dashboard in the list, unless a ?dashboard=
-// query param (used by the Overview landing deep links) names a specific one.
+// line. Opens on Resource Overview — the dashboard the Overview landing's KPI
+// cards deep-link to, and not simply the first in the list, which was metax-gpu
+// on a real install — unless a ?dashboard= query param names a specific one. A
+// project that provisions no Resource Overview still falls back to the first.
 // The dropdown label and the description read straight off each dashboard
 // resource (spec.display), which is the single source of truth — no frontend
 // catalog.
@@ -23,7 +25,7 @@ import { useEffect, useState } from "react";
 
 import { PersesIslandHost } from "@/components/perses/PersesIslandHost";
 import { useI18n } from "@/lib/i18n";
-import { PERSES_PROJECT } from "@/lib/perses/config";
+import { DEFAULT_DASHBOARD_NAME, PERSES_PROJECT } from "@/lib/perses/config";
 import { fetchDashboard, fetchDashboards } from "@/lib/perses/perses-client";
 
 export default function DashboardsPage({
@@ -37,9 +39,9 @@ export default function DashboardsPage({
   // Tracks whether the request has settled, so a successful but empty list is
   // distinguishable from the not-yet-loaded state (both have length 0).
   const [loaded, setLoaded] = useState(false);
-  // Selected dashboard name; defaults to the first dashboard once the list
-  // loads, unless the ?dashboard= query param names one of the listed
-  // dashboards (then that one is preselected).
+  // Selected dashboard name; defaults to Resource Overview once the list loads,
+  // unless the ?dashboard= query param names one of the listed dashboards (then
+  // that one is preselected).
   const [selectedName, setSelectedName] = useState<string | null>(null);
   // Optional landing scope carried by the Overview deep links (?scope=gpu): it
   // tells the island to start the selected dashboard in that scope (see
@@ -52,7 +54,8 @@ export default function DashboardsPage({
     let cancelled = false;
     // Next passes searchParams as a Promise; the host is React 18 (no use()),
     // so resolve it in the same async flow as the list. A query param that
-    // doesn't match any provisioned dashboard falls back to the first.
+    // doesn't match any provisioned dashboard falls back to the same default as
+    // no param at all.
     (async () => {
       const sp = searchParams ? await searchParams : {};
       const requested = typeof sp.dashboard === "string" ? sp.dashboard : null;
@@ -62,7 +65,8 @@ export default function DashboardsPage({
         if (cancelled) return;
         setDashboards(items);
         const match = requested !== null && items.some((d) => d.metadata.name === requested);
-        setSelectedName(match ? requested : items[0]?.metadata.name ?? null);
+        const platformOverview = items.find((d) => d.metadata.name === DEFAULT_DASHBOARD_NAME)?.metadata.name;
+        setSelectedName(match ? requested : (platformOverview ?? items[0]?.metadata.name ?? null));
         setScope(requestedScope);
       } catch (err: unknown) {
         if (!cancelled) {

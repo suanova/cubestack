@@ -19,6 +19,13 @@ export const PERSES_PROXY_BASE_PATH = withBasePath("/api/perses");
 // namespace the PersesDashboard CRs live in (namespace = project).
 export const PERSES_PROJECT = process.env.NEXT_PUBLIC_PERSES_PROJECT ?? "monitoring";
 
+// The dashboard the monitoring landing opens on when the URL does not name one.
+// Named here rather than in the landing alone: the Overview KPI cards deep-link
+// to this same dashboard by name, and two spellings of "the platform's own
+// resource overview" is how a landing ends up opening on whichever dashboard
+// happens to sort first (measured on a real install: metax-gpu).
+export const DEFAULT_DASHBOARD_NAME = "resource-overview-dashboard";
+
 declare global {
   interface Window {
     PERSES_APP_CONFIG?: { api_prefix: string };
