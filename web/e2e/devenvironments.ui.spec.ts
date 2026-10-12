@@ -13,10 +13,12 @@ const OPTIONS = {
   // though project-a sorts first, which is the point of the field.
   defaultNamespace: "default",
   images: [
-    { tag: "harbor.isuanova.com/suanova/jupyter-minimal:latest", label: "suanova/jupyter-minimal · CPU · JupyterLab (jovyan)", user: "jovyan", runAsGroup: 100 },
-    { tag: "harbor.isuanova.com/suanova/ssh-ubuntu22.04:latest", label: "suanova/ssh-ubuntu22.04 · CPU · SSH (ubuntu)", user: "ubuntu" },
-    { tag: "harbor.isuanova.com/suanova/base-cuda:latest", label: "suanova/base-cuda · NVIDIA CUDA (ubuntu)", user: "ubuntu" },
-    { tag: "harbor.isuanova.com/suanova/base-maca:latest", label: "suanova/base-maca · Metax MACA (ubuntu)", user: "ubuntu" },
+    { tag: "harbor.isuanova.com/suanova/jupyter-minimal:latest", label: "suanova/jupyter-minimal · CPU · JupyterLab (jovyan)", user: "jovyan", runAsGroup: 100, interface: "jupyter" },
+    { tag: "harbor.isuanova.com/suanova/ssh-ubuntu22.04:latest", label: "suanova/ssh-ubuntu22.04 · CPU · SSH (ubuntu)", user: "ubuntu", interface: "ssh" },
+    { tag: "harbor.isuanova.com/suanova/jupyter-cuda-pytorch:latest", label: "suanova/jupyter-cuda-pytorch · NVIDIA CUDA · JupyterLab (ubuntu)", user: "ubuntu", interface: "jupyter" },
+    { tag: "harbor.isuanova.com/suanova/ssh-cuda-pytorch:latest", label: "suanova/ssh-cuda-pytorch · NVIDIA CUDA · SSH (ubuntu)", user: "ubuntu", interface: "ssh" },
+    { tag: "harbor.isuanova.com/suanova/jupyter-maca-pytorch:latest", label: "suanova/jupyter-maca-pytorch · Metax MACA · JupyterLab (ubuntu)", user: "ubuntu", interface: "jupyter" },
+    { tag: "harbor.isuanova.com/suanova/ssh-maca-pytorch:latest", label: "suanova/ssh-maca-pytorch · Metax MACA · SSH (ubuntu)", user: "ubuntu", interface: "ssh" },
   ],
 };
 
@@ -74,7 +76,7 @@ test.describe("dev environments landing (mocked data)", () => {
     await expect(ssh).toContainText("Stopped");
     // The image is a detail-panel fact, not a column: a long registry path in
     // every row is what made the table unreadable.
-    await expect(table).not.toContainText("base-cuda:latest");
+    await expect(table).not.toContainText("jupyter-cuda-pytorch:latest");
     await expect(table).not.toContainText("ssh-ubuntu22.04:latest");
 
     // The row's actions live behind the kebab, which is what one clicks first.
@@ -109,7 +111,7 @@ test.describe("dev environments landing (mocked data)", () => {
     await expect(detail).toContainText("连接信息");
     await expect(detail).toContainText("https://dev.cubestack.local/ws/jupyter-nlp-ln");
     await expect(detail).toContainText("规格与状态");
-    await expect(detail).toContainText("harbor.isuanova.com/suanova/base-cuda:latest");
+    await expect(detail).toContainText("harbor.isuanova.com/suanova/jupyter-cuda-pytorch:latest");
     await expect(detail).toContainText("1 × nvidia");
     // Step 3's three new sections each get a row, and the storage row carries
     // the mount path the CR states rather than one the panel invents.

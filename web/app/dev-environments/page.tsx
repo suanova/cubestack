@@ -1336,6 +1336,12 @@ function CreateWizard({
     t("dev.wizard.step.confirm"),
   ];
   const labelFor = (tag: string) => options?.images.find((i) => i.tag === tag)?.label ?? tag;
+  // The interface the chosen image was built for, when the catalog knows it. The
+  // image and the type are two independent choices, and the vendor images come
+  // in per-interface pairs, so the two can disagree: an ssh image under type
+  // jupyter is a token nothing serves. The catalog is what makes that visible,
+  // so it is said rather than left to be met on the cluster.
+  const imageInterface = options?.images.find((i) => i.tag === draft.image)?.interface;
 
   // What the user will see on the confirm step. Built by pushing into a typed
   // array rather than spreading, so the conditional rows stay [string, string].
@@ -1418,7 +1424,14 @@ function CreateWizard({
                     ))}
                   </Select>
                 </WizField>
-                <WizField label={t("dev.wizard.type")}>
+                <WizField
+                  label={t("dev.wizard.type")}
+                  hint={
+                    imageInterface && imageInterface !== draft.type
+                      ? t("dev.wizard.typeMismatch", { interface: t(`dev.wizard.type.${imageInterface}`) })
+                      : undefined
+                  }
+                >
                   <Box sx={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "10px" }}>
                     {(["jupyter", "ssh", "vscode"] as const).map((tp) => (
                       <Box

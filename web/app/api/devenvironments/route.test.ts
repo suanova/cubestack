@@ -29,7 +29,7 @@ function stubCluster() {
         },
         spec: {
           type: "jupyter",
-          image: "harbor.isuanova.com/suanova/base-cuda:latest",
+          image: "harbor.isuanova.com/suanova/jupyter-cuda-pytorch:latest",
           running: true,
           resources: { gpu: { vendor: "nvidia", count: 2 }, cpu: "16", memory: "64Gi" },
           storage: { size: "200Gi", mountPath: "/home/ubuntu" },
@@ -100,7 +100,7 @@ describe("GET /api/devenvironments", () => {
       name: "jupyter-nlp-ln",
       namespace: "project-a",
       type: "jupyter",
-      image: "harbor.isuanova.com/suanova/base-cuda:latest",
+      image: "harbor.isuanova.com/suanova/jupyter-cuda-pytorch:latest",
       running: true,
       resources: { gpu: { vendor: "nvidia", count: 2 }, cpu: "16", memory: "64Gi" },
       storage: { size: "200Gi", mountPath: "/home/ubuntu" },
@@ -269,7 +269,7 @@ describe("POST /api/devenvironments", () => {
           name: "jupyter-recsys",
           namespace: "project-a",
           type: "jupyter",
-          image: "harbor.isuanova.com/suanova/base-cuda:latest",
+          image: "harbor.isuanova.com/suanova/jupyter-cuda-pytorch:latest",
           accelerator: "nvidia",
           gpuCount: 4,
           cpu: "64",
@@ -290,7 +290,7 @@ describe("POST /api/devenvironments", () => {
       metadata: { name: "jupyter-recsys", namespace: "project-a" },
       spec: {
         type: "jupyter",
-        image: "harbor.isuanova.com/suanova/base-cuda:latest",
+        image: "harbor.isuanova.com/suanova/jupyter-cuda-pytorch:latest",
         running: true,
         resources: { gpu: { vendor: "nvidia", count: 4 }, cpu: "64", memory: "256Gi" },
         // Derived from the image, never sent by the client: the self-authored

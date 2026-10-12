@@ -27,6 +27,14 @@ export interface DevImage {
   user: string;
   /** spec.runtime.securityContext.runAsGroup, when the platform default of 1000 is wrong. */
   runAsGroup?: number;
+  /**
+   * The interface the image was built for — the same axis as spec.type, and the
+   * reason the vendor images come in pairs. CUBESTACK_IMAGE is baked into each
+   * image, so one image cannot serve both a jupyter and an ssh environment: an
+   * ssh image under type jupyter runs sshd with nothing serving the token the
+   * operator publishes for it (images/README.md).
+   */
+  interface: "jupyter" | "ssh";
 }
 
 // The platform's own fallbacks, stated once for the wizard and the create
@@ -40,6 +48,11 @@ export const PLATFORM_GID = 1000;
 
 const REGISTRY = "harbor.isuanova.com/suanova";
 
+// The platform's published set (images/README.md), CPU first and then the two
+// vendor pairs, in the order the wizard's own accelerator select offers them.
+// The superseded base-cuda / base-maca are not here: they are bare vendor SDK
+// images with no ENTRYPOINT, no sshd and no launch chain, nothing a
+// DevEnvironment can be pointed at (docs/design/devenv-images/decision.md).
 export const DEV_IMAGES: DevImage[] = [
   {
     tag: `${REGISTRY}/jupyter-minimal:latest`,
@@ -48,22 +61,38 @@ export const DEV_IMAGES: DevImage[] = [
     // no other spec field implies that gid — the platform default is 1000.
     user: "jovyan",
     runAsGroup: 100,
+    interface: "jupyter",
   },
   {
     tag: `${REGISTRY}/ssh-ubuntu22.04:latest`,
     label: "suanova/ssh-ubuntu22.04 · CPU · SSH (ubuntu)",
     // Self-authored family: account ubuntu, uid/gid 1000 — the platform default.
     user: "ubuntu",
+    interface: "ssh",
   },
   {
-    tag: `${REGISTRY}/base-cuda:latest`,
-    label: "suanova/base-cuda · NVIDIA CUDA (ubuntu)",
+    tag: `${REGISTRY}/jupyter-cuda-pytorch:latest`,
+    label: "suanova/jupyter-cuda-pytorch · NVIDIA CUDA · JupyterLab (ubuntu)",
     user: "ubuntu",
+    interface: "jupyter",
   },
   {
-    tag: `${REGISTRY}/base-maca:latest`,
-    label: "suanova/base-maca · Metax MACA (ubuntu)",
+    tag: `${REGISTRY}/ssh-cuda-pytorch:latest`,
+    label: "suanova/ssh-cuda-pytorch · NVIDIA CUDA · SSH (ubuntu)",
     user: "ubuntu",
+    interface: "ssh",
+  },
+  {
+    tag: `${REGISTRY}/jupyter-maca-pytorch:latest`,
+    label: "suanova/jupyter-maca-pytorch · Metax MACA · JupyterLab (ubuntu)",
+    user: "ubuntu",
+    interface: "jupyter",
+  },
+  {
+    tag: `${REGISTRY}/ssh-maca-pytorch:latest`,
+    label: "suanova/ssh-maca-pytorch · Metax MACA · SSH (ubuntu)",
+    user: "ubuntu",
+    interface: "ssh",
   },
 ];
 

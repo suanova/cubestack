@@ -5,9 +5,9 @@ import type { DevEnvironmentSummary } from "@/app/api/devenvironments/route";
 
 /**
  * A summary with the demo's magnitude but no fabricated status/metrics. The
- * default names a GPU environment — a jupyter environment on the self-authored
- * `base-cuda` image, which runs as account `ubuntu` — so the shared fixture
- * covers a requested accelerator as well as an absent one.
+ * default names a GPU environment — a jupyter environment on the shipped
+ * `jupyter-cuda-pytorch` image, which runs as account `ubuntu` — so the shared
+ * fixture covers a requested accelerator as well as an absent one.
  */
 export function devEnvironmentSummary(
   overrides: Partial<DevEnvironmentSummary> = {},
@@ -17,7 +17,7 @@ export function devEnvironmentSummary(
     namespace: "project-a",
     createdAt: "2026-09-01T06:12:00Z",
     type: "jupyter",
-    image: "harbor.isuanova.com/suanova/base-cuda:latest",
+    image: "harbor.isuanova.com/suanova/jupyter-cuda-pytorch:latest",
     running: true,
     resources: { gpu: { vendor: "nvidia", count: 1 }, cpu: "16", memory: "64Gi" },
     storage: { size: "200Gi", mountPath: "/home/ubuntu", pvcRetention: "delete" },

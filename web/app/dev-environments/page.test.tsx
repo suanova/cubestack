@@ -16,9 +16,10 @@ const OPTIONS = {
   // first entry: project-a sorts first here, and is not the answer.
   defaultNamespace: "default",
   images: [
-    { tag: "harbor.isuanova.com/suanova/jupyter-minimal:latest", label: "suanova/jupyter-minimal · CPU · JupyterLab (jovyan)", user: "jovyan", runAsGroup: 100 },
-    { tag: "harbor.isuanova.com/suanova/ssh-ubuntu22.04:latest", label: "suanova/ssh-ubuntu22.04 · CPU · SSH (ubuntu)", user: "ubuntu" },
-    { tag: "harbor.isuanova.com/suanova/base-cuda:latest", label: "suanova/base-cuda · NVIDIA CUDA (ubuntu)", user: "ubuntu" },
+    { tag: "harbor.isuanova.com/suanova/jupyter-minimal:latest", label: "suanova/jupyter-minimal · CPU · JupyterLab (jovyan)", user: "jovyan", runAsGroup: 100, interface: "jupyter" },
+    { tag: "harbor.isuanova.com/suanova/ssh-ubuntu22.04:latest", label: "suanova/ssh-ubuntu22.04 · CPU · SSH (ubuntu)", user: "ubuntu", interface: "ssh" },
+    { tag: "harbor.isuanova.com/suanova/jupyter-cuda-pytorch:latest", label: "suanova/jupyter-cuda-pytorch · NVIDIA CUDA · JupyterLab (ubuntu)", user: "ubuntu", interface: "jupyter" },
+    { tag: "harbor.isuanova.com/suanova/ssh-maca-pytorch:latest", label: "suanova/ssh-maca-pytorch · Metax MACA · SSH (ubuntu)", user: "ubuntu", interface: "ssh" },
   ],
 };
 
@@ -111,7 +112,7 @@ describe("dev environments page", () => {
     expect(container.textContent).toContain("连接信息");
     expect(container.textContent).toContain("https://dev.cubestack.local/ws/jupyter-nlp-ln");
     expect(container.textContent).toContain("规格与状态");
-    expect(container.textContent).toContain("harbor.isuanova.com/suanova/base-cuda:latest");
+    expect(container.textContent).toContain("harbor.isuanova.com/suanova/jupyter-cuda-pytorch:latest");
     // The GPU environment's accelerator, and the stopped one's absence of one.
     expect(container.textContent).toContain("1 × nvidia");
     expect(container.textContent).toContain("无加速卡");
@@ -1126,6 +1127,40 @@ describe("create wizard", () => {
       sshKeysSecret: "alice-keys",
       sshKeysKey: "alice@laptop",
     });
+
+    act(() => root.unmount());
+  });
+
+  it("says when the chosen image does not serve the chosen type", async () => {
+    const { container, root } = renderWithBoth();
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="create-env-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    // The catalog opens on a jupyter image under the jupyter type: nothing to say.
+    expect(document.body.textContent).not.toContain("与当前环境类型不一致");
+
+    // An ssh image under the jupyter type is the combination the per-interface
+    // vendor pairs make expressible, and the one nothing can serve: the
+    // operator would publish a jupyter token for an image whose sshd is all
+    // that starts.
+    setInput(
+      document.body.querySelector('[data-od-id="wizard-image"] input') as HTMLInputElement,
+      "harbor.isuanova.com/suanova/ssh-maca-pytorch:latest",
+    );
+    await act(async () => {});
+    expect(document.body.textContent).toContain("与当前环境类型不一致");
+
+    // Choosing the type the image was built for settles it.
+    await act(async () => {
+      const sshType = Array.from(document.body.querySelectorAll('[data-step="1"] button')).find((b) =>
+        b.textContent?.startsWith("SSH"),
+      ) as HTMLElement;
+      sshType.click();
+    });
+    expect(document.body.textContent).not.toContain("与当前环境类型不一致");
 
     act(() => root.unmount());
   });

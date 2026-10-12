@@ -12,11 +12,12 @@ export const dynamic = "force-dynamic";
 // falls back to the same list; the wizard is sent only what it displays — which
 // now includes each image's runtime identity, since the wizard shows it and
 // pre-fills the editable account / uid / gid fields from it.
-const IMAGES: DevEnvImageOption[] = DEV_IMAGES.map(({ tag, label, user, runAsGroup }) => ({
+const IMAGES: DevEnvImageOption[] = DEV_IMAGES.map(({ tag, label, user, runAsGroup, interface: iface }) => ({
   tag,
   label,
   user,
   runAsGroup,
+  interface: iface,
 }));
 
 /** One selectable image, with the identity the wizard pre-fills from it. */
@@ -27,6 +28,9 @@ export interface DevEnvImageOption {
   user: string;
   /** spec.runtime.securityContext.runAsGroup, when 1000 is wrong for this image. */
   runAsGroup?: number;
+  /** The interface the image was built for; the wizard warns when it disagrees
+   * with the environment type the user picked. */
+  interface: "jupyter" | "ssh";
 }
 
 /**
