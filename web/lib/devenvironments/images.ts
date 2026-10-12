@@ -35,7 +35,19 @@ export interface DevImage {
    * operator publishes for it (images/README.md).
    */
   interface: "jupyter" | "ssh";
+  /**
+   * The accelerator stack the image carries — also what the two entries of a
+   * pair have in common: jupyter-cuda-pytorch and ssh-cuda-pytorch are one
+   * vendor's stack in two modes. The wizard keeps it across a type change, so
+   * an environment moved to ssh from a CUDA jupyter image lands on the CUDA ssh
+   * image rather than on the CPU one, which the operator would refuse as a brand
+   * mismatch.
+   */
+  vendor: DevImageVendor;
 }
+
+/** The accelerator axis the catalog is split on; `cpu` for the images with none. */
+export type DevImageVendor = "cpu" | "nvidia" | "metax";
 
 // The platform's own fallbacks, stated once for the wizard and the create
 // route: what a DevEnvironment runs as when its image says nothing. The
@@ -62,6 +74,7 @@ export const DEV_IMAGES: DevImage[] = [
     user: "jovyan",
     runAsGroup: 100,
     interface: "jupyter",
+    vendor: "cpu",
   },
   {
     tag: `${REGISTRY}/ssh-ubuntu22.04:latest`,
@@ -69,30 +82,35 @@ export const DEV_IMAGES: DevImage[] = [
     // Self-authored family: account ubuntu, uid/gid 1000 — the platform default.
     user: "ubuntu",
     interface: "ssh",
+    vendor: "cpu",
   },
   {
     tag: `${REGISTRY}/jupyter-cuda-pytorch:latest`,
     label: "suanova/jupyter-cuda-pytorch · NVIDIA CUDA · JupyterLab (ubuntu)",
     user: "ubuntu",
     interface: "jupyter",
+    vendor: "nvidia",
   },
   {
     tag: `${REGISTRY}/ssh-cuda-pytorch:latest`,
     label: "suanova/ssh-cuda-pytorch · NVIDIA CUDA · SSH (ubuntu)",
     user: "ubuntu",
     interface: "ssh",
+    vendor: "nvidia",
   },
   {
     tag: `${REGISTRY}/jupyter-maca-pytorch:latest`,
     label: "suanova/jupyter-maca-pytorch · Metax MACA · JupyterLab (ubuntu)",
     user: "ubuntu",
     interface: "jupyter",
+    vendor: "metax",
   },
   {
     tag: `${REGISTRY}/ssh-maca-pytorch:latest`,
     label: "suanova/ssh-maca-pytorch · Metax MACA · SSH (ubuntu)",
     user: "ubuntu",
     interface: "ssh",
+    vendor: "metax",
   },
 ];
 

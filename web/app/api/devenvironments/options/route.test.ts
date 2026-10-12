@@ -21,6 +21,14 @@ async function options(): Promise<{ namespaces: Array<{ name: string }>; default
   return res.json();
 }
 
+/** The catalog the wizard is sent, with the axes it selects on. */
+async function images(): Promise<Array<{ tag: string; interface: string; vendor: string }>> {
+  const { GET } = await import("./route");
+  const res = await GET(await authedGet(), undefined);
+  expect(res.status).toBe(200);
+  return (await res.json()).images;
+}
+
 describe("GET /api/devenvironments/options", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -96,6 +104,23 @@ describe("GET /api/devenvironments/options", () => {
     stubNamespaces(["kube-system", "cubestack-system"]);
 
     expect(await options()).toMatchObject({ namespaces: [], defaultNamespace: null });
+  });
+
+  it("sends the two axes the wizard selects an image on", async () => {
+    stubNamespaces(["default"]);
+
+    // The wizard offers only the images that serve the chosen type, and keeps the
+    // accelerator across a type change, so both axes have to reach it: an image
+    // built for one interface cannot serve the other, and the pair a change moves
+    // between is the vendor.
+    expect(await images()).toEqual([
+      { tag: "harbor.isuanova.com/suanova/jupyter-minimal:latest", label: "suanova/jupyter-minimal · CPU · JupyterLab (jovyan)", user: "jovyan", runAsGroup: 100, interface: "jupyter", vendor: "cpu" },
+      { tag: "harbor.isuanova.com/suanova/ssh-ubuntu22.04:latest", label: "suanova/ssh-ubuntu22.04 · CPU · SSH (ubuntu)", user: "ubuntu", runAsGroup: undefined, interface: "ssh", vendor: "cpu" },
+      { tag: "harbor.isuanova.com/suanova/jupyter-cuda-pytorch:latest", label: "suanova/jupyter-cuda-pytorch · NVIDIA CUDA · JupyterLab (ubuntu)", user: "ubuntu", runAsGroup: undefined, interface: "jupyter", vendor: "nvidia" },
+      { tag: "harbor.isuanova.com/suanova/ssh-cuda-pytorch:latest", label: "suanova/ssh-cuda-pytorch · NVIDIA CUDA · SSH (ubuntu)", user: "ubuntu", runAsGroup: undefined, interface: "ssh", vendor: "nvidia" },
+      { tag: "harbor.isuanova.com/suanova/jupyter-maca-pytorch:latest", label: "suanova/jupyter-maca-pytorch · Metax MACA · JupyterLab (ubuntu)", user: "ubuntu", runAsGroup: undefined, interface: "jupyter", vendor: "metax" },
+      { tag: "harbor.isuanova.com/suanova/ssh-maca-pytorch:latest", label: "suanova/ssh-maca-pytorch · Metax MACA · SSH (ubuntu)", user: "ubuntu", runAsGroup: undefined, interface: "ssh", vendor: "metax" },
+    ]);
   });
 
   it("rejects an unauthenticated request", async () => {

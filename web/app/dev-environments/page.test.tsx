@@ -16,10 +16,12 @@ const OPTIONS = {
   // first entry: project-a sorts first here, and is not the answer.
   defaultNamespace: "default",
   images: [
-    { tag: "harbor.isuanova.com/suanova/jupyter-minimal:latest", label: "suanova/jupyter-minimal · CPU · JupyterLab (jovyan)", user: "jovyan", runAsGroup: 100, interface: "jupyter" },
-    { tag: "harbor.isuanova.com/suanova/ssh-ubuntu22.04:latest", label: "suanova/ssh-ubuntu22.04 · CPU · SSH (ubuntu)", user: "ubuntu", interface: "ssh" },
-    { tag: "harbor.isuanova.com/suanova/jupyter-cuda-pytorch:latest", label: "suanova/jupyter-cuda-pytorch · NVIDIA CUDA · JupyterLab (ubuntu)", user: "ubuntu", interface: "jupyter" },
-    { tag: "harbor.isuanova.com/suanova/ssh-maca-pytorch:latest", label: "suanova/ssh-maca-pytorch · Metax MACA · SSH (ubuntu)", user: "ubuntu", interface: "ssh" },
+    { tag: "harbor.isuanova.com/suanova/jupyter-minimal:latest", label: "suanova/jupyter-minimal · CPU · JupyterLab (jovyan)", user: "jovyan", runAsGroup: 100, interface: "jupyter", vendor: "cpu" },
+    { tag: "harbor.isuanova.com/suanova/ssh-ubuntu22.04:latest", label: "suanova/ssh-ubuntu22.04 · CPU · SSH (ubuntu)", user: "ubuntu", interface: "ssh", vendor: "cpu" },
+    { tag: "harbor.isuanova.com/suanova/jupyter-cuda-pytorch:latest", label: "suanova/jupyter-cuda-pytorch · NVIDIA CUDA · JupyterLab (ubuntu)", user: "ubuntu", interface: "jupyter", vendor: "nvidia" },
+    { tag: "harbor.isuanova.com/suanova/ssh-cuda-pytorch:latest", label: "suanova/ssh-cuda-pytorch · NVIDIA CUDA · SSH (ubuntu)", user: "ubuntu", interface: "ssh", vendor: "nvidia" },
+    { tag: "harbor.isuanova.com/suanova/jupyter-maca-pytorch:latest", label: "suanova/jupyter-maca-pytorch · Metax MACA · JupyterLab (ubuntu)", user: "ubuntu", interface: "jupyter", vendor: "metax" },
+    { tag: "harbor.isuanova.com/suanova/ssh-maca-pytorch:latest", label: "suanova/ssh-maca-pytorch · Metax MACA · SSH (ubuntu)", user: "ubuntu", interface: "ssh", vendor: "metax" },
   ],
 };
 
@@ -605,6 +607,33 @@ describe("create wizard", () => {
   /** The image combobox's text box, on step 1. */
   function imageInput(): HTMLInputElement {
     return document.body.querySelector('[data-od-id="wizard-image"] input') as HTMLInputElement;
+  }
+
+  /** One of step 1's type buttons, by its visible name. */
+  async function clickType(name: string) {
+    await act(async () => {
+      const btn = Array.from(document.body.querySelectorAll('[data-step="1"] button')).find(
+        (b) => b.firstElementChild?.textContent === name,
+      ) as HTMLElement;
+      expect(btn).toBeTruthy();
+      btn.click();
+    });
+  }
+
+  /** The references the image combobox offers, in order, with its list opened. */
+  async function offeredImageTags(): Promise<string[]> {
+    await act(async () => {
+      imageInput().dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    });
+    const tags = Array.from(document.body.querySelectorAll('[role="option"]')).map(
+      // The option reads as the human label over the reference; the reference is
+      // what the wizard writes to spec.image.
+      (o) => o.querySelector("span")?.textContent ?? "",
+    );
+    await act(async () => {
+      imageInput().dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    return tags;
   }
 
   /** Step 3's workspace mount path — empty means "derive it from the identity". */
@@ -1213,6 +1242,93 @@ describe("create wizard", () => {
     act(() => root.unmount());
   });
 
+  it("offers only the environment types the platform can serve", async () => {
+    const { container, root } = renderWithBoth();
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="create-env-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    // `vscode` is a legal spec.type that nothing publishes an image for:
+    // mainContainerPort maps it to 8080, and neither the readiness probe nor the
+    // Service can be satisfied because no shipped image binds that port. Offering
+    // the type would be offering a spec the platform cannot honour — a 0/1 pod
+    // behind a route that reports RouteReady=True and answers 503.
+    // The type cards are the buttons carrying a description line (the image
+    // combobox's own clear button sits in the same step).
+    const types = Array.from(document.body.querySelectorAll('[data-step="1"] button'))
+      .filter((b) => b.querySelector("span"))
+      .map((b) => b.firstElementChild?.textContent ?? "");
+    expect(types).toEqual(["JupyterLab", "SSH"]);
+    expect(document.body.textContent).not.toContain("VS Code");
+
+    act(() => root.unmount());
+  });
+
+  it("offers only the images that serve the chosen type", async () => {
+    const { container, root } = renderWithBoth();
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="create-env-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    // The wizard opens on the first catalog image — jupyter-minimal, which serves
+    // the jupyter type it also opens on — and the list holds only jupyter images.
+    expect(imageInput().value).toBe("harbor.isuanova.com/suanova/jupyter-minimal:latest");
+    expect(await offeredImageTags()).toEqual([
+      "harbor.isuanova.com/suanova/jupyter-minimal:latest",
+      "harbor.isuanova.com/suanova/jupyter-cuda-pytorch:latest",
+      "harbor.isuanova.com/suanova/jupyter-maca-pytorch:latest",
+    ]);
+
+    // SSH is served by the other three, and nothing mixes the two: an ssh image
+    // under type jupyter runs sshd with nothing serving the token the operator
+    // publishes for it, which is the environment the type is supposed to describe.
+    await clickType("SSH");
+    expect(await offeredImageTags()).toEqual([
+      "harbor.isuanova.com/suanova/ssh-ubuntu22.04:latest",
+      "harbor.isuanova.com/suanova/ssh-cuda-pytorch:latest",
+      "harbor.isuanova.com/suanova/ssh-maca-pytorch:latest",
+    ]);
+
+    act(() => root.unmount());
+  });
+
+  it("keeps the accelerator when the type changes", async () => {
+    const { container, root } = renderWithBoth();
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="create-env-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    // The two images of a stack differ only in the mode baked into them, so a
+    // CUDA environment moved to ssh lands on the CUDA ssh image. Following the
+    // type alone would put it on the CPU image, which the operator refuses as a
+    // brand mismatch (Accepted=False / BrandMismatch) — the same dead end
+    // reached by a different route.
+    setInput(imageInput(), "harbor.isuanova.com/suanova/jupyter-cuda-pytorch:latest");
+    await act(async () => {});
+    await clickType("SSH");
+    expect(imageInput().value).toBe("harbor.isuanova.com/suanova/ssh-cuda-pytorch:latest");
+    // ...and the identity follows the image, since ubuntu/1000 is the shipped
+    // account rather than whatever the previous image implied.
+    expect(document.body.textContent).not.toContain("与当前环境类型不一致");
+
+    // A reference the platform does not publish is not the catalog's to replace:
+    // it is left exactly as typed, and nothing is claimed about what it serves,
+    // since only the catalog knows an image's interface.
+    setInput(imageInput(), "busybox:latest");
+    await act(async () => {});
+    await clickType("SSH");
+    expect(imageInput().value).toBe("busybox:latest");
+    expect(document.body.textContent).not.toContain("与当前环境类型不一致");
+
+    act(() => root.unmount());
+  });
+
   it("says when the chosen image does not serve the chosen type", async () => {
     const { container, root } = renderWithBoth();
     await act(async () => {});
@@ -1227,21 +1343,14 @@ describe("create wizard", () => {
     // An ssh image under the jupyter type is the combination the per-interface
     // vendor pairs make expressible, and the one nothing can serve: the
     // operator would publish a jupyter token for an image whose sshd is all
-    // that starts.
-    setInput(
-      document.body.querySelector('[data-od-id="wizard-image"] input') as HTMLInputElement,
-      "harbor.isuanova.com/suanova/ssh-maca-pytorch:latest",
-    );
+    // that starts. The list no longer offers it, so the user has to type it —
+    // which is exactly the case the hint is for.
+    setInput(imageInput(), "harbor.isuanova.com/suanova/ssh-maca-pytorch:latest");
     await act(async () => {});
     expect(document.body.textContent).toContain("与当前环境类型不一致");
 
     // Choosing the type the image was built for settles it.
-    await act(async () => {
-      const sshType = Array.from(document.body.querySelectorAll('[data-step="1"] button')).find((b) =>
-        b.textContent?.startsWith("SSH"),
-      ) as HTMLElement;
-      sshType.click();
-    });
+    await clickType("SSH");
     expect(document.body.textContent).not.toContain("与当前环境类型不一致");
 
     act(() => root.unmount());

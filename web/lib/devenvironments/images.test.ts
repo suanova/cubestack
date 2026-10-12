@@ -47,6 +47,27 @@ describe("DEV_IMAGES", () => {
     }
   });
 
+  it("says which accelerator each image carries, so a type change can keep it", () => {
+    // The vendor is what the two entries of a pair have in common: the wizard
+    // moves to this image's counterpart rather than to the first of the new
+    // interface, which would put a metax environment on the CPU image — an
+    // Accepted=False / BrandMismatch on the cluster.
+    expect(DEV_IMAGES.map((image) => [image.tag.split("/").pop(), image.vendor, image.interface])).toEqual([
+      ["jupyter-minimal:latest", "cpu", "jupyter"],
+      ["ssh-ubuntu22.04:latest", "cpu", "ssh"],
+      ["jupyter-cuda-pytorch:latest", "nvidia", "jupyter"],
+      ["ssh-cuda-pytorch:latest", "nvidia", "ssh"],
+      ["jupyter-maca-pytorch:latest", "metax", "jupyter"],
+      ["ssh-maca-pytorch:latest", "metax", "ssh"],
+    ]);
+    // Every vendor with a jupyter image has an ssh one and the other way round,
+    // since that is exactly the lookup the wizard performs.
+    for (const vendor of ["cpu", "nvidia", "metax"]) {
+      const interfaces = DEV_IMAGES.filter((image) => image.vendor === vendor).map((image) => image.interface);
+      expect(interfaces.sort()).toEqual(["jupyter", "ssh"]);
+    }
+  });
+
   it("states the stock-derived jupyter image's gid, which nothing else implies", () => {
     const jupyter = devImageFor("harbor.isuanova.com/suanova/jupyter-minimal:latest");
     expect(jupyter).toMatchObject({ user: "jovyan", runAsGroup: 100 });

@@ -894,6 +894,16 @@ const ENV_NAME_RE = /^[-._a-zA-Z][-._a-zA-Z0-9]*$/;
 const PORT_TYPES = ["http", "tcp", "udp"] as const;
 type PortType = (typeof PORT_TYPES)[number];
 
+// The types the wizard offers, which is not the CRD's enum: `vscode` is a legal
+// spec.type the platform cannot serve. mainContainerPort maps it to 8080 and the
+// readiness probe and the Service both target that port, but no published image
+// binds it — the catalog is jupyter (8888) and ssh images, so a `vscode`
+// environment is created 0/1 with a route that 503s while reporting
+// RouteReady=True. Offering it would be offering a spec the platform cannot
+// honour, so it is dropped here rather than left as a trap; the CRD keeps the
+// value, and an object applied by hand still renders with its own badge.
+const WIZARD_TYPES = ["jupyter", "ssh"] as const;
+
 // The repeatable rows of step 3. Each carries an id so a deletion addresses the
 // row by identity rather than by an index captured when the row was rendered.
 interface PvcRow {
@@ -1371,9 +1381,32 @@ function CreateWizard({
   // The interface the chosen image was built for, when the catalog knows it. The
   // image and the type are two independent choices, and the vendor images come
   // in per-interface pairs, so the two can disagree: an ssh image under type
-  // jupyter is a token nothing serves. The catalog is what makes that visible,
-  // so it is said rather than left to be met on the cluster.
+  // jupyter is a token nothing serves. The list below offers only the images
+  // that serve the chosen type, so this can only speak for a reference the user
+  // typed in by hand — which is left alone and reported rather than corrected.
   const imageInterface = options?.images.find((i) => i.tag === draft.image)?.interface;
+
+  // The images that can serve the chosen type. CUBESTACK_IMAGE is baked into
+  // each image, so an image built for one interface cannot serve the other: an
+  // ssh image under type jupyter runs sshd with nothing serving the token the
+  // operator publishes for it, and a jupyter image under type ssh runs a
+  // notebook nobody can reach.
+  const imageOptions = (options?.images ?? []).filter((img) => img.interface === draft.type);
+
+  // Switching the type keeps the vendor when the catalog has the pair: the two
+  // images of a stack differ only in the mode baked into them, so a CUDA
+  // environment moved to ssh lands on ssh-cuda-pytorch rather than on the CPU
+  // image, which the operator would refuse as a brand mismatch. A reference the
+  // user typed in by hand is their own and is left alone.
+  const switchType = (tp: Draft["type"]) =>
+    setDraft((prev) => {
+      const current = options?.images.find((i) => i.tag === prev.image);
+      if (!current || current.interface === tp) return { ...prev, type: tp };
+      const pair =
+        options?.images.find((i) => i.vendor === current.vendor && i.interface === tp) ??
+        options?.images.find((i) => i.interface === tp);
+      return pair ? { ...prev, type: tp, image: pair.tag, ...identityOf(pair) } : { ...prev, type: tp };
+    });
 
   // What the user will see on the confirm step. Built by pushing into a typed
   // array rather than spreading, so the conditional rows stay [string, string].
@@ -1464,13 +1497,13 @@ function CreateWizard({
                       : undefined
                   }
                 >
-                  <Box sx={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "10px" }}>
-                    {(["jupyter", "ssh", "vscode"] as const).map((tp) => (
+                  <Box sx={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "10px" }}>
+                    {WIZARD_TYPES.map((tp) => (
                       <Box
                         key={tp}
                         component="button"
                         type="button"
-                        onClick={() => setField("type", tp)}
+                        onClick={() => switchType(tp)}
                         sx={{
                           border: 1,
                           borderColor: draft.type === tp ? "primary.main" : "divider",
@@ -1499,7 +1532,7 @@ function CreateWizard({
                     size="small"
                     fullWidth
                     data-od-id="wizard-image"
-                    options={options.images.map((img) => img.tag)}
+                    options={imageOptions.map((img) => img.tag)}
                     value={draft.image}
                     inputValue={draft.image}
                     onChange={(_, v) => setImageTag(v ?? "")}
