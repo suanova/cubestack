@@ -130,7 +130,9 @@ describe("GET /api/devenvironments", () => {
           metadata: { name: "pinned", namespace: "project-a" },
           spec: {
             type: "ssh",
-            storage: { size: "100Gi", mountPath: "/data" },
+            // The workspace is to outlive the environment, so the projection
+            // has to carry that rather than the schema default.
+            storage: { size: "100Gi", mountPath: "/data", pvcRetention: "retain" },
             volumes: [{ name: "data-cache", pvcName: "data-cache", mountPath: "/cache", readOnly: true }],
             ports: [{ name: "api", containerPort: 8080 }],
             runtime: { env: [{ name: "HF_TOKEN" }, { name: "HF_HOME" }], command: ["python", "-m", "jupyter", "lab"], args: ["--port", "8080"] },
@@ -152,7 +154,7 @@ describe("GET /api/devenvironments", () => {
     const body = await (await GET(await authedGet(), undefined)).json();
     const [pinned, derived] = body.items;
 
-    expect(pinned.storage).toEqual({ size: "100Gi", mountPath: "/data" });
+    expect(pinned.storage).toEqual({ size: "100Gi", mountPath: "/data", pvcRetention: "retain" });
     expect(pinned.volumes).toEqual([{ name: "data-cache", pvcName: "data-cache", mountPath: "/cache", readOnly: true }]);
     // The type is defaulted the way the CRD does; the env value is not
     // projected at all — a value can be a registry token, and the names are
@@ -163,7 +165,9 @@ describe("GET /api/devenvironments", () => {
     expect(pinned.args).toEqual(["--port", "8080"]);
     expect(pinned.jupyterTokenSecret).toBeNull();
 
-    expect(derived.storage).toEqual({ size: "100Gi", mountPath: null });
+    // Never "unknown": the workspace of an object that predates the field is
+    // reclaimed by the schema default, and the delete path reads this.
+    expect(derived.storage).toEqual({ size: "100Gi", mountPath: null, pvcRetention: "delete" });
     expect(derived.jupyterTokenSecret).toEqual({ name: "derived-jupyter-token", namespace: "project-a" });
   });
 
@@ -544,6 +548,37 @@ describe("POST /api/devenvironments", () => {
 
     const pinned = await postedSpec({ mountPath: "/data" });
     expect(pinned.storage).toEqual({ size: "100Gi", mountPath: "/data" });
+  });
+
+  it("states storage.pvcRetention only when the workspace is to outlive the environment", async () => {
+    // "delete" is what the CRD applies to an absent field, so writing it would
+    // put the platform's default in the user's mouth; the body names only the
+    // decision that changes the outcome.
+    const retained = await postedSpec({ pvcRetention: "retain" });
+    expect(retained.storage).toEqual({ size: "100Gi", pvcRetention: "retain" });
+
+    const explicitlyDefault = await postedSpec({ pvcRetention: "delete" });
+    expect(explicitlyDefault.storage).toEqual({ size: "100Gi" });
+
+    const silent = await postedSpec({});
+    expect(silent.storage).toEqual({ size: "100Gi" });
+  });
+
+  it("rejects a pvcRetention outside the CRD's enum, or with no claim behind it", async () => {
+    expect(await rejectedPost({ pvcRetention: "keep" })).toContain("pvcRetention");
+    // spec.storage.pvcRetention lives inside spec.storage, so a policy with no
+    // size beside it decides nothing — the API server would prune the block.
+    const { POST } = await importRoute();
+    const res = await POST(
+      await authedRequest({
+        method: "POST",
+        body: JSON.stringify({ name: "ok-name", namespace: "project-a", type: "ssh", image: "img", pvcRetention: "retain" }),
+      }),
+      undefined,
+    );
+    expect(res.status).toBe(400);
+    expect(createNamespacedCustomObject).not.toHaveBeenCalled();
+    expect((await res.json()).error).toContain("pvcRetention");
   });
 
   it("rejects a workspace path that is not absolute, or that has no claim behind it", async () => {

@@ -214,13 +214,29 @@ export default function DevEnvironmentsPage() {
     return true;
   });
 
+  /**
+   * What deleting this environment does to its workspace, stated as the
+   * consequence for this environment rather than as the field that decides it:
+   * pvcRetention is chosen once, in the wizard, and never seen again — naming it
+   * at the moment of deletion tells the user nothing. The claim name is the same
+   * one the StatefulSet provisions (workspace-<name>-0), which is how a retained
+   * workspace can be found again after the environment is gone.
+   */
+  const deletePrompt = (e: DevEnvironmentSummary) => {
+    if (!e.storage) return t("dev.delete.confirm", { name: e.name });
+    const claim = `workspace-${e.name}-0`;
+    return e.storage.pvcRetention === "retain"
+      ? t("dev.delete.confirmRetain", { name: e.name, size: e.storage.size, claim })
+      : t("dev.delete.confirmDelete", { name: e.name, size: e.storage.size, claim });
+  };
+
   const runAction = (e: DevEnvironmentSummary, act: string) => {
     if (act === "stop") {
       patch({ namespace: e.namespace, name: e.name, running: false });
     } else if (act === "start") {
       patch({ namespace: e.namespace, name: e.name, running: true });
     } else if (act === "del") {
-      if (!window.confirm(t("dev.delete.confirm", { name: e.name }))) return;
+      if (!window.confirm(deletePrompt(e))) return;
       apiFetch("/api/devenvironments", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
@@ -749,9 +765,14 @@ function SpecCard({ e }: { e: DevEnvironmentSummary }) {
     [
       t("dev.spec.storage"),
       // A null mountPath is not "/workspace": the controller derives it from the
-      // runtime identity, and for a jupyter image that is /home/jovyan.
+      // runtime identity, and for a jupyter image that is /home/jovyan. The
+      // retention policy is named only when it is the unusual one — delete is
+      // the CRD's default and what most environments carry, and it is stated
+      // where it matters, in the delete confirmation.
       e.storage
-        ? `${e.storage.size} · ${e.storage.mountPath ?? t("dev.spec.mountPathDerived")}`
+        ? `${e.storage.size} · ${e.storage.mountPath ?? t("dev.spec.mountPathDerived")}${
+            e.storage.pvcRetention === "retain" ? ` · ${t("dev.spec.storageRetained")}` : ""
+          }`
         : t("dev.spec.idleOff"),
     ],
     [t("dev.spec.idle"), e.idleTimeout === 0 ? t("dev.spec.idleOff") : t("dev.spec.idleMin", { minutes: String(Math.round(e.idleTimeout / 60)) })],
@@ -887,6 +908,10 @@ interface Draft {
   cpu: string;
   memory: string;
   storageGi: number;
+  // spec.storage.pvcRetention: what deleting the environment does to the
+  // workspace claim. "delete" is the CRD's default and the one the wizard opens
+  // on, stated rather than implied so the choice is visible before it is made.
+  pvcRetention: "retain" | "delete";
   idle: number;
   // The runtime identity. uid and gid are held as strings, not numbers: a
   // number field would turn an empty box into 0, and 0 is not a missing uid —
@@ -972,6 +997,7 @@ function CreateWizard({
     cpu: "2",
     memory: "4Gi",
     storageGi: 200,
+    pvcRetention: "delete",
     idle: 0,
     runAsRoot: false,
     runtimeUser: "",
@@ -1232,6 +1258,10 @@ function CreateWizard({
       cpu: draft.cpu,
       memory: draft.memory,
       storageGi: draft.storageGi,
+      // Sent only when the workspace is to outlive the environment: delete is
+      // the CRD's default, and stating it would put a decision in the body the
+      // user never made.
+      ...(draft.pvcRetention === "retain" ? { pvcRetention: "retain" } : {}),
       idleTimeout: draft.idle,
       // Root is requested by runAsUser 0 alone; the operator serves "root" and
       // ignores spec.runtime.user, so no account is sent with it — sending one
@@ -1311,6 +1341,10 @@ function CreateWizard({
     [t("dev.wizard.cpu"), t("dev.cpu.cores", { n: draft.cpu })],
     [t("dev.wizard.memory"), draft.memory],
     [t("dev.wizard.storage"), `${draft.storageGi}Gi`],
+    [
+      t("dev.wizard.pvcRetention"),
+      draft.pvcRetention === "retain" ? t("dev.wizard.pvcRetentionRetain") : t("dev.wizard.pvcRetentionDelete"),
+    ],
     [t("dev.wizard.idle"), draft.idle === 0 ? t("dev.spec.idleOff") : t("dev.spec.idleMin", { minutes: String(draft.idle / 60) })],
     [
       t("dev.wizard.identity"),
@@ -1505,6 +1539,18 @@ function CreateWizard({
                       onChange={(e) => setField("mountPath", e.target.value)}
                       placeholder={derivedMountPath}
                     />
+                  </WizField>
+                  <WizField label={t("dev.wizard.pvcRetention")} hint={t("dev.wizard.pvcRetentionHint")}>
+                    <Select
+                      size="small"
+                      fullWidth
+                      data-od-id="wizard-pvc-retention"
+                      value={draft.pvcRetention}
+                      onChange={(e) => setField("pvcRetention", e.target.value as Draft["pvcRetention"])}
+                    >
+                      <MenuItem value="delete">{t("dev.wizard.pvcRetentionDelete")}</MenuItem>
+                      <MenuItem value="retain">{t("dev.wizard.pvcRetentionRetain")}</MenuItem>
+                    </Select>
                   </WizField>
                   <WizField label={t("dev.wizard.pvcs")} error={pvcError} errorText={t("dev.wizard.errPvc")}>
                     {draft.pvcs.map((r) => (

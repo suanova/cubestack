@@ -311,6 +311,35 @@ describe("dev environments page", () => {
     act(() => root.unmount());
   });
 
+  it("names the workspace consequence of a delete, per that environment's policy", async () => {
+    stubData([
+      devEnvironmentSummary({ name: "kept-env", phase: "Stopped", endpoints: [], conditions: [], storage: { size: "20Gi", mountPath: null, pvcRetention: "retain" } }),
+      devEnvironmentSummary({ name: "purged-env", phase: "Stopped", endpoints: [], conditions: [], storage: { size: "200Gi", mountPath: null, pvcRetention: "delete" } }),
+    ]);
+    const prompts: string[] = [];
+    // Answering "no" keeps the request off the wire: what is under test is the
+    // sentence the user reads at the moment of the decision, not the delete.
+    vi.spyOn(window, "confirm").mockImplementation((message?: string) => {
+      prompts.push(String(message));
+      return false;
+    });
+    const { root } = renderPage();
+    await act(async () => {});
+
+    rowAct("kept-env", "del");
+    rowAct("purged-env", "del");
+
+    // A retained workspace outlives the environment and nothing else names it,
+    // so the confirmation does — it is how one is found again.
+    expect(prompts[0]).toContain("workspace-kept-env-0");
+    expect(prompts[0]).toContain("20Gi");
+    // The default policy is stated as the loss it is, not as the field name.
+    expect(prompts[1]).toContain("workspace-purged-env-0");
+    expect(prompts[1]).toContain("200Gi");
+
+    act(() => root.unmount());
+  });
+
   it("refreshes and applies the newer phase after an action", async () => {
     // First fetch returns jupyter running; the post-action refresh flips it to Stopped.
     let flipped = false;
@@ -1038,6 +1067,45 @@ describe("create wizard", () => {
       sshKeysSecret: "alice-keys",
       sshKeysKey: "alice@laptop",
     });
+
+    act(() => root.unmount());
+  });
+
+  it("sends spec.storage.pvcRetention when the workspace is to outlive the environment", async () => {
+    const { container, root } = renderWithBoth();
+    await act(async () => {});
+    await toStep3(container);
+
+    // The control opens on the CRD's default (delete), which the body does not
+    // state: absent and delete mean the same thing to the API server.
+    await nextStep();
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="wizard-create"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    expect("pvcRetention" in createdBody()).toBe(false);
+
+    act(() => root.unmount());
+  });
+
+  it("keeps the workspace when the user asks for it, and says so on the confirm step", async () => {
+    const { container, root } = renderWithBoth();
+    await act(async () => {});
+    await toStep3(container);
+
+    const retention = document.body.querySelector('[data-od-id="wizard-pvc-retention"] [role="combobox"]') as HTMLElement;
+    expect(retention).not.toBeNull();
+    // The two-way choice names the consequence, not the field.
+    expect(await selectOption(retention, "保留工作区卷")).toEqual(["随环境一并删除(默认)", "保留工作区卷"]);
+
+    await nextStep();
+    expect(document.body.textContent).toContain("保留工作区卷");
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="wizard-create"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    expect(createdBody()).toMatchObject({ storageGi: 200, pvcRetention: "retain" });
 
     act(() => root.unmount());
   });
