@@ -110,6 +110,12 @@ test.describe("dev environments landing (mocked data)", () => {
     const detail = page.locator("body");
     await expect(detail).toContainText("连接信息");
     await expect(detail).toContainText("https://dev.cubestack.local/ws/jupyter-nlp-ln");
+    // The endpoint opens the container's own UI: it is an anchor, not text the
+    // user has to select and paste, and Copy is still beside it.
+    const endpoint = page.locator('[data-od-id="endpoint-link"]').first();
+    await expect(endpoint).toHaveAttribute("href", "https://dev.cubestack.local/ws/jupyter-nlp-ln");
+    await expect(endpoint).toHaveAttribute("target", "_blank");
+    await expect(detail.getByRole("button", { name: "复制" }).first()).toBeVisible();
     await expect(detail).toContainText("规格与状态");
     await expect(detail).toContainText("harbor.isuanova.com/suanova/jupyter-cuda-pytorch:latest");
     await expect(detail).toContainText("1 × nvidia");

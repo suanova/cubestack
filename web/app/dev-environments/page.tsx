@@ -686,6 +686,11 @@ function Kvs({ rows }: { rows: Array<[string, string]> }) {
   );
 }
 
+/** An endpoint address is a link when it is one, and text when it is not. */
+function isLink(value: string): boolean {
+  return /^https?:\/\//i.test(value);
+}
+
 function EndpointRow({ label, value }: { label: string; value: string }) {
   const { t } = useI18n();
   // idle → copied → idle, or idle → failed, which stays long enough to be read
@@ -693,11 +698,36 @@ function EndpointRow({ label, value }: { label: string; value: string }) {
   // deployment this serves, so a silent no-op is the one outcome a copy button
   // may not have.
   const [copied, setCopied] = useState<"idle" | "ok" | "fail">("idle");
+  const valueSx = {
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    flex: 1,
+    minWidth: 0,
+  } as const;
   return (
     <Box sx={{ mb: "12px" }}>
       <Typography sx={{ fontSize: 11, color: "text.secondary", mb: "8px" }}>{label}</Typography>
       <Box sx={{ display: "flex", alignItems: "center", gap: "10px", fontFamily: "var(--font-mono)", fontSize: 11, color: "text.secondary", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "6px", px: "9px", py: "5px", overflow: "hidden" }}>
-        <Box component="span" sx={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>{value}</Box>
+        {/* The address is the thing the user came for, and a Jupyter URL they
+            have to select, copy and paste themselves is a step that only exists
+            because the row was text. Deep-linking to the container's own UI is
+            the point of publishing the endpoint; the copy button stays for the
+            cases a link cannot serve (a terminal, a notebook client config). */}
+        {isLink(value) ? (
+          <Box
+            component="a"
+            href={value}
+            target="_blank"
+            rel="noopener noreferrer"
+            data-od-id="endpoint-link"
+            sx={{ ...valueSx, color: "var(--accent-strong)", textDecoration: "none", "&:hover": { textDecoration: "underline" } }}
+          >
+            {value}
+          </Box>
+        ) : (
+          <Box component="span" sx={valueSx}>{value}</Box>
+        )}
         <Button
           disableRipple
           onClick={async () => {

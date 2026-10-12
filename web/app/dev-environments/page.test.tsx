@@ -149,6 +149,41 @@ describe("dev environments page", () => {
     act(() => root.unmount());
   });
 
+  it("links an endpoint the user can open, and keeps it copyable", async () => {
+    stubData(devEnvironmentList());
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    // The endpoint is a URL, so it opens the container's own UI in a new tab
+    // instead of asking the user to select and paste it — and the copy button
+    // stays, for the places a link cannot go (a terminal, a client config).
+    const link = container.querySelector('[data-od-id="endpoint-link"]') as HTMLAnchorElement;
+    expect(link.getAttribute("href")).toBe("https://dev.cubestack.local/ws/jupyter-nlp-ln");
+    expect(link.getAttribute("target")).toBe("_blank");
+    // noopener: a new tab must not get a handle on this window through `window.opener`.
+    expect(link.getAttribute("rel")).toContain("noopener");
+    expect(link.textContent).toBe("https://dev.cubestack.local/ws/jupyter-nlp-ln");
+
+    // The copy button next to it still copies the address itself.
+    Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true, writable: true });
+    let copiedInto = "";
+    Object.defineProperty(document, "execCommand", {
+      configurable: true,
+      writable: true,
+      value: () => {
+        copiedInto = (document.querySelector("textarea") as HTMLTextAreaElement).value;
+        return true;
+      },
+    });
+    const row = link.closest("div")?.parentElement as HTMLElement;
+    await act(async () => {
+      (Array.from(row.querySelectorAll("button")).find((b) => b.textContent === "复制") as HTMLElement).click();
+    });
+    expect(copiedInto).toBe("https://dev.cubestack.local/ws/jupyter-nlp-ln");
+
+    act(() => root.unmount());
+  });
+
   it("reads each condition's status as text, not as the colour of a dot", async () => {
     stubData([
       devEnvironmentSummary({
