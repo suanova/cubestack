@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { authedGet, bareGet } from "@/test/auth";
+import { clearGatewayCaches } from "@/lib/cubepilot/gateway";
 
 // Off-cluster with nothing to discover: the gateway module's Service lookup must
 // not reach for a real kubeconfig in a unit test.
@@ -18,6 +19,7 @@ describe("/api/cubepilot/playground/services", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
+    clearGatewayCaches();
     delete process.env.SESSION_SECRET;
   });
 

@@ -8,13 +8,14 @@ vi.mock("@/lib/kubernetes", () => ({
   getKubeConfig: () => ({ getCurrentCluster: () => ({ server: "https://k8s.test" }) }),
 }));
 
-import { GATEWAY_NAMESPACE, gatewayFetch, gatewayTokenHeader, resolveGatewayBase } from "./gateway";
+import { GATEWAY_NAMESPACE, clearGatewayCaches, gatewayCatalog, gatewayFetch, gatewayTokenHeader, resolveGatewayBase } from "./gateway";
 
 describe("lib/cubepilot/gateway", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
     vi.clearAllMocks();
+    clearGatewayCaches();
   });
 
   it("resolveGatewayBase prefers CUBESTACK_GATEWAT_URL and strips trailing slashes", async () => {
@@ -146,6 +147,50 @@ describe("lib/cubepilot/gateway", () => {
     await fn("/v1/models");
     expect(warn).not.toHaveBeenCalled();
     warn.mockRestore();
+  });
+
+  it("discovers the gateway base once within the cache window", async () => {
+    // Discovery is a Service LIST on the cluster API, and every gateway call
+    // used to pay for one.
+    vi.stubEnv("KUBERNETES_SERVICE_HOST", "10.0.0.1");
+    vi.stubEnv("KUBERNETES_SERVICE_PORT", "443");
+    listNamespacedService.mockResolvedValue({
+      items: [{ metadata: { name: "envoy-default-ai-gateway-27dc8f39" }, spec: { ports: [{ port: 8080 }] } }],
+    });
+    await resolveGatewayBase();
+    await resolveGatewayBase();
+    expect(listNamespacedService).toHaveBeenCalledTimes(1);
+  });
+
+  it("answers the model catalog from one gateway call within the cache window", async () => {
+    vi.stubEnv("CUBESTACK_GATEWAT_URL", "http://gw.test:8080");
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({ object: "list", data: [{ id: "qwen38-27b-fp16", owned_by: "cubestack" }, { id: "dsv4" }] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const first = await gatewayCatalog();
+    const second = await gatewayCatalog();
+    expect(first).toEqual([
+      { id: "qwen38-27b-fp16", ownedBy: "cubestack" },
+      { id: "dsv4", ownedBy: "" },
+    ]);
+    expect(second).toEqual(first);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("answers null for the catalog when the gateway cannot be reached", async () => {
+    vi.stubEnv("CUBESTACK_GATEWAT_URL", "http://gw.test:8080");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("fetch failed");
+      }),
+    );
+    expect(await gatewayCatalog()).toBeNull();
   });
 });
 

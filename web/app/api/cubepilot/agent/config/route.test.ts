@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { authedGet, authedRequest, bareGet } from "@/test/auth";
+import type { GatewayModel } from "@/lib/cubepilot/types";
 
 const {
   getNamespacedCustomObject,
@@ -21,8 +22,11 @@ vi.mock("@/lib/kubernetes", () => ({
   }),
 }));
 
-const { gatewayFetch, gatewayOpenAiBase } = vi.hoisted(() => ({ gatewayFetch: vi.fn(), gatewayOpenAiBase: vi.fn() }));
-vi.mock("@/lib/cubepilot/gateway", () => ({ gatewayFetch, gatewayOpenAiBase }));
+const { gatewayCatalog, gatewayOpenAiBase } = vi.hoisted(() => ({ gatewayCatalog: vi.fn(), gatewayOpenAiBase: vi.fn() }));
+vi.mock("@/lib/cubepilot/gateway", () => ({ gatewayCatalog, gatewayOpenAiBase }));
+
+/** The catalog the gateway serves, as the gateway module reports it. */
+const catalogOf = (...ids: string[]): GatewayModel[] => ids.map((id) => ({ id, ownedBy: "" }));
 
 /** The model API a save writes into the platform provider. */
 const MODEL_API = "http://ai-gateway.envoy-gateway-system.svc:18080/v1";
@@ -74,7 +78,7 @@ describe("/api/cubepilot/agent/config", () => {
     vi.clearAllMocks();
     // The gateway serves one model by default: a save selects it through the
     // platform provider, and the catalog lists it as a system entry.
-    gatewayFetch.mockResolvedValue(new Response(JSON.stringify({ data: [{ id: "qwen38-27b" }] }), { status: 200 }));
+    gatewayCatalog.mockResolvedValue(catalogOf("qwen38-27b"));
     gatewayOpenAiBase.mockResolvedValue(MODEL_API);
   });
 
@@ -170,7 +174,7 @@ describe("/api/cubepilot/agent/config", () => {
     // to the one the caller picks, so only the instance is patched.
     const picked = "cubestack/glm-5.2-chat";
     const served = [{ id: "qwen38-27b" }, { id: "glm-5.2-chat" }];
-    gatewayFetch.mockResolvedValue(new Response(JSON.stringify({ data: served }), { status: 200 }));
+    gatewayCatalog.mockResolvedValue(served.map((m) => ({ id: m.id, ownedBy: "" })));
     const currentTmpl = {
       ...TEMPLATE_CR,
       spec: {
@@ -198,7 +202,7 @@ describe("/api/cubepilot/agent/config", () => {
 
     // The bare model id (no provider prefix) is accepted too.
     vi.clearAllMocks();
-    gatewayFetch.mockResolvedValue(new Response(JSON.stringify({ data: served }), { status: 200 }));
+    gatewayCatalog.mockResolvedValue(served.map((m) => ({ id: m.id, ownedBy: "" })));
     gatewayOpenAiBase.mockResolvedValue(MODEL_API);
     mockK8s(INSTANCE_CR, currentTmpl);
     patchNamespacedCustomObject.mockResolvedValue(INSTANCE_CR);
@@ -267,7 +271,7 @@ describe("/api/cubepilot/agent/config", () => {
   it("PUT: a gateway id that itself contains a slash is still accepted as a bare id", async () => {
     // Models are namespaced on some gateways ("meta-llama/Llama-3"). Reading every
     // slash as a provider separator would refuse an id the gateway serves.
-    gatewayFetch.mockResolvedValue(new Response(JSON.stringify({ data: [{ id: "meta-llama/Llama-3" }] }), { status: 200 }));
+    gatewayCatalog.mockResolvedValue(catalogOf("meta-llama/Llama-3"));
     mockK8s(INSTANCE_CR);
     patchNamespacedCustomObject.mockResolvedValue(INSTANCE_CR);
     const res = await PUT(
@@ -299,7 +303,7 @@ describe("/api/cubepilot/agent/config", () => {
     // without any AI Gateway installed. The platform provider is written FROM the
     // gateway, so with no gateway there is nothing to write — but that must not
     // refuse the selection the page actually offered.
-    gatewayFetch.mockResolvedValue(new Response(JSON.stringify({ data: [] }), { status: 200 }));
+    gatewayCatalog.mockResolvedValue(catalogOf());
     mockK8s(INSTANCE_CR);
     patchNamespacedCustomObject.mockResolvedValue(INSTANCE_CR);
     const res = await PUT(
@@ -318,7 +322,7 @@ describe("/api/cubepilot/agent/config", () => {
   it("PUT: a prompt-only update is saved when the gateway serves nothing", async () => {
     // Instructions do not depend on the catalog: refusing them would block the
     // page entirely on a cluster that runs no gateway.
-    gatewayFetch.mockResolvedValue(new Response(JSON.stringify({ data: [] }), { status: 200 }));
+    gatewayCatalog.mockResolvedValue(catalogOf());
     const external = {
       metadata: { name: "tester-cubepilot" },
       spec: { owner: "tester", selectedModel: "deepseek/deepseek-chat" },
@@ -341,7 +345,7 @@ describe("/api/cubepilot/agent/config", () => {
     // Nothing to select — no gateway and no template provider. The instance is
     // created without a selection rather than with an empty ref the CRD would
     // have to reject.
-    gatewayFetch.mockResolvedValue(new Response(JSON.stringify({ data: [] }), { status: 200 }));
+    gatewayCatalog.mockResolvedValue(catalogOf());
     mockK8s(null, { metadata: { name: "cubepilot" }, spec: { runtime: "OpenClaw" } });
     createNamespacedCustomObject.mockResolvedValue({ metadata: { name: "tester-cubepilot" }, spec: { owner: "tester" } });
     const res = await PUT(
@@ -357,7 +361,7 @@ describe("/api/cubepilot/agent/config", () => {
   it("PUT: an explicit empty selection on a first save selects nothing", async () => {
     // "" is a clear, not an omission: picking the first model in the catalog for
     // it would silently override what the caller asked for.
-    gatewayFetch.mockResolvedValue(new Response(JSON.stringify({ data: [] }), { status: 200 }));
+    gatewayCatalog.mockResolvedValue(catalogOf());
     mockK8s(null, {
       metadata: { name: "cubepilot" },
       spec: {
@@ -380,7 +384,7 @@ describe("/api/cubepilot/agent/config", () => {
     // The template's default is what every instance without its own selection
     // runs. A save that named no model must not repoint it at the first model of
     // the list just because this caller had none.
-    gatewayFetch.mockResolvedValue(new Response(JSON.stringify({ data: [] }), { status: 200 }));
+    gatewayCatalog.mockResolvedValue(catalogOf());
     mockK8s(null, {
       metadata: { name: "cubepilot" },
       spec: {
@@ -410,7 +414,7 @@ describe("/api/cubepilot/agent/config", () => {
     // The template still lists the platform entry, but this save cannot rewrite it
     // from the gateway — accepting the ref would store a selection against a
     // provider entry this request cannot vouch for.
-    gatewayFetch.mockResolvedValue(new Response(JSON.stringify({ data: [] }), { status: 200 }));
+    gatewayCatalog.mockResolvedValue(catalogOf());
     mockK8s(INSTANCE_CR);
     const res = await PUT(
       await authedRequest({ method: "PUT", body: JSON.stringify({ config: { selectedModel: SELECTED_MODEL } }) }),
@@ -472,7 +476,7 @@ describe("/api/cubepilot/agent/config", () => {
 
   it("GET: a missing builtin template is reported, not silently empty", async () => {
     // No gateway models either: the assertion is about the template.
-    gatewayFetch.mockResolvedValue(new Response(JSON.stringify({ data: [] }), { status: 200 }));
+    gatewayCatalog.mockResolvedValue(catalogOf());
     mockK8s(null, null);
     const body = (await (await GET(await authedGet(), undefined)).json()) as {
       config: { providers: unknown[]; templateMissing?: boolean };
@@ -482,9 +486,7 @@ describe("/api/cubepilot/agent/config", () => {
   });
 
   it("GET: the gateway catalog is reported separately from the template's providers", async () => {
-    gatewayFetch.mockResolvedValue(
-      new Response(JSON.stringify({ data: [{ id: "qwen38-27b" }, { id: "system-only" }] }), { status: 200 }),
-    );
+    gatewayCatalog.mockResolvedValue(catalogOf("qwen38-27b", "system-only"));
     mockK8s(null);
     const body = (await (await GET(await authedGet(), undefined)).json()) as {
       config: { gatewayModels: string[]; providers: Array<{ name: string; origin?: string }> };

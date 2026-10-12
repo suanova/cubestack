@@ -5,8 +5,7 @@
 // user-visible base URL (null when the gateway is reached through the
 // API-server proxy, which is not usable outside the cluster).
 
-import { resolveGatewayBase, gatewayFetch } from "@/lib/cubepilot/gateway";
-import type { GatewayModel } from "@/lib/cubepilot/types";
+import { gatewayCatalog, resolveGatewayBase } from "@/lib/cubepilot/gateway";
 import { logger } from "@/lib/log";
 import { withAuth } from "@/lib/auth/guard";
 
@@ -28,17 +27,11 @@ export const GET = withAuth(async () => {
     });
     return Response.json({ models: [], endpoint: null, error: NO_CATALOG }, { status: 503 });
   }
-  let body: { data?: Array<{ id?: string; owned_by?: string }> };
-  try {
-    const res = await gatewayFetch("/v1/models");
-    if (!res.ok) throw new Error(`gateway /v1/models returned HTTP ${res.status}`);
-    body = (await res.json()) as typeof body;
-  } catch (e) {
-    logger("gateway").warn("model catalog unavailable", { url: base.url, error: String(e) });
+  // Memoized and bounded by the gateway module: one wait per window instead of
+  // one per read, and the failure is logged there with the URL it was aimed at.
+  const models = await gatewayCatalog();
+  if (!models) {
     return Response.json({ models: [], endpoint: null, error: NO_CATALOG }, { status: 502 });
   }
-  const models: GatewayModel[] = (body.data ?? [])
-    .filter((m) => typeof m.id === "string" && m.id.length > 0)
-    .map((m) => ({ id: m.id as string, ownedBy: m.owned_by ?? "" }));
   return Response.json({ models, endpoint: base.via === "direct" ? base.url : null });
 });

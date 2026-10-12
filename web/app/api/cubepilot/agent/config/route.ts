@@ -42,7 +42,7 @@ import {
   type AgentTemplateCr,
   type JsonPatchOp,
 } from "@/lib/cubepilot/agentcrd";
-import { gatewayFetch, gatewayOpenAiBase } from "@/lib/cubepilot/gateway";
+import { gatewayCatalog, gatewayOpenAiBase } from "@/lib/cubepilot/gateway";
 import { validateInstructions } from "@/lib/cubepilot/instructions";
 import { modelKey } from "@/lib/cubepilot/llm";
 import { logger } from "@/lib/log";
@@ -62,22 +62,14 @@ function clearOrAdd(value: string | undefined, path: string, current: string | u
 
 /**
  * The model ids the AI Gateway serves (the chat tab's source, and what the
- * platform provider's entry gets written with). Best effort and bounded — an
- * absent or slow gateway simply means "no models": the platform provider's entry
- * is left as it stands and its ids are not offered. Bounded so that a read-only
- * GET still answers.
+ * platform provider's entry gets written with). Best effort — an absent or slow
+ * gateway simply means "no models": the platform provider's entry is left as it
+ * stands and its ids are not offered. The call itself is memoized and bounded
+ * by the gateway module, so a slow gateway is not paid for on every read.
  */
 async function gatewayModels(): Promise<string[]> {
-  try {
-    const res = await gatewayFetch("/v1/models", { signal: AbortSignal.timeout(2500) });
-    if (!res.ok) return [];
-    const body = (await res.json()) as { data?: Array<{ id?: string }> };
-    return (body.data ?? [])
-      .filter((m): m is { id: string } => typeof m.id === "string" && m.id.length > 0)
-      .map((m) => m.id);
-  } catch {
-    return [];
-  }
+  const catalog = await gatewayCatalog();
+  return (catalog ?? []).map((m) => m.id);
 }
 
 function configFromCr(cr: AgentInstanceCr | null, tmpl: AgentTemplateCr | null, gateway: string[]): AgentConfig {
