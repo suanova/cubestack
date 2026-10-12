@@ -9,6 +9,9 @@ import { seedSession } from "./auth";
 
 const OPTIONS = {
   namespaces: [{ name: "project-a" }, { name: "default" }],
+  // The API names the namespace the wizard opens on. Here it is `default` even
+  // though project-a sorts first, which is the point of the field.
+  defaultNamespace: "default",
   images: [
     { tag: "harbor.isuanova.com/suanova/jupyter-minimal:latest", label: "suanova/jupyter-minimal · CPU · JupyterLab (jovyan)", user: "jovyan", runAsGroup: 100 },
     { tag: "harbor.isuanova.com/suanova/ssh-ubuntu22.04:latest", label: "suanova/ssh-ubuntu22.04 · CPU · SSH (ubuntu)", user: "ubuntu" },
@@ -202,7 +205,9 @@ test.describe("dev environments landing (mocked data)", () => {
     expect(posts).toHaveLength(1);
     expect(posts[0]).toMatchObject({
       name: "my-env",
-      namespace: "project-a",
+      // Step 1 opens on the namespace the API offers, not on the first one it
+      // lists — project-a sorts first and is not the default.
+      namespace: "default",
       type: "jupyter",
       image: "harbor.isuanova.com/suanova/jupyter-minimal:latest",
       accelerator: "none",

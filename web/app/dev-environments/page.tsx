@@ -1040,7 +1040,10 @@ function CreateWizard({
         setLoadError(null);
         setDraft((prev) => ({
           ...prev,
-          namespace: d.namespaces[0]?.name ?? "",
+          // The namespace the API offers as the starting point — `default`, or
+          // the platform's configured one. Not "the first that sorts": on a
+          // CubeStack install that was a platform namespace.
+          namespace: d.defaultNamespace ?? "",
           image: d.images[0]?.tag ?? "",
           ...identityOf(d.images[0]),
         }));
@@ -1409,7 +1412,7 @@ function CreateWizard({
                   <TextField size="small" fullWidth autoFocus value={draft.name} onChange={(e) => setField("name", e.target.value)} placeholder="e.g. jupyter-nlp-ln" />
                 </WizField>
                 <WizField label={t("dev.wizard.namespace")}>
-                  <Select size="small" fullWidth value={draft.namespace} onChange={(e) => changeNamespace(e.target.value)}>
+                  <Select size="small" fullWidth data-od-id="wizard-namespace" value={draft.namespace} onChange={(e) => changeNamespace(e.target.value)}>
                     {options.namespaces.map((n) => (
                       <MenuItem key={n.name} value={n.name}>{n.name}</MenuItem>
                     ))}

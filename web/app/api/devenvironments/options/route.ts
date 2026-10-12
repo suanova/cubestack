@@ -29,9 +29,51 @@ export interface DevEnvImageOption {
   runAsGroup?: number;
 }
 
+/**
+ * Namespaces the wizard must not offer as a home for a development environment.
+ *
+ * The console cannot know every cluster's intent, but it can leave out what
+ * Kubernetes reserves and what the platform itself installs into. Measured on a
+ * live CubeStack install, the unfiltered list began "ai-gateway-system" — the
+ * platform's own control-plane namespace — and the wizard preselected it, so an
+ * untouched wizard would put a user's StatefulSet, PVC and Routes beside the
+ * gateway. A platform installed elsewhere can name its namespace here.
+ */
+const PLATFORM_NAMESPACES = new Set([
+  "ai-gateway-system", // Agent Router / AI Gateway control plane
+  "cubestack-system", // the operator, the portal and the task CRs
+  "envoy-gateway-system", // the Gateway API data plane
+  "lws-system", // LeaderWorkerSet, for multi-node inference
+  "metallb-system", // LoadBalancer address assignment
+  "metax-operator", // the Metax device stack
+  "rook-ceph", // the cluster's own storage
+]);
+
+/** Whether a namespace may be offered as a home for a development environment. */
+function offered(name: string): boolean {
+  return !name.startsWith("kube-") && !PLATFORM_NAMESPACES.has(name);
+}
+
+/**
+ * The namespace the wizard opens on: the platform's configured one when there
+ * is one (CUBESTACK_DEFAULT_NAMESPACE, set through the chart's `env` value — an
+ * explicit decision, so it wins), else `default`, else the first namespace
+ * offered — which filtering has already confined to one that is not the
+ * platform's, so "whatever sorts first" can no longer pick a platform
+ * namespace. Null only when the cluster offers none at all.
+ */
+function defaultNamespaceOf(names: string[]): string | null {
+  const configured = (process.env.CUBESTACK_DEFAULT_NAMESPACE ?? "").trim();
+  if (configured && names.includes(configured)) return configured;
+  if (names.includes("default")) return "default";
+  return names[0] ?? null;
+}
+
 /** Catalog the create wizard needs, read from the live cluster. */
 export interface DevEnvOptionsResponse {
   namespaces: Array<{ name: string }>;
+  /** The namespace the wizard opens on — never silently a platform namespace. */
+  defaultNamespace: string | null;
   images: DevEnvImageOption[];
 }
 
@@ -47,12 +89,15 @@ export const GET = withAuth(async () => {
     const core = getCoreClient();
     const nsRes = await core.listNamespace();
 
+    const names = (nsRes.items ?? [])
+      .map((ns) => ns.metadata?.name)
+      .filter((n): n is string => Boolean(n))
+      .filter(offered)
+      .sort();
+
     const response: DevEnvOptionsResponse = {
-      namespaces: (nsRes.items ?? [])
-        .map((ns) => ns.metadata?.name)
-        .filter((n): n is string => Boolean(n))
-        .sort()
-        .map((name) => ({ name })),
+      namespaces: names.map((name) => ({ name })),
+      defaultNamespace: defaultNamespaceOf(names),
       images: IMAGES,
     };
 

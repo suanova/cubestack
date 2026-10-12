@@ -12,6 +12,9 @@ import { devEnvironmentList, devEnvironmentSummary } from "@/test/fixtures/deven
 
 const OPTIONS = {
   namespaces: [{ name: "project-a" }, { name: "default" }],
+  // The API names the starting point rather than leaving the wizard to take the
+  // first entry: project-a sorts first here, and is not the answer.
+  defaultNamespace: "default",
   images: [
     { tag: "harbor.isuanova.com/suanova/jupyter-minimal:latest", label: "suanova/jupyter-minimal · CPU · JupyterLab (jovyan)", user: "jovyan", runAsGroup: 100 },
     { tag: "harbor.isuanova.com/suanova/ssh-ubuntu22.04:latest", label: "suanova/ssh-ubuntu22.04 · CPU · SSH (ubuntu)", user: "ubuntu" },
@@ -1123,6 +1126,25 @@ describe("create wizard", () => {
       sshKeysSecret: "alice-keys",
       sshKeysKey: "alice@laptop",
     });
+
+    act(() => root.unmount());
+  });
+
+  it("opens the wizard on the namespace the API offers, not the first it lists", async () => {
+    const { container, root } = renderWithBoth();
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="create-env-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    // project-a sorts first in the options; the API's default is `default`. On
+    // a real install the first entry used to be a platform namespace, which an
+    // untouched wizard then created the environment in.
+    const namespace = document.body.querySelector('[data-od-id="wizard-namespace"] [role="combobox"]') as HTMLElement;
+    expect(namespace.textContent).toBe("default");
+    // Every namespace the API offered is still selectable.
+    expect(await selectOption(namespace, "project-a")).toEqual(["project-a", "default"]);
 
     act(() => root.unmount());
   });
