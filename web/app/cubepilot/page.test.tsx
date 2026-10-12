@@ -21,6 +21,8 @@ function stubApi(
     catalogUnavailable?: boolean;
     /** Fails the config read, so the config pane shows its load-error card. */
     configUnavailable?: boolean;
+    /** Makes the config read REJECT (a transport failure, not an HTTP error). */
+    configThrows?: boolean;
     stream?: "end" | "error" | "stall" | "terminal";
     activePolls?: number;
     transcript?: Array<{ role: string; content: string }>;
@@ -28,6 +30,8 @@ function stubApi(
      *  `transcript` is the other case: it only exists once this test has sent a
      *  turn, so a mount read cannot satisfy an adoption assertion by accident. */
     history?: Array<{ role: string; content: string }>;
+    /** When set, a history answer waits for the test to release it (in order). */
+    historyPending?: Array<(items: unknown) => void>;
     attach?: { events?: unknown[]; emit?: (ev: unknown) => void; calls?: number };
     /** When set, a status answer waits for the test to release it (in order). */
     agentStatusPending?: Array<(s: unknown) => void>;
@@ -60,6 +64,7 @@ function stubApi(
         return json({ taskTemplates: [] });
       if (url.includes("/api/cubepilot/tasks")) return json({ tasks: [], reports: [] });
       if (url.includes("/api/cubepilot/agent/config")) {
+        if (opts.configThrows) throw new TypeError("fetch failed");
         if (opts.configPending) {
           return new Promise((resolve) => {
             opts.configPending?.push((body: unknown) =>
@@ -211,6 +216,11 @@ function stubApi(
         if (!sent) return json({ active: false });
         turnPolls += 1;
         return json({ active: turnPolls <= opts.activePolls });
+      }
+      if (url.endsWith("/messages") && opts.historyPending) {
+        return new Promise((resolve) => {
+          opts.historyPending?.push((items: unknown) => resolve(json({ items })));
+        });
       }
       if (url.endsWith("/messages") && opts.history) {
         return json({ items: opts.history });
@@ -1033,6 +1043,46 @@ describe("cubepilot page", () => {
 
     expect(container.textContent).not.toContain("实例状态加载中");
     expect(configPending.length).toBeGreaterThan(0); // still out: that is the point
+    act(() => root.unmount());
+  });
+
+  it("keeps the status when a neighboring read throws", async () => {
+    // The status leg publishes on its own, and the meta it returns must keep
+    // that status: a throwing config read used to hand back `status: null`, so
+    // the caller read the instance as absent and ran a second round of reads
+    // for something it already knew.
+    stubApi(EXTERNAL_ONLY, { history: [{ role: "user", content: "历史消息乙" }], configThrows: true });
+    const { container, root } = renderPage();
+    await act(async () => {});
+    await waitFor(() => false, 10);
+
+    const configReads = (globalThis.fetch as unknown as { mock: { calls: Array<[unknown]> } }).mock.calls
+      .map((call) => String(call[0]))
+      .filter((url) => url.includes("/api/cubepilot/agent/config")).length;
+    // Two readers on this page: the chat pane's meta read and the config pane's
+    // own. A third meant a failed neighbor had thrown the status away.
+    expect(configReads).toBe(2);
+    expect(container.textContent).toContain("历史消息乙");
+    act(() => root.unmount());
+  });
+
+  it("does not start a second history read while one is still out", async () => {
+    // Two reads in flight can land out of order and jump the transcript
+    // backwards, so the pane runs them one at a time (the e2e suite pins this
+    // too: "never runs two history reads at once"). Selecting the assistant
+    // again — which is what the object list's click does — must join the read
+    // the mount already started, not start its own.
+    const historyPending: Array<(items: unknown) => void> = [];
+    stubApi(EXTERNAL_ONLY, { historyPending });
+    const { container, root } = renderPage();
+    await act(async () => {});
+    act(() => (container.querySelector('[data-od-id="obj-cubepilot"]') as HTMLElement).click());
+    await act(async () => {});
+
+    const reads = (globalThis.fetch as unknown as { mock: { calls: Array<[unknown]> } }).mock.calls
+      .map((call) => String(call[0]))
+      .filter((url) => url.endsWith("/messages")).length;
+    expect(reads).toBe(1);
     act(() => root.unmount());
   });
 

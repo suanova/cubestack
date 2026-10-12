@@ -88,6 +88,9 @@ async function discoverGatewayBase(): Promise<GatewayBase | null> {
  *  after the portal is picked up without a restart. */
 const BASE_TTL_MS = 30_000;
 let baseCache: { base: GatewayBase | null; loadedAt: number } | null = null;
+/** The discovery in flight: a cold portal answers several requests at once, and
+ *  each used to run its own LIST. */
+let baseInflight: Promise<GatewayBase | null> | null = null;
 
 /** How long the gateway's model catalog is reused. A catalog answer is stable
  *  for far longer than this, and every read of it used to be a live call that
@@ -105,6 +108,7 @@ let catalogInflight: Promise<GatewayModel[] | null> | null = null;
 /** Clear the memoized base and catalog (tests; a gateway that moved). */
 export function clearGatewayCaches(): void {
   baseCache = null;
+  baseInflight = null;
   catalogCache = null;
   catalogInflight = null;
 }
@@ -122,23 +126,32 @@ export async function resolveGatewayBase(): Promise<GatewayBase | null> {
   }
   const cached = baseCache;
   if (cached && Date.now() - cached.loadedAt < BASE_TTL_MS) return cached.base;
-  const discovered = await discoverGatewayBase();
-  if (discovered) {
-    logger("gateway").debug("base discovered from the Service", { url: discovered.url, via: discovered.via });
-    baseCache = { base: discovered, loadedAt: Date.now() };
-    return discovered;
+  if (baseInflight) return baseInflight;
+  const flight = (async (): Promise<GatewayBase | null> => {
+    const discovered = await discoverGatewayBase();
+    if (discovered) {
+      logger("gateway").debug("base discovered from the Service", { url: discovered.url, via: discovered.via });
+      baseCache = { base: discovered, loadedAt: Date.now() };
+      return discovered;
+    }
+    if (inCluster()) {
+      logger("gateway").debug("base from the well-known in-cluster name", { url: DEFAULT_GATEWAY_BASE });
+      const base: GatewayBase = { url: DEFAULT_GATEWAY_BASE, via: "direct" };
+      baseCache = { base, loadedAt: Date.now() };
+      return base;
+    }
+    logger("gateway").warn("no gateway base resolved — system model list and playground chat are unavailable", {
+      hint: "set CUBESTACK_GATEWAT_URL or install the gateway in " + GATEWAY_NAMESPACE,
+    });
+    baseCache = { base: null, loadedAt: Date.now() };
+    return null;
+  })();
+  baseInflight = flight;
+  try {
+    return await flight;
+  } finally {
+    if (baseInflight === flight) baseInflight = null;
   }
-  if (inCluster()) {
-    logger("gateway").debug("base from the well-known in-cluster name", { url: DEFAULT_GATEWAY_BASE });
-    const base: GatewayBase = { url: DEFAULT_GATEWAY_BASE, via: "direct" };
-    baseCache = { base, loadedAt: Date.now() };
-    return base;
-  }
-  logger("gateway").warn("no gateway base resolved — system model list and playground chat are unavailable", {
-    hint: "set CUBESTACK_GATEWAT_URL or install the gateway in " + GATEWAY_NAMESPACE,
-  });
-  baseCache = { base: null, loadedAt: Date.now() };
-  return null;
 }
 
 /**

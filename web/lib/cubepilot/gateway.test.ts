@@ -162,6 +162,19 @@ describe("lib/cubepilot/gateway", () => {
     expect(listNamespacedService).toHaveBeenCalledTimes(1);
   });
 
+  it("shares one Service lookup between concurrent base resolutions", async () => {
+    // A cold portal answers several requests at once, and each used to run its
+    // own discovery LIST.
+    vi.stubEnv("KUBERNETES_SERVICE_HOST", "10.0.0.1");
+    vi.stubEnv("KUBERNETES_SERVICE_PORT", "443");
+    listNamespacedService.mockResolvedValue({
+      items: [{ metadata: { name: "envoy-default-ai-gateway-27dc8f39" }, spec: { ports: [{ port: 8080 }] } }],
+    });
+    const [a, b] = await Promise.all([resolveGatewayBase(), resolveGatewayBase()]);
+    expect(a).toEqual(b);
+    expect(listNamespacedService).toHaveBeenCalledTimes(1);
+  });
+
   it("answers the model catalog from one gateway call within the cache window", async () => {
     vi.stubEnv("CUBESTACK_GATEWAT_URL", "http://gw.test:8080");
     const fetchMock = vi.fn(

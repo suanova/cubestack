@@ -289,6 +289,10 @@ export function ChatPane() {
    *  share one round of requests instead of firing several — whose answers
    *  would then supersede each other and queue on the server. */
   const metaInflightRef = useRef<Promise<AgentMeta> | null>(null);
+  /** The history reads in flight, by session key: a second read started while
+   *  one is out joins it. Two in flight can land out of order and jump the
+   *  transcript backwards. */
+  const historyInflightRef = useRef(new Map<string, Promise<boolean>>());
   /** Set when the last select skipped its restore because there was no
    *  instance — the one case a start that finishes later owes a restore. */
   const awaitingInstanceRef = useRef(false);
@@ -550,14 +554,17 @@ export function ChatPane() {
       })();
       const [st, cfgRes, skRes] = await Promise.all([
         statusLeg,
-        apiFetch("/api/cubepilot/agent/config"),
-        apiFetch("/api/cubepilot/skills"),
+        // A neighbor's failure must not discard the status this leg published:
+        // the caller would read the meta as "no instance" and start over for
+        // something the pane already knows.
+        apiFetch("/api/cubepilot/agent/config").catch(() => null),
+        apiFetch("/api/cubepilot/skills").catch(() => null),
       ]);
       if (!st.res.ok) throw new Error((st.body as { error?: string } | null)?.error ?? `HTTP ${st.res.status}`);
-      const config = cfgRes.ok
+      const config = cfgRes?.ok
         ? (((await cfgRes.json().catch(() => null)) as { config?: AgentConfig } | null)?.config ?? null)
         : null;
-      const skills = skRes.ok
+      const skills = skRes?.ok
         ? (((await skRes.json().catch(() => null)) as { skills?: SkillInfo[] } | null)?.skills ?? [])
         : [];
       // config and skills travel in the returned meta and are read from there;
@@ -809,8 +816,24 @@ export function ChatPane() {
 
   /** Load a session's history; answers whether there was any. An empty history
    *  is a conversation that has not started, which the caller greets rather than
-   *  drawing as a blank thread. */
-  async function loadAgentHistory(key: string): Promise<boolean> {
+   *  drawing as a blank thread.
+   *
+   *  One read per session is in flight at a time: two can land out of order and
+   *  jump the transcript backwards, and the mount's read and the auto-select's
+   *  are the same read. The follow loop schedules its next tick after the last
+   *  one finishes, so it joins this rather than overlapping with it. */
+  function loadAgentHistory(key: string): Promise<boolean> {
+    const inflight = historyInflightRef.current.get(key);
+    if (inflight) return inflight;
+    const run = readAgentHistory(key);
+    historyInflightRef.current.set(key, run);
+    void run.finally(() => {
+      if (historyInflightRef.current.get(key) === run) historyInflightRef.current.delete(key);
+    });
+    return run;
+  }
+
+  async function readAgentHistory(key: string): Promise<boolean> {
     const gen = genRef.current;
     try {
       const res = await apiFetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/messages`);
