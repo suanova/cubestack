@@ -967,4 +967,26 @@ describe("create wizard", () => {
 
     act(() => root.unmount());
   });
+
+  it("sends spec.network only when the RDMA toggle is on", async () => {
+    const { container, root } = renderWithBoth();
+    await act(async () => {});
+    await toStep3(container);
+
+    // The RDMA toggle is off by default, so no network reaches the body.
+    // Flipping it on exposes the fabric select and writes spec.network.
+    const rdmaSwitch = document.body.querySelector('[data-od-id="wizard-rdma"] input') as HTMLInputElement;
+    await act(async () => {
+      rdmaSwitch.click();
+    });
+    await nextStep();
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="wizard-create"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    expect(createdBody()).toMatchObject({ rdmaEnabled: true, rdmaType: "roce" });
+
+    act(() => root.unmount());
+  });
 });

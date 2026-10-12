@@ -712,6 +712,25 @@ describe("POST /api/devenvironments", () => {
     const spec = await postedSpec({ ports: [{ type: "tcp" }] });
     expect("ports" in spec).toBe(false);
   });
+
+  it("states spec.network only when RDMA is on, defaulting the fabric to roce", async () => {
+    const withRdma = await postedSpec({ rdmaEnabled: true });
+    // The block is written only when rdmaEnabled; the fabric defaults to roce,
+    // the CRD's default, so a client that only flips the switch still states a
+    // valid fabric.
+    expect(withRdma.network).toEqual({ rdmaEnabled: true, rdmaType: "roce" });
+
+    const explicit = await postedSpec({ rdmaEnabled: true, rdmaType: "infiniband" });
+    expect(explicit.network).toEqual({ rdmaEnabled: true, rdmaType: "infiniband" });
+
+    // Off: the block is absent, not a false flag the operator would have to read.
+    const off = await postedSpec({});
+    expect("network" in off).toBe(false);
+  });
+
+  it("rejects an rdmaType outside the CRD's enum", async () => {
+    expect(await rejectedPost({ rdmaEnabled: true, rdmaType: "ethernet" })).toContain("rdmaType");
+  });
 });
 
 describe("PATCH /api/devenvironments", () => {

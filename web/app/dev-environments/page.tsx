@@ -911,6 +911,12 @@ interface Draft {
   args: string;
   command: string;
   ports: PortRow[];
+  // spec.network: RDMA access, independent of the accelerator. rdmaEnabled gates
+  // the block; rdmaType names the fabric, defaulting to roce (the CRD default).
+  // A fabric no node advertises does not fail the write — the environment stays
+  // Pending — so the choice is offered with a hint rather than hidden.
+  rdmaEnabled: boolean;
+  rdmaType: "roce" | "infiniband";
 }
 
 // CPU is picked in cores and memory follows it: the platform offers 1x, 2x or 4x
@@ -968,6 +974,8 @@ function CreateWizard({
     args: "",
     command: "",
     ports: [],
+    rdmaEnabled: false,
+    rdmaType: "roce",
   });
   const [nameError, setNameError] = useState(false);
   const [createBusy, setCreateBusy] = useState(false);
@@ -1177,6 +1185,9 @@ function CreateWizard({
             })),
           }
         : {}),
+      // spec.network: sent only when RDMA is on; rdmaType names the fabric the
+      // environment joins. Off, the block is absent — the one spelling of no RDMA.
+      ...(draft.rdmaEnabled ? { rdmaEnabled: true, rdmaType: draft.rdmaType } : {}),
     };
     apiFetch("/api/devenvironments", {
       method: "POST",
@@ -1230,6 +1241,9 @@ function CreateWizard({
   if (draft.args.trim()) summaryRows.push([t("dev.wizard.args"), draft.args.trim()]);
   if (filledPorts.length) {
     summaryRows.push([t("dev.wizard.ports"), filledPorts.map((r) => `${r.name.trim()}:${r.port.trim()}/${r.type}`).join(" · ")]);
+  }
+  if (draft.rdmaEnabled) {
+    summaryRows.push([t("dev.wizard.rdma"), draft.rdmaType === "roce" ? "RoCE" : "InfiniBand"]);
   }
 
   return (
@@ -1552,6 +1566,24 @@ function CreateWizard({
                     ))}
                     <AddRowButton label={t("dev.wizard.addPort")} onClick={() => addRow("ports", { name: "", port: "", type: "http" })} />
                   </WizField>
+                </WizSection>
+
+                <WizSection odId="sec-rdma" title={t("dev.wizard.rdma")} badge="network">
+                  <Box sx={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "12px", py: "8px" }}>
+                    <Box>
+                      <Box sx={{ fontSize: 12.5 }}>{t("dev.wizard.rdmaEnabled")}</Box>
+                      <Box sx={{ fontSize: 11, color: "text.secondary", mt: "2px" }}>{t("dev.wizard.rdmaHint")}</Box>
+                    </Box>
+                    <Switch size="small" checked={draft.rdmaEnabled} onChange={(e) => setField("rdmaEnabled", e.target.checked)} data-od-id="wizard-rdma" />
+                  </Box>
+                  {draft.rdmaEnabled ? (
+                    <WizField label={t("dev.wizard.rdmaType")} hint={t("dev.wizard.rdmaTypeHint")}>
+                      <Select size="small" value={draft.rdmaType} onChange={(e) => setField("rdmaType", e.target.value as Draft["rdmaType"])} data-od-id="wizard-rdma-type">
+                        <MenuItem value="roce">RoCE</MenuItem>
+                        <MenuItem value="infiniband">InfiniBand</MenuItem>
+                      </Select>
+                    </WizField>
+                  ) : null}
                 </WizSection>
               </Box>
             )}

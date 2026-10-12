@@ -224,6 +224,9 @@ const ACCELERATORS = ["none", "nvidia", "metax"] as const;
 // else — an invalid name would surface as an opaque 422 on the CR, not here.
 const ENV_NAME_RE = /^[-._a-zA-Z][-._a-zA-Z0-9]*$/;
 const PORT_TYPES = ["http", "tcp", "udp"] as const;
+// spec.network.rdmaType's own enum, mirrored from the CRD (roce is the default
+// fabric; infiniband is the other choice the operator knows).
+const RDMA_TYPES = ["roce", "infiniband"] as const;
 
 /**
  * Split a command line into argv: whitespace separates, and single or double
@@ -303,6 +306,11 @@ interface CreateBody {
   command?: string; // → spec.runtime.command (one command line, split here)
   args?: string; // → spec.runtime.args (one command line, split here)
   ports?: Array<{ name?: string; containerPort?: number; type?: string }>; // → spec.ports[]
+  // spec.network: RDMA access. rdmaEnabled gates the block; rdmaType names the
+  // fabric the environment joins (roce is the CRD's default). Absent / false =
+  // no RDMA, so the block is omitted rather than written as a false flag.
+  rdmaEnabled?: boolean; // → spec.network.rdmaEnabled
+  rdmaType?: string; // → spec.network.rdmaType
 }
 
 /**
@@ -487,6 +495,16 @@ export const POST = withAuth(async (req) => {
       ports.push({ name, type, containerPort });
     }
 
+    // spec.network: RDMA. The block is written only when rdmaEnabled; rdmaType
+    // names the fabric and defaults to roce (the CRD's default). A fabric no
+    // node advertises does not fail the write — the environment simply stays
+    // Pending — so the value is checked for shape here, not for availability.
+    const rdmaEnabled = body.rdmaEnabled === true;
+    const rdmaType = body.rdmaType ?? "roce";
+    if (rdmaEnabled && !(RDMA_TYPES as readonly string[]).includes(rdmaType)) {
+      return ValidationError(`rdmaType 必须为 ${RDMA_TYPES.join(" / ")} 之一。`);
+    }
+
     const core = getCoreClient();
     const co = getCustomObjectsClient();
 
@@ -568,6 +586,9 @@ export const POST = withAuth(async (req) => {
         ...(volumes.length ? { volumes } : {}),
         ...(ports.length ? { ports } : {}),
         lifecycle: { idleTimeout },
+        // Written only when RDMA is on: absence is the one spelling of "no
+        // RDMA", so a false flag is never sent for the operator to interpret.
+        ...(rdmaEnabled ? { network: { rdmaEnabled: true, rdmaType } } : {}),
       },
     };
 
