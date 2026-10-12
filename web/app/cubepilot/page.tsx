@@ -54,56 +54,59 @@ export default function CubepilotPage() {
           </Typography>
           <Typography sx={{ color: "text.secondary", fontSize: 13, mt: "5px" }}>{t("cubepilot.sub")}</Typography>
         </Box>
-      </Box>
-
-      <Box
-        role="tablist"
-        aria-label={t("nav.cubepilot")}
-        data-od-id="cubepilot-tabs"
-        sx={{ display: "flex", borderBottom: 1, borderColor: "divider", mb: "18px" }}
-      >
-        {tabItems.map((item) => {
-          const active = tab === item.id;
-          return (
-            <Box
-              key={item.id}
-              component="button"
-              type="button"
-              role="tab"
-              id={`tab-${item.id}`}
-              aria-selected={active}
-              aria-controls={`pane-${item.id}`}
-              onClick={() => setStoredTab(item.id)}
-              data-od-id={`cp-tab-${item.id}`}
-              sx={{
-                border: 0,
-                bgcolor: "transparent",
-                padding: "9px 0",
-                marginRight: "24px",
-                cursor: "pointer",
-                fontFamily: "var(--font-mono)",
-                fontSize: 11.5,
-                letterSpacing: "0.07em",
-                textTransform: "uppercase",
-                color: active ? "text.primary" : "text.secondary",
-                fontWeight: active ? 650 : 450,
-                position: "relative",
-                "&:hover": { color: "text.primary" },
-                "&::after": {
-                  content: '""',
-                  position: "absolute",
-                  left: 0,
-                  right: 0,
-                  bottom: "-1px",
-                  height: 2,
-                  background: active ? "var(--accent)" : "transparent",
-                },
-              }}
-            >
-              {item.label}
-            </Box>
-          );
-        })}
+        {/* The tablist shares the title's row: the chat tab's thread is the one
+            surface here that wants height, and a row of tabs of its own was 66px
+            of it. (The other pages keep their own head shape for now — see
+            issue #291.) */}
+        <Box
+          role="tablist"
+          aria-label={t("nav.cubepilot")}
+          data-od-id="cubepilot-tabs"
+          sx={{ display: "flex", borderBottom: 1, borderColor: "divider", flex: "none" }}
+        >
+          {tabItems.map((item) => {
+            const active = tab === item.id;
+            return (
+              <Box
+                key={item.id}
+                component="button"
+                type="button"
+                role="tab"
+                id={`tab-${item.id}`}
+                aria-selected={active}
+                aria-controls={`pane-${item.id}`}
+                onClick={() => setStoredTab(item.id)}
+                data-od-id={`cp-tab-${item.id}`}
+                sx={{
+                  border: 0,
+                  bgcolor: "transparent",
+                  padding: "9px 0",
+                  marginRight: "24px",
+                  cursor: "pointer",
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 11.5,
+                  letterSpacing: "0.07em",
+                  textTransform: "uppercase",
+                  color: active ? "text.primary" : "text.secondary",
+                  fontWeight: active ? 650 : 450,
+                  position: "relative",
+                  "&:hover": { color: "text.primary" },
+                  "&::after": {
+                    content: '""',
+                    position: "absolute",
+                    left: 0,
+                    right: 0,
+                    bottom: "-1px",
+                    height: 2,
+                    background: active ? "var(--accent)" : "transparent",
+                  },
+                }}
+              >
+                {item.label}
+              </Box>
+            );
+          })}
+        </Box>
       </Box>
 
       <Box hidden={tab !== "chat"} role="tabpanel" id="pane-chat" aria-labelledby="tab-chat" data-od-id="pane-chat">

@@ -763,6 +763,30 @@ describe("cubepilot page", () => {
     act(() => root.unmount());
   }, 40000);
 
+  it("collapses the object list and hands its width to the conversation", async () => {
+    // The conversation is what this card is for; how much width the list takes
+    // is the reader's call. Collapsing takes the column out rather than hiding
+    // it, so the card gets the width instead of an empty gutter beside it.
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    const toggle = container.querySelector('[data-od-id="toggle-objects"]') as HTMLElement;
+    expect(toggle).not.toBeNull();
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(container.querySelector('[data-od-id="object-list"]')).not.toBeNull();
+
+    act(() => toggle.click());
+    await act(async () => {});
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(container.querySelector('[data-od-id="object-list"]')).toBeNull();
+
+    act(() => toggle.click());
+    await act(async () => {});
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(container.querySelector('[data-od-id="object-list"]')).not.toBeNull();
+    act(() => root.unmount());
+  });
+
   it("resizes the object list column by dragging the pane resizer", async () => {
     const { container, root } = renderPage();
     await act(async () => {});
@@ -770,7 +794,7 @@ describe("cubepilot page", () => {
     const resizer = container.querySelector('[data-od-id="pane-resizer"]') as HTMLElement;
     expect(resizer).not.toBeNull();
     expect(resizer.getAttribute("role")).toBe("separator");
-    expect(resizer.getAttribute("aria-valuenow")).toBe("157");
+    expect(resizer.getAttribute("aria-valuenow")).toBe("132");
 
     const drag = (fromX: number, toX: number): void => {
       act(() => {
@@ -784,7 +808,7 @@ describe("cubepilot page", () => {
 
     // Dragging 100px right widens the column by 100px.
     drag(200, 300);
-    expect(resizer.getAttribute("aria-valuenow")).toBe("257");
+    expect(resizer.getAttribute("aria-valuenow")).toBe("232");
 
     // Drags beyond the bounds clamp to the min/max.
     drag(200, 5000);

@@ -86,14 +86,18 @@ const VIOLET_SOFT = "color-mix(in oklch, var(--violet) 9%, transparent)";
 const ACCENT_FILL = "color-mix(in oklch, var(--accent) 82%, var(--fg))";
 
 // The object list is a draggable pane: the column width is component state,
-// and the resizer handle rides the 16px gutter between the two panes.
-const LIST_COL_DEFAULT = 157;
+// and the resizer handle rides the 16px gutter between the two panes. It can
+// also be collapsed away entirely, which is the reader's way of giving the
+// conversation the width.
+const LIST_COL_DEFAULT = 132;
 const LIST_COL_MIN = 120;
 const LIST_COL_MAX = 460;
 
-const chatGridSx = (listW: number): SxProps<Theme> => ({
+const chatGridSx = (listW: number, collapsed: boolean): SxProps<Theme> => ({
   display: "grid",
-  gridTemplateColumns: `${listW}px 16px minmax(0,1fr)`,
+  // Collapsed takes the column *and* its gutter out of the template, so the
+  // card takes the width instead of leaving an empty 16px strip between them.
+  gridTemplateColumns: collapsed ? "minmax(0,1fr)" : `${listW}px 16px minmax(0,1fr)`,
   alignItems: "start",
   "@media (max-width: 1180px)": { gridTemplateColumns: "1fr" },
 });
@@ -242,6 +246,9 @@ export function ChatPane() {
   const [paramsAnchor, setParamsAnchor] = useState<HTMLElement | null>(null);
   /** Object-list column width in px; dragged with the pane resizer. */
   const [listW, setListW] = useState(LIST_COL_DEFAULT);
+  /** Collapsed is a choice, not a width: the list and its gutter get out of the
+   *  way whole, which is the reader's way of giving the conversation room. */
+  const [listCollapsed, setListCollapsed] = useState(false);
   const [resizing, setResizing] = useState(false);
   const resizeStart = useRef({ x: 0, w: 0 });
 
@@ -1850,14 +1857,15 @@ export function ChatPane() {
 
   return (
     <Box>
-      <Box data-od-id="chat-sub" sx={{ fontSize: 12, color: "text.secondary", mb: "14px" }}>
-        {t("cubepilot.chat.sub")}
-      </Box>
       {toastView}
 
-      <Box sx={chatGridSx(listW)}>
+      <Box sx={chatGridSx(listW, listCollapsed)}>
         {/* ── objects ── */}
-        <Box data-od-id="object-list" sx={{ "@media (max-width: 1180px)": { mb: "14px" } }}>
+        {listCollapsed ? null : (
+        <Box
+          data-od-id="object-list"
+          sx={{ "@media (max-width: 1180px)": { mb: "14px" } }}
+        >
           <Box sx={groupLabelSx}>{t("cubepilot.chat.objectsAgents")}</Box>
           <Box
             component="button"
@@ -1967,6 +1975,7 @@ export function ChatPane() {
           })}
         </Box>
 
+        )}
         {/* ── resizer: drag to resize the object list column ── */}
         <Box
           data-od-id="pane-resizer"
@@ -1978,6 +1987,7 @@ export function ChatPane() {
           aria-label={t("cubepilot.chat.resizeAria")}
           onPointerDown={startResize}
           sx={{
+            display: listCollapsed ? "none" : undefined,
             alignSelf: "stretch",
             position: "relative",
             cursor: "col-resize",
@@ -2001,7 +2011,7 @@ export function ChatPane() {
         />
 
         {/* ── chat card ── */}
-        {/* The card fills the viewport below the app chrome (237px above:
+        {/* The card fills the viewport below the app chrome (141px above:
             sticky topbar + page head + tabs + pane sub; the chat tab has no
             page bottom padding), so the thread is the flex filler that
             scrolls inside its own scrollbar and the floating composer sits
@@ -2011,7 +2021,7 @@ export function ChatPane() {
           sx={{
             display: "flex",
             flexDirection: "column",
-            height: "calc(100dvh - 237px)",
+            height: "calc(100dvh - 141px)",
             minHeight: 480,
             // Visible so the floating composer's shadow is not clipped at the
             // card's bottom edge.
@@ -2032,6 +2042,18 @@ export function ChatPane() {
             }}
           >
             <Box sx={{ display: "flex", alignItems: "center", gap: "10px", minWidth: 0 }}>
+              {/* The conversation is the point of this card, so how much width
+                  the object list takes is the reader's call. */}
+              <Btn
+                variant="ghost"
+                small
+                onClick={() => setListCollapsed((collapsed) => !collapsed)}
+                title={t(listCollapsed ? "cubepilot.chat.objectsExpand" : "cubepilot.chat.objectsCollapse")}
+                aria-expanded={!listCollapsed}
+                data-od-id="toggle-objects"
+              >
+                {listCollapsed ? "»" : "«"}
+              </Btn>
               <Box
                 aria-hidden
                 sx={{
@@ -2049,7 +2071,10 @@ export function ChatPane() {
               </Box>
               <Box sx={{ minWidth: 0 }}>
                 <Box sx={{ fontSize: 14, fontWeight: 650 }}>{objName}</Box>
-                <Box sx={{ fontSize: 11, color: "text.secondary" }}>{objRole}</Box>
+                {/* The agent's phase is the Pill beside the name; the line would
+                    print it a second time. A model's line is its *role*, which
+                    the Pill does not say. */}
+                {isAgent ? null : <Box sx={{ fontSize: 11, color: "text.secondary" }}>{objRole}</Box>}
               </Box>
               {objKind ? (
                 isAgent ? (
