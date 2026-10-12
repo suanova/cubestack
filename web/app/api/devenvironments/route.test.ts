@@ -1,5 +1,9 @@
 // @vitest-environment node
+import { readFile } from "node:fs/promises";
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { dictionaries } from "@/lib/i18n/dictionaries";
 
 import { authedGet, authedRequest } from "@/test/auth";
 
@@ -232,7 +236,7 @@ describe("POST /api/devenvironments", () => {
     const { POST } = await importRoute();
     const res = await POST(await authedRequest({ method: "POST", body: JSON.stringify({ name: "ok-name", namespace: "missing", type: "jupyter", image: "img", accelerator: "nvidia", gpuCount: 1 }) }), undefined);
     expect(res.status).toBe(400);
-    expect((await res.json()).error).toContain("不存在");
+    expect(await res.json()).toMatchObject({ error: "namespaceMissing", params: { namespace: "missing" } });
     expect(createNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
@@ -240,7 +244,7 @@ describe("POST /api/devenvironments", () => {
     const { POST } = await importRoute();
     const res = await POST(await authedRequest({ method: "POST", body: JSON.stringify({ name: "jupyter-nlp-ln", namespace: "project-a", type: "jupyter", image: "img", accelerator: "nvidia", gpuCount: 1 }) }), undefined);
     expect(res.status).toBe(400);
-    expect((await res.json()).error).toContain("已存在");
+    expect(await res.json()).toMatchObject({ error: "nameTaken", params: { name: "jupyter-nlp-ln" } });
     expect(createNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
@@ -537,6 +541,7 @@ describe("POST /api/devenvironments", () => {
   }
 
   /** A request the route must refuse, asserting nothing reached the cluster. */
+  /** The code a rejected create answers with, plus the values its sentence needs. */
   async function rejectedPost(extra: Record<string, unknown>): Promise<string> {
     clearMocks();
     const { POST } = await importRoute();
@@ -549,6 +554,8 @@ describe("POST /api/devenvironments", () => {
     );
     expect(res.status).toBe(400);
     expect(createNamespacedCustomObject).not.toHaveBeenCalled();
+    // The route carries no prose: the console renders `dev.err.<code>` from its
+    // own dictionaries, in the user's language.
     return (await res.json()).error;
   }
 
@@ -595,8 +602,8 @@ describe("POST /api/devenvironments", () => {
   });
 
   it("rejects a workspace path that is not absolute, or that has no claim behind it", async () => {
-    expect(await rejectedPost({ mountPath: "data" })).toContain("绝对路径");
-    expect(await rejectedPost({ mountPath: "/" })).toContain("绝对路径");
+    expect(await rejectedPost({ mountPath: "data" })).toBe("mountPathInvalid");
+    expect(await rejectedPost({ mountPath: "/" })).toBe("mountPathInvalid");
     // spec.storage.mountPath lives inside spec.storage, so a path with no size
     // describes a mount nothing honours — the API server would prune it silently.
     const { POST } = await importRoute();
@@ -629,8 +636,8 @@ describe("POST /api/devenvironments", () => {
   });
 
   it("rejects volume rows that are half-filled, relative, or at a taken path", async () => {
-    expect(await rejectedPost({ volumes: [{ pvcName: "data-cache" }] })).toContain("同时填写");
-    expect(await rejectedPost({ volumes: [{ pvcName: "data-cache", mountPath: "data" }] })).toContain("绝对路径");
+    expect(await rejectedPost({ volumes: [{ pvcName: "data-cache" }] })).toBe("volumeIncomplete");
+    expect(await rejectedPost({ volumes: [{ pvcName: "data-cache", mountPath: "data" }] })).toBe("volumePathInvalid");
     expect(
       await rejectedPost({
         volumes: [
@@ -638,9 +645,9 @@ describe("POST /api/devenvironments", () => {
           { pvcName: "b", mountPath: "/data" },
         ],
       }),
-    ).toContain("重复");
+    ).toBe("volumePathDuplicate");
     // The workspace is a mount in the same pod, so its path is taken too.
-    expect(await rejectedPost({ mountPath: "/data", volumes: [{ pvcName: "a", mountPath: "/data" }] })).toContain("重复");
+    expect(await rejectedPost({ mountPath: "/data", volumes: [{ pvcName: "a", mountPath: "/data" }] })).toBe("volumePathDuplicate");
   });
 
   it("drops a volume row the user never filled", async () => {
@@ -682,9 +689,9 @@ describe("POST /api/devenvironments", () => {
   });
 
   it("rejects env names the API server would, and a relative HOME", async () => {
-    expect(await rejectedPost({ env: [{ name: "1BAD", value: "x" }] })).toContain("环境变量名");
-    expect(await rejectedPost({ env: [{ name: "has space", value: "x" }] })).toContain("环境变量名");
-    expect(await rejectedPost({ env: [{ value: "orphan" }] })).toContain("变量名");
+    expect(await rejectedPost({ env: [{ name: "1BAD", value: "x" }] })).toBe("envNameInvalid");
+    expect(await rejectedPost({ env: [{ name: "has space", value: "x" }] })).toBe("envNameInvalid");
+    expect(await rejectedPost({ env: [{ value: "orphan" }] })).toBe("envNameRequired");
     expect(
       await rejectedPost({
         env: [
@@ -692,20 +699,20 @@ describe("POST /api/devenvironments", () => {
           { name: "A", value: "2" },
         ],
       }),
-    ).toContain("重复");
+    ).toBe("envNameDuplicate");
     // HOME decides where the workspace mounts, so a relative one points the
     // container's home at a directory that cannot exist.
-    expect(await rejectedPost({ env: [{ name: "HOME", value: "rel" }] })).toContain("HOME");
+    expect(await rejectedPost({ env: [{ name: "HOME", value: "rel" }] })).toBe("envHomeNotAbsolute");
   });
 
   it("rejects an unbalanced quote in the arguments rather than guessing", async () => {
-    expect(await rejectedPost({ args: '--name "a b' })).toContain("引号");
+    expect(await rejectedPost({ args: '--name "a b' })).toBe("argsUnbalanced");
   });
 
   it("rejects an unbalanced quote in the command, naming that field", async () => {
     // Shares splitArgs with the arguments, but not its error message: one
     // shared wording would point the user at the box that is actually fine.
-    expect(await rejectedPost({ command: 'python -c "print(1)' })).toContain("启动命令");
+    expect(await rejectedPost({ command: 'python -c "print(1)' })).toBe("commandUnbalanced");
   });
 
   it("omits args, command and env when they state nothing", async () => {
@@ -729,11 +736,11 @@ describe("POST /api/devenvironments", () => {
   });
 
   it("rejects ports the CRD or the publisher would refuse", async () => {
-    expect(await rejectedPost({ ports: [{ containerPort: 8080 }] })).toContain("名称");
-    expect(await rejectedPost({ ports: [{ name: "api", containerPort: 0 }] })).toContain("1–65535");
-    expect(await rejectedPost({ ports: [{ name: "api", containerPort: 65536 }] })).toContain("1–65535");
-    expect(await rejectedPost({ ports: [{ name: "api", containerPort: 1.5 }] })).toContain("1–65535");
-    expect(await rejectedPost({ ports: [{ name: "api", containerPort: 80, type: "sctp" }] })).toContain("端口类型");
+    expect(await rejectedPost({ ports: [{ containerPort: 8080 }] })).toBe("portNameRequired");
+    expect(await rejectedPost({ ports: [{ name: "api", containerPort: 0 }] })).toBe("portNumberInvalid");
+    expect(await rejectedPost({ ports: [{ name: "api", containerPort: 65536 }] })).toBe("portNumberInvalid");
+    expect(await rejectedPost({ ports: [{ name: "api", containerPort: 1.5 }] })).toBe("portNumberInvalid");
+    expect(await rejectedPost({ ports: [{ name: "api", containerPort: 80, type: "sctp" }] })).toBe("portTypeInvalid");
     expect(
       await rejectedPost({
         ports: [
@@ -741,7 +748,7 @@ describe("POST /api/devenvironments", () => {
           { name: "api", containerPort: 9090, type: "tcp" },
         ],
       }),
-    ).toContain("重复");
+    ).toBe("portNameDuplicate");
     // tcp and udp are published over one L4 pool, where a number is held by a
     // single protocol — the CRD states this in prose, not in its schema.
     expect(
@@ -751,7 +758,7 @@ describe("POST /api/devenvironments", () => {
           { name: "metrics", containerPort: 9000, type: "udp" },
         ],
       }),
-    ).toContain("端口池");
+    ).toBe("portInUse");
   });
 
   it("drops a port row the user never filled", async () => {
@@ -798,7 +805,7 @@ describe("POST /api/devenvironments", () => {
   });
 
   it("rejects a bring-your-own key Secret that names no data entry", async () => {
-    expect(await rejectedPost({ sshEnabled: true, sshKeysSecret: "alice-keys" })).toContain("sshKeysKey");
+    expect(await rejectedPost({ sshEnabled: true, sshKeysSecret: "alice-keys" })).toBe("sshKeyRequired");
   });
 });
 
@@ -879,4 +886,18 @@ describe("DELETE /api/devenvironments", () => {
     expect(res.status).toBe(400);
     expect(deleteNamespacedCustomObject).not.toHaveBeenCalled();
   });
+
+  it("answers with codes the console has a sentence for", async () => {
+    // The dictionary is keyed by code and the route's codes are strings, so
+    // nothing below TypeScript ties the two together: a code added here without
+    // its `dev.err.<code>` entry would reach the user as the bare code. This
+    // scan is that tie.
+    const source = await readFile(new URL("./route.ts", import.meta.url), "utf8");
+    const codes = [...source.matchAll(/(?:ValidationError\(|(?:error|code):\s*)"(\w+)"/g)].map((m) => m[1]);
+    expect(codes.length).toBeGreaterThan(25);
+    for (const code of new Set(codes)) {
+      expect(dictionaries["zh-CN"], `dev.err.${code}`).toHaveProperty(`dev.err.${code}`);
+    }
+  });
+
 });

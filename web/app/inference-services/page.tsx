@@ -13,6 +13,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { CreateOptionsResponse } from "@/app/api/inferenceservices/options/route";
 import type { InferenceServiceSummary } from "@/app/api/inferenceservices/route";
+import { validationMessage, type ValidationErrorBody } from "@/lib/api-error";
 import { apiFetch } from "@/lib/base-path";
 import { copyText } from "@/lib/clipboard";
 import { useI18n } from "@/lib/i18n";
@@ -197,8 +198,8 @@ export default function InferenceServicesPage() {
         body: JSON.stringify({ namespace: selected.namespace, name: selected.name, overrides }),
       })
         .then(async (res) => {
-          const body = (await res.json().catch(() => ({}))) as { error?: string };
-          if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
+          const body = (await res.json().catch(() => ({}))) as ValidationErrorBody;
+          if (!res.ok) throw new Error(validationMessage(t, body, res.status, "inf"));
           setScaleMsg(t("inf.scale.applied"));
           load();
         })
@@ -1048,8 +1049,8 @@ function DeployWizard({
       body: JSON.stringify(body),
     })
       .then(async (res) => {
-        const data = (await res.json().catch(() => ({}))) as { error?: string; name?: string };
-        if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+        const data = (await res.json().catch(() => ({}))) as ValidationErrorBody & { name?: string };
+        if (!res.ok) throw new Error(validationMessage(t, data, res.status, "inf"));
         onCreated(draft.namespace, data.name ?? draft.name.trim());
       })
       .catch((err: Error) => setCreateError(err.message))

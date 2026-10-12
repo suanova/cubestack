@@ -165,26 +165,37 @@ function condTrue(conds: Condition[] | undefined, type: string): boolean | null 
 }
 
 /**
+ * A rejected request: a stable code, plus the values the sentence built from it
+ * needs. The sentence itself lives in the portal's dictionaries (`inf.err.<code>`,
+ * in all three locales), which is what the console renders — the route carries no
+ * prose of its own, so nothing here can reach a user in the wrong language.
+ */
+export interface ValidationCode {
+  code: string;
+  params?: Record<string, string | number>;
+}
+
+/**
  * Validate a set of override values against a profile's declared parameters.
- * Returns an error message, or null when every key is declared and in range.
- * Shared by POST (create) and PATCH (scale) so both enforce the same contract
- * before touching the cluster.
+ * Returns the code of the first violation, or null when every key is declared and
+ * in range. Shared by POST (create) and PATCH (scale) so both enforce the same
+ * contract before touching the cluster.
  */
 function overrideError(
   overrides: Record<string, unknown>,
   profile: Profile | undefined,
-): string | null {
+): ValidationCode | null {
   if (!profile) return null; // profile unresolvable; the operator re-validates
   const declared = new Map((profile.spec?.overrides ?? []).map((o) => [o.name ?? "", o]));
   for (const [key, value] of Object.entries(overrides)) {
     const o = declared.get(key);
-    if (!o) return `不认识的 override '${key}'。`;
+    if (!o) return { code: "overrideUnknown", params: { key } };
     const kind = { integer: 1, string: 2, boolean: 3 }[o.type ?? "integer"] ?? 1;
-    if (kind === 1 && !Number.isInteger(value)) return `override '${key}' 需要整数。`;
-    if (o.enum && !o.enum.some((e) => e === value)) return `override '${key}' 取值不在允许集合内。`;
+    if (kind === 1 && !Number.isInteger(value)) return { code: "overrideNotInteger", params: { key } };
+    if (o.enum && !o.enum.some((e) => e === value)) return { code: "overrideNotAllowed", params: { key } };
     if (kind === 1 && typeof value === "number") {
-      if (o.min !== undefined && value < o.min) return `override '${key}' 小于最小值 ${o.min}。`;
-      if (o.max !== undefined && value > o.max) return `override '${key}' 大于最大值 ${o.max}。`;
+      if (o.min !== undefined && value < o.min) return { code: "overrideBelowMin", params: { key, min: o.min } };
+      if (o.max !== undefined && value > o.max) return { code: "overrideAboveMax", params: { key, max: o.max } };
     }
   }
   return null;
@@ -372,12 +383,12 @@ export const PATCH = withAuth(async (req) => {
       console.error("Failed to resolve inference service for validation:", err);
       const sc = (err as { statusCode?: number })?.statusCode;
       if (sc === 404) {
-        return Response.json({ error: `服务 '${body.name}' 不存在。` }, { status: 404 });
+        return Response.json({ error: "nameMissing", params: { name: body.name } }, { status: 404 });
       }
       return Response.json({ error: "Failed to update inference service" }, { status: 500 });
     }
     const oerr = overrideError(body.overrides, profile);
-    if (oerr) return Response.json({ error: oerr }, { status: 400 });
+    if (oerr) return Response.json({ error: oerr.code, params: oerr.params }, { status: 400 });
 
     // The generated CustomObjectsApi patches custom objects with an RFC 6902
     // JSON Patch (application/json-patch+json). `add` replaces the value of an
@@ -450,13 +461,14 @@ interface ModelVersionRef {
 export const POST = withAuth(async (req) => {
   try {
     const body = (await req.json()) as CreateBody;
-    const ValidationError = (error: string) => Response.json({ error }, { status: 400 });
+    const ValidationError = (code: string, params?: Record<string, string | number>) =>
+      Response.json({ error: code, params }, { status: 400 });
 
     if (!body.name || !DNS_LABEL_RE.test(body.name)) {
-      return ValidationError("服务名称不合法:需小写字母/数字/中划线,DNS-1123 label。");
+      return ValidationError("nameInvalid");
     }
     if (!body.namespace || !body.profileRef || !body.modelRef) {
-      return ValidationError("namespace、profileRef、modelRef 均为必填。");
+      return ValidationError("refsRequired");
     }
 
     const core = getCoreClient();
@@ -471,32 +483,32 @@ export const POST = withAuth(async (req) => {
 
     const nsNames = new Set((nsRes.items ?? []).map((ns) => ns.metadata?.name));
     if (!nsNames.has(body.namespace)) {
-      return ValidationError(`namespace '${body.namespace}' 不存在。`);
+      return ValidationError("namespaceMissing", { namespace: body.namespace });
     }
 
     const profiles: Profile[] = profileRes.items ?? [];
     const profile = profiles.find((p) => p.metadata?.name === body.profileRef);
-    if (!profile) return ValidationError(`profile '${body.profileRef}' 不存在。`);
+    if (!profile) return ValidationError("profileMissing", { profile: body.profileRef });
 
     const models: ModelVersionRef[] = mvRes.items ?? [];
     const model = models.find((m) => m.metadata?.name === body.modelRef);
-    if (!model) return ValidationError(`model '${body.modelRef}' 不存在。`);
+    if (!model) return ValidationError("modelMissing", { model: body.modelRef });
 
     // Model↔profile compatibility: architecture + quantization must be allowed.
     const reqs = profile.spec?.modelRequirements;
     if (reqs && ((reqs.architectures?.length && !reqs.architectures.includes(model.spec?.architecture ?? "")) || (reqs.quantization?.length && !reqs.quantization.includes(model.spec?.quantization ?? "")))) {
-      return ValidationError(`模型 '${body.modelRef}' 与 profile '${body.profileRef}' 不兼容(架构/量化不匹配)。`);
+      return ValidationError("modelProfileIncompatible", { model: body.modelRef, profile: body.profileRef });
     }
 
     // Unique name in the namespace.
     const exists = (isvcRes.items ?? []).some(
       (s: Isvc) => s.metadata?.namespace === body.namespace && s.metadata?.name === body.name,
     );
-    if (exists) return ValidationError(`服务 '${body.name}' 已存在。`);
+    if (exists) return ValidationError("nameTaken", { name: body.name });
 
     // Overrides must satisfy the profile's declared parameters (shared with PATCH).
     const oerr = overrideError(body.overrides ?? {}, profile);
-    if (oerr) return ValidationError(oerr);
+    if (oerr) return ValidationError(oerr.code, oerr.params);
 
     // Route: publishing joins the platform model catalog, which requires a
     // valid catalog model name. Both timeouts are bounded by the operator's CRD
@@ -504,10 +516,10 @@ export const POST = withAuth(async (req) => {
     const timeout = body.route?.timeoutSeconds;
     const idle = body.route?.idleTimeoutSeconds;
     if (timeout !== undefined && timeout !== null && (Number.isNaN(timeout) || timeout < 0 || timeout > 86400)) {
-      return ValidationError("timeoutSeconds 需在 0–86400 之间(0 = 不设上限)。");
+      return ValidationError("timeoutInvalid");
     }
     if (idle !== undefined && idle !== null && (Number.isNaN(idle) || idle < 1 || idle > 86400)) {
-      return ValidationError("idleTimeoutSeconds 需在 1–86400 之间。");
+      return ValidationError("idleTimeoutInvalid");
     }
     let route: {
       publish: boolean;
@@ -518,7 +530,7 @@ export const POST = withAuth(async (req) => {
     if (body.route?.publish) {
       const modelName = body.route?.modelName;
       if (!modelName || !MODEL_NAME_RE.test(modelName)) {
-        return ValidationError("route.modelName 不合法:需以字母数字开头,允许 . _ / - ,长度 ≤128。");
+        return ValidationError("routeModelNameInvalid");
       }
       route = { publish: true, modelName, timeoutSeconds: timeout ?? 0, idleTimeoutSeconds: idle ?? 300 };
     } else {

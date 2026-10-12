@@ -183,6 +183,37 @@ describe("inference services page", () => {
     act(() => root.unmount());
   });
 
+  it("renders a refusal the route sent as a code, in the user's language", async () => {
+    // The route answers with `{ error, params }` and no prose, so the sentence is
+    // the console's (`inf.err.<code>`) — the same contract as the create routes.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method === "PATCH") {
+          return { ok: false, status: 400, json: async () => ({ error: "overrideAboveMax", params: { key: "prefillReplicas", max: 8 } }) };
+        }
+        return { ok: true, status: 200, json: async () => ({ items: [inferenceServiceSummary({})] }) };
+      }),
+    );
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    const numInput = container.querySelector('input[type="number"]') as HTMLInputElement;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
+      setter.call(numInput, "3");
+      numInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      (Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "应用") as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    expect(container.textContent).toContain("override 'prefillReplicas' 大于最大值 8。");
+
+    act(() => root.unmount());
+  });
+
   it("renders a declared string enum as a select, not a free-text input", async () => {
     // A string override with a declared enum is a closed set: it must render the
     // enum as a select (previously the string branch won and it was text).

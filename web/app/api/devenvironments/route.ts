@@ -354,38 +354,44 @@ interface CreateBody {
 export const POST = withAuth(async (req) => {
   try {
     const body = (await req.json()) as CreateBody;
-    const ValidationError = (error: string) => Response.json({ error }, { status: 400 });
+    // A rejected request carries a stable code plus the values its sentence
+    // needs, and no prose of its own: the sentence lives in the portal's
+    // dictionaries (`dev.err.<code>`, en / zh-CN / zh-TW), which is what the
+    // console renders. The code still names what was refused to a caller that is
+    // not the console — the route's own tests, curl, a future client.
+    const ValidationError = (code: string, params?: Record<string, string | number>) =>
+      Response.json({ error: code, params }, { status: 400 });
 
     if (!body.name || !DNS_LABEL_RE.test(body.name)) {
-      return ValidationError("环境名称不合法:需小写字母/数字/中划线,DNS-1123 label。");
+      return ValidationError("nameInvalid");
     }
     if (!body.namespace || !body.image?.trim()) {
-      return ValidationError("namespace、image 均为必填。");
+      return ValidationError("namespaceImageRequired");
     }
     // Trimmed once and used for both the catalog lookup and the CR: a padded
     // reference is a different image to the registry, and looking the two up
     // separately is how a catalog image stops being recognized as one.
     const image = body.image.trim();
     if (!body.type || !(DEVENV_TYPES as readonly string[]).includes(body.type)) {
-      return ValidationError(`type 必须为 ${DEVENV_TYPES.join(" / ")} 之一。`);
+      return ValidationError("typeInvalid", { types: DEVENV_TYPES.join(" / ") });
     }
     // "none" omits spec.resources.gpu entirely: the CRD has no zero count, and
     // the absence of the block is what keeps the image out of the brand gate.
     const accelerator = body.accelerator ?? "none";
     if (!(ACCELERATORS as readonly string[]).includes(accelerator)) {
-      return ValidationError(`accelerator 必须为 ${ACCELERATORS.join(" / ")} 之一。`);
+      return ValidationError("acceleratorInvalid", { values: ACCELERATORS.join(" / ") });
     }
     const gpuEnabled = accelerator !== "none";
     const gpuCount = body.gpuCount ?? 1;
     if (gpuEnabled && (!Number.isInteger(gpuCount) || gpuCount < 1 || gpuCount > 16)) {
-      return ValidationError("gpuCount 需为 1–16 之间的整数。");
+      return ValidationError("gpuCountInvalid");
     }
     if (body.storageGi !== undefined && (body.storageGi < 20 || body.storageGi > 800)) {
-      return ValidationError("storageGi 需在 20–800 之间。");
+      return ValidationError("storageInvalid");
     }
     const idleTimeout = body.idleTimeout === undefined ? 0 : body.idleTimeout;
     if (!Number.isInteger(idleTimeout) || idleTimeout < 0 || idleTimeout > IDLE_TIMEOUT_MAX) {
-      return ValidationError(`idleTimeout 需为 0–${IDLE_TIMEOUT_MAX} 之间的整数(秒),0 表示不启用。`);
+      return ValidationError("idleTimeoutInvalid", { max: IDLE_TIMEOUT_MAX });
     }
 
     // The runtime identity. An empty account is "not stated", not an account:
@@ -393,7 +399,7 @@ export const POST = withAuth(async (req) => {
     // so writing "" would be an API-server 422 the user cannot act on.
     if (body.runtimeUser) {
       if (body.runtimeUser.length > RUNTIME_USER_MAX || !RUNTIME_USER_RE.test(body.runtimeUser)) {
-        return ValidationError("运行账号不合法:需以字母或下划线开头,仅含小写字母/数字/下划线/中划线,最长 32 字符。");
+        return ValidationError("runtimeUserInvalid");
       }
       // Root is the one account whose uid the platform knows: the controller
       // serves and advertises "root" only at runAsUser 0, so asking for it at
@@ -401,7 +407,7 @@ export const POST = withAuth(async (req) => {
       // Every other account/uid pairing is the image's to get right and is
       // unverifiable here (docs/design/devenv-images/decision.md).
       if (body.runtimeUser === "root" && body.runAsUser !== 0) {
-        return ValidationError("运行账号 root 需与以 root 身份运行(runAsUser 为 0)同时使用。");
+        return ValidationError("rootAccountMismatch");
       }
     }
     // Never through `||` or a truthiness test: runAsUser 0 is the root request,
@@ -413,7 +419,7 @@ export const POST = withAuth(async (req) => {
     ] as const) {
       if (value === undefined) continue;
       if (!Number.isInteger(value) || value < 0 || value > RUN_AS_ID_MAX) {
-        return ValidationError(`${field} 需为 0–${RUN_AS_ID_MAX} 之间的整数。`);
+        return ValidationError("runAsIdInvalid", { field, max: RUN_AS_ID_MAX });
       }
     }
 
@@ -423,13 +429,13 @@ export const POST = withAuth(async (req) => {
     // /home/jovyan onto whatever this route guessed.
     const workspacePath = body.mountPath?.trim() ?? "";
     if (workspacePath && (!workspacePath.startsWith("/") || workspacePath === "/")) {
-      return ValidationError("workspace 挂载路径需为以 / 开头的绝对路径,且不能为 /。");
+      return ValidationError("mountPathInvalid");
     }
     // spec.storage.mountPath exists only inside spec.storage: a path with no
     // claim behind it describes a mount nothing can honour, and the API server
     // would prune it rather than complain.
     if (workspacePath && body.storageGi === undefined) {
-      return ValidationError("workspace 挂载路径需与持久化存储(storageGi)同时提交。");
+      return ValidationError("mountPathWithoutStorage");
     }
     // spec.storage.pvcRetention, like mountPath, exists only inside spec.storage:
     // a retention policy for a claim that was never asked for decides nothing.
@@ -437,10 +443,10 @@ export const POST = withAuth(async (req) => {
     // written — see the spec literal below.
     const pvcRetention = body.pvcRetention ?? "delete";
     if (!(PVC_RETENTIONS as readonly string[]).includes(pvcRetention)) {
-      return ValidationError(`pvcRetention 必须为 ${PVC_RETENTIONS.join(" / ")} 之一。`);
+      return ValidationError("pvcRetentionInvalid", { values: PVC_RETENTIONS.join(" / ") });
     }
     if (body.pvcRetention !== undefined && body.storageGi === undefined) {
-      return ValidationError("pvcRetention 需与持久化存储(storageGi)同时提交。");
+      return ValidationError("pvcRetentionWithoutStorage");
     }
 
     const volumes: Array<{ name: string; pvcName: string; mountPath: string }> = [];
@@ -454,13 +460,13 @@ export const POST = withAuth(async (req) => {
       // A row the user added and never filled is not a request.
       if (!pvcName && !mountPath) continue;
       if (!pvcName || !mountPath) {
-        return ValidationError("额外 PVC 需同时填写 PVC 名称与挂载路径。");
+        return ValidationError("volumeIncomplete");
       }
       if (!mountPath.startsWith("/") || mountPath === "/") {
-        return ValidationError(`PVC 挂载路径 '${mountPath}' 需为以 / 开头的绝对路径,且不能为 /。`);
+        return ValidationError("volumePathInvalid", { path: mountPath });
       }
       if (mountedPaths.has(mountPath)) {
-        return ValidationError(`挂载路径 '${mountPath}' 重复。`);
+        return ValidationError("volumePathDuplicate", { path: mountPath });
       }
       mountedPaths.add(mountPath);
       // The identifier is derived rather than asked for, so mounting one PVC
@@ -478,17 +484,17 @@ export const POST = withAuth(async (req) => {
       const name = e.name?.trim() ?? "";
       const value = e.value ?? "";
       if (!name && !value) continue;
-      if (!name) return ValidationError("环境变量需填写变量名。");
+      if (!name) return ValidationError("envNameRequired");
       if (!ENV_NAME_RE.test(name)) {
-        return ValidationError(`环境变量名 '${name}' 不合法:需以字母/下划线/点/中划线开头,仅含字母/数字/下划线/点/中划线。`);
+        return ValidationError("envNameInvalid", { name });
       }
-      if (envNames.has(name)) return ValidationError(`环境变量 '${name}' 重复。`);
+      if (envNames.has(name)) return ValidationError("envNameDuplicate", { name });
       envNames.add(name);
       // HOME is not just another variable: an absolute one decides where the
       // workspace mounts (StorageSpec.MountPath), so a relative value would tell
       // the container its home is at a path that does not exist.
       if (name === "HOME" && !value.startsWith("/")) {
-        return ValidationError("环境变量 HOME 需为绝对路径(以 / 开头),它同时决定工作区挂载路径。");
+        return ValidationError("envHomeNotAbsolute");
       }
       env.push({ name, value });
     }
@@ -498,11 +504,11 @@ export const POST = withAuth(async (req) => {
     // two errors: one shared message would point at the wrong field.
     const commandLine = body.command?.trim() ?? "";
     const command = commandLine ? splitArgs(commandLine) : [];
-    if (command === null) return ValidationError("启动命令引号不匹配。");
+    if (command === null) return ValidationError("commandUnbalanced");
 
     const argsLine = body.args?.trim() ?? "";
     const args = argsLine ? splitArgs(argsLine) : [];
-    if (args === null) return ValidationError("启动参数引号不匹配。");
+    if (args === null) return ValidationError("argsUnbalanced");
 
     const ports: Array<{ name: string; type: string; containerPort: number }> = [];
     const portNames = new Set<string>();
@@ -516,19 +522,19 @@ export const POST = withAuth(async (req) => {
       // "Untouched" is decided by the name and the number alone: the type always
       // has a value, so counting it would make every added row look filled.
       if (!name && containerPort === undefined) continue;
-      if (!name) return ValidationError("额外端口需填写名称。");
+      if (!name) return ValidationError("portNameRequired");
       // The name is published in the sub path and in status.endpoints, so the
       // CRD requires it unique — stated in prose, not in the schema.
-      if (portNames.has(name)) return ValidationError(`端口名称 '${name}' 重复,名称用于发布子路径,须唯一。`);
+      if (portNames.has(name)) return ValidationError("portNameDuplicate", { name });
       if (!(PORT_TYPES as readonly string[]).includes(type)) {
-        return ValidationError(`端口类型须为 ${PORT_TYPES.join(" / ")} 之一。`);
+        return ValidationError("portTypeInvalid", { types: PORT_TYPES.join(" / ") });
       }
       if (containerPort === undefined || !Number.isInteger(containerPort) || containerPort < 1 || containerPort > 65535) {
-        return ValidationError("端口(containerPort)需为 1–65535 之间的整数。");
+        return ValidationError("portNumberInvalid");
       }
       if (type !== "http") {
         if (l4Ports.has(containerPort)) {
-          return ValidationError(`端口 ${containerPort} 已被另一条 tcp/udp 规则占用,tcp 与 udp 共用同一端口池。`);
+          return ValidationError("portInUse", { port: containerPort });
         }
         l4Ports.add(containerPort);
       }
@@ -543,7 +549,7 @@ export const POST = withAuth(async (req) => {
     const rdmaEnabled = body.rdmaEnabled === true;
     const rdmaType = body.rdmaType ?? "roce";
     if (rdmaEnabled && !(RDMA_TYPES as readonly string[]).includes(rdmaType)) {
-      return ValidationError(`rdmaType 必须为 ${RDMA_TYPES.join(" / ")} 之一。`);
+      return ValidationError("rdmaTypeInvalid", { types: RDMA_TYPES.join(" / ") });
     }
 
     // spec.ssh: written only when sshEnabled (independent of type — a jupyter or
@@ -555,7 +561,7 @@ export const POST = withAuth(async (req) => {
     let sshAuthorizedKeysSecret: { name: string; key: string } | undefined;
     if (sshEnabled && body.sshKeysSecret) {
       if (!body.sshKeysKey) {
-        return ValidationError("sshKeysKey 必须指定 Secret 的数据条目。");
+        return ValidationError("sshKeyRequired");
       }
       sshAuthorizedKeysSecret = { name: body.sshKeysSecret, key: body.sshKeysKey };
     }
@@ -567,7 +573,7 @@ export const POST = withAuth(async (req) => {
     const envelope = await core.listNamespace();
     const nsNames = new Set((envelope.items ?? []).map((ns) => ns.metadata?.name));
     if (!nsNames.has(body.namespace)) {
-      return ValidationError(`namespace '${body.namespace}' 不存在。`);
+      return ValidationError("namespaceMissing", { namespace: body.namespace });
     }
 
     // The environment name must be unique in its namespace (the CR name is the
@@ -580,7 +586,7 @@ export const POST = withAuth(async (req) => {
     const exists = (existing.items ?? []).some(
       (e: DevEnv) => e.metadata?.namespace === body.namespace && e.metadata?.name === body.name,
     );
-    if (exists) return ValidationError(`环境 '${body.name}' 已存在。`);
+    if (exists) return ValidationError("nameTaken", { name: body.name });
 
     // The runtime identity. Neither half is discoverable from the cluster, so
     // the catalog is the default for a client that states none, and an explicit
@@ -731,8 +737,12 @@ export const PATCH = withAuth(async (req) => {
  * Deletes one environment. Body: `{ namespace, name }`.
  */
 export const DELETE = withAuth(async (req) => {
+  // Held outside the try so the 404 below can name the object it could not find:
+  // the sentence the console renders is built from it.
+  let name = "";
   try {
     const body = (await req.json()) as { namespace?: string; name?: string };
+    name = body.name ?? "";
     if (!body.namespace || !body.name) {
       return Response.json({ error: "namespace and name are required" }, { status: 400 });
     }
@@ -749,7 +759,9 @@ export const DELETE = withAuth(async (req) => {
     console.error("Failed to delete dev environment:", err);
     const status =
       (err as { statusCode?: number })?.statusCode === 404
-        ? { error: `环境不存在或已删除。`, status: 404 }
+        ? // The object was already gone. A code like the 400s, so the console can
+          // say it in the user's language instead of a Chinese literal.
+          { error: "nameMissing", params: { name }, status: 404 }
         : { error: "Failed to delete dev environment", status: 500 };
     return Response.json(status, { status: status.status });
   }

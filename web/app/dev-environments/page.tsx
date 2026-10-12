@@ -36,6 +36,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { DevEnvironmentSummary } from "@/app/api/devenvironments/route";
 import type { DevEnvImageOption, DevEnvOptionsResponse } from "@/app/api/devenvironments/options/route";
 import type { SshKeySecretOption } from "@/app/api/devenvironments/ssh-keys/route";
+import { validationMessage, type ValidationErrorBody } from "@/lib/api-error";
 import { apiFetch } from "@/lib/base-path";
 import { copyText } from "@/lib/clipboard";
 import { PLATFORM_GID, PLATFORM_UID, PLATFORM_USER } from "@/lib/devenvironments/images";
@@ -244,8 +245,8 @@ export default function DevEnvironmentsPage() {
         body: JSON.stringify({ namespace: e.namespace, name: e.name }),
       })
         .then(async (res) => {
-          const body = (await res.json().catch(() => ({}))) as { error?: string };
-          if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
+          const body = (await res.json().catch(() => ({}))) as ValidationErrorBody;
+          if (!res.ok) throw new Error(validationMessage(t, body, res.status, "dev"));
           load();
         })
         .catch((err: Error) => window.alert(err.message));
@@ -260,13 +261,13 @@ export default function DevEnvironmentsPage() {
         body: JSON.stringify({ namespace, name, running }),
       })
         .then(async (res) => {
-          const body = (await res.json().catch(() => ({}))) as { error?: string };
-          if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
+          const body = (await res.json().catch(() => ({}))) as ValidationErrorBody;
+          if (!res.ok) throw new Error(validationMessage(t, body, res.status, "dev"));
           load();
         })
         .catch((err: Error) => window.alert(err.message));
     },
-    [load],
+    [load, t],
   );
 
   return (
@@ -1408,8 +1409,8 @@ function CreateWizard({
       body: JSON.stringify(body),
     })
       .then(async (res) => {
-        const data = (await res.json().catch(() => ({}))) as { error?: string; name?: string };
-        if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+        const data = (await res.json().catch(() => ({}))) as ValidationErrorBody & { name?: string };
+        if (!res.ok) throw new Error(validationMessage(t, data, res.status, "dev"));
         onCreated(draft.namespace, data.name ?? draft.name.trim());
       })
       .catch((err: Error) => setCreateError(err.message))

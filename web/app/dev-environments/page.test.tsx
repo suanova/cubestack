@@ -588,16 +588,23 @@ describe("create wizard", () => {
     document.body.innerHTML = "";
   });
 
-  function renderWithBoth() {
+  /**
+   * Render the page with both options endpoints stubbed. `rejectCreate` stands in
+   * for a create the route refuses: the portal must render whatever it answers.
+   */
+  function renderWithBoth(rejectCreate?: { status: number; body: unknown }) {
     vi.stubGlobal(
       "fetch",
-      vi.fn((input: RequestInfo | URL) => {
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url.includes("/options")) {
           return Promise.resolve({ ok: true, status: 200, json: async () => OPTIONS });
         }
         if (url.includes("/ssh-keys")) {
           return Promise.resolve({ ok: true, status: 200, json: async () => SSH_KEYS });
+        }
+        if (rejectCreate && init?.method === "POST") {
+          return Promise.resolve({ ok: false, status: rejectCreate.status, json: async () => rejectCreate.body });
         }
         return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: devEnvironmentList() }) });
       }),
@@ -1106,6 +1113,42 @@ describe("create wizard", () => {
     await act(async () => {});
 
     expect(createdBody()).toMatchObject({ runtimeUser: "alice", runAsUser: 1500, runAsGroup: 1500 });
+
+    act(() => root.unmount());
+  });
+
+  it("renders a refusal the route sent as a code, in the user's language", async () => {
+    // The route answers with `{ error: "nameTaken", params: { name } }` and no
+    // prose of its own, so the sentence below comes from the console's
+    // dictionary — which is the only place a user-facing string can come from.
+    const { container, root } = renderWithBoth({ status: 400, body: { error: "nameTaken", params: { name: "my-env" } } });
+    await act(async () => {});
+    await toStep3(container);
+    await nextStep();
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="wizard-create"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    const shown = document.body.querySelector('[data-od-id="create-error"]') as HTMLElement;
+    expect(shown.textContent).toBe("创建失败: 环境 'my-env' 已存在。");
+
+    act(() => root.unmount());
+  });
+
+  it("names a code it has no sentence for, rather than inventing one", async () => {
+    // Version skew: this bundle predates the route. A bare code still names what
+    // was refused; "HTTP 400" names nothing.
+    const { container, root } = renderWithBoth({ status: 400, body: { error: "someFutureRefusal" } });
+    await act(async () => {});
+    await toStep3(container);
+    await nextStep();
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="wizard-create"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    expect((document.body.querySelector('[data-od-id="create-error"]') as HTMLElement).textContent).toContain("someFutureRefusal");
 
     act(() => root.unmount());
   });

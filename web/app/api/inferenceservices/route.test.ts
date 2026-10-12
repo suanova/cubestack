@@ -1,5 +1,9 @@
 // @vitest-environment node
+import { readFile } from "node:fs/promises";
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { dictionaries } from "@/lib/i18n/dictionaries";
 
 import { authedGet, authedRequest } from "@/test/auth";
 
@@ -599,4 +603,18 @@ describe("inference services create (POST)", () => {
     expect(res.status).toBe(500);
     expect(await res.json()).toEqual({ error: "Failed to create inference service" });
   });
+
+  it("answers with codes the console has a sentence for", async () => {
+    // The dictionary is keyed by code and the route's codes are strings, so
+    // nothing below TypeScript ties the two together: a code added here without
+    // its `inf.err.<code>` entry would reach the user as the bare code. This
+    // scan is that tie.
+    const source = await readFile(new URL("./route.ts", import.meta.url), "utf8");
+    const codes = [...source.matchAll(/(?:ValidationError\(|(?:error|code):\s*)"(\w+)"/g)].map((m) => m[1]);
+    expect(codes.length).toBeGreaterThan(10);
+    for (const code of new Set(codes)) {
+      expect(dictionaries["zh-CN"], `inf.err.${code}`).toHaveProperty(`inf.err.${code}`);
+    }
+  });
+
 });
