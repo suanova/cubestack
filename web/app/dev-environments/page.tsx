@@ -1086,6 +1086,7 @@ function CreateWizard({
   const [sshSecretsLoading, setSshSecretsLoading] = useState(false);
   const [sshSecretsError, setSshSecretsError] = useState<string | null>(null);
   const [nameError, setNameError] = useState(false);
+  const [imageError, setImageError] = useState(false);
   const [createBusy, setCreateBusy] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
 
@@ -1289,9 +1290,11 @@ function CreateWizard({
     if (step === 1) {
       if (!step1Valid) {
         setNameError(!nameValid);
+        setImageError(!draft.image);
         return;
       }
       setNameError(false);
+      setImageError(false);
     } else if (step === 2) {
       setGpuError(!gpuValid);
       setStorageError(!storageValid);
@@ -1556,7 +1559,16 @@ function CreateWizard({
                     ))}
                   </Box>
                 </WizField>
-                <WizField label={t("dev.wizard.image")} hint={t("dev.wizard.imageHint")}>
+                <WizField
+                  label={t("dev.wizard.image")}
+                  hint={t("dev.wizard.imageHint")}
+                  // An empty image is the one required field on this step that
+                  // failed silently: clearing it (which is what the field's own
+                  // clear button does before a new reference is typed) left Next
+                  // with nothing to say, and no way to learn why.
+                  error={imageError}
+                  errorText={t("dev.wizard.errImage")}
+                >
                   <Autocomplete
                     freeSolo
                     size="small"
@@ -2055,7 +2067,9 @@ function WizField({
       <Typography sx={{ fontSize: 12.5, fontWeight: 550, mb: "7px" }}>{label}</Typography>
       {children}
       {error && errorText ? (
-        <Typography data-od-id="field-error" sx={{ fontSize: 11.5, color: soft(STATUS_ERR, 75), fontWeight: 550, mt: "6px" }}>
+        // Announced when it appears: a wizard step that refuses to advance has to
+        // say why, and the helper text is the only thing that does.
+        <Typography role="alert" data-od-id="field-error" sx={{ fontSize: 11.5, color: soft(STATUS_ERR, 75), fontWeight: 550, mt: "6px" }}>
           {errorText}
         </Typography>
       ) : hint ? (

@@ -1306,6 +1306,41 @@ describe("create wizard", () => {
     act(() => root.unmount());
   });
 
+  it("says why an empty image blocks the step instead of refusing silently", async () => {
+    const { container, root } = renderWithBoth();
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="create-env-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    setInput(document.body.querySelector('input[placeholder="e.g. jupyter-nlp-ln"]') as HTMLInputElement, "r2-web");
+    await act(async () => {});
+
+    // Clearing the field — what its own clear button does before a new reference
+    // is typed — used to leave Next doing nothing at all: no message, no error
+    // colour, and no way to learn what was missing.
+    setInput(imageInput(), "");
+    await act(async () => {});
+    await nextStep();
+
+    expect(document.body.querySelector('[data-step="2"]')).toBeNull();
+    // The name and the namespace are filled here, so the image is the only field
+    // that can be complaining.
+    const err = document.body.querySelector('[data-od-id="field-error"]');
+    expect(err?.textContent).toBe("请填写开发镜像地址,或从平台内置镜像中选择。");
+    // Announced, not only painted.
+    expect(err?.getAttribute("role")).toBe("alert");
+
+    // A reference of any kind clears it, and the step advances.
+    setInput(imageInput(), "busybox:latest");
+    await act(async () => {});
+    await nextStep();
+    expect(document.body.querySelector('[data-step="2"]')).not.toBeNull();
+    expect(document.body.querySelector('[data-od-id="field-error"]')).toBeNull();
+
+    act(() => root.unmount());
+  });
+
   it("offers only the environment types the platform can serve", async () => {
     const { container, root } = renderWithBoth();
     await act(async () => {});
