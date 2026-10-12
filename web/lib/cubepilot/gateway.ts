@@ -98,11 +98,15 @@ const CATALOG_TTL_MS = 30_000;
  *  coming back. */
 const CATALOG_ERROR_TTL_MS = 5_000;
 let catalogCache: { models: GatewayModel[] | null; loadedAt: number; ttlMs: number } | null = null;
+/** The catalog call in flight, so concurrent readers share it instead of each
+ *  waiting the gateway out (a cache alone only helps once an answer exists). */
+let catalogInflight: Promise<GatewayModel[] | null> | null = null;
 
 /** Clear the memoized base and catalog (tests; a gateway that moved). */
 export function clearGatewayCaches(): void {
   baseCache = null;
   catalogCache = null;
+  catalogInflight = null;
 }
 
 /**
@@ -146,26 +150,35 @@ export async function resolveGatewayBase(): Promise<GatewayBase | null> {
 export async function gatewayCatalog(timeoutMs = 2500): Promise<GatewayModel[] | null> {
   const cached = catalogCache;
   if (cached && Date.now() - cached.loadedAt < cached.ttlMs) return cached.models;
-  let models: GatewayModel[] | null = null;
-  try {
-    const res = await gatewayFetch("/v1/models", { signal: AbortSignal.timeout(timeoutMs) });
-    if (res.ok) {
-      const body = (await res.json()) as { data?: Array<{ id?: unknown; owned_by?: unknown }> };
-      if (Array.isArray(body.data)) {
-        models = body.data
-          .filter((m): m is { id: string; owned_by?: unknown } => typeof m?.id === "string" && m.id.length > 0)
-          .map((m) => ({ id: m.id, ownedBy: typeof m.owned_by === "string" ? m.owned_by : "" }));
+  if (catalogInflight) return catalogInflight;
+  const flight = (async (): Promise<GatewayModel[] | null> => {
+    let models: GatewayModel[] | null = null;
+    try {
+      const res = await gatewayFetch("/v1/models", { signal: AbortSignal.timeout(timeoutMs) });
+      if (res.ok) {
+        const body = (await res.json()) as { data?: Array<{ id?: unknown; owned_by?: unknown }> };
+        if (Array.isArray(body.data)) {
+          models = body.data
+            .filter((m): m is { id: string; owned_by?: unknown } => typeof m?.id === "string" && m.id.length > 0)
+            .map((m) => ({ id: m.id, ownedBy: typeof m.owned_by === "string" ? m.owned_by : "" }));
+        }
+      } else {
+        logger("gateway").warn("model catalog unavailable: the gateway answered an error", { status: res.status });
       }
-    } else {
-      logger("gateway").warn("model catalog unavailable: the gateway answered an error", { status: res.status });
+    } catch (e) {
+      // Worth saying out loud: this call sits on the config read's path, and a
+      // silent empty list used to hide a gateway that was down for days.
+      logger("gateway").warn("model catalog unavailable", { url: (await resolveGatewayBase())?.url ?? "-", error: String(e) });
     }
-  } catch (e) {
-    // Worth saying out loud: this call sits on the config read's path, and a
-    // silent empty list used to hide a gateway that was down for days.
-    logger("gateway").warn("model catalog unavailable", { url: (await resolveGatewayBase())?.url ?? "-", error: String(e) });
+    catalogCache = { models, loadedAt: Date.now(), ttlMs: models === null ? CATALOG_ERROR_TTL_MS : CATALOG_TTL_MS };
+    return models;
+  })();
+  catalogInflight = flight;
+  try {
+    return await flight;
+  } finally {
+    if (catalogInflight === flight) catalogInflight = null;
   }
-  catalogCache = { models, loadedAt: Date.now(), ttlMs: models === null ? CATALOG_ERROR_TTL_MS : CATALOG_TTL_MS };
-  return models;
 }
 
 /** Bearer header for the gateway when CUBESTACK_GATEWAY_TOKEN is set. */

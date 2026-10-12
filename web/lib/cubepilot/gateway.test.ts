@@ -192,6 +192,25 @@ describe("lib/cubepilot/gateway", () => {
     );
     expect(await gatewayCatalog()).toBeNull();
   });
+
+  it("shares one gateway call between concurrent catalog reads", async () => {
+    // A page reads the catalog from two places at once (the chat pane's meta and
+    // the config pane's card): a cache that only remembers finished answers let
+    // both wait the gateway out separately.
+    vi.stubEnv("CUBESTACK_GATEWAT_URL", "http://gw.test:8080");
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ data: [{ id: "qwen38-27b" }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const [a, b] = await Promise.all([gatewayCatalog(), gatewayCatalog()]);
+    expect(a).toEqual([{ id: "qwen38-27b", ownedBy: "" }]);
+    expect(b).toEqual(a);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("GATEWAY_NAMESPACE", () => {
