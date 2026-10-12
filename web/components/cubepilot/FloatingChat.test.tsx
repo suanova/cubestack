@@ -176,6 +176,23 @@ describe("floating chat (global AI assistant)", () => {
     document.body.innerHTML = "";
   });
 
+  it("keeps the turn status with the composer, not above the thread", async () => {
+    // Same rule as the full pane: the line is read while a long turn is quiet,
+    // which is when the reader is at the input.
+    stubApi(TURN_DONE);
+    const { container, root } = renderChat();
+    await act(async () => {});
+    act(() => (container.querySelector('[data-od-id="fchat-fab"]') as HTMLElement).click());
+    await act(async () => {});
+
+    const thread = container.querySelector('[data-od-id="fchat-thread"]');
+    const status = container.querySelector('[data-od-id="fchat-status"]');
+    expect(thread).not.toBeNull();
+    expect(status).not.toBeNull();
+    expect(thread!.compareDocumentPosition(status!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    act(() => root.unmount());
+  });
+
   it("renders the launcher only, closed, and restores nothing until opened", async () => {
     const fetches: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {

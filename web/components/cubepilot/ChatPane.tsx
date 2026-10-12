@@ -2116,46 +2116,6 @@ export function ChatPane() {
             ) : null}
           </Box>
 
-          {/* The state of the turn, in the card's own frame rather than in the
-              thread below it. It has to be up here: the thread scrolls, and this
-              line is read exactly when a long turn has been quiet for a while
-              and the user has started to wonder whether it is still going. The
-              reference puts it in its header for the same reason. */}
-          {isAgent ? (
-            <Box
-              data-od-id="agent-status"
-              aria-live="polite"
-              sx={{
-                display: "flex",
-                alignItems: "center",
-                gap: "8px",
-                px: "18px",
-                py: "9px",
-                borderBottom: 1,
-                borderColor: "divider",
-              }}
-            >
-              <Pill variant={STATUS_PILL[status.tone]} dot pulse={status.tone === "run"}>
-                {t(status.key, status.vars)}
-              </Pill>
-              {/* The two ways on from a check that could not answer, beside the
-                  status they belong to. Retry is the way back to an answer, and
-                  Dismiss the way out of an alarm that cannot resolve itself —
-                  a channel this pane cannot use fails every retry the same way,
-                  and without it the status would sit here forever. */}
-              {turnCheckFailed ? (
-                <Box sx={{ display: "flex", alignItems: "center", gap: "4px", ml: "auto" }}>
-                  <Btn variant="ghost" small onClick={retryTurnCheck} data-od-id="turn-retry">
-                    {t("cubepilot.chat.retry")}
-                  </Btn>
-                  <Btn variant="ghost" small onClick={dismissTurnCheck} data-od-id="turn-dismiss">
-                    {t("cubepilot.chat.dismiss")}
-                  </Btn>
-                </Box>
-              ) : null}
-            </Box>
-          ) : null}
-
           <Box
             ref={threadEl}
             data-od-id="chat-thread"
@@ -2312,6 +2272,38 @@ export function ChatPane() {
                     {t("cubepilot.chat.goConfig")}
                   </Btn>
                 )}
+              </Box>
+            ) : null}
+            {/* The state of the turn, above the composer rather than in the
+                card's frame: the thread scrolls, and this line is read exactly
+                when a long turn has been quiet and the reader has started to
+                wonder whether it is still going — which is when their eyes are
+                here, at the input. This dock is outside the scroll area, so the
+                line is as always-visible here as it was up there. */}
+            {isAgent ? (
+              <Box
+                data-od-id="agent-status"
+                aria-live="polite"
+                sx={{ display: "flex", alignItems: "center", gap: "8px", mb: "8px" }}
+              >
+                <Pill variant={STATUS_PILL[status.tone]} dot pulse={status.tone === "run"}>
+                  {t(status.key, status.vars)}
+                </Pill>
+                {/* The two ways on from a check that could not answer, beside the
+                    status they belong to. Retry is the way back to an answer, and
+                    Dismiss the way out of an alarm that cannot resolve itself —
+                    a channel this pane cannot use fails every retry the same way,
+                    and without it the status would sit here forever. */}
+                {turnCheckFailed ? (
+                  <Box sx={{ display: "flex", alignItems: "center", gap: "4px", ml: "auto" }}>
+                    <Btn variant="ghost" small onClick={retryTurnCheck} data-od-id="turn-retry">
+                      {t("cubepilot.chat.retry")}
+                    </Btn>
+                    <Btn variant="ghost" small onClick={dismissTurnCheck} data-od-id="turn-dismiss">
+                      {t("cubepilot.chat.dismiss")}
+                    </Btn>
+                  </Box>
+                ) : null}
               </Box>
             ) : null}
             <Box

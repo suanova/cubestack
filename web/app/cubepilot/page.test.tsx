@@ -988,6 +988,24 @@ describe("cubepilot page", () => {
     act(() => root.unmount());
   }, 45000);
 
+  it("keeps the turn status with the composer, not above the thread", async () => {
+    // The status is read exactly when a long turn has been quiet and the reader
+    // wonders whether it is still going — which is when their eyes are at the
+    // input, not at the card's top edge.
+    stubApi(EXTERNAL_ONLY, {});
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    const thread = container.querySelector('[data-od-id="chat-thread"]');
+    const status = container.querySelector('[data-od-id="agent-status"]');
+    expect(thread).not.toBeNull();
+    expect(status).not.toBeNull();
+    // It belongs to the composer area below the thread, not to the card's frame
+    // above it: document order is the contract.
+    expect(thread!.compareDocumentPosition(status!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    act(() => root.unmount());
+  });
+
   it("counts the seconds while the instance is coming up", async () => {
     // The wait is the part that ends by itself, so the callout shows how long
     // it has been going (the box also carries a spinner).
