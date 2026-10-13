@@ -43,6 +43,7 @@ spec:
 # - assets[].name unique; assets[].configMapRef.name versioned, e.g. *-v0.5.12-rc1
 # - overrides[].name unique; enum excludes min/max; default must be in enum
 # - roles[].name unique; dependsOn must reference an existing role
+# - a role declaring accelerator must declare podTemplate.resources.gpuPerPod
 # - workload.group required for LeaderWorkerSet, forbidden for Deployment
 # - endpoint.role must reference a role that defines a service
 # - hostNetwork requires dnsPolicy ClusterFirstWithHostNet; labels must not
@@ -103,6 +104,9 @@ spec:
     reason: Invalid
   - expression: "object.spec.roles.all(r, !has(r.dependsOn) || r.dependsOn.all(d, object.spec.roles.exists(x, x.name == d)))"
     message: "dependsOn must reference an existing role"
+    reason: Invalid
+  - expression: "object.spec.roles.all(r, !has(r.accelerator) || (has(r.podTemplate.resources) && has(r.podTemplate.resources.gpuPerPod)))"
+    message: "a role declaring accelerator must declare podTemplate.resources.gpuPerPod"
     reason: Invalid
   - expression: "object.spec.roles.all(r, r.workload.kind == 'Deployment' ? !has(r.workload.group) : has(r.workload.group))"
     message: "workload.group is required for LeaderWorkerSet and forbidden for Deployment"
