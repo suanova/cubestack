@@ -120,6 +120,30 @@ const CHEVRON_DOWN_ICON = (
     <path d="M6 9l6 6 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
   </svg>
 );
+// The room's height toggle: corners out take the rows the page head and its tab
+// row were using, corners in give them back.
+const ROOM_EXPAND_ICON = (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
+    <path
+      d="M3 9V3h6M21 9V3h-6M3 15v6h6M21 15v6h-6"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+const ROOM_RESTORE_ICON = (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
+    <path
+      d="M9 3v6H3M15 3v6h6M9 21v-6H3M15 21v-6h6"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
 
 const userMsgSx: SxProps<Theme> = {
   alignSelf: "flex-end",
@@ -233,7 +257,16 @@ const ATTACH_EVENTS = new Set<AgentSseEvent["type"]>([
   "question_resolved",
 ]);
 
-export function ChatPane() {
+/** What only the page can do for this pane: fold its own head and tab row away
+ *  so the conversation has their height. The page owns the flag (the head is
+ *  its markup), so the pane just reports the ask — and without the props, as in
+ *  the floating panel, the control is not offered at all. */
+interface ChatPaneProps {
+  roomExpanded?: boolean;
+  onToggleRoom?: () => void;
+}
+
+export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps = {}) {
   const { t } = useI18n();
   const { showToast, toastView } = useToast();
 
@@ -2110,57 +2143,80 @@ export function ChatPane() {
                 )
               ) : null}
             </Box>
-            {isModel && svc && endpoint ? (
-              <Box
-                data-od-id="pg-endpoint"
-                sx={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: "8px",
-                  ml: "auto",
-                  maxWidth: "100%",
-                  ...monoSx,
-                  fontSize: 11,
-                  color: "text.secondary",
-                  bgcolor: "var(--surface)",
-                  border: 1,
-                  borderColor: "divider",
-                  borderRadius: 6,
-                  px: "8px",
-                  py: "4px",
-                }}
-              >
-                <Box component="span" sx={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {endpointText}
+            {/* The identity stays left and the room's controls stay right: the
+                width of the object list and the height of the conversation are
+                the same kind of choice, and the clear buttons are the actions
+                that go with them. */}
+            <Box sx={{ ml: "auto", display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap", maxWidth: "100%" }}>
+              {isModel && svc && endpoint ? (
+                <Box
+                  data-od-id="pg-endpoint"
+                  sx={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "8px",
+                    maxWidth: "100%",
+                    ...monoSx,
+                    fontSize: 11,
+                    color: "text.secondary",
+                    bgcolor: "var(--surface)",
+                    border: 1,
+                    borderColor: "divider",
+                    borderRadius: 6,
+                    px: "8px",
+                    py: "4px",
+                  }}
+                >
+                  <Box component="span" sx={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {endpointText}
+                  </Box>
+                  <CopyBtn
+                    text={copied === "endpoint" ? t("cubepilot.playground.copied") : t("cubepilot.playground.copy")}
+                    onClick={() => copyEndpoint(endpointText, "endpoint")}
+                  />
                 </Box>
-                <CopyBtn
-                  text={copied === "endpoint" ? t("cubepilot.playground.copied") : t("cubepilot.playground.copy")}
-                  onClick={() => copyEndpoint(endpointText, "endpoint")}
-                />
-              </Box>
-            ) : null}
-            {/* Model side only: the agent's conversation lives in the runtime under
-                one fixed key, so there is nothing here it could clear. */}
-            {isModel ? (
-              <Btn variant="secondary" small onClick={clearChat} data-od-id="clear-chat">
-                {t("cubepilot.playground.clear")}
-              </Btn>
-            ) : null}
-            {/* The agent side's own clear. Its transcript is not here — it is in
-                the runtime under one fixed key — so this one DELETEs the session
-                rather than dropping a local copy, which is why it is a different
-                control with a different question in front of it. */}
-            {isAgent ? (
-              <Btn
-                variant="secondary"
-                small
-                onClick={() => void clearAgentSession()}
-                disabled={clearing || !agentSessionKey}
-                data-od-id="clear-agent"
-              >
-                {t(clearing ? "cubepilot.chat.clearing" : "cubepilot.chat.clear")}
-              </Btn>
-            ) : null}
+              ) : null}
+              {/* Model side only: the agent's conversation lives in the runtime under
+                  one fixed key, so there is nothing here it could clear. */}
+              {isModel ? (
+                <Btn variant="secondary" small onClick={clearChat} data-od-id="clear-chat">
+                  {t("cubepilot.playground.clear")}
+                </Btn>
+              ) : null}
+              {/* The agent side's own clear. Its transcript is not here — it is in
+                  the runtime under one fixed key — so this one DELETEs the session
+                  rather than dropping a local copy, which is why it is a different
+                  control with a different question in front of it. */}
+              {isAgent ? (
+                <Btn
+                  variant="secondary"
+                  small
+                  onClick={() => void clearAgentSession()}
+                  disabled={clearing || !agentSessionKey}
+                  data-od-id="clear-agent"
+                >
+                  {t(clearing ? "cubepilot.chat.clearing" : "cubepilot.chat.clear")}
+                </Btn>
+              ) : null}
+              {/* The page head and the tab row are 100px the conversation can
+                  have: the page folds them away on this ask, and this button is
+                  the way back. Narrow layouts scroll instead, so it is not
+                  offered there. */}
+              {onToggleRoom ? (
+                <Btn
+                  variant="ghost"
+                  small
+                  onClick={onToggleRoom}
+                  title={t(roomExpanded ? "cubepilot.chat.roomRestore" : "cubepilot.chat.roomExpand")}
+                  aria-label={t(roomExpanded ? "cubepilot.chat.roomRestore" : "cubepilot.chat.roomExpand")}
+                  aria-expanded={roomExpanded}
+                  data-od-id="toggle-room"
+                  sx={{ "@media (max-width: 1180px)": { display: "none" } }}
+                >
+                  {roomExpanded ? ROOM_RESTORE_ICON : ROOM_EXPAND_ICON}
+                </Btn>
+              ) : null}
+            </Box>
           </Box>
 
           <Box

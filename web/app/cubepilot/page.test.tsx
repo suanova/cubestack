@@ -319,6 +319,9 @@ describe("cubepilot page", () => {
     expect(container.textContent).toContain("配置");
     expect(container.querySelector('[data-od-id="cp-tab-playground"]')).toBeNull();
     expect(container.querySelector('[data-od-id="cubepilot-tabs"]')).not.toBeNull();
+    // The tabs have a row of their own, as on every other page: the head is not
+    // a place to hang them on.
+    expect(container.querySelector('[data-od-id="page-head"] [data-od-id="cubepilot-tabs"]')).toBeNull();
     act(() => root.unmount());
   });
 
@@ -784,6 +787,37 @@ describe("cubepilot page", () => {
     await act(async () => {});
     expect(toggle.getAttribute("aria-expanded")).toBe("true");
     expect(container.querySelector('[data-od-id="object-list"]')).not.toBeNull();
+    act(() => root.unmount());
+  });
+
+  it("folds the page's own rows away while the room is expanded", async () => {
+    // The head and the tab row are 100px of chrome the conversation can have,
+    // but only on the reader's ask — and the control that asked for it sits in
+    // the room, since the room is the only thing left on the page.
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    expect((container.querySelector('[data-od-id="toggle-room"]') as HTMLElement).getAttribute("aria-expanded")).toBe(
+      "false",
+    );
+    expect(container.querySelector('[data-od-id="page-head"]')).not.toBeNull();
+    expect(container.querySelector('[data-od-id="cubepilot-tabs"]')).not.toBeNull();
+
+    act(() => (container.querySelector('[data-od-id="toggle-room"]') as HTMLElement).click());
+    await act(async () => {});
+    expect((container.querySelector('[data-od-id="toggle-room"]') as HTMLElement).getAttribute("aria-expanded")).toBe(
+      "true",
+    );
+    expect(container.querySelector('[data-od-id="page-head"]')).toBeNull();
+    expect(container.querySelector('[data-od-id="cubepilot-tabs"]')).toBeNull();
+    // The room itself is untouched — the same pane, given the rows.
+    expect(container.querySelector('[data-od-id="pane-chat"]')).not.toBeNull();
+    expect(container.querySelector('[data-od-id="chat-thread"]')).not.toBeNull();
+
+    act(() => (container.querySelector('[data-od-id="toggle-room"]') as HTMLElement).click());
+    await act(async () => {});
+    expect(container.querySelector('[data-od-id="page-head"]')).not.toBeNull();
+    expect(container.querySelector('[data-od-id="cubepilot-tabs"]')).not.toBeNull();
     act(() => root.unmount());
   });
 
