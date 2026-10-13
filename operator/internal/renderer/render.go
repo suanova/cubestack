@@ -139,7 +139,7 @@ func Render(isvc *aiv1alpha1.InferenceService, profile *aiv1alpha1.InferenceRunt
 		ctx.role = roleV
 		rr.PodTemplate, res.Errors = renderPodTemplate(ctx, rr.PodTemplate, res.Errors)
 		rr.UsesCredentials = roleV.usesCredentials
-		res.Errors = injectModelSelector(&rr, profile.Spec.Accelerator, res.Errors)
+		res.Errors = injectModelSelector(&rr, role.EffectiveAccelerator(profile.Spec.Accelerator), res.Errors)
 		// A role that will receive the injected S3 credentials volume must not
 		// declare a podTemplate volume of the same name: the pod template would
 		// carry two volumes named model-credentials and Kubernetes would reject
@@ -237,8 +237,9 @@ type renderContext struct {
 	role *roleVars
 }
 
-// injectModelSelector constrains the role's scheduling to the declared
-// accelerator models (design §3.2): one model merges into the pod template
+// injectModelSelector constrains the role's scheduling to its effective
+// accelerator models (design §3.2: the role's own accelerator when declared,
+// the profile-level value otherwise): one model merges into the pod template
 // nodeSelector, several models produce a required nodeAffinity In term on the
 // vendor product label (recorded in the rendered role for the controller).
 // A podTemplate.nodeSelector pinning the vendor label to a value outside the

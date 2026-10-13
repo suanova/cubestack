@@ -22,6 +22,7 @@ const (
 	metaxModelC500  = "MXC500"
 	metaxModelC550  = "MXC550"
 	nvidiaModelH200 = "H200"
+	nvidiaModelH20  = "H20"
 	// metaxModelC900 is a model outside the declared model lists of the specs.
 	metaxModelC900 = "MXC900"
 )
@@ -194,6 +195,65 @@ var _ = Describe("Render", func() {
 		res := Render(renderISVC(), p, renderModel(), nil)
 		Expect(res.Errors).To(BeEmpty())
 		Expect(res.Roles[0].PodTemplate.NodeSelector).To(Equal(map[string]string{metaxProductLabel: metaxModelC900}))
+	})
+
+	It("lets a GPU role override the profile accelerator with a different vendor", func() {
+		p := renderProfile()
+		gpuPrefill(p)
+		p.Spec.Accelerator = aiv1alpha1.Accelerator{Vendor: aiv1alpha1.AcceleratorVendorMetax, Models: []string{metaxModelC500}}
+		p.Spec.Roles[1].Accelerator = &aiv1alpha1.Accelerator{Vendor: aiv1alpha1.AcceleratorVendorNvidia, Models: []string{nvidiaModelH200}}
+		res := Render(renderISVC(), p, renderModel(), nil)
+		Expect(res.Errors).To(BeEmpty())
+		// The role's own declaration replaces the profile-level one wholesale:
+		// the label the profile would inject must not appear on this role.
+		Expect(res.Roles[1].PodTemplate.NodeSelector).To(HaveKeyWithValue(nvidiaProductLabel, nvidiaModelH200))
+		Expect(res.Roles[1].PodTemplate.NodeSelector).NotTo(HaveKey(metaxProductLabel))
+		Expect(res.Roles[1].ModelNodeAffinity).To(BeNil())
+	})
+
+	It("uses the role-level models for the multi-model nodeAffinity", func() {
+		p := renderProfile()
+		gpuPrefill(p)
+		p.Spec.Accelerator = aiv1alpha1.Accelerator{Vendor: aiv1alpha1.AcceleratorVendorMetax, Models: []string{metaxModelC500}}
+		p.Spec.Roles[1].Accelerator = &aiv1alpha1.Accelerator{Vendor: aiv1alpha1.AcceleratorVendorNvidia, Models: []string{nvidiaModelH200, nvidiaModelH20}}
+		res := Render(renderISVC(), p, renderModel(), nil)
+		Expect(res.Errors).To(BeEmpty())
+		Expect(res.Roles[1].PodTemplate.NodeSelector).To(BeEmpty())
+		Expect(res.Roles[1].ModelNodeAffinity).NotTo(BeNil())
+		Expect(res.Roles[1].ModelNodeAffinity.Label).To(Equal(nvidiaProductLabel))
+		Expect(res.Roles[1].ModelNodeAffinity.Models).To(Equal([]string{nvidiaModelH200, nvidiaModelH20}))
+	})
+
+	It("judges the nodeSelector conflict against the role's own models", func() {
+		p := renderProfile()
+		gpuPrefill(p)
+		p.Spec.Accelerator = aiv1alpha1.Accelerator{Vendor: aiv1alpha1.AcceleratorVendorMetax, Models: []string{metaxModelC500}}
+		p.Spec.Roles[1].Accelerator = &aiv1alpha1.Accelerator{Vendor: aiv1alpha1.AcceleratorVendorNvidia, Models: []string{nvidiaModelH200}}
+		// A pin equal to the role's own model is consistent…
+		p.Spec.Roles[1].PodTemplate.NodeSelector = map[string]string{nvidiaProductLabel: nvidiaModelH200}
+		res := Render(renderISVC(), p, renderModel(), nil)
+		Expect(res.Errors).To(BeEmpty())
+		// …and one outside the role's models is the reported conflict, even
+		// though it is inside the profile-level models.
+		p.Spec.Roles[1].PodTemplate.NodeSelector = map[string]string{nvidiaProductLabel: metaxModelC500}
+		res = Render(renderISVC(), p, renderModel(), nil)
+		Expect(res.Errors).To(HaveLen(1))
+		Expect(string(res.Errors[0].Reason)).To(Equal("ModelSchedulingConflict"))
+	})
+
+	It("injects nothing for a CPU-only role's accelerator declaration", func() {
+		// L1 rejects this shape at admission; the renderer must still not
+		// constrain a role without gpuPerPod (defense for legacy objects).
+		p := renderProfile()
+		gpuPrefill(p)
+		p.Spec.Accelerator = aiv1alpha1.Accelerator{Vendor: aiv1alpha1.AcceleratorVendorMetax, Models: []string{metaxModelC500}}
+		p.Spec.Roles[0].Accelerator = &aiv1alpha1.Accelerator{Vendor: aiv1alpha1.AcceleratorVendorNvidia, Models: []string{nvidiaModelH200}}
+		res := Render(renderISVC(), p, renderModel(), nil)
+		Expect(res.Errors).To(BeEmpty())
+		Expect(res.Roles[0].PodTemplate.NodeSelector).To(BeEmpty())
+		Expect(res.Roles[0].ModelNodeAffinity).To(BeNil())
+		// The GPU role still gets the profile-level constraint.
+		Expect(res.Roles[1].PodTemplate.NodeSelector).To(HaveKeyWithValue(metaxProductLabel, metaxModelC500))
 	})
 
 	It("defaults replicas to 1 when unset", func() {
