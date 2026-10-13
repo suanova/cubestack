@@ -99,7 +99,7 @@ rules:
   # skills, taskruns, tasktemplates or the profiles).
   - apiGroups: ["ai.cubestack.io"]
     resources: ["inferenceservices"]
-    verbs: ["create", "get", "list", "patch"]
+    verbs: ["create", "get", "list", "patch", "delete"]
   # `get` is for the connection card's Jupyter token: the token route reads the
   # one DevEnvironment named in the request to learn which Secret its status
   # points at (see the Secrets rule above). It grants nothing `list` does not
