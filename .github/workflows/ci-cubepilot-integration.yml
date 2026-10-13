@@ -80,10 +80,12 @@ jobs:
       # contradicting "fork PR: layer 2 skips, layer 1 still runs".
       - name: Log in to Harbor (chart pulls)
         if: env.CI_BOT_PASSWORD_SET == 'true'
+        env:
+          HARBOR_USER: ${{ vars.CI_BOT_NAME }}
+          HARBOR_PASSWORD: ${{ secrets.CI_BOT_PASSWORD }}
         run: |
-          helm registry login harbor.isuanova.com \
-            --username "${{ vars.CI_BOT_NAME }}" \
-            --password "${{ secrets.CI_BOT_PASSWORD }}"
+          printf '%s' "$HARBOR_PASSWORD" | helm registry login harbor.isuanova.com \
+            --username "$HARBOR_USER" --password-stdin
       - name: Bring up cubepilot + the portal
         env:
           # Optional manual override for the drift check; empty uses the chart

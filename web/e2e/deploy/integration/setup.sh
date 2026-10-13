@@ -123,6 +123,12 @@ helm upgrade --install portal "${REPO_ROOT}/web/helm/cubestack-portal-chart" \
   --set secrets.sessionSecret.existingSecret=portal-session \
   --wait --timeout 240s
 
+# The image tag is pinned to e2e, so a rerun's pod template is unchanged and the
+# Deployment would keep serving the previous build; roll onto the loaded image.
+info "portal rollout onto the freshly built image"
+kubectl -n "${NS}" rollout restart deploy/portal
+kubectl -n "${NS}" rollout status deploy/portal --timeout=240s >/dev/null
+
 info "seeding a Task CR (owner=admin, templateRef=daily-inspection)"
 kubectl -n "${NS}" apply -f - >/dev/null <<YAML
 apiVersion: ai.cubestack.io/v1alpha1
