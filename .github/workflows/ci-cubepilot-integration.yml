@@ -39,6 +39,11 @@ jobs:
       # Unique per run and shared by the seeded CR and the specs.
       E2E_MARKER: ${{ github.run_id }}-${{ github.run_attempt }}
       KIND_CLUSTER_NAME: cubestack-e2e
+      # The Harbor password, not the username, is the credential a fork PR
+      # loses: secrets are withheld while repository variables are not. A
+      # boolean here lets the login gate on the password; the `secrets` context
+      # is not available in a step `if`, so the login reads this instead.
+      CI_BOT_PASSWORD_SET: ${{ secrets.CI_BOT_PASSWORD != '' }}
       CUBEPILOT_LLM_ENDPOINT: ${{ vars.CUBEPILOT_LLM_ENDPOINT || 'https://api.deepseek.com' }}
       CUBEPILOT_LLM_MODEL: ${{ vars.CUBEPILOT_LLM_MODEL || 'deepseek-v4-flash' }}
     steps:
@@ -68,13 +73,13 @@ jobs:
         with:
           version: v3.13.0
       # Harbor serves the chart and the images; an anonymous pull works for the
-      # images, but the OCI chart may need the bot's read credentials. Gate on
-      # the password, not the username: on a fork PR of the upstream repo the
-      # secrets are withheld while the repository variables are not, so a
-      # username-only guard would run the login with an empty password and fail
-      # the job — contradicting "fork PR: layer 2 skips, layer 1 still runs".
+      # images, but the OCI chart may need the bot's read credentials. Gated on
+      # the password (see CI_BOT_PASSWORD_SET): a fork PR of the upstream repo
+      # withholds the secrets but keeps the variables, so a username-only guard
+      # would run the login with an empty password and fail the job,
+      # contradicting "fork PR: layer 2 skips, layer 1 still runs".
       - name: Log in to Harbor (chart pulls)
-        if: ${{ secrets.CI_BOT_PASSWORD != '' }}
+        if: env.CI_BOT_PASSWORD_SET == 'true'
         run: |
           helm registry login harbor.isuanova.com \
             --username "${{ vars.CI_BOT_NAME }}" \
