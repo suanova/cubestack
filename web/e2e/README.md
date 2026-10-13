@@ -1,6 +1,6 @@
 # E2E tests
 
-Two suites cover the overview landing at different layers:
+Three suites cover the portal at different layers:
 
 ## Suite A — `e2e/overview.ui.spec.ts` + `e2e/inference-services.ui.spec.ts` + `e2e/cubepilot.ui.spec.ts` + `e2e/cubepilot-tasks.ui.spec.ts` (CI-cheap, deterministic)
 
@@ -75,15 +75,22 @@ skipped unless `CUBEPILOT_E2E_CHAT=1`:
 
 ```sh
 CUBEPILOT_LLM_APIKEY='sk-...' bash e2e/deploy/integration/setup.sh
-CUBEPILOT_E2E_CHAT=1 E2E_MARKER=dev-local npm run test:e2e:integration
+CUBEPILOT_E2E_CHAT=1 E2E_MARKER=dev-local npm run test:e2e:integration -- --grep "cubepilot chat"
 ```
+
+Layer 2 shares one pinned conversation across its three tests, so a reply or a
+parked approval left over from an earlier run can satisfy an assertion, and one
+of the tests proves only that a turn stopped being parked rather than that it
+finished. A green Layer 2 run is therefore weaker than it looks on a cluster
+that has been used before; the first run against a fresh bring-up is the
+meaningful one.
 
 Requirements: `docker`, `kind`, `kubectl`, `helm`; the cluster is created by
 the script (`KIND_CLUSTER_NAME`, default `cubestack-e2e`).
 
 `E2E_MARKER` must be the same value for the bring-up and the test run: it is
 seeded into a Task CR and written by the spec into the AgentInstance, and the
-CI workflow greps the CR for it afterwards. The workflow is
+CI workflow greps the AgentInstance for it afterwards. The workflow is
 `.github/workflows/ci-cubepilot-integration.yml`; it is a separate workflow so
 the other portal jobs are unaffected. It installs the chart's **latest**
 release, so a red run there can mean a new cubepilot release rather than a

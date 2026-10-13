@@ -24,9 +24,13 @@ test.describe("portal → cubepilot boundary (real backend)", () => {
   // context's cookie jar, so the session seeded in beforeEach reaches withAuth;
   // the isolated `request` fixture sends no cookies and the routes answer 401.
   test("a path outside the proxy allow-list is refused with 404", async ({ context }) => {
-    // /transcript is not in lib/cubepilot/pilotpath.ts's allow-list.
-    const res = await context.request.get(`${BASE}/api/cubepilot/pilot/api/v1/sessions/any/transcript`);
+    // /agent/config is not in lib/cubepilot/pilotpath.ts's allow-list — but the
+    // upstream serves it (200), so a 404 here can only be the portal's own deny
+    // and not the API answering an unknown path. The body is asserted as well,
+    // which keeps the test discriminating if the status ever changes.
+    const res = await context.request.get(`${BASE}/api/cubepilot/pilot/api/v1/agent/config`);
     expect(res.status()).toBe(404);
+    expect(await res.json()).toEqual({ error: "not found" });
   });
 
   test("an allow-listed path reaches the real cubepilot-api", async ({ context }) => {

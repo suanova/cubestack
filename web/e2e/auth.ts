@@ -11,12 +11,8 @@ const SESSION_COOKIE = "cubestack-session";
 /**
  * Install a valid signed session cookie (user "admin") on the context so the
  * mocked-data page specs can navigate straight past the login redirect.
- *
- * `domain` is the host the cookie is scoped to. Suite A runs on localhost:3000
- * (the default); the integration suite reaches the portal through a
- * port-forward, so it passes whatever host its baseURL uses.
  */
-export async function seedSession(context: BrowserContext, domain = "localhost"): Promise<void> {
+export async function seedSession(context: BrowserContext): Promise<void> {
   const now = Math.floor(Date.now() / 1000);
   const token = await new SignJWT({})
     .setProtectedHeader({ alg: "HS256" })
@@ -28,7 +24,7 @@ export async function seedSession(context: BrowserContext, domain = "localhost")
     {
       name: SESSION_COOKIE,
       value: token,
-      domain,
+      domain: "localhost",
       path: "/",
       httpOnly: true,
       sameSite: "Lax",

@@ -141,6 +141,7 @@ YAML
 # cubepilot-api provisions its builtin `admin` AgentInstance the first time its
 # session surface is used and answers 503 while that settles — 20-84s, longer
 # than a caller's own timeout. Warm it to a real 200 so "ready" means serving.
+# The probe runs `node` inside the portal pod (web/Dockerfile is node:22-alpine).
 info "warming the agent API (first-use provisioning)"
 warm_start="${SECONDS}"
 warm_deadline=$(( SECONDS + 420 ))
