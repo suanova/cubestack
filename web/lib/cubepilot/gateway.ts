@@ -279,7 +279,28 @@ function apiServerFetch(url: string, init: RequestInit): Promise<Response> {
         })
       : undefined;
     const req = isHttps ? httpsRequest({ ...base, agent }) : httpRequest(base);
+    // The caller's signal has to reach this path too: it is the slowest way to
+    // the gateway (through the API server), and a stalled response would hold the
+    // caller — and its stream — open past the timeout it asked for. Both halves
+    // are covered: the request before the headers, the body after them.
+    const signal = init.signal ?? null;
+    let response: (Readable & { destroy: (error?: Error) => void }) | null = null;
+    const onAbort = () => {
+      const error = new Error("gateway request aborted");
+      if (response) response.destroy(error);
+      else req.destroy(error);
+      reject(error);
+    };
+    if (signal) {
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+      req.on("close", () => signal.removeEventListener("abort", onAbort));
+    }
     req.on("response", (res) => {
+      response = res as Readable & { destroy: (error?: Error) => void };
       resolve(new Response(Readable.toWeb(res as Readable) as ReadableStream<Uint8Array>, {
         status: res.statusCode ?? 0,
         headers: toResponseHeaders(res.headers),

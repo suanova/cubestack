@@ -5,8 +5,13 @@ const { listNamespacedService } = vi.hoisted(() => ({ listNamespacedService: vi.
 
 vi.mock("@/lib/kubernetes", () => ({
   getCoreClient: () => ({ listNamespacedService }),
-  getKubeConfig: () => ({ getCurrentCluster: () => ({ server: "https://k8s.test" }) }),
+  getKubeConfig: () => ({ getCurrentCluster: () => ({ server: "https://k8s.test" }), getCurrentUser: () => null }),
 }));
+
+// The service-proxy path speaks raw TLS through node:https, which the unit
+// environment cannot reach.
+const { httpsRequest, httpsAgent } = vi.hoisted(() => ({ httpsRequest: vi.fn(), httpsAgent: vi.fn() }));
+vi.mock("node:https", () => ({ request: httpsRequest, Agent: httpsAgent }));
 
 import { GATEWAY_NAMESPACE, clearGatewayCaches, gatewayCatalog, gatewayFetch, gatewayTokenHeader, resolveGatewayBase } from "./gateway";
 
@@ -160,6 +165,20 @@ describe("lib/cubepilot/gateway", () => {
     await resolveGatewayBase();
     await resolveGatewayBase();
     expect(listNamespacedService).toHaveBeenCalledTimes(1);
+  });
+
+  it("aborts the service-proxy request when the caller's signal fires", async () => {
+    // This path is hand-rolled (client certs rule out global fetch), so the
+    // caller's timeout has to be wired to it explicitly: an endpoint that never
+    // answers would otherwise hold the caller — and its stream — open.
+    listNamespacedService.mockResolvedValue({
+      items: [{ metadata: { name: "envoy-default-ai-gateway-27dc8f39" }, spec: { ports: [{ port: 8080 }] } }],
+    });
+    const destroy = vi.fn();
+    httpsRequest.mockReturnValue({ on: vi.fn().mockReturnThis(), write: vi.fn(), end: vi.fn(), destroy });
+
+    expect(await gatewayCatalog(30)).toBeNull();
+    expect(destroy).toHaveBeenCalled();
   });
 
   it("shares one Service lookup between concurrent base resolutions", async () => {

@@ -1086,20 +1086,6 @@ describe("cubepilot page", () => {
     act(() => root.unmount());
   });
 
-  it("shows the conversation as soon as the history answers, with config still out", async () => {
-    // The thread is keyed by the fixed session key and needs nothing from the
-    // meta, so it must not wait for the meta read — which waits on the AI
-    // Gateway's catalog. Restoring it used to start only after that read landed,
-    // which put the conversation 3.5s into the page.
-    const configPending: Array<(c: unknown) => void> = [];
-    stubApi(EXTERNAL_ONLY, { configPending, history: [{ role: "user", content: "历史消息甲" }] });
-    const { container, root } = renderPage();
-    await act(async () => {});
-    expect(await waitFor(() => container.textContent?.includes("历史消息甲") === true, 20)).toBe(true);
-    expect(configPending.length).toBeGreaterThan(0); // still out: that is the point
-    act(() => root.unmount());
-  });
-
   it("does not read the agent meta twice for one open", async () => {
     // Two readers exist on this page: the chat pane's meta read, and the config
     // pane's read of the same endpoint for its model card. Opening the pane used

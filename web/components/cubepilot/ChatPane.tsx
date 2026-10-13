@@ -664,15 +664,11 @@ export function ChatPane() {
     setAgentNotice("");
     void (async () => {
       const gen = genRef.current;
-      // Start the conversation read before the meta: it needs nothing from it,
-      // and the meta read waits on the AI Gateway's catalog (up to 2.5s). The
-      // thread renders when this lands, instead of after the meta did.
-      const history = loadAgentHistory(SESSION_KEY);
       const meta = await loadAgentMeta();
       if (genRef.current !== gen) return;
       if (meta.status?.exists) {
         awaitingInstanceRef.current = false;
-        await restoreAgentSession(meta, history);
+        await restoreAgentSession(meta);
       } else {
         awaitingInstanceRef.current = true;
         setMsgs(greetingMsgs(meta.status, meta.config, meta.skills, await loadConfirmPolicy()));
@@ -739,14 +735,15 @@ export function ChatPane() {
    * "…is owned by …:run:…, not …" — which is what a user saw on opening this
    * page. A key we chose cannot name one of them.
    */
-  async function restoreAgentSession(meta: AgentMeta, history?: Promise<boolean>): Promise<void> {
+  async function restoreAgentSession(meta: AgentMeta): Promise<void> {
     const gen = genRef.current;
     const key = SESSION_KEY;
     setAgentSessionKey(key);
-    // The caller may already have this read in flight (see selectAgent): it is
-    // keyed by the fixed session key and needs nothing from the meta, so it can
-    // run while the meta read waits on the AI Gateway's catalog.
-    const hadHistory = await (history ?? loadAgentHistory(key));
+    // Read after the meta, not with it: starting this earlier meant a selection
+    // that lands while it is out overtakes it (the generation guard drops the
+    // render), and the read in flight is shared, so the newer selection gets the
+    // overtaken answer too — an empty thread. Ordering it here is worth the wait.
+    const hadHistory = await loadAgentHistory(key);
     if (genRef.current !== gen) return;
     // Nothing under this key yet: a conversation has not started, so greet. An
     // empty thread with no prompt is the one thing a first-time visitor must not
@@ -843,10 +840,16 @@ export function ChatPane() {
       if (res.status === 404) return false;
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const body = (await res.json()) as { items?: HistoryMessage[] };
-      if (genRef.current !== gen) return true;
       const items = body.items ?? [];
-      lastHistoryRef.current = JSON.stringify(items);
       const restored = historyToMsgs(items, nextId);
+      // A read that has been overtaken still answers the one question its caller
+      // asks — "is there a conversation under this key?" — because that answer
+      // decides between greeting and restoring. What it must not do is render,
+      // or record itself as what is on screen: the view belongs to the newer
+      // read now. (Answering `true` here instead would skip the greeting and
+      // leave the thread empty for a first-time reader.)
+      if (genRef.current !== gen) return restored.length > 0;
+      lastHistoryRef.current = JSON.stringify(items);
       // An empty document never replaces what is on screen. Read on its own it
       // means "this conversation has not started", and the caller greets — but
       // this same read is what the follow loop takes when a turn it was watching
