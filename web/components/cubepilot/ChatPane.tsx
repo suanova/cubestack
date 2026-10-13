@@ -2186,7 +2186,8 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
                   variant="ghost"
                   small
                   onClick={onToggleRoom}
-                  title={t(roomExpanded ? "cubepilot.chat.roomRestore" : "cubepilot.chat.roomExpand")}
+                  // The name only: a title carrying the same words would be read
+                  // out twice, and this glyph has no second thing to say.
                   aria-label={t(roomExpanded ? "cubepilot.chat.roomRestore" : "cubepilot.chat.roomExpand")}
                   aria-expanded={roomExpanded}
                   data-od-id="toggle-room"
