@@ -7,6 +7,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -208,6 +209,15 @@ type Suite struct {
 	// digests is what each environment's image resolved to, appended as the
 	// environments come up. Only ever read after the run, by the report.
 	digests []ImageDigest
+
+	// capacityOnce, capacity and capacityErr are DeviceCapacity's memo: one Node
+	// list per run rather than one per device case. The error is remembered with
+	// the answer, so a cluster that cannot be asked is reported the same way
+	// wherever a device case runs instead of being retried on the chance of a
+	// different one.
+	capacityOnce sync.Once
+	capacity     map[corev1.ResourceName]int64
+	capacityErr  error
 }
 
 // ImageDigest is one environment's image as it was actually delivered.

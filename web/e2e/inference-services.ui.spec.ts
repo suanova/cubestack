@@ -9,6 +9,8 @@ import { seedSession } from "./auth";
 
 const OPTIONS = {
   namespaces: [{ name: "project-a" }, { name: "default" }],
+  // The API names the namespace the wizard opens on; project-a sorts first.
+  defaultNamespace: "default",
   profiles: [
     {
       name: "metax-sglang-dsv4-pd",
@@ -148,7 +150,9 @@ test.describe("inference services landing (mocked data)", () => {
     const wizard = page.locator('[data-od-id="deploy-wizard"]');
     await expect(wizard).toBeVisible();
 
-    // Step 1: a valid name is the only requirement (namespace/profile default).
+    // Step 1: a valid name is the only requirement (namespace/profile default),
+    // and the namespace is the one the API named rather than the first listed.
+    await expect(page.locator('[data-od-id="deploy-namespace"]')).toContainText("default");
     await page.getByPlaceholder("e.g. dsv4-flash-serve").fill("my-serve");
     await page.getByRole("button", { name: "下一步" }).click();
     await expect(page.locator('[data-step="2"]')).toBeVisible();

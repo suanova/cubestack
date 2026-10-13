@@ -21,6 +21,7 @@ import {
   DialogContent,
   DialogTitle,
   Divider,
+  IconButton,
   Menu,
   MenuItem,
   Select,
@@ -686,38 +687,208 @@ function Kvs({ rows }: { rows: Array<[string, string]> }) {
   );
 }
 
-function EndpointRow({ label, value }: { label: string; value: string }) {
+/** An endpoint address is a link when it is one, and text when it is not. */
+function isLink(value: string): boolean {
+  return /^https?:\/\//i.test(value);
+}
+
+/**
+ * The Copy affordance every connection row ends with: idle → copied → idle, or
+ * idle → failed, which stays long enough to be read and to be retried by hand —
+ * the clipboard is unavailable on the plain-HTTP deployment this serves, so a
+ * silent no-op is the one outcome a copy button may not have.
+ *
+ * `value` is a string for what the row already holds (an endpoint address) and a
+ * function for what has to be fetched first (the token); returning null from the
+ * latter means the fetch failed and its message is already on the row.
+ */
+function CopyButton({ value }: { value: string | (() => Promise<string | null>) }) {
   const { t } = useI18n();
-  // idle → copied → idle, or idle → failed, which stays long enough to be read
-  // and to be retried by hand: the clipboard is unavailable on the plain-HTTP
-  // deployment this serves, so a silent no-op is the one outcome a copy button
-  // may not have.
   const [copied, setCopied] = useState<"idle" | "ok" | "fail">("idle");
+  return (
+    <Button
+      disableRipple
+      onClick={async () => {
+        const text = typeof value === "string" ? value : await value();
+        if (text === null) return;
+        const ok = await copyText(text);
+        setCopied(ok ? "ok" : "fail");
+        setTimeout(() => setCopied("idle"), ok ? 1200 : 4000);
+      }}
+      sx={{
+        p: 0,
+        minWidth: 0,
+        fontSize: 11,
+        fontFamily: "var(--font-mono)",
+        color: copied === "fail" ? STATUS_ERR : "var(--accent-strong)",
+        textTransform: "none",
+        "&:hover": { textDecoration: "underline" },
+      }}
+    >
+      {copied === "ok" ? t("dev.conn.copied") : copied === "fail" ? t("dev.conn.copyFailed") : t("dev.conn.copy")}
+    </Button>
+  );
+}
+
+/** The shell every connection row is drawn in: a label above a monospace box. */
+const CONN_ROW_SX = {
+  display: "flex",
+  alignItems: "center",
+  gap: "10px",
+  fontFamily: "var(--font-mono)",
+  fontSize: 11,
+  color: "text.secondary",
+  background: "var(--surface)",
+  border: "1px solid var(--border)",
+  borderRadius: "6px",
+  px: "9px",
+  py: "5px",
+  overflow: "hidden",
+} as const;
+
+const CONN_VALUE_SX = {
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  flex: 1,
+  minWidth: 0,
+} as const;
+
+function EndpointRow({ label, value }: { label: string; value: string }) {
   return (
     <Box sx={{ mb: "12px" }}>
       <Typography sx={{ fontSize: 11, color: "text.secondary", mb: "8px" }}>{label}</Typography>
-      <Box sx={{ display: "flex", alignItems: "center", gap: "10px", fontFamily: "var(--font-mono)", fontSize: 11, color: "text.secondary", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "6px", px: "9px", py: "5px", overflow: "hidden" }}>
-        <Box component="span" sx={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>{value}</Box>
-        <Button
-          disableRipple
-          onClick={async () => {
-            const ok = await copyText(value);
-            setCopied(ok ? "ok" : "fail");
-            setTimeout(() => setCopied("idle"), ok ? 1200 : 4000);
-          }}
-          sx={{
-            p: 0,
-            minWidth: 0,
-            fontSize: 11,
-            fontFamily: "var(--font-mono)",
-            color: copied === "fail" ? STATUS_ERR : "var(--accent-strong)",
-            textTransform: "none",
-            "&:hover": { textDecoration: "underline" },
-          }}
-        >
-          {copied === "ok" ? t("dev.conn.copied") : copied === "fail" ? t("dev.conn.copyFailed") : t("dev.conn.copy")}
-        </Button>
+      <Box sx={CONN_ROW_SX}>
+        {/* The address is the thing the user came for, and a Jupyter URL they
+            have to select, copy and paste themselves is a step that only exists
+            because the row was text. Deep-linking to the container's own UI is
+            the point of publishing the endpoint; the copy button stays for the
+            cases a link cannot serve (a terminal, a notebook client config). */}
+        {isLink(value) ? (
+          <Box
+            component="a"
+            href={value}
+            target="_blank"
+            rel="noopener noreferrer"
+            data-od-id="endpoint-link"
+            sx={{ ...CONN_VALUE_SX, color: "var(--accent-strong)", textDecoration: "none", "&:hover": { textDecoration: "underline" } }}
+          >
+            {value}
+          </Box>
+        ) : (
+          <Box component="span" sx={CONN_VALUE_SX}>{value}</Box>
+        )}
+        <CopyButton value={value} />
       </Box>
+    </Box>
+  );
+}
+
+// Twelve bullets, whatever the token's length: the mask says "there is a secret
+// here" and says nothing about how long it is.
+const TOKEN_MASK = "•".repeat(12);
+
+function EyeIcon({ open }: { open: boolean }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="15"
+      height="15"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12Z" />
+      <circle cx="12" cy="12" r="2.6" />
+      {open ? null : <path d="M4 20 20 4" />}
+    </svg>
+  );
+}
+
+/**
+ * The environment's own Jupyter token, masked until the user asks for it.
+ *
+ * The card used to print the `kubectl` command that reads the Secret, which asks
+ * the user to hold cluster access the console already has. The value is fetched
+ * only when it is asked for — reveal or copy — so a credential is not pulled into
+ * the page (and into a screenshot) for every environment the user clicks past,
+ * and a failed read leaves its reason on the row instead of an empty box.
+ */
+function TokenRow({
+  name,
+  namespace,
+  secret,
+}: {
+  name: string;
+  namespace: string;
+  secret: { name: string; namespace: string };
+}) {
+  const { t } = useI18n();
+  const [token, setToken] = useState<string | null>(null);
+  const [revealed, setRevealed] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async (): Promise<string | null> => {
+    if (token !== null) return token;
+    setBusy(true);
+    try {
+      const res = await apiFetch(
+        `/api/devenvironments/token?namespace=${encodeURIComponent(namespace)}&name=${encodeURIComponent(name)}`,
+      );
+      const body = (await res.json().catch(() => ({}))) as ValidationErrorBody & { token?: string };
+      if (!res.ok || !body.token) {
+        setError(validationMessage(t, body, res.status, "dev"));
+        return null;
+      }
+      setToken(body.token);
+      setError(null);
+      return body.token;
+    } catch {
+      // The route's own sentence for this: from the user's side a request that
+      // never arrived and a read that failed are the same thing to retry.
+      setError(t("dev.err.tokenUnreadable"));
+      return null;
+    } finally {
+      setBusy(false);
+    }
+  }, [name, namespace, t, token]);
+
+  return (
+    <Box sx={{ mb: "12px" }}>
+      <Typography sx={{ fontSize: 11, color: "text.secondary", mb: "8px" }}>{t("dev.conn.token")}</Typography>
+      <Box sx={CONN_ROW_SX}>
+        <Box component="span" data-od-id="token-value" sx={{ ...CONN_VALUE_SX, color: error ? STATUS_ERR : "text.secondary" }}>
+          {error ?? (revealed && token !== null ? token : TOKEN_MASK)}
+        </Box>
+        <IconButton
+          data-od-id="token-toggle"
+          aria-label={revealed ? t("dev.conn.tokenHide") : t("dev.conn.tokenReveal")}
+          aria-pressed={revealed}
+          disabled={busy}
+          onClick={async () => {
+            if (revealed) {
+              setRevealed(false);
+              return;
+            }
+            // The mask stays if the token could not be read: the row says why.
+            if (token === null && (await load()) === null) return;
+            setRevealed(true);
+          }}
+          sx={{ p: 0, width: 20, height: 20, color: "var(--accent-strong)", "&:hover": { background: "transparent" } }}
+        >
+          <EyeIcon open={revealed} />
+        </IconButton>
+        <CopyButton value={load} />
+      </Box>
+      {/* Named where it lives, because rotating it is a `kubectl delete secret`
+          away and the card is where the user finds out which one. */}
+      <Typography data-od-id="token-secret" sx={{ fontSize: 11, color: "text.secondary", mt: "6px" }}>
+        {t("dev.conn.tokenSecret", { name: `${secret.namespace}/${secret.name}` })}
+      </Typography>
     </Box>
   );
 }
@@ -731,14 +902,15 @@ function ConnectionCard({ e, onAct }: { e: DevEnvironmentSummary; onAct: (e: Dev
           {e.endpoints.map((ep) => (
             <EndpointRow key={ep.name} label={ep.name} value={ep.address} />
           ))}
-          {/* Reaching a jupyter environment needs its token, and the Copy button
-              is the same one the endpoints use — what is offered is the command
-              that reads the Secret, never its value. */}
+          {/* Reaching a jupyter environment needs its token, so the card carries
+              the token itself — masked until asked for, read from the Secret the
+              environment's own status names. */}
           {e.type === "jupyter" && e.jupyterTokenSecret ? (
-            <EndpointRow
-              label={t("dev.conn.tokenFrom", { name: e.jupyterTokenSecret.name })}
-              value={`kubectl -n ${e.jupyterTokenSecret.namespace} get secret ${e.jupyterTokenSecret.name} -o jsonpath='{.data.token}' | base64 -d`}
-            />
+            // Keyed by environment: the detail panel is the same component for
+            // whichever row is selected, and without this a token revealed for
+            // one environment would stay revealed — showing the previous
+            // environment's credential — when the next row is clicked.
+            <TokenRow key={`${e.namespace}/${e.name}`} name={e.name} namespace={e.namespace} secret={e.jupyterTokenSecret} />
           ) : null}
           <Typography sx={{ fontSize: 11, color: "text.secondary", lineHeight: 1.7 }}>{t("dev.conn.guide")}</Typography>
           {/* Said only when it is true of this environment: the idle clause used
@@ -1075,7 +1247,11 @@ function CreateWizard({
     gpuCount: 1,
     cpu: "2",
     memory: "4Gi",
-    storageGi: 200,
+    // The smallest workspace the route accepts, not the largest: a claim is
+    // provisioned at its full size up front, and 200Gi is 200Gi of the cluster
+    // spent on a wizard nobody has edited yet. The field is editable, and the
+    // summary step states the size before it is created.
+    storageGi: 20,
     pvcRetention: "delete",
     idle: 0,
     idleCustom: false,

@@ -67,3 +67,18 @@ export function getCoreClient(): CoreV1Api {
 export function getCustomObjectsClient(): CustomObjectsApi {
   return getKubeConfig().makeApiClient(CustomObjectsApi);
 }
+
+/**
+ * Whether a client call failed because the object is not there.
+ *
+ * @kubernetes/client-node 2.x throws its generated `ApiException`, which carries
+ * the HTTP status on `.code`. The older `HttpError` shape carried `.statusCode`,
+ * and reading the wrong one turns every "already gone" into an opaque 500 —
+ * measured against the live cluster, where deleting a deleted DevEnvironment
+ * answered 500 instead of the 404 the console has a sentence for. Both are read
+ * so the check survives either client.
+ */
+export function isNotFound(err: unknown): boolean {
+  const e = err as { code?: number | string; statusCode?: number } | null;
+  return e?.code === 404 || e?.statusCode === 404;
+}

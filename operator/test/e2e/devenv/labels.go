@@ -25,7 +25,7 @@ const (
 	TierP1 = "p1"
 )
 
-// LabelFamily names the family a case belongs to — the A–M grouping of
+// LabelFamily names the family a case belongs to — the A–O grouping of
 // design/devenv/image-endpoint-test-plan.md §4. A family is a subject (bring-up,
 // publication, the negative cases, …), not a priority; the tier carries that.
 func LabelFamily(family string) string { return "family:" + family }
@@ -35,3 +35,11 @@ func LabelImage(key string) string { return "image:" + key }
 
 // LabelIdentity names the account an environment runs as.
 func LabelIdentity(i Identity) string { return "identity:" + string(i) }
+
+// LabelDevice names the device a case needs, and so the device its cluster must
+// have for the case to run at all. It spans both classes — a GPU vendor and an
+// RDMA fabric are the same kind of thing to a reader choosing what to run, even
+// though one is an extended resource on a node and the other a flag on the
+// manager. Needed because a case that shapes its own environment is not on the
+// image matrix and so carries no image label to select it by.
+func LabelDevice(name string) string { return "device:" + name }

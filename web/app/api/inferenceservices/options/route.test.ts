@@ -70,6 +70,10 @@ describe("inference services create options route", () => {
     const body = await res.json();
 
     expect(body.namespaces.map((n: { name: string }) => n.name)).toContain("project-a");
+    // The wizard opens on `default`, not on the first name alphabetically
+    // ("default" sorts after "project-a" here, so this is a choice) and not on a
+    // name the route has no business preferring.
+    expect(body.defaultNamespace).toBe("default");
 
     expect(body.profiles).toHaveLength(1);
     const profile = body.profiles[0];
@@ -98,6 +102,25 @@ describe("inference services create options route", () => {
       architecture: "deepseek_v4",
       quantization: "w8a8",
     });
+  });
+
+  it("opens on the configured namespace when the platform names one", async () => {
+    process.env.CUBESTACK_DEFAULT_NAMESPACE = "project-llm";
+    try {
+      const { GET } = await import("./route");
+      const res = await GET(await authedGet(), undefined);
+      expect((await res.json()).defaultNamespace).toBe("project-llm");
+    } finally {
+      delete process.env.CUBESTACK_DEFAULT_NAMESPACE;
+    }
+  });
+
+  it("opens on the first namespace only when there is no `default`", async () => {
+    listNamespace.mockResolvedValue({ items: [{ metadata: { name: "project-a" } }, { metadata: { name: "project-llm" } }] });
+    const { GET } = await import("./route");
+    const res = await GET(await authedGet(), undefined);
+    // project-a sorts first, and `default` does not exist to be preferred.
+    expect((await res.json()).defaultNamespace).toBe("project-a");
   });
 
   it("returns 500 when the cluster read fails", async () => {

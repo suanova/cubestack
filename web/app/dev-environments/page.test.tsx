@@ -48,6 +48,11 @@ describe("dev environments page", () => {
     document.body.innerHTML = "";
   });
 
+  // The value the stubbed token endpoint hands back, and one entry per request
+  // made for it (see stubData).
+  const JUPYTER_TOKEN = "fa4040c1b2e34d5f8091aa2b3c5d5e6f";
+  const tokenRequests: string[] = [];
+
   function renderPage() {
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -59,9 +64,19 @@ describe("dev environments page", () => {
   }
 
   function stubData(items: unknown[], ok = true) {
+    tokenRequests.length = 0;
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => ({ ok, status: ok ? 200 : 500, json: async () => (ok ? { items } : { error: "boom" }) })),
+      vi.fn(async (url: unknown) => {
+        // The token endpoint is the one request whose *timing* matters: the card
+        // must not pull a credential it was not asked to show.
+        if (String(url).includes("/api/devenvironments/token")) {
+          const q = new URL(String(url), "http://localhost").searchParams;
+          tokenRequests.push(`${q.get("namespace")}/${q.get("name")}`);
+          return { ok: true, status: 200, json: async () => ({ token: JUPYTER_TOKEN, secret: { name: "jupyter-nlp-ln-jupyter-token", namespace: "project-a" } }) };
+        }
+        return { ok, status: ok ? 200 : 500, json: async () => (ok ? { items } : { error: "boom" }) };
+      }),
     );
   }
 
@@ -145,6 +160,41 @@ describe("dev environments page", () => {
     expect(container.textContent).toContain("500Gi · 按运行身份自动派生");
     expect(container.textContent).toContain("shared-models → /models (只读)");
     expect(container.textContent).toContain("debug:9229/tcp");
+
+    act(() => root.unmount());
+  });
+
+  it("links an endpoint the user can open, and keeps it copyable", async () => {
+    stubData(devEnvironmentList());
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    // The endpoint is a URL, so it opens the container's own UI in a new tab
+    // instead of asking the user to select and paste it — and the copy button
+    // stays, for the places a link cannot go (a terminal, a client config).
+    const link = container.querySelector('[data-od-id="endpoint-link"]') as HTMLAnchorElement;
+    expect(link.getAttribute("href")).toBe("https://dev.cubestack.local/ws/jupyter-nlp-ln");
+    expect(link.getAttribute("target")).toBe("_blank");
+    // noopener: a new tab must not get a handle on this window through `window.opener`.
+    expect(link.getAttribute("rel")).toContain("noopener");
+    expect(link.textContent).toBe("https://dev.cubestack.local/ws/jupyter-nlp-ln");
+
+    // The copy button next to it still copies the address itself.
+    Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true, writable: true });
+    let copiedInto = "";
+    Object.defineProperty(document, "execCommand", {
+      configurable: true,
+      writable: true,
+      value: () => {
+        copiedInto = (document.querySelector("textarea") as HTMLTextAreaElement).value;
+        return true;
+      },
+    });
+    const row = link.closest("div")?.parentElement as HTMLElement;
+    await act(async () => {
+      (Array.from(row.querySelectorAll("button")).find((b) => b.textContent === "复制") as HTMLElement).click();
+    });
+    expect(copiedInto).toBe("https://dev.cubestack.local/ws/jupyter-nlp-ln");
 
     act(() => root.unmount());
   });
@@ -256,25 +306,123 @@ describe("dev environments page", () => {
     act(() => root.unmount());
   });
 
-  it("names the jupyter token's Secret and how to read it, and neither for an ssh environment", async () => {
+  it("shows the jupyter token masked until it is asked for, and nothing for an ssh environment", async () => {
     stubData(devEnvironmentList());
     const { container, root } = renderPage();
     await act(async () => {});
 
-    // The value stays in the cluster — the portal has no cluster-wide Secret
-    // read — so the panel names the Secret and offers the command instead.
-    expect(container.textContent).toContain("Jupyter Token Secret");
-    expect(container.textContent).toContain("jupyter-nlp-ln-jupyter-token");
-    expect(container.textContent).toContain(
-      "kubectl -n project-a get secret jupyter-nlp-ln-jupyter-token -o jsonpath='{.data.token}' | base64 -d",
+    const value = () => container.querySelector('[data-od-id="token-value"]') as HTMLElement;
+    const toggle = () => container.querySelector('[data-od-id="token-toggle"]') as HTMLElement;
+    // Masked on arrival, at a width the token's own length cannot be read off,
+    // and nothing has been fetched: the credential waits to be asked for.
+    expect(value().textContent).toBe("•".repeat(12));
+    expect(container.querySelector('[data-od-id="token-secret"]')?.textContent).toContain(
+      "project-a/jupyter-nlp-ln-jupyter-token",
     );
+    expect(tokenRequests).toEqual([]);
 
-    // An ssh environment has no token: no row, and no command to run.
+    // The eye is what asks for it, and the value is the token itself — not a
+    // command the user is meant to run against a cluster they may have no shell on.
+    await act(async () => {
+      toggle().click();
+    });
+    expect(tokenRequests).toEqual(["project-a/jupyter-nlp-ln"]);
+    expect(value().textContent).toBe(JUPYTER_TOKEN);
+    expect(toggle().getAttribute("aria-pressed")).toBe("true");
+    expect(toggle().getAttribute("aria-label")).toBe("隐藏 Token");
+
+    // Clicking again hides it without a second read.
+    await act(async () => {
+      toggle().click();
+    });
+    expect(value().textContent).toBe("•".repeat(12));
+    expect(toggle().getAttribute("aria-label")).toBe("显示 Token");
+    expect(tokenRequests).toHaveLength(1);
+
+    // Copy takes the same value the reveal shows, and asks for it if the user
+    // went straight for the clipboard.
+    Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true, writable: true });
+    let copiedInto = "";
+    Object.defineProperty(document, "execCommand", {
+      configurable: true,
+      writable: true,
+      value: () => {
+        copiedInto = (document.querySelector("textarea") as HTMLTextAreaElement).value;
+        return true;
+      },
+    });
+    const tokenRow = value().parentElement as HTMLElement;
+    await act(async () => {
+      (Array.from(tokenRow.querySelectorAll("button")).find((b) => b.textContent === "复制") as HTMLElement).click();
+    });
+    expect(copiedInto).toBe(JUPYTER_TOKEN);
+
+    // An ssh environment has no token: no row at all.
     await act(async () => {
       (container.querySelector('[data-od-id="dev-row-ssh-dataset-prep"]') as HTMLElement).click();
     });
-    expect(container.textContent).not.toContain("Jupyter Token Secret");
+    expect(container.querySelector('[data-od-id="token-value"]')).toBeNull();
     expect(container.textContent).not.toContain("kubectl -n");
+    expect(tokenRequests).toHaveLength(1);
+
+    act(() => root.unmount());
+  });
+
+  it("does not carry a revealed token over to the next environment", async () => {
+    stubData([
+      ...devEnvironmentList(),
+      devEnvironmentSummary({
+        name: "jupyter-vision",
+        type: "jupyter",
+        endpoints: [{ name: "jupyter", address: "https://dev.cubestack.local/ws/jupyter-vision" }],
+        jupyterTokenSecret: { name: "jupyter-vision-jupyter-token", namespace: "project-a" },
+      }),
+    ]);
+    const { container, root } = renderPage();
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="token-toggle"]') as HTMLElement).click();
+    });
+    expect((container.querySelector('[data-od-id="token-value"]') as HTMLElement).textContent).toBe(JUPYTER_TOKEN);
+
+    // The detail panel is one component with new props when another row is
+    // selected: revealed state must not follow it, or the panel would show the
+    // environment that was just navigated away from — with its value on screen.
+    await act(async () => {
+      (container.querySelector('[data-od-id="dev-row-jupyter-vision"]') as HTMLElement).click();
+    });
+    expect((container.querySelector('[data-od-id="token-value"]') as HTMLElement).textContent).toBe("•".repeat(12));
+    expect(container.querySelector('[data-od-id="token-toggle"]')?.getAttribute("aria-pressed")).toBe("false");
+
+    act(() => root.unmount());
+  });
+
+  it("says why a token could not be read instead of showing an empty box", async () => {
+    stubData(devEnvironmentList());
+    const calls = { n: 0 };
+    const real = globalThis.fetch as unknown as (u: unknown, i?: unknown) => Promise<unknown>;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown, init?: unknown) => {
+        if (String(url).includes("/api/devenvironments/token")) {
+          calls.n += 1;
+          return { ok: false, status: 404, json: async () => ({ error: "tokenMissing" }) };
+        }
+        return real(url, init);
+      }),
+    );
+
+    const { container, root } = renderPage();
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="token-toggle"]') as HTMLElement).click();
+    });
+
+    // The route's code reaches the row as a sentence in the user's language, and
+    // the row stays masked rather than pretending the token is empty.
+    const value = container.querySelector('[data-od-id="token-value"]') as HTMLElement;
+    expect(value.textContent).toContain("尚未发布 Jupyter Token");
+    expect(container.querySelector('[data-od-id="token-toggle"]')?.getAttribute("aria-pressed")).toBe("false");
 
     act(() => root.unmount());
   });
@@ -1639,7 +1787,10 @@ describe("create wizard", () => {
     });
     await act(async () => {});
 
-    expect(createdBody()).toMatchObject({ storageGi: 200, pvcRetention: "retain" });
+    // 20Gi is the wizard's starting size, left untouched here: the claim is
+    // provisioned at its full size up front, so the default is the smallest the
+    // route accepts rather than the largest it allows.
+    expect(createdBody()).toMatchObject({ storageGi: 20, pvcRetention: "retain" });
 
     act(() => root.unmount());
   });

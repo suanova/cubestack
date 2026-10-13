@@ -1200,6 +1200,27 @@ func desiredGPU(env *aiv1alpha1.DevEnvironment) (aiv1alpha1.AcceleratorVendor, i
 	return vendor, count, true
 }
 
+// gpuModelNodeSelector pins the environment to the GPU model it names, or is nil
+// when it names none — either because it asks for no accelerator at all or
+// because it left the model open. The vendor is resolved first through
+// desiredGPU, so the label and the model always describe one vendor: a label
+// taken from a vendor other than the one whose resource is requested could never
+// be satisfied, since the nodes carrying it are not the nodes advertising that
+// resource.
+//
+// The model is matched verbatim against the label value the vendor's device
+// plugin writes, so a model the cluster does not offer matches no node and the
+// environment stays Pending. That is deliberately not a spec finding: what the
+// cluster has is not what the spec asked for, and editing the spec is not the
+// remedy — the remedy is a cluster that has the card.
+func gpuModelNodeSelector(env *aiv1alpha1.DevEnvironment) map[string]string {
+	vendor, _, ok := desiredGPU(env)
+	if !ok || env.Spec.Resources.GPU.Model == "" {
+		return nil
+	}
+	return map[string]string{vendorProductLabel(vendor): env.Spec.Resources.GPU.Model}
+}
+
 // desiredContainerPorts declares the ports the environment's container listens
 // on, in the order desiredService publishes them: the type's main port, ssh
 // when it is exposed and is not already the main port, then each spec.ports
@@ -1950,11 +1971,12 @@ func activityAgentServiceAccountName(env *aiv1alpha1.DevEnvironment) string {
 	return env.Name + activityAgentNameSuffix
 }
 
-// desiredPodSpec renders the pod spec: compute-pool nodeSelector, the main
-// container with the workspace and data volume mounts, the SSH keys volume, and —
-// when the environment has its own storage — the init container that makes that
-// storage writable (::desiredPermissionInitContainer). An environment that asks
-// for an idle timeout carries the activity agent as a second container
+// desiredPodSpec renders the pod spec: the GPU-model nodeSelector when the
+// environment names one, the main container with the workspace and data volume
+// mounts, the SSH keys volume, and — when the environment has its own storage —
+// the init container that makes that storage writable
+// (::desiredPermissionInitContainer). An environment that asks for an idle
+// timeout carries the activity agent as a second container
 // (::desiredActivityAgent).
 func (r *DevEnvironmentReconciler) desiredPodSpec(env *aiv1alpha1.DevEnvironment) corev1.PodSpec {
 	mainPort := mainContainerPort(env.Spec.Type)
@@ -2059,6 +2081,13 @@ func (r *DevEnvironmentReconciler) desiredPodSpec(env *aiv1alpha1.DevEnvironment
 
 	podSpec := corev1.PodSpec{
 		Containers: []corev1.Container{container},
+		// The GPU model the environment names, if any. This is the pod spec's
+		// only node selection — #206 removed the hard compute-pool selector and
+		// nothing replaced it — so it is set outright rather than merged. A
+		// second source of node selection would have to merge into this map
+		// instead: nodeSelector is a flat map with no merge semantics, and
+		// assigning over it would silently drop the model constraint.
+		NodeSelector: gpuModelNodeSelector(env),
 		// Pod-level, so the profile reaches the init container below too. An unset
 		// profile is Unconfined, which the Restricted Pod Security Standard refuses
 		// outright: this is that level's seccomp requirement met, and no more —

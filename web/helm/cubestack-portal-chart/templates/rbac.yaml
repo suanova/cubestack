@@ -60,13 +60,26 @@ rules:
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["list"]
-  # List Secrets to back the SSH key picker in the dev-environment wizard: it
-  # offers only the Secrets that carry the operator's delegation label
-  # (ai.cubestack.io/ssh-keys-delegated) in the namespace the user picks, so the
-  # picker never surfaces a key Secret the controller would refuse. The namespace
-  # is user-chosen (any namespace), so this is cluster-wide. List only — the
-  # endpoint returns each Secret's name and data keys, never its values, and the
-  # portal does no other Secret read outside the namespaced roles above.
+  # List Secrets for two reads, both of which need a namespace the user chooses
+  # and neither of which is a general Secret browser:
+  #
+  # 1. The dev-environment wizard's SSH key picker, which offers only the Secrets
+  #    that carry the operator's delegation label
+  #    (ai.cubestack.io/ssh-keys-delegated), so it never surfaces a key Secret the
+  #    controller would refuse. That endpoint returns each Secret's name and data
+  #    keys, never its values.
+  # 2. The connection card's Jupyter token
+  #    (/api/devenvironments/token?namespace=&name=), which the card shows behind
+  #    a reveal toggle. The endpoint identifies a DevEnvironment and reads the
+  #    Secret *that environment's own status points at* — the Secret name is never
+  #    taken from the request — so an environment can only yield the credential
+  #    the operator published for it, and this is not a way to read an arbitrary
+  #    Secret by name.
+  #
+  # Both go through `list` (field-selected to one name for the token) because
+  # `get` here would be `get` on every Secret in the cluster; the token read is
+  # within what this rule already allows rather than an extension of it. The
+  # namespaced Role above grants no Secret read beyond the htpasswd one.
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["list"]
@@ -87,9 +100,13 @@ rules:
   - apiGroups: ["ai.cubestack.io"]
     resources: ["inferenceservices"]
     verbs: ["create", "get", "list", "patch"]
+  # `get` is for the connection card's Jupyter token: the token route reads the
+  # one DevEnvironment named in the request to learn which Secret its status
+  # points at (see the Secrets rule above). It grants nothing `list` does not
+  # already reach, and it is the verb that maps to that call.
   - apiGroups: ["ai.cubestack.io"]
     resources: ["devenvironments"]
-    verbs: ["create", "delete", "list", "patch"]
+    verbs: ["create", "delete", "get", "list", "patch"]
   - apiGroups: ["ai.cubestack.io"]
     resources: ["inferenceruntimeprofiles", "modelversions"]
     verbs: ["list"]

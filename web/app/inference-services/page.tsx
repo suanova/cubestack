@@ -974,7 +974,11 @@ function DeployWizard({
         setLoadError(null);
         setDraft((prev) => ({
           ...prev,
-          namespace: d.namespaces.find((n) => n.name === "project-a")?.name || d.namespaces[0]?.name || "",
+          // The API names the starting point — the platform's configured
+          // namespace, else `default`. This used to prefer `project-a` by name
+          // and otherwise take the first that sorts, which on a real install is
+          // a platform namespace the user cannot deploy into.
+          namespace: d.defaultNamespace ?? d.namespaces[0]?.name ?? "",
           profileRef: d.profiles[0]?.name || "",
           modelRef: "",
         }));
@@ -1129,7 +1133,7 @@ function DeployWizard({
                   />
                 </WizField>
                 <WizField label={t("inf.deploy.namespace")}>
-                  <Select size="small" fullWidth value={draft.namespace} onChange={(e) => setField("namespace", e.target.value)}>
+                  <Select size="small" fullWidth data-od-id="deploy-namespace" value={draft.namespace} onChange={(e) => setField("namespace", e.target.value)}>
                     {(options?.namespaces ?? []).map((n) => (
                       <MenuItem key={n.name} value={n.name}>{n.name}</MenuItem>
                     ))}

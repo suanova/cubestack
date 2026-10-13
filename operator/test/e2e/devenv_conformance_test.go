@@ -264,6 +264,11 @@ var _ = Describe("DevEnvironment conformance", Label(devenv.LabelConformance), O
 	describePorts()
 	describeRoll()
 	describeJupyter()
+	// Families N and O, whose subjects a cluster may simply not have: a GPU of a
+	// named vendor, an RDMA fabric. Each case asks the cluster first and stands
+	// down where the device is missing, so the same tree runs everywhere.
+	describeGPU()
+	describeRDMA()
 })
 
 // DescribeEnvironment declares the container for one (image, identity): the

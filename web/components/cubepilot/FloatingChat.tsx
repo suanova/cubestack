@@ -1305,37 +1305,6 @@ export function FloatingChat() {
             </Box>
           </Box>
 
-          {/* The state of the turn, in the card's own frame: the thread scrolls,
-              and this line is read exactly when a long turn has been quiet. */}
-          <Box
-            data-od-id="fchat-status"
-            aria-live="polite"
-            sx={{
-              display: "flex",
-              alignItems: "center",
-              gap: "8px",
-              px: "14px",
-              py: "7px",
-              borderBottom: 1,
-              borderColor: "divider",
-              flex: "none",
-            }}
-          >
-            <Pill variant={STATUS_PILL[status.tone]} dot pulse={status.tone === "run"}>
-              {t(status.key, status.vars)}
-            </Pill>
-            {turnCheckFailed ? (
-              <Box sx={{ display: "flex", alignItems: "center", gap: "4px", ml: "auto" }}>
-                <Btn variant="ghost" small onClick={retryTurnCheck}>
-                  {t("cubepilot.chat.retry")}
-                </Btn>
-                <Btn variant="ghost" small onClick={dismissTurnCheck}>
-                  {t("cubepilot.chat.dismiss")}
-                </Btn>
-              </Box>
-            ) : null}
-          </Box>
-
           {/* Thread */}
           <Box
             ref={threadEl}
@@ -1468,6 +1437,28 @@ export function FloatingChat() {
                 )}
               </Box>
             ) : null}
+            {/* The state of the turn, above the composer rather than in the
+                panel's frame: same rule as the full pane — it is read while a
+                long turn is quiet, which is when the reader is at the input. */}
+            <Box
+              data-od-id="fchat-status"
+              aria-live="polite"
+              sx={{ display: "flex", alignItems: "center", gap: "8px", mb: "8px" }}
+            >
+              <Pill variant={STATUS_PILL[status.tone]} dot pulse={status.tone === "run"}>
+                {t(status.key, status.vars)}
+              </Pill>
+              {turnCheckFailed ? (
+                <Box sx={{ display: "flex", alignItems: "center", gap: "4px", ml: "auto" }}>
+                  <Btn variant="ghost" small onClick={retryTurnCheck}>
+                    {t("cubepilot.chat.retry")}
+                  </Btn>
+                  <Btn variant="ghost" small onClick={dismissTurnCheck}>
+                    {t("cubepilot.chat.dismiss")}
+                  </Btn>
+                </Box>
+              ) : null}
+            </Box>
             <Box
               sx={{
                 display: "flex",

@@ -46,6 +46,28 @@ func vendorResource(vendor aiv1alpha1.AcceleratorVendor) string {
 	}
 }
 
+// vendorProductLabel maps an AcceleratorVendor to the node label its device
+// plugin writes the GPU model to, which is what a declared model is matched
+// against. Like vendorResource it is total, and for the same reason: an
+// unresolvable vendor resolves to the metax label rather than falling out of the
+// switch and matching no node, and callers that can hold a half-filled spec must
+// resolve the vendor first — gpuModelNodeSelector does, so only the two literals
+// ever reach here.
+//
+// The renderer keeps its own copies of these two names, unexported, for the
+// accelerator.models constraint; this package cannot reach them and does not
+// import them, exactly as it keeps its own copies of the resource names above.
+// The two pairs answer to the same device plugins, so they have to be kept in
+// step by hand rather than by the compiler.
+func vendorProductLabel(vendor aiv1alpha1.AcceleratorVendor) string {
+	switch vendor {
+	case aiv1alpha1.AcceleratorVendorNvidia:
+		return "nvidia.com/gpu.product"
+	default:
+		return "metax-tech.com/gpu.product"
+	}
+}
+
 // buildPodSpec converts the rendered platform pod template into a corev1.PodSpec:
 // resources mapping (cpu/memory → requests; gpuPerPod and extendedResources →
 // the extended resources in requests AND limits), model volume composition

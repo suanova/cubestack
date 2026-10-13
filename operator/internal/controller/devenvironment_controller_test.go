@@ -1359,6 +1359,48 @@ var _ = Describe("DevEnvironment object rendering and publishing", func() {
 		})
 	})
 
+	Describe("gpuModelNodeSelector", func() {
+		envWith := func(gpu *aiv1alpha1.GPUSpec) *aiv1alpha1.DevEnvironment {
+			return &aiv1alpha1.DevEnvironment{
+				Spec: aiv1alpha1.DevEnvironmentSpec{Resources: aiv1alpha1.ResourcesSpec{GPU: gpu}},
+			}
+		}
+
+		It("maps a named model onto the vendor's own product label", func() {
+			Expect(gpuModelNodeSelector(envWith(&aiv1alpha1.GPUSpec{
+				Vendor: aiv1alpha1.AcceleratorVendorMetax, Model: testGPUModelMXC550,
+			}))).To(Equal(map[string]string{testProductLabelMetax: testGPUModelMXC550}))
+
+			Expect(gpuModelNodeSelector(envWith(&aiv1alpha1.GPUSpec{
+				Vendor: aiv1alpha1.AcceleratorVendorNvidia, Model: testGPUModelH200,
+			}))).To(Equal(map[string]string{testProductLabelNvidia: testGPUModelH200}))
+		})
+
+		// No GPU block and a block with no model both leave the placement open.
+		// The second is the case that keeps this field from rolling every
+		// existing environment when it lands.
+		It("selects no node without a model to select", func() {
+			Expect(gpuModelNodeSelector(envWith(nil))).To(BeNil())
+			Expect(gpuModelNodeSelector(envWith(&aiv1alpha1.GPUSpec{
+				Vendor: aiv1alpha1.AcceleratorVendorMetax, Count: ptrTo(int32(1)),
+			}))).To(BeNil())
+		})
+
+		// The vendor is resolved before the label is chosen, so an unset vendor
+		// takes the schema's nvidia default — and a metax model written without
+		// `vendor: metax` therefore names a model on the nvidia label, which no
+		// node advertises. That is verbatim matching working as specified and not
+		// a bug here: the model is a value of the vendor's label, so the vendor
+		// has to be declared for the pair to mean anything. The pre-apply brand
+		// gate catches the common form of this — a maca image with no metax
+		// vendor — while a cuda-named image escapes it.
+		It("takes the default vendor for an unset one", func() {
+			Expect(gpuModelNodeSelector(envWith(&aiv1alpha1.GPUSpec{
+				Model: testGPUModelMXC550,
+			}))).To(Equal(map[string]string{testProductLabelNvidia: testGPUModelMXC550}))
+		})
+	})
+
 	Describe("rdmaResource", func() {
 		envWith := func(network *aiv1alpha1.NetworkSpec) *aiv1alpha1.DevEnvironment {
 			return &aiv1alpha1.DevEnvironment{Spec: aiv1alpha1.DevEnvironmentSpec{Network: network}}
@@ -2080,6 +2122,65 @@ var _ = Describe("DevEnvironment object rendering and publishing", func() {
 			Expect(render(nil).SecurityContext).To(Equal(&corev1.PodSecurityContext{
 				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 			}))
+		})
+
+		// The model is the pod spec's only node selection, and it is set outright
+		// rather than merged. It is also the reason the image is the vendor's own:
+		// a metax model on a cuda image is a pair the pre-apply gate refuses, and
+		// this spec renders the pod the platform would actually create.
+		It("pins the pod to the named model's node", func() {
+			spec := render(func(env *aiv1alpha1.DevEnvironment) {
+				env.Spec.Image = testMetaxImage
+				env.Spec.Resources.GPU = &aiv1alpha1.GPUSpec{
+					Vendor: aiv1alpha1.AcceleratorVendorMetax,
+					Model:  testGPUModelMXC550,
+				}
+			})
+			Expect(spec.NodeSelector).To(Equal(map[string]string{
+				testProductLabelMetax: testGPUModelMXC550,
+			}))
+			// One model is a nodeSelector, not a nodeAffinity term: there is
+			// nothing to OR a single value against.
+			Expect(spec.Affinity).To(BeNil())
+		})
+
+		It("pins an nvidia model on the label nvidia's plugin writes", func() {
+			spec := render(func(env *aiv1alpha1.DevEnvironment) {
+				env.Spec.Resources.GPU = &aiv1alpha1.GPUSpec{
+					Vendor: aiv1alpha1.AcceleratorVendorNvidia,
+					Model:  testGPUModelH200,
+				}
+			})
+			Expect(spec.NodeSelector).To(Equal(map[string]string{testProductLabelNvidia: testGPUModelH200}))
+		})
+
+		// Asking for a vendor's accelerator without naming a model leaves the
+		// placement open, and an environment that asks for no accelerator at all
+		// must carry no selector either. Either way the pod spec says nothing
+		// about where it runs, which is what keeps a model-less environment
+		// digesting exactly as it did before the field existed.
+		It("selects no node when no model is named", func() {
+			Expect(render(nil).NodeSelector).To(BeEmpty())
+			Expect(render(func(env *aiv1alpha1.DevEnvironment) {
+				env.Spec.Image = testMetaxImage
+				env.Spec.Resources.GPU = metaxGPU()
+			}).NodeSelector).To(BeEmpty())
+		})
+
+		// The model narrows where the pod runs and nothing else: the extended
+		// resource still comes from the vendor, so a pinned environment claims
+		// exactly what an unpinned one of the same vendor claims.
+		It("leaves the claimed resource to the vendor", func() {
+			spec := render(func(env *aiv1alpha1.DevEnvironment) {
+				env.Spec.Image = testMetaxImage
+				env.Spec.Resources.GPU = &aiv1alpha1.GPUSpec{
+					Vendor: aiv1alpha1.AcceleratorVendorMetax,
+					Model:  testGPUModelMXC550,
+				}
+			})
+			c := spec.Containers[0]
+			Expect(c.Resources.Requests).To(HaveKey(corev1.ResourceName("metax-tech.com/gpu")))
+			Expect(c.Resources.Limits).To(HaveKey(corev1.ResourceName("metax-tech.com/gpu")))
 		})
 
 		// Host networking is the difference between the two fabrics, not an
@@ -3323,6 +3424,60 @@ var _ = Describe("DevEnvironment controller", func() {
 				g.Expect(sts.Annotations[stsSpecHashAnnotationKey]).NotTo(Equal(before))
 				g.Expect(sts.Spec.Template.Spec.Containers[0].Resources.Requests).
 					To(HaveKey(corev1.ResourceName(testRDMAIBResource)))
+			}, "15s", "200ms").Should(Succeed())
+		})
+
+		// Naming a model is a change the pod template carries, and the pod
+		// template is only reapplied when the hash changes: without the hash
+		// covering the field the environment would keep scheduling wherever it
+		// already was, and spec.resources.gpu.model would read as a request the
+		// platform accepted and never honoured.
+		It("rolls the StatefulSet when a GPU model is named, and not before", func() {
+			env := validDevEnvironment("de-gpu-model-roll")
+			Expect(k8sClient.Create(ctx, env)).To(Succeed())
+			defer deleteEnv(env.Name)
+
+			var before string
+			Eventually(func(g Gomega) {
+				sts := &appsv1.StatefulSet{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), sts)).To(Succeed())
+				before = sts.Annotations[stsSpecHashAnnotationKey]
+				g.Expect(before).NotTo(BeEmpty())
+				// A gpu block with no model names no card, so it constrains
+				// nothing: the environment asks for the vendor's accelerator and
+				// takes whichever node offers one.
+				g.Expect(sts.Spec.Template.Spec.NodeSelector).To(BeEmpty())
+			}, "15s", "200ms").Should(Succeed())
+
+			// Deleting the StatefulSet is what makes the no-roll claim checkable:
+			// the reconcile that recreates it recomputes the hash from scratch,
+			// so a recreated StatefulSet carrying the same hash proves an unset
+			// model contributes nothing to it. Asserting only that the annotation
+			// did not move would also pass if no reconcile ever ran.
+			sts := &appsv1.StatefulSet{}
+			Expect(k8sClient.Get(ctx, envKey(env.Name), sts)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, sts)).To(Succeed())
+
+			Eventually(func(g Gomega) {
+				recreated := &appsv1.StatefulSet{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), recreated)).To(Succeed())
+				g.Expect(recreated.Annotations[stsSpecHashAnnotationKey]).To(Equal(before))
+			}, "15s", "200ms").Should(Succeed())
+
+			// The image is the cuda base, so the model has to be an nvidia one:
+			// a metax model here would contradict the brand gate and the
+			// environment would be refused rather than rolled.
+			updateEnvSpec(env.Name, func(e *aiv1alpha1.DevEnvironment) {
+				e.Spec.Resources.GPU.Model = testGPUModelH200
+			})
+
+			Eventually(func(g Gomega) {
+				sts := &appsv1.StatefulSet{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), sts)).To(Succeed())
+				g.Expect(sts.Annotations[stsSpecHashAnnotationKey]).NotTo(Equal(before))
+				g.Expect(sts.Spec.Template.Spec.NodeSelector).To(Equal(map[string]string{
+					testProductLabelNvidia: testGPUModelH200,
+				}))
 			}, "15s", "200ms").Should(Succeed())
 		})
 

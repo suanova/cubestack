@@ -115,15 +115,37 @@ type ResourcesSpec struct {
 	Memory string `json:"memory,omitempty"`
 }
 
-// GPUSpec requests accelerators: how many, and of which vendor. It exists only
-// when the environment asks for at least one, so a vendor can never describe a
-// device that is not there.
+// GPUSpec requests accelerators: how many, of which vendor, and — optionally —
+// which of the vendor's models. It exists only when the environment asks for at
+// least one, so a vendor can never describe a device that is not there.
 type GPUSpec struct {
 	// Vendor is the GPU vendor: nvidia / metax. It decides the GPU extended
 	// resource (nvidia.com/gpu / metax-tech.com/gpu) and image brand matching.
 	// +kubebuilder:default=nvidia
 	// +optional
 	Vendor AcceleratorVendor `json:"vendor,omitempty"`
+
+	// Model restricts the environment to a single GPU model the vendor offers,
+	// e.g. MXC550. It has to name a model of the declared vendor
+	// (spec.resources.gpu.vendor), and is matched against the model the cluster
+	// advertises for that vendor, so it is written as that vendor reports the
+	// model rather than in any platform's own spelling. Omit it to take any node
+	// offering the vendor's accelerator.
+	//
+	// The advertised model is a node label's value, and the field is held to that
+	// shape — a vendor that names a card "MXC 550" advertises it as "MXC-550".
+	// The shape is enforced rather than left to select nothing, because no
+	// cluster could ever satisfy the other one; a model that is valid but absent
+	// is a different matter, and is handled below.
+	//
+	// A model no node offers is a matter of what the cluster has rather than of
+	// what the spec asks for, so the environment stays Pending with the
+	// scheduling failure reported against it — the spec is applied as written.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$`
+	// +optional
+	Model string `json:"model,omitempty"`
 
 	// Count is the number of GPU cards to request. Omit it for the default of 1.
 	// There is no zero: omitting the whole gpu block is how an environment asks

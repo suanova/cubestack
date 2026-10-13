@@ -44,6 +44,15 @@ const (
 
 	testGPUModelMXC500 = "MXC500"
 	testGPUModelMXC550 = "MXC550"
+	testGPUModelH200   = "H200"
+
+	// The node labels the two device plugins write a model to, written out here
+	// rather than read from vendorProductLabel: what these assertions are about
+	// is the label being the plugin's own, and a mapping compared with itself
+	// would prove nothing. goconst counts a package's literals across its test
+	// files too, which is why they are named rather than repeated.
+	testProductLabelNvidia = "nvidia.com/gpu.product"
+	testProductLabelMetax  = "metax-tech.com/gpu.product"
 )
 
 // testExecProbeCommand is the command line of the exec-probe specs: the
@@ -141,11 +150,11 @@ var _ = Describe("buildPodSpec", func() {
 
 	It("attaches a required nodeAffinity In term for multi-model accelerators", func() {
 		spec := &corev1.PodSpec{}
-		attachModelNodeAffinity(spec, "metax-tech.com/gpu.product", []string{testGPUModelMXC500, testGPUModelMXC550})
+		attachModelNodeAffinity(spec, testProductLabelMetax, []string{testGPUModelMXC500, testGPUModelMXC550})
 		Expect(spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution).To(Equal(&corev1.NodeSelector{
 			NodeSelectorTerms: []corev1.NodeSelectorTerm{{
 				MatchExpressions: []corev1.NodeSelectorRequirement{{
-					Key:      "metax-tech.com/gpu.product",
+					Key:      testProductLabelMetax,
 					Operator: corev1.NodeSelectorOpIn,
 					Values:   []string{testGPUModelMXC500, testGPUModelMXC550},
 				}},
@@ -156,12 +165,12 @@ var _ = Describe("buildPodSpec", func() {
 		// node matching another term alone would otherwise schedule without the
 		// model label.
 		spec2 := &corev1.PodSpec{}
-		attachModelNodeAffinity(spec2, "metax-tech.com/gpu.product", []string{testGPUModelMXC500})
+		attachModelNodeAffinity(spec2, testProductLabelMetax, []string{testGPUModelMXC500})
 		attachModelNodeAffinity(spec2, "example.com/extra", []string{"a"})
 		Expect(spec2.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution).To(Equal(&corev1.NodeSelector{
 			NodeSelectorTerms: []corev1.NodeSelectorTerm{{
 				MatchExpressions: []corev1.NodeSelectorRequirement{
-					{Key: "metax-tech.com/gpu.product", Operator: corev1.NodeSelectorOpIn, Values: []string{testGPUModelMXC500}},
+					{Key: testProductLabelMetax, Operator: corev1.NodeSelectorOpIn, Values: []string{testGPUModelMXC500}},
 					{Key: "example.com/extra", Operator: corev1.NodeSelectorOpIn, Values: []string{"a"}},
 				},
 			}},
@@ -378,5 +387,23 @@ var _ = Describe("buildPodSpec", func() {
 		Expect(c.StartupProbe.FailureThreshold).To(Equal(int32(180)))
 		Expect(spec.NodeSelector).To(Equal(map[string]string{"pool": "gpu"}))
 		Expect(spec.DNSPolicy).To(Equal(corev1.DNSClusterFirstWithHostNet))
+	})
+})
+
+var _ = Describe("vendorProductLabel", func() {
+	It("maps nvidia to the label its device plugin writes", func() {
+		Expect(vendorProductLabel(aiv1alpha1.AcceleratorVendorNvidia)).To(Equal(testProductLabelNvidia))
+	})
+
+	It("maps metax to the label its device plugin writes", func() {
+		Expect(vendorProductLabel(aiv1alpha1.AcceleratorVendorMetax)).To(Equal(testProductLabelMetax))
+	})
+
+	// The mapping is total like vendorResource's, and defaults the same way: an
+	// unrecognised vendor has to land on one of the two labels rather than on
+	// none, or a half-filled spec would be pinned to a label no plugin writes.
+	It("resolves an unrecognised vendor to the metax label", func() {
+		Expect(vendorProductLabel(aiv1alpha1.AcceleratorVendor("amd"))).To(Equal(testProductLabelMetax))
+		Expect(vendorProductLabel("")).To(Equal(testProductLabelMetax))
 	})
 })

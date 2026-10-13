@@ -1,5 +1,7 @@
 # CubeStack 智算云平台
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/suanova/cubestack)
+
 企业级 AI 基础设施控制平面，基于 Kubernetes 统一底座，通过 CRD + Controller 模式向上扩展 AI 能力。聚焦智算资源管理、AI 工作负载编排与智能运维，支持完全私有化部署。
 
 ## 核心功能

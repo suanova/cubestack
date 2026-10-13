@@ -32,6 +32,18 @@ function stubOptions(page: Page) {
   return page.route("**/api/devenvironments/options", (route) => route.fulfill({ json: OPTIONS }));
 }
 
+// The environment's own Jupyter token, served the way the route serves it: only
+// when the card asks. Returns the request log, so a test can prove the credential
+// is not fetched for a card the user merely selected.
+function stubToken(page: Page, token = "itest-jupyter-token-0f3a"): string[] {
+  const requests: string[] = [];
+  page.route("**/api/devenvironments/token?*", (route) => {
+    requests.push(route.request().url());
+    return route.fulfill({ json: { token, secret: { name: "jupyter-nlp-ln-jupyter-token", namespace: "project-a" } } });
+  });
+  return requests;
+}
+
 /**
  * Step 3's account, uid and gid boxes, in render order (the root toggle is a
  * checkbox). Scoped to the security section: the other three sections of the
@@ -103,6 +115,7 @@ test.describe("dev environments landing (mocked data)", () => {
 
   test("selecting an environment opens its connection + spec detail", async ({ page }) => {
     await stubList(page, { items: devEnvironmentList() });
+    const requests = stubToken(page);
     await page.goto("/cubestack/dev-environments");
 
     await page.locator('[data-od-id="dev-row-jupyter-nlp-ln"]').click();
@@ -110,6 +123,12 @@ test.describe("dev environments landing (mocked data)", () => {
     const detail = page.locator("body");
     await expect(detail).toContainText("连接信息");
     await expect(detail).toContainText("https://dev.cubestack.local/ws/jupyter-nlp-ln");
+    // The endpoint opens the container's own UI: it is an anchor, not text the
+    // user has to select and paste, and Copy is still beside it.
+    const endpoint = page.locator('[data-od-id="endpoint-link"]').first();
+    await expect(endpoint).toHaveAttribute("href", "https://dev.cubestack.local/ws/jupyter-nlp-ln");
+    await expect(endpoint).toHaveAttribute("target", "_blank");
+    await expect(detail.getByRole("button", { name: "复制" }).first()).toBeVisible();
     await expect(detail).toContainText("规格与状态");
     await expect(detail).toContainText("harbor.isuanova.com/suanova/jupyter-cuda-pytorch:latest");
     await expect(detail).toContainText("1 × nvidia");
@@ -121,12 +140,22 @@ test.describe("dev environments landing (mocked data)", () => {
     await expect(detail).toContainText("python -m jupyter lab");
     await expect(detail).toContainText("--port 8080");
     await expect(detail).toContainText("api:8080/http");
-    // The jupyter token is named where it lives, plus the command that reads
-    // it — the portal has no cluster-wide Secret access to show the value.
-    await expect(detail).toContainText("jupyter-nlp-ln-jupyter-token");
-    await expect(detail).toContainText(
-      "kubectl -n project-a get secret jupyter-nlp-ln-jupyter-token -o jsonpath='{.data.token}' | base64 -d",
-    );
+    // The jupyter token is the token itself, masked until asked for: the card
+    // used to hand the user a `kubectl` command to run against a cluster.
+    await expect(detail).toContainText("Jupyter Token");
+    await expect(page.locator('[data-od-id="token-secret"]')).toContainText("project-a/jupyter-nlp-ln-jupyter-token");
+    await expect(page.locator('[data-od-id="token-value"]')).toHaveText("•".repeat(12));
+    await expect(page.locator('[data-od-id="token-toggle"]')).toHaveAttribute("aria-label", "显示 Token");
+    await expect(detail).not.toContainText("kubectl -n");
+
+    await page.locator('[data-od-id="token-toggle"]').click();
+    await expect(page.locator('[data-od-id="token-value"]')).toHaveText("itest-jupyter-token-0f3a");
+    await expect(page.locator('[data-od-id="token-toggle"]')).toHaveAttribute("aria-label", "隐藏 Token");
+
+    // ...and hiding it again reads nothing a second time.
+    await page.locator('[data-od-id="token-toggle"]').click();
+    await expect(page.locator('[data-od-id="token-value"]')).toHaveText("•".repeat(12));
+    expect(requests).toHaveLength(1);
   });
 
   test("start/stop a stopped environment via the row actions", async ({ page }) => {

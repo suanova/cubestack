@@ -31,6 +31,12 @@ const DASHBOARDS = [
     metadata: { name: "kubernetes-cluster-resources-overview" },
     spec: { display: { name: "Cluster Overview", description: "Cluster resource usage at a glance" } },
   },
+  // Deliberately not first: the landing must open on the platform's own resource
+  // overview because that is what it is, not because of the order Perses listed.
+  {
+    metadata: { name: "resource-overview-dashboard" },
+    spec: { display: { name: "Resource Overview", description: "Nodes, CPU, memory, GPU and RDMA at a glance" } },
+  },
 ];
 
 function viewerText(container: HTMLElement): string {
@@ -88,22 +94,25 @@ describe("dashboards landing page", () => {
     act(() => root.unmount());
   });
 
-  it("renders a dropdown defaulting to the first dashboard and its panels", async () => {
+  it("renders a dropdown defaulting to Resource Overview and its panels", async () => {
     fetchDashboards.mockResolvedValue(DASHBOARDS);
-    fetchDashboard.mockResolvedValue({ metadata: { name: "metax-gpu" }, spec: {} });
+    fetchDashboard.mockImplementation((_project: string, name: string) =>
+      Promise.resolve({ metadata: { name }, spec: {} }),
+    );
 
     const { container, root } = renderPage();
     await act(async () => {});
 
     // The dropdown is present with the localized label.
     expect(container.textContent).toContain("选择看板");
-    // Default selection = first dashboard; its panels render below.
-    expect(fetchDashboard).toHaveBeenCalledWith("monitoring", "metax-gpu");
-    expect(viewerText(container)).toContain("dashboard:metax-gpu");
-    // The select's current value is the first dashboard's display name, and the
+    // The default is the platform's resource overview, which is listed third
+    // here: not "whatever Perses returned first".
+    expect(fetchDashboard).toHaveBeenCalledWith("monitoring", "resource-overview-dashboard");
+    expect(viewerText(container)).toContain("dashboard:resource-overview-dashboard");
+    // The select's current value is that dashboard's display name, and the
     // description is read straight off the dashboard resource (spec.display).
-    expect(container.textContent).toContain("MetaX GPU");
-    expect(container.textContent).toContain("MetaX accelerator: utilization, temperature, power and clocks");
+    expect(container.textContent).toContain("Resource Overview");
+    expect(container.textContent).toContain("Nodes, CPU, memory, GPU and RDMA at a glance");
 
     act(() => root.unmount());
   });
@@ -128,13 +137,32 @@ describe("dashboards landing page", () => {
     act(() => root.unmount());
   });
 
-  it("falls back to the first dashboard when the query param matches nothing", async () => {
+  it("falls back to the default when the query param matches nothing", async () => {
     fetchDashboards.mockResolvedValue(DASHBOARDS);
-    fetchDashboard.mockResolvedValue({ metadata: { name: "metax-gpu" }, spec: {} });
+    fetchDashboard.mockImplementation((_project: string, name: string) =>
+      Promise.resolve({ metadata: { name }, spec: {} }),
+    );
 
     const { container, root } = renderPage(Promise.resolve({ dashboard: "nope-dashboard" }));
     await act(async () => {});
 
+    expect(fetchDashboard).toHaveBeenLastCalledWith("monitoring", "resource-overview-dashboard");
+    expect(viewerText(container)).toContain("dashboard:resource-overview-dashboard");
+
+    act(() => root.unmount());
+  });
+
+  it("falls back to the first dashboard when the project provisions no Resource Overview", async () => {
+    fetchDashboards.mockResolvedValue(DASHBOARDS.filter((d) => d.metadata.name !== "resource-overview-dashboard"));
+    fetchDashboard.mockImplementation((_project: string, name: string) =>
+      Promise.resolve({ metadata: { name }, spec: {} }),
+    );
+
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    // A deployment whose Perses project carries other dashboards is still usable:
+    // it opens on one of them rather than on nothing.
     expect(fetchDashboard).toHaveBeenLastCalledWith("monitoring", "metax-gpu");
     expect(viewerText(container)).toContain("dashboard:metax-gpu");
 
@@ -149,10 +177,10 @@ describe("dashboards landing page", () => {
 
     const { container, root } = renderPage();
     await act(async () => {});
-    expect(viewerText(container)).toContain("dashboard:metax-gpu");
+    expect(viewerText(container)).toContain("dashboard:resource-overview-dashboard");
 
     // Drive the MUI Select's native input (sibling of the combobox, holds the
-    // value) to pick the second dashboard. Set the value through the prototype
+    // value) to pick another dashboard. Set the value through the prototype
     // setter so React's input value tracker isn't bypassed/desynced, then fire
     // the native input event React's onChange listens for.
     const input = container.querySelector<HTMLInputElement>("input.MuiSelect-nativeInput");

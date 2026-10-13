@@ -28,6 +28,12 @@ const (
 	defaultGatewayNamespace = "envoy-gateway-system"
 	defaultL4Start          = 20000
 	defaultL4End            = 20999
+	// The RDMA resources the manager requests by default. Restated from the
+	// controller's own defaults, and reached only when the flag is absent — a
+	// manager that sets neither still requests one of these, so a device case
+	// that read nothing would look for a resource no environment asks for.
+	defaultRDMAIBResource   = "rdma/ib_shared_devices"
+	defaultRDMARoCEResource = "rdma/roce_shared_devices"
 )
 
 // Result is one precondition's outcome.
@@ -86,6 +92,14 @@ type Cluster struct {
 
 	L4Start int32
 	L4End   int32
+
+	// RDMAIBResource and RDMARoCEResource are the extended resources the manager
+	// was told to request, one per fabric. They are flags rather than constants
+	// because the cluster's own device plugin has to advertise the same names, so
+	// a case asking whether this cluster has a fabric has to read what this
+	// manager asks for rather than write a name down.
+	RDMAIBResource   string
+	RDMARoCEResource string
 }
 
 // Check runs every precondition and returns them all.
@@ -190,6 +204,20 @@ func (p Preflight) checkManager(ctx context.Context, c *Cluster) Result {
 			c.L4Start = int32(atoiOr(args["l4-port-range-start"], defaultL4Start))
 			c.L4End = int32(atoiOr(args["l4-port-range-end"], defaultL4End))
 
+			// Read, never required. An absent RDMA flag is not a precondition the
+			// platform failed: it means this manager leaves the resources at their
+			// defaults and the cases below look for those. Adding them to missing
+			// would turn a cluster without RDMA into a run that cannot start, which
+			// is the one outcome the device gate exists to avoid.
+			c.RDMAIBResource = args["rdma-ib-resource"]
+			if c.RDMAIBResource == "" {
+				c.RDMAIBResource = defaultRDMAIBResource
+			}
+			c.RDMARoCEResource = args["rdma-roce-resource"]
+			if c.RDMARoCEResource == "" {
+				c.RDMARoCEResource = defaultRDMARoCEResource
+			}
+
 			var missing []string
 			if c.DataplaneNamespace == "" {
 				missing = append(missing, "--gateway-dataplane-namespace")
@@ -210,8 +238,9 @@ func (p Preflight) checkManager(ctx context.Context, c *Cluster) Result {
 			}
 			return Result{
 				Name: name,
-				Detail: fmt.Sprintf("%s/%s → %s/%s, L4 %d-%d",
-					d.Namespace, d.Name, c.GatewayNamespace, c.GatewayName, c.L4Start, c.L4End),
+				Detail: fmt.Sprintf("%s/%s → %s/%s, L4 %d-%d, RDMA %s | %s",
+					d.Namespace, d.Name, c.GatewayNamespace, c.GatewayName, c.L4Start, c.L4End,
+					c.RDMAIBResource, c.RDMARoCEResource),
 			}
 		}
 	}
