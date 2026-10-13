@@ -2068,6 +2068,9 @@ export function ChatPane() {
                 small
                 onClick={() => setListCollapsed((collapsed) => !collapsed)}
                 title={t(listCollapsed ? "cubepilot.chat.objectsExpand" : "cubepilot.chat.objectsCollapse")}
+                // The glyph is a chevron, so the name has to be spelled out for
+                // readers who cannot see it.
+                aria-label={t(listCollapsed ? "cubepilot.chat.objectsExpand" : "cubepilot.chat.objectsCollapse")}
                 aria-expanded={!listCollapsed}
                 data-od-id="toggle-objects"
               >
