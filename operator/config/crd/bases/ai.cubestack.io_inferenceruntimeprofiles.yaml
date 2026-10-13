@@ -267,6 +267,33 @@ spec:
                     <isvc>-<role>; the role name is the reference anchor for endpoint.role,
                     dependsOn and templates.
                   properties:
+                    accelerator:
+                      description: |-
+                        Accelerator overrides the profile-level accelerator for this role: a
+                        complete {vendor, models} replacement for heterogeneous profiles (design
+                        §3.2 roles[].accelerator). A role declaring it must declare
+                        podTemplate.resources.gpuPerPod (L1).
+                      properties:
+                        models:
+                          description: |-
+                            Models restricts the schedulable GPU models, e.g. MXC500. The controller
+                            injects node selection constraints based on the declared models.
+                          items:
+                            type: string
+                          minItems: 1
+                          type: array
+                        vendor:
+                          description: |-
+                            Vendor is the GPU vendor, mapped to a Kubernetes GPU extended resource
+                            name, e.g. metax -> metax-tech.com/gpu, nvidia -> nvidia.com/gpu.
+                          enum:
+                          - metax
+                          - nvidia
+                          type: string
+                      required:
+                      - models
+                      - vendor
+                      type: object
                     dependsOn:
                       description: |-
                         DependsOn lists roles that must be ready before this one is created,

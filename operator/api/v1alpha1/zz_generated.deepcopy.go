@@ -1452,6 +1452,11 @@ func (in *Role) DeepCopyInto(out *Role) {
 	}
 	in.Workload.DeepCopyInto(&out.Workload)
 	in.PodTemplate.DeepCopyInto(&out.PodTemplate)
+	if in.Accelerator != nil {
+		in, out := &in.Accelerator, &out.Accelerator
+		*out = new(Accelerator)
+		(*in).DeepCopyInto(*out)
+	}
 	if in.Service != nil {
 		in, out := &in.Service, &out.Service
 		*out = new(RoleService)

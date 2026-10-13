@@ -489,3 +489,16 @@ var _ = Describe("InferenceRuntimeProfile", func() {
 		)
 	})
 })
+
+var _ = Describe("Role.EffectiveAccelerator", func() {
+	It("returns the role's own accelerator when declared", func() {
+		role := &Role{Accelerator: &Accelerator{Vendor: AcceleratorVendorNvidia, Models: []string{"H200"}}}
+		profileAccel := Accelerator{Vendor: AcceleratorVendorMetax, Models: []string{"MXC500"}}
+		Expect(role.EffectiveAccelerator(profileAccel)).To(Equal(*role.Accelerator))
+	})
+
+	It("falls back to the profile-level accelerator when not declared", func() {
+		profileAccel := Accelerator{Vendor: AcceleratorVendorMetax, Models: []string{"MXC500"}}
+		Expect((&Role{}).EffectiveAccelerator(profileAccel)).To(Equal(profileAccel))
+	})
+})
