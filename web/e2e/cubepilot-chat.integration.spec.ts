@@ -11,6 +11,11 @@ const CHAT_ENABLED = process.env.CUBEPILOT_E2E_CHAT === "1";
 test.describe("cubepilot chat against the real backend", () => {
   test.skip(!CHAT_ENABLED, "set CUBEPILOT_E2E_CHAT=1 with a real CUBEPILOT_LLM_APIKEY");
 
+  // The waits below budget a real model (240s + 180s + 180s in the heaviest
+  // test), but the config's `timeout` is the webServer's and the framework
+  // default is 30s, under which none of them could ever elapse.
+  test.describe.configure({ timeout: 720_000 });
+
   test.beforeEach(async ({ context }) => {
     await seedSession(context);
   });
@@ -32,7 +37,14 @@ test.describe("cubepilot chat against the real backend", () => {
     await openChat(page);
     await page.locator('[data-od-id="chat-input"]').fill("用一句话打招呼。");
     await page.locator('[data-od-id="send-btn"]').click();
-    await expect(page.locator('[data-od-id="agent-bubble"]').first()).toBeVisible({ timeout: 180_000 });
+    // The bubble draws from the turn's start — its CUBEPILOT label and a
+    // thinking line precede any content — so visibility alone would pass
+    // against a dead backend. Require a text block, then a clean end.
+    await expect(page.locator('[data-od-block="text"]').first()).toBeVisible({ timeout: 180_000 });
+    await expect(page.locator('[data-od-id="stop-btn"]')).toHaveCount(0, { timeout: 180_000 });
+    await expect(page.locator('[data-od-id="agent-error"]')).toHaveCount(0);
+    await expect(page.locator('[data-od-id="agent-lost"]')).toHaveCount(0);
+    await expect(page.locator('[data-od-id="agent-stopped"]')).toHaveCount(0);
   });
 
   test("a write parks on an approval card, and approving lets the turn finish", async ({ page }) => {
@@ -50,13 +62,18 @@ test.describe("cubepilot chat against the real backend", () => {
   });
 
   test("a reload restores the conversation", async ({ page }) => {
+    const marker = process.env.E2E_MARKER ?? "";
+    expect(marker, "E2E_MARKER must be exported by setup.sh / the workflow").not.toBe("");
+
     await openChat(page);
-    await page.locator('[data-od-id="chat-input"]').fill("用一句话记住:集成测试标记。");
+    await page.locator('[data-od-id="chat-input"]').fill(`用一句话记住:集成测试标记 ${marker}。`);
     await page.locator('[data-od-id="send-btn"]').click();
     await expect(page.locator('[data-od-id="agent-bubble"]').first()).toBeVisible({ timeout: 180_000 });
 
     await page.reload();
-    // History comes from cubepilot-api through the proxy, not from memory.
-    await expect(page.locator('[data-od-id="agent-bubble"]').first()).toBeVisible({ timeout: 60_000 });
+    // History comes from cubepilot-api through the proxy, not from memory. The
+    // marker pins the restored thread to THIS turn: the pane's session key is
+    // fixed, so a bare bubble assertion is satisfied by the earlier tests.
+    await expect(page.locator('[data-od-id="chat-thread"]')).toContainText(marker, { timeout: 60_000 });
   });
 });
