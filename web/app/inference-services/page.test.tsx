@@ -730,6 +730,30 @@ describe("deploy wizard", () => {
     act(() => root.unmount());
   });
 
+  it("falls back to the profile vendor when the profile's roles lack prefill/decode", async () => {
+    // The wizard must never blank the select when roles[] is absent or named
+    // differently: the profile-level vendor is the fallback, matching the
+    // options projection's effective value.
+    const noRolesOptions = {
+      ...OPTIONS,
+      profiles: OPTIONS.profiles.map((p) => ({ ...p, roles: [] })),
+    };
+    const { container, root } = renderWithBoth(noRolesOptions);
+    await act(async () => {});
+    const deployBtn = container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement;
+    await act(async () => {
+      deployBtn.click();
+    });
+    await act(async () => {});
+    await fillNameAndGoToStep2();
+
+    const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
+    expect(selectText(step2.querySelector('[data-od-id="wizard-gpu-prefill"]'))).toBe("metax");
+    expect(selectText(step2.querySelector('[data-od-id="wizard-gpu-decode"]'))).toBe("metax");
+
+    act(() => root.unmount());
+  });
+
   it("renders a single GPU type select for a standard profile", async () => {
     const standardOptions = {
       ...OPTIONS,

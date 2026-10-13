@@ -280,6 +280,8 @@ test.describe("inference services landing (mocked data)", () => {
     await expect(page.locator('[data-step="2"]')).toContainText("deepseek-v4-flash-w8a8-v1");
     await page.getByRole("button", { name: "下一步" }).click();
     await expect(page.locator('[data-step="3"]')).toBeVisible();
+    // Step 3: the summary spells out both roles' declared accelerators.
+    await expect(page.locator('[data-step="3"]')).toContainText("prefill: metax / decode: nvidia");
 
     // Step 3: create and expect the new service to appear and be selected.
     await page.locator('[data-od-id="wizard-create"]').click();
