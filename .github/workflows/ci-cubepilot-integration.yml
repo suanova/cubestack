@@ -3,8 +3,8 @@
 # It lives in its own workflow (own paths filter, own job) so the existing
 # ci-portal.yml jobs are neither slowed nor re-run by it.
 #
-# The conversational layer needs a real provider key (secret
-# CUBEPILOT_LLM_APIKEY, vars CUBEPILOT_LLM_ENDPOINT / CUBEPILOT_LLM_MODEL).
+# The conversational layer needs a real provider key (secret LLM_APIKEY, vars
+# LLM_ENDPOINT / LLM_MODEL).
 # Without it the job still runs the deploy path and the L1 specs.
 name: CI Portal x CubePilot integration
 
@@ -44,8 +44,8 @@ jobs:
       # boolean here lets the login gate on the password; the `secrets` context
       # is not available in a step `if`, so the login reads this instead.
       CI_BOT_PASSWORD_SET: ${{ secrets.CI_BOT_PASSWORD != '' }}
-      CUBEPILOT_LLM_ENDPOINT: ${{ vars.CUBEPILOT_LLM_ENDPOINT || 'https://api.deepseek.com' }}
-      CUBEPILOT_LLM_MODEL: ${{ vars.CUBEPILOT_LLM_MODEL || 'deepseek-v4-flash' }}
+      CUBEPILOT_LLM_ENDPOINT: ${{ vars.LLM_ENDPOINT || 'https://api.deepseek.com' }}
+      CUBEPILOT_LLM_MODEL: ${{ vars.LLM_MODEL || 'deepseek-v4-flash' }}
     steps:
       - name: Clone the code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -89,15 +89,14 @@ jobs:
           # Optional manual override for the drift check; empty uses the chart
           # the bring-up would pick on its own.
           CUBEPILOT_CHART_VERSION: ${{ inputs.chartVersion }}
-          CUBEPILOT_LLM_APIKEY: ${{ secrets.CUBEPILOT_LLM_APIKEY || 'sk-placeholder' }}
+          CUBEPILOT_LLM_APIKEY: ${{ secrets.LLM_APIKEY || 'sk-placeholder' }}
         run: bash web/e2e/deploy/integration/setup.sh
       # Only the chat layer needs a real key; a fork PR never has the secret,
       # so that layer skips and the rest still runs.
       - name: Run the integration suite
         working-directory: web
         env:
-          CUBEPILOT_E2E_CHAT: ${{ secrets.CUBEPILOT_LLM_APIKEY != '' && '1' || '0' }}
-          CUBEPILOT_LLM_APIKEY: ${{ secrets.CUBEPILOT_LLM_APIKEY || 'sk-placeholder' }}
+          CUBEPILOT_E2E_CHAT: ${{ secrets.LLM_APIKEY != '' && '1' || '0' }}
         run: npm run test:e2e:integration
       # Independent of the portal: prove the CR the UI wrote really is in the
       # cluster, so a portal-side bug cannot fake the assertion.

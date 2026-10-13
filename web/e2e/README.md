@@ -97,10 +97,11 @@ release, so a red run there can mean a new cubepilot release rather than a
 portal regression — check which side moved before debugging the portal.
 
 Being honest about what has and has not been exercised: the Layer 2 tests have
-never been executed in this repository. The CI job has no provider key (a fork
-PR never does), so it reports them as skipped, and only the Layer 1 tests and
-the gated (skipping) shape are proven there. Verify Layer 2 yourself with a
-real key before trusting it; the section above gives the two commands.
+never actually run anywhere. They skip unless a provider key is present, and a
+fork PR never carries one, so a fork PR proves only the Layer 1 tests and the
+gated (skipping) shape. The key is configured on the upstream repo, so the job
+runs Layer 2 for real there. Verify it locally too; the section above gives the
+two commands.
 
 ## One-time setup
 
