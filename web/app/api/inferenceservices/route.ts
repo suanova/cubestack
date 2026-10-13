@@ -662,3 +662,36 @@ async function queryRange(
   }
   return out;
 }
+
+// ── delete (DELETE) ──────────────────────────────────────────────────────────
+
+export const DELETE = withAuth(async (req) => {
+  // Held outside the try so the 404 below can name the object it could not find:
+  // the sentence the console renders is built from it.
+  let name = "";
+  try {
+    const body = (await req.json()) as { namespace?: string; name?: string };
+    name = body.name ?? "";
+    if (!body.namespace || !body.name) {
+      return Response.json({ error: "namespace and name are required" }, { status: 400 });
+    }
+    const co = getCustomObjectsClient();
+    await co.deleteNamespacedCustomObject({
+      group: GROUP,
+      version: VERSION,
+      namespace: body.namespace,
+      plural: PLURAL_ISVC,
+      name: body.name,
+    });
+    return Response.json({ ok: true });
+  } catch (err) {
+    console.error("Failed to delete inference service:", err);
+    const status =
+      (err as { statusCode?: number })?.statusCode === 404
+        ? // The object was already gone. A code like the 400s, so the console can
+          // say it in the user's language instead of a Chinese literal.
+          { error: "nameMissing", params: { name }, status: 404 }
+        : { error: "Failed to delete inference service", status: 500 };
+    return Response.json(status, { status: status.status });
+  }
+});

@@ -8,7 +8,7 @@
 // (decodeReplicas / prefillReplicas / groupSize) via a PATCH. Metrics are
 // best-effort Prometheus data and show an empty state when absent.
 
-import { Box, Button, Dialog, DialogActions, DialogContent, DialogTitle, MenuItem, Select, Switch, TextField, Typography, Stepper, Step, StepLabel } from "@mui/material";
+import { Box, Button, Dialog, DialogActions, DialogContent, DialogTitle, Menu, MenuItem, Select, Switch, TextField, Typography, Stepper, Step, StepLabel } from "@mui/material";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { CreateOptionsResponse } from "@/app/api/inferenceservices/options/route";
@@ -126,6 +126,10 @@ export default function InferenceServicesPage() {
   const [scaleMsg, setScaleMsg] = useState<string | null>(null);
   const [scaleErr, setScaleErr] = useState<string | null>(null);
   const [deployOpen, setDeployOpen] = useState(false);
+  // The delete flow: the row names the target, the row's dialog confirms it, and
+  // a failure lands in a dialog of its own.
+  const [pendingDelete, setPendingDelete] = useState<InferenceServiceSummary | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   // After a successful deploy, select the just-created service on the next
   // reload (the ref is consumed by load()). Holds the composite namespace/name
@@ -208,6 +212,28 @@ export default function InferenceServicesPage() {
     },
     [selected, load, t],
   );
+
+  /**
+   * Delete the service the dialog is about. It comes off the dialog's state
+   * rather than the row's: the confirming click is the dialog's, and by the time
+   * it fires the row it named may be behind a menu that has already closed.
+   */
+  const confirmDelete = () => {
+    if (!pendingDelete) return;
+    const { namespace, name } = pendingDelete;
+    setPendingDelete(null);
+    apiFetch("/api/inferenceservices", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ namespace, name }),
+    })
+      .then(async (res) => {
+        const body = (await res.json().catch(() => ({}))) as ValidationErrorBody;
+        if (!res.ok) throw new Error(validationMessage(t, body, res.status, "inf"));
+        load();
+      })
+      .catch((err: Error) => setActionError(err.message));
+  };
 
   return (
     <>
@@ -326,33 +352,35 @@ export default function InferenceServicesPage() {
             </Typography>
           </Box>
 
-          <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", lg: "minmax(0,1fr) 348px" }, gap: "14px", alignItems: "start" }}>
-            <ServiceTable items={visible} selectedKey={selected ? svcKey(selected) : null} onSelect={setSelKey} />
-            {items.length === 0 ? (
-              <Box sx={{ border: 1, borderColor: "divider", borderRadius: "var(--radius)", bgcolor: "background.paper", p: "48px 20px", textAlign: "center", fontSize: 13, color: "text.secondary" }}>
-                {t("inf.empty")}
-              </Box>
-            ) : selected ? (
-              // Keyed by the composite service identity so the panel (and the
-              // scale panel's local state) remounts on every selection change;
-              // without it, switching from a service with no declared
-              // overrides to one that has them would render inputs with
-              // undefined values for a frame (uncontrolled -> controlled).
-              <DetailPanel
-                key={svcKey(selected)}
-                s={selected}
-                busy={scaleBusy}
-                msg={scaleMsg}
-                err={scaleErr}
-                onApply={handleApply}
-              />
-            ) : (
-              <Box sx={{ p: "48px 20px", textAlign: "center", fontSize: 13, color: "text.secondary" }}>{t("inf.filter.none")}</Box>
-            )}
-          </Box>
+          {/* Only the table: the detail is disclosed inside it, under the row
+              it belongs to, so there is no second column to give it. Clicking
+              the open row closes it again. */}
+          <ServiceTable
+            items={visible}
+            total={items.length}
+            selectedKey={selected ? svcKey(selected) : null}
+            onSelect={(key) => setSelKey((prev) => (prev === key ? null : key))}
+            // The row's button only names the target; the dialog mounted below
+            // asks. Deleting cannot be taken back, so the request waits for its
+            // answer rather than firing under the click.
+            onDelete={setPendingDelete}
+            busy={scaleBusy}
+            msg={scaleMsg}
+            err={scaleErr}
+            onApply={handleApply}
+          />
         </>
       )}
     </Box>
+
+    {pendingDelete ? (
+      <DeleteServiceDialog
+        s={pendingDelete}
+        onClose={() => setPendingDelete(null)}
+        onConfirm={confirmDelete}
+      />
+    ) : null}
+    {actionError ? <ErrorDialog message={actionError} onClose={() => setActionError(null)} /> : null}
 
     <DeployWizard
       key={deployOpen ? "open" : "closed"}
@@ -371,14 +399,167 @@ export default function InferenceServicesPage() {
 
 // ── service table ─────────────────────────────────────────────────────────
 
+/** The row's disclosure caret: it points at the detail, so it turns when the row is open. */
+function Caret({ open }: { open: boolean }) {
+  return (
+    <Box
+      component="span"
+      aria-hidden="true"
+      sx={{
+        display: "inline-flex",
+        flex: "none",
+        color: open ? "var(--accent-strong)" : "var(--muted)",
+        transition: "transform .16s ease",
+        transform: open ? "rotate(90deg)" : "none",
+        "@media (prefers-reduced-motion: reduce)": { transition: "none" },
+      }}
+    >
+      <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round">
+        <path d="m9 6 6 6-6 6" />
+      </svg>
+    </Box>
+  );
+}
+
+/**
+ * The row's actions. A closed row keeps them behind a kebab, where they cost one
+ * column and the table stays a table; the open row has the width to lay them out
+ * in, so it does (`open`).
+ *
+ * Delete is the only one. An InferenceService has no start/stop to offer — the
+ * profile's override knobs are the console's other handle on a service, and they
+ * are edited in the panel the row opens onto rather than from the row.
+ *
+ * The menu is a MUI `Menu` rather than an absolutely positioned box, because the
+ * table sits in a scroll container that would clip a menu laid out inside it.
+ */
+function RowActions({
+  s,
+  onDelete,
+  open,
+}: {
+  s: InferenceServiceSummary;
+  onDelete: (s: InferenceServiceSummary) => void;
+  open: boolean;
+}) {
+  const { t } = useI18n();
+  const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+  const itemSx = { fontSize: 12.5, fontWeight: 550, px: "11px", py: "7px", borderRadius: "6px" };
+  // Worn by the button whether it is drawn flat or in the menu, so the two
+  // layouts cannot drift apart on what the action is styled as.
+  const flatSx = {
+    minWidth: 0,
+    px: "10px",
+    py: "3px",
+    fontSize: 12,
+    textTransform: "none",
+    whiteSpace: "nowrap",
+    borderColor: "divider",
+    bgcolor: "background.paper",
+  } as const;
+  const run = () => {
+    // Deleting removes the row — and with it the kebab MUI hands focus back to —
+    // which would leave the closing dialog aria-hidden around a focused item.
+    // Drop that focus first so there is nothing to hide.
+    (document.activeElement as HTMLElement | null)?.blur();
+    setAnchor(null);
+    onDelete(s);
+  };
+  const dangerSx = {
+    ...flatSx,
+    color: STATUS_ERR,
+    borderColor: soft(STATUS_ERR, 55),
+    "&:hover": { borderColor: STATUS_ERR, bgcolor: soft(STATUS_ERR, 10) },
+  };
+  if (open) {
+    return (
+      <Box onClick={(ev) => ev.stopPropagation()} sx={{ display: "inline-flex" }}>
+        <Button size="small" variant="outlined" data-od-id={`act-del-${s.name}`} onClick={run} sx={dangerSx}>
+          {t("inf.act.delete")}
+        </Button>
+      </Box>
+    );
+  }
+  return (
+    // The row itself is the selection control, so the kebab and its item must
+    // not reach it: one click means one thing.
+    <Box onClick={(ev) => ev.stopPropagation()} sx={{ display: "inline-flex" }}>
+      <Button
+        size="small"
+        data-od-id={`svc-ops-${s.name}`}
+        aria-label={t("inf.col.ops")}
+        aria-haspopup="menu"
+        aria-expanded={anchor ? "true" : "false"}
+        onClick={(ev) => setAnchor(ev.currentTarget)}
+        sx={{
+          minWidth: 0,
+          width: 30,
+          height: 30,
+          p: 0,
+          border: 1,
+          borderColor: "divider",
+          borderRadius: "6px",
+          bgcolor: "background.paper",
+          color: "text.primary",
+          "&:hover": { borderColor: "text.primary", bgcolor: "var(--surface)" },
+        }}
+      >
+        <Box component="svg" viewBox="0 0 16 16" aria-hidden sx={{ width: 16, height: 16, fill: "currentColor" }}>
+          <circle cx="3" cy="8" r="1.5" />
+          <circle cx="8" cy="8" r="1.5" />
+          <circle cx="13" cy="8" r="1.5" />
+        </Box>
+      </Button>
+      <Menu
+        open={anchor !== null}
+        anchorEl={anchor}
+        onClose={() => setAnchor(null)}
+        anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+        transformOrigin={{ vertical: "top", horizontal: "right" }}
+        slotProps={{
+          paper: {
+            sx: {
+              minWidth: 128,
+              mt: "6px",
+              border: 1,
+              borderColor: "divider",
+              borderRadius: "8px",
+              boxShadow: "0 12px 28px color-mix(in oklch, var(--fg) 14%, transparent)",
+            },
+          },
+          list: { sx: { py: "4px", px: "4px" } },
+        }}
+      >
+        <MenuItem data-od-id={`act-del-${s.name}`} onClick={run} sx={{ ...itemSx, color: STATUS_ERR }}>
+          {t("inf.act.delete")}
+        </MenuItem>
+      </Menu>
+    </Box>
+  );
+}
+
 function ServiceTable({
   items,
+  total,
   selectedKey,
   onSelect,
+  onDelete,
+  busy,
+  msg,
+  err,
+  onApply,
 }: {
   items: InferenceServiceSummary[];
+  total: number;
   selectedKey: string | null;
   onSelect: (key: string) => void;
+  onDelete: (s: InferenceServiceSummary) => void;
+  // The detail panel's own state, threaded straight through: the table is what
+  // renders the panel, inside the row it belongs to.
+  busy: boolean;
+  msg: string | null;
+  err: string | null;
+  onApply: (overrides: Record<string, number | string | boolean>) => void;
 }) {
   const { t } = useI18n();
   const thSx = {
@@ -413,17 +594,22 @@ function ServiceTable({
               <th style={thSx}>{t("inf.col.qps")}</th>
               <th style={thSx}>{t("inf.col.p95")}</th>
               <th style={thSx}>{t("inf.col.model")}</th>
+              <th style={{ ...thSx, textAlign: "right" }}>{t("inf.col.ops")}</th>
             </tr>
           </thead>
           <tbody>
             {items.map((s) => {
               const sel = svcKey(s) === selectedKey;
-              return (
+              const row = (
                 <tr
                   key={svcKey(s)}
                   data-od-id={`svc-row-${s.name}`}
                   tabIndex={0}
                   aria-selected={sel}
+                  // The row discloses the detail below it rather than pointing at
+                  // a block beside the table, so its open state is announced the
+                  // way a disclosure's is.
+                  aria-expanded={sel}
                   onClick={() => onSelect(svcKey(s))}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" || e.key === " ") {
@@ -443,8 +629,13 @@ function ServiceTable({
                   }}
                 >
                   <td style={tdSx}>
-                    <Box sx={{ fontWeight: 600, fontSize: 13.5 }}>{s.name}</Box>
-                    <Box sx={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "text.secondary", mt: "2px" }}>{s.namespace}</Box>
+                    <Box sx={{ display: "flex", alignItems: "center", gap: "9px" }}>
+                      <Caret open={sel} />
+                      <Box sx={{ minWidth: 0 }}>
+                        <Box sx={{ fontWeight: 600, fontSize: 13.5 }}>{s.name}</Box>
+                        <Box sx={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "text.secondary", mt: "2px" }}>{s.namespace}</Box>
+                      </Box>
+                    </Box>
                   </td>
                   <td style={tdSx}>
                     <StatusChip cls={serviceStatus(s)} label={t(`inf.status.${serviceStatus(s)}`)} />
@@ -461,13 +652,35 @@ function ServiceTable({
                     {s.metrics && s.metrics.p95 != null ? `${Math.round(s.metrics.p95)} ms` : "—"}
                   </td>
                   <td style={tdSx}>{s.modelRef}</td>
+                  <td style={{ ...tdSx, textAlign: "right" }}>
+                    <RowActions s={s} onDelete={onDelete} open={sel} />
+                  </td>
                 </tr>
               );
+              if (!sel) return [row];
+              // The detail, in the table rather than in a stack below it: the
+              // panel keeps the service's own row in view while it is read, and
+              // its row stays outside the `svc-row-` family the table counts.
+              return [
+                row,
+                <tr key={`${svcKey(s)}/detail`} data-od-id={`svc-detail-${s.name}`}>
+                  <td
+                    colSpan={9}
+                    style={{ padding: 0, background: "var(--surface)", borderBottom: "1px solid var(--border)" }}
+                  >
+                    <Box sx={{ p: "18px 20px 20px" }}>
+                      <DetailPanel s={s} busy={busy} msg={msg} err={err} onApply={onApply} />
+                    </Box>
+                  </td>
+                </tr>,
+              ];
             })}
             {items.length === 0 && (
               <tr>
-                <td colSpan={8} style={{ ...tdSx, textAlign: "center", borderBottom: 0 }}>
-                  <Box sx={{ py: "20px", fontSize: 13, color: "text.secondary" }}>{t("inf.filter.none")}</Box>
+                <td colSpan={9} style={{ ...tdSx, textAlign: "center", borderBottom: 0 }}>
+                  <Box sx={{ py: "20px", fontSize: 13, color: "text.secondary" }}>
+                    {total === 0 ? t("inf.empty") : t("inf.filter.none")}
+                  </Box>
                 </td>
               </tr>
             )}
@@ -475,6 +688,75 @@ function ServiceTable({
         </table>
       </Box>
     </Box>
+  );
+}
+
+/**
+ * Deleting, asked in a dialog of the console's own. An InferenceService owns no
+ * storage a user put there — the operator garbage-collects the workloads and the
+ * route it created — so the prompt names what goes and nothing more.
+ *
+ * The caller mounts it only while there is a target, so `open` is the mount.
+ */
+function DeleteServiceDialog({ s, onClose, onConfirm }: { s: InferenceServiceSummary; onClose: () => void; onConfirm: () => void }) {
+  const { t } = useI18n();
+  return (
+    <Dialog open onClose={onClose} maxWidth="xs" fullWidth data-od-id="delete-dialog">
+      <DialogTitle sx={{ fontSize: 15, fontWeight: 650 }}>{t("inf.delete.title")}</DialogTitle>
+      <DialogContent dividers>
+        <Typography data-od-id="delete-prompt" sx={{ fontSize: 13, lineHeight: 1.8, color: "text.secondary" }}>
+          {t("inf.delete.confirm", { name: s.name })}
+        </Typography>
+      </DialogContent>
+      <DialogActions sx={{ px: "24px", py: "14px" }}>
+        <Button data-od-id="delete-cancel" onClick={onClose} sx={{ textTransform: "none", fontSize: 12.5 }}>
+          {t("inf.delete.cancel")}
+        </Button>
+        <Button
+          data-od-id="delete-confirm"
+          variant="contained"
+          disableElevation
+          color="error"
+          onClick={onConfirm}
+          sx={{ textTransform: "none", fontSize: 12.5 }}
+        >
+          {t("inf.act.delete")}
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+/**
+ * An action that failed, said in the console's own dialog rather than the
+ * browser's alert — the message is the API's, and where it lands should be the
+ * console's too. One button, because there is nothing to decide: the action did
+ * not happen, and the row behind this dialog is unchanged.
+ *
+ * The caller mounts it only while there is a message, so `open` is the mount.
+ */
+function ErrorDialog({ message, onClose }: { message: string; onClose: () => void }) {
+  const { t } = useI18n();
+  return (
+    <Dialog open onClose={onClose} maxWidth="xs" fullWidth data-od-id="error-dialog">
+      <DialogTitle sx={{ fontSize: 15, fontWeight: 650 }}>{t("inf.error.title")}</DialogTitle>
+      <DialogContent dividers>
+        <Typography data-od-id="error-message" sx={{ fontSize: 13, lineHeight: 1.8, color: "text.secondary" }}>
+          {message}
+        </Typography>
+      </DialogContent>
+      <DialogActions sx={{ px: "24px", py: "14px" }}>
+        <Button
+          data-od-id="error-close"
+          variant="contained"
+          disableElevation
+          onClick={onClose}
+          sx={{ textTransform: "none", fontSize: 12.5 }}
+        >
+          {t("inf.error.close")}
+        </Button>
+      </DialogActions>
+    </Dialog>
   );
 }
 
@@ -503,9 +785,24 @@ function DetailPanel({
 }) {
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: "14px", minWidth: 0 }}>
-      <EndpointsCard s={s} />
-      <MetricsCard s={s} />
-      <ScaleCard s={s} busy={busy} msg={msg} err={err} onApply={onApply} />
+      {/* The three the row is opened to read: where the service answers, how it
+          is doing, and what turns the knobs. One row of three equal widths, so
+          they are compared at a glance instead of scrolled past. Below lg there
+          is no width for a third column and they stack as they did before. */}
+      <Box
+        sx={{
+          display: "grid",
+          gridTemplateColumns: { xs: "1fr", lg: "repeat(3, minmax(0, 1fr))" },
+          gap: "14px",
+          // Stretched, not start-aligned: the three are read as a row, so they
+          // end together — a card whose content is short leaves the space at the
+          // bottom rather than letting its border stop short of its neighbours'.
+        }}
+      >
+        <EndpointsCard s={s} />
+        <MetricsCard s={s} />
+        <ScaleCard s={s} busy={busy} msg={msg} err={err} onApply={onApply} />
+      </Box>
       <ParamsCard s={s} />
       <ConditionsCard s={s} />
     </Box>
@@ -515,9 +812,9 @@ function DetailPanel({
 function Card({ title, meta, children }: { title: string; meta?: string; children: React.ReactNode }) {
   return (
     <Box sx={{ border: 1, borderColor: "divider", borderRadius: "var(--radius)", bgcolor: "background.paper" }}>
-      <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", px: "18px", py: "13px", borderBottom: 1, borderColor: "divider" }}>
-        <Typography sx={{ fontSize: 14, fontWeight: 600 }}>{title}</Typography>
-        {meta ? <Typography component="span" sx={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "text.secondary" }}>{meta}</Typography> : null}
+      <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "14px", px: "18px", py: "13px", borderBottom: 1, borderColor: "divider" }}>
+        <Typography sx={{ fontSize: 14, fontWeight: 600, flex: "none" }}>{title}</Typography>
+        {meta ? <Typography component="span" sx={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "text.secondary", textAlign: "right" }}>{meta}</Typography> : null}
       </Box>
       {children}
     </Box>
@@ -526,7 +823,20 @@ function Card({ title, meta, children }: { title: string; meta?: string; childre
 
 function Kvs({ rows }: { rows: Array<[string, string]> }) {
   return (
-    <Box sx={{ px: "18px", py: "4px" }}>
+    // Two columns of rows, filled left to right: with the card this wide a single
+    // column would set every value the width of the table away from its label.
+    // The dashed rule separates rows within a column, so it is absent from the
+    // first grid row — and that is a different set of items per breakpoint, since
+    // below lg the grid is one column and only the first item starts a row.
+    <Box
+      sx={{
+        px: "18px",
+        py: "4px",
+        display: "grid",
+        gridTemplateColumns: { xs: "1fr", lg: "1fr 1fr" },
+        columnGap: "28px",
+      }}
+    >
       {rows.map(([k, v], i) => (
         <Box
           key={k}
@@ -537,7 +847,10 @@ function Kvs({ rows }: { rows: Array<[string, string]> }) {
             gap: "14px",
             py: "7px",
             fontSize: 13,
-            ...(i > 0 ? { borderTop: "1px dashed var(--border)" } : {}),
+            borderTop: {
+              xs: i === 0 ? "none" : "1px dashed var(--border)",
+              lg: i < 2 ? "none" : "1px dashed var(--border)",
+            },
           }}
         >
           <Box component="span" sx={{ color: "text.secondary", flex: "none" }}>{k}</Box>
@@ -558,7 +871,18 @@ function EndpointsCard({ s }: { s: InferenceServiceSummary }) {
   const external = s.publicEndpoint ?? "—";
   return (
     <Card title={t("inf.endpoints.title")}>
-      <Box sx={{ px: "18px", py: "14px" }}>
+      {/* Stacked, not side by side: this card is a third of the panel's width
+          now, and two addresses across it would ellipsise both. */}
+      <Box
+        sx={{
+          px: "18px",
+          py: "14px",
+          display: "grid",
+          gridTemplateColumns: "1fr",
+          rowGap: "14px",
+          alignItems: "start",
+        }}
+      >
         <EndpointRow label={t("inf.endpoints.internal")} value={internal} />
         <EndpointRow
           label={t("inf.endpoints.public")}
@@ -577,7 +901,9 @@ function EndpointRow({ label, value, hint }: { label: string; value: string; hin
   // "nothing happened" is not an outcome the button may report as success.
   const [copied, setCopied] = useState<"idle" | "ok" | "fail">("idle");
   return (
-    <Box sx={{ mb: "12px" }}>
+    // No margin of its own: the grid that places these rows sets the gap, so
+    // stacking and side by side are spaced by the same number.
+    <Box>
       <Typography sx={{ fontSize: 11, color: "text.secondary", mb: "8px" }}>{label}</Typography>
       <Box sx={{ display: "flex", alignItems: "center", gap: "10px", fontFamily: "var(--font-mono)", fontSize: 11, color: "text.secondary", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "6px", px: "9px", py: "5px", overflow: "hidden" }}>
         <Box component="span" sx={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>{value}</Box>
@@ -782,7 +1108,7 @@ function ScaleCard({
       {s.overrides.length === 0 ? (
         <Box sx={{ px: "18px", py: "12px", fontSize: 12.5, color: "text.secondary" }}>{t("inf.scale.noOverrides")}</Box>
       ) : (
-        <Box sx={{ px: "18px", py: "12px", display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(170px, 1fr))", gap: "12px", alignItems: "end" }}>
+        <Box sx={{ px: "18px", py: "12px", display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: "12px", alignItems: "end" }}>
           {s.overrides.map((o) => (
             <Field key={o.name} label={o.name} error={!scaleValueValid(o, effective[o.name])}>
               <ScaleInput o={o} value={effective[o.name]} onChange={(v) => setValues((prev) => ({ ...prev, [o.name]: v }))} />
@@ -877,37 +1203,85 @@ function ParamsCard({ s }: { s: InferenceServiceSummary }) {
 
 function ConditionsCard({ s }: { s: InferenceServiceSummary }) {
   const { t } = useI18n();
-  const dot = (status: string) =>
-    status === "True"
-      ? { bgcolor: STATUS_OK }
-      : status === "False"
-        ? { bgcolor: STATUS_ERR, boxShadow: `0 0 0 4px ${soft(STATUS_ERR)}` }
-        : { bgcolor: "transparent", border: "1.5px solid var(--muted)", width: 5, height: 5 };
   return (
     <Card title={t("inf.conds.title")} meta={t("inf.conds.meta")}>
-      {s.conditions.length === 0 ? (
-        <Box sx={{ px: "18px", py: "14px", fontSize: 12.5, color: "text.secondary" }}>{t("inf.conds.empty")}</Box>
-      ) : (
-        <Box sx={{ px: "18px", py: "8px" }}>
-          {s.conditions.map((c) => (
-            <Box key={c.type} data-od-id={`cond-${c.type}`} sx={{ display: "flex", alignItems: "center", gap: "9px", py: "6px", fontSize: 12.5 }}>
-              <Box component="span" sx={{ width: 7, height: 7, borderRadius: "50%", flex: "none", ...dot(c.status) }} />
-              <Box component="span" sx={{ fontWeight: 500, color: "text.primary" }}>{c.type}</Box>
-              <Box component="span" sx={{ ml: "auto", fontFamily: "var(--font-mono)", fontSize: 11, color: "text.secondary" }}>
-                {c.status}
-                {c.reason ? ` · ${c.reason}` : ""}
+      <Box sx={{ display: "flex", flexDirection: "column", gap: "8px", px: "18px", py: "12px" }}>
+        {s.conditions.length === 0 ? (
+          <Typography data-od-id="infsvc-conds-empty" sx={{ fontSize: 12, color: "text.secondary" }}>{t("inf.conds.empty")}</Typography>
+        ) : (
+          // One line per condition, pill first: the pill already names the
+          // condition and states its status, so the object's own sentence about
+          // it follows on the same line instead of in a second list keyed by
+          // type. Every condition is listed, not only the ones that are False —
+          // a True one's sentence is the controller saying what it did, and
+          // reading them in order is how a half-converged service (routes
+          // published, replicas not yet ready) is told from a working one.
+          s.conditions.map((c) => {
+            // Green only for an observed True condition; False (a real failure)
+            // and Unknown (pending) get distinct non-success styling.
+            const cls = c.status === "True" ? "ok" : c.status === "Unknown" ? "pending" : "err";
+            const [chip, dot] =
+              cls === "ok"
+                ? [STATUS_OK, STATUS_OK]
+                : cls === "pending"
+                  ? [STATUS_WARN, STATUS_WARN]
+                  : [soft(STATUS_ERR, 55), STATUS_ERR];
+            // The reason stays off the line: the pill names the condition
+            // already, and for most of them the reason repeats it ("Ready",
+            // "Scheduled"). It is still on the hover, beside the message.
+            const detail = [c.reason ? `(${c.reason})` : "", c.message].filter(Boolean).join(" ");
+            return (
+              <Box key={c.type} sx={{ fontSize: 12, color: "text.secondary", lineHeight: 2 }}>
+                <Box
+                  data-od-id={`cond-${c.type}`}
+                  component="span"
+                  title={detail ? `${c.type} ${c.status} ${detail}` : undefined}
+                  sx={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "6px",
+                    px: "9px",
+                    py: "2px",
+                    mr: "5px",
+                    borderRadius: 999,
+                    fontSize: 12,
+                    verticalAlign: "middle",
+                    bgcolor: cls === "ok" ? soft(STATUS_OK) : soft(chip),
+                    color: cls === "ok" ? "inherit" : `color-mix(in oklch, ${chip} 66%, var(--fg))`,
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  <Box
+                    component="span"
+                    // Decorative once the status is text beside it: hue was the
+                    // only carrier, which reads as nothing to a screen reader and
+                    // little to a colour-blind one.
+                    aria-hidden="true"
+                    sx={{
+                      width: 6,
+                      height: 6,
+                      borderRadius: "50%",
+                      bgcolor: dot,
+                      flex: "none",
+                    }}
+                  />
+                  {c.type}
+                  {/* The status itself, as the object states it. It is a
+                      Kubernetes enum, so it reads the same in every locale —
+                      the way an unrecognised phase already does. */}
+                  <Box component="span" sx={{ fontWeight: 600, opacity: 0.75 }}>{c.status}</Box>
+                </Box>
+                {/* A condition with no message has nothing to add to its pill,
+                    and an empty ": " would read as a message that failed to
+                    arrive. */}
+                {c.message ? (
+                  <Box component="span" data-od-id={`cond-note-${c.type}`}>{`: ${c.message}`}</Box>
+                ) : null}
               </Box>
-            </Box>
-          ))}
-          <Box sx={{ mt: "8px" }}>
-            {s.conditions.filter((c) => c.message).map((c) => (
-              <Typography key={c.type} sx={{ fontSize: 11.5, color: "text.secondary", lineHeight: 1.6, mt: "4px" }}>
-                {c.type}: {c.message}
-              </Typography>
-            ))}
-          </Box>
-        </Box>
-      )}
+            );
+          })
+        )}
+      </Box>
     </Card>
   );
 }

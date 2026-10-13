@@ -46,6 +46,31 @@ describe("inference services page", () => {
     );
   }
 
+  /**
+   * A fetch that answers the list on GET and the delete on DELETE, recording
+   * every call so a test can assert on what the console actually sent — and on
+   * the fact that it sent nothing while the dialog was still asking.
+   */
+  function stubDeleteFetch(items: unknown[], del: { ok: boolean; status?: number; body?: unknown }) {
+    const calls: Array<{ method: string; body: unknown }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+        const method = init?.method ?? "GET";
+        calls.push({ method, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+        if (method === "DELETE") {
+          return {
+            ok: del.ok,
+            status: del.status ?? (del.ok ? 200 : 500),
+            json: async () => (del.ok ? { ok: true } : (del.body ?? { error: "boom" })),
+          };
+        }
+        return { ok: true, status: 200, json: async () => ({ items }) };
+      }),
+    );
+    return calls;
+  }
+
   it("shows a loading state until the cluster request resolves", () => {
     stubData([]);
     const { container, root } = renderPage();
@@ -359,6 +384,132 @@ describe("inference services page", () => {
     // QPS value renders in the metrics grid.
     const match = Array.from(container.querySelectorAll("div")).some((el) => el.textContent === "42");
     expect(match).toBe(true);
+
+    act(() => root.unmount());
+  });
+
+  it("prints every condition beside its pill, True ones included", async () => {
+    stubData([
+      inferenceServiceSummary({
+        name: "half-broken-svc",
+        conditions: [
+          // A True condition whose message is empty: the pill is the whole line.
+          { type: "Ready", status: "True", reason: "Ready", message: "", transitionTime: null },
+          // A True condition with a sentence: the controller saying what it did,
+          // on the same line as its pill.
+          { type: "RouteReady", status: "True", reason: "Published", message: "Routes are published on the gateway", transitionTime: null },
+          // The sentences that used to be unreachable: they were printed in a
+          // second list keyed by type, detached from the row that carried them.
+          { type: "Scaling", status: "True", reason: "Scaling", message: "Scaling decode replicas to 2", transitionTime: null },
+          { type: "ReplicasReady", status: "False", reason: "PodNotReady", message: "0/2 decode replicas ready", transitionTime: null },
+        ],
+      }),
+    ]);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    expect(container.querySelector('[data-od-id="cond-note-RouteReady"]')?.textContent).toBe(
+      ": Routes are published on the gateway",
+    );
+    expect(container.querySelector('[data-od-id="cond-note-Scaling"]')?.textContent).toBe(": Scaling decode replicas to 2");
+    expect(container.querySelector('[data-od-id="cond-note-ReplicasReady"]')?.textContent).toBe(": 0/2 decode replicas ready");
+    // An empty message takes no line: ": " on its own reads as a message that
+    // failed to arrive. The pill still states the condition.
+    expect(container.querySelector('[data-od-id="cond-note-Ready"]')).toBeNull();
+    expect(container.querySelector('[data-od-id="cond-Ready"]')?.textContent).toBe("ReadyTrue");
+    // The reason is off the line but not out of reach: the pill's hover carries
+    // it beside the message.
+    expect(container.querySelector('[data-od-id="cond-Ready"]')?.getAttribute("title")).toBe("Ready True (Ready)");
+    expect(container.querySelector('[data-od-id="cond-ReplicasReady"]')?.getAttribute("title")).toBe(
+      "ReplicasReady False (PodNotReady) 0/2 decode replicas ready",
+    );
+    // The status is stated, not only coloured: the dot is decorative now that
+    // the enum is text beside it.
+    expect(container.querySelector('[data-od-id="cond-ReplicasReady"]')?.textContent).toBe("ReplicasReadyFalse");
+    expect(container.querySelector('[data-od-id="cond-ReplicasReady"] [aria-hidden="true"]')).not.toBeNull();
+    // Every condition takes a line, True ones included — not only the False ones.
+    for (const type of ["Ready", "RouteReady", "Scaling", "ReplicasReady"]) {
+      expect(container.querySelector(`[data-od-id="cond-${type}"]`)).not.toBeNull();
+    }
+
+    act(() => root.unmount());
+  });
+
+  it("lays the row's actions out in an open row and keeps them behind the kebab when closed", async () => {
+    stubData(inferenceServiceList());
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    // The open row has the width to lay the action out, so it is a button.
+    const openAct = container.querySelector('[data-od-id="act-del-dsv4-pro-pd"]');
+    expect(openAct).not.toBeNull();
+    expect(openAct?.textContent).toBe("删除");
+
+    // The closed row has only the kebab: the item exists nowhere in the DOM
+    // until the menu is opened.
+    expect(container.querySelector('[data-od-id="svc-ops-dsv4-flash-pd"]')).not.toBeNull();
+    expect(container.querySelector('[data-od-id="act-del-dsv4-flash-pd"]')).toBeNull();
+    // Opening that row is what puts the action on the row.
+    await act(async () => {
+      (container.querySelector('[data-od-id="svc-row-dsv4-flash-pd"]') as HTMLElement).click();
+    });
+    expect(container.querySelector('[data-od-id="act-del-dsv4-flash-pd"]')).not.toBeNull();
+    // One row is open at a time, so the first row's action went back to a kebab.
+    expect(container.querySelector('[data-od-id="act-del-dsv4-pro-pd"]')).toBeNull();
+
+    act(() => root.unmount());
+  });
+
+  it("asks before deleting, then sends the row's own namespace and name", async () => {
+    const calls = stubDeleteFetch(inferenceServiceList(), { ok: true });
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    await act(async () => {
+      (container.querySelector('[data-od-id="act-del-dsv4-pro-pd"]') as HTMLElement).click();
+    });
+    // The dialog says what goes, by name — and nothing has been sent: the click
+    // on the row's button only names the target.
+    expect(document.body.querySelector('[data-od-id="delete-prompt"]')?.textContent).toBe(
+      "删除推理服务「dsv4-pro-pd」?其控制器创建的资源会一并回收,此操作不可撤销。",
+    );
+    expect(calls.filter((c) => c.method === "DELETE")).toHaveLength(0);
+
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="delete-confirm"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    // The composite namespace/name, not the bare name a same-named service in
+    // another namespace would answer to.
+    const del = calls.find((c) => c.method === "DELETE");
+    expect(del?.body).toEqual({ namespace: "project-a", name: "dsv4-pro-pd" });
+    expect(document.body.querySelector('[data-od-id="delete-dialog"]')).toBeNull();
+
+    act(() => root.unmount());
+  });
+
+  it("says a failed delete in the console's own dialog, in the user's language", async () => {
+    stubDeleteFetch(inferenceServiceList(), {
+      ok: false,
+      status: 404,
+      body: { error: "nameMissing", params: { name: "dsv4-pro-pd" } },
+    });
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    await act(async () => {
+      (container.querySelector('[data-od-id="act-del-dsv4-pro-pd"]') as HTMLElement).click();
+    });
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="delete-confirm"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    expect(document.body.querySelector('[data-od-id="error-dialog"]')).not.toBeNull();
+    expect(document.body.querySelector('[data-od-id="error-message"]')?.textContent).toBe("服务 'dsv4-pro-pd' 不存在。");
+    // The row behind the dialog is unchanged: the delete did not happen.
+    expect(container.querySelector('[data-od-id="svc-row-dsv4-pro-pd"]')).not.toBeNull();
 
     act(() => root.unmount());
   });

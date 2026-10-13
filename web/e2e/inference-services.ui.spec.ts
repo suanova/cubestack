@@ -105,13 +105,12 @@ test.describe("inference services landing (mocked data)", () => {
     await expect(page.locator('[data-od-id="svc-row-dsv4-pro-pd"]')).toHaveCount(0);
   });
 
-  test("selecting a service opens its detail panel", async ({ page }) => {
+  test("selecting a service opens its detail in that service's own row", async ({ page }) => {
     await stubList(page, { items: inferenceServiceList() });
     await page.goto("/cubestack/inference-services");
 
-    await page.locator('[data-od-id="svc-row-dsv4-pro-pd"]').click();
-
-    const detail = page.locator("body"); // Detail cards render beside the table.
+    // The first service is open on load, so its detail is already disclosed.
+    const detail = page.locator("body");
     await expect(detail).toContainText("访问端点");
     await expect(detail).toContainText("外部端点(AI Gateway)");
     await expect(detail).toContainText("https://ai.cubestack.dev");
@@ -122,6 +121,114 @@ test.describe("inference services landing (mocked data)", () => {
     await expect(detail).toContainText("引擎参数");
     await expect(detail).toContainText("profileRef");
     await expect(detail).toContainText("metax-sglang-dsv4-pd");
+    await expect(page.locator('[data-od-id="svc-detail-dsv4-pro-pd"]')).toHaveCount(1);
+
+    // Selecting the other service hands the disclosure over to it: one row is
+    // open at a time, and the panel moves rather than being duplicated.
+    await page.locator('[data-od-id="svc-row-dsv4-flash-pd"]').click();
+    await expect(page.locator('[data-od-id="svc-detail-dsv4-flash-pd"]')).toHaveCount(1);
+    await expect(page.locator('[data-od-id="svc-detail-dsv4-pro-pd"]')).toHaveCount(0);
+  });
+
+  test("discloses the detail in the row's own table row, and prints each condition beside its pill", async ({ page }) => {
+    const list = inferenceServiceList();
+    // The fixture carries no conditions; graft on the four shapes the card has
+    // to tell apart — a True with no message, a True with a sentence, an
+    // Unknown, and a False.
+    list[0].conditions = [
+      { type: "Ready", status: "True", reason: "Ready", message: "", transitionTime: null },
+      { type: "RouteReady", status: "True", reason: "Published", message: "路由已发布到网关", transitionTime: null },
+      { type: "Progressing", status: "Unknown", reason: "WaitingForReplicas", message: "等待 decode 副本调度", transitionTime: null },
+      { type: "ReplicasReady", status: "False", reason: "PodNotReady", message: "0/2 decode 副本就绪", transitionTime: null },
+    ];
+    await stubList(page, { items: list });
+    await page.goto("/cubestack/inference-services");
+
+    // The panel is disclosed inside the table, under the row it belongs to,
+    // rather than in a block below the table: it starts after that row and ends
+    // before the next one begins.
+    const row = await page.locator('[data-od-id="svc-row-dsv4-pro-pd"]').boundingBox();
+    const detail = await page.locator('[data-od-id="svc-detail-dsv4-pro-pd"]').boundingBox();
+    const next = await page.locator('[data-od-id="svc-row-dsv4-flash-pd"]').boundingBox();
+    expect(row).not.toBeNull();
+    expect(detail).not.toBeNull();
+    expect(next).not.toBeNull();
+    expect(detail!.y).toBeGreaterThan(row!.y + row!.height - 1);
+    expect(detail!.y + detail!.height).toBeLessThanOrEqual(next!.y + 1);
+    // And the row says so, the way a disclosure does.
+    await expect(page.locator('[data-od-id="svc-row-dsv4-pro-pd"]')).toHaveAttribute("aria-expanded", "true");
+    // The detail row is not one of the rows the table counts.
+    await expect(page.locator('[data-od-id^="svc-row-"]')).toHaveCount(2);
+
+    // One line per condition, the object's sentence beside its own pill rather
+    // than in a second list keyed by type.
+    await expect(page.locator('[data-od-id="cond-Ready"]')).toHaveText("ReadyTrue");
+    await expect(page.locator('[data-od-id="cond-note-Ready"]')).toHaveCount(0);
+    await expect(page.locator('[data-od-id="cond-note-RouteReady"]')).toHaveText(": 路由已发布到网关");
+    await expect(page.locator('[data-od-id="cond-note-Progressing"]')).toHaveText(": 等待 decode 副本调度");
+    await expect(page.locator('[data-od-id="cond-note-ReplicasReady"]')).toHaveText(": 0/2 decode 副本就绪");
+    // Every condition takes a line, the True ones included.
+    await expect(page.locator('span[data-od-id^="cond-"]').filter({ hasNotText: ":" })).toHaveCount(4);
+    // The reason is off the line but on the pill's hover.
+    await expect(page.locator('[data-od-id="cond-ReplicasReady"]')).toHaveAttribute(
+      "title",
+      "ReplicasReady False (PodNotReady) 0/2 decode 副本就绪",
+    );
+
+    // Clicking the open row closes it, and clicking it again reopens it.
+    await page.locator('[data-od-id="svc-row-dsv4-pro-pd"]').click();
+    await expect(page.locator('[data-od-id="svc-detail-dsv4-pro-pd"]')).toHaveCount(0);
+    await expect(page.locator('[data-od-id="svc-row-dsv4-pro-pd"]')).toHaveAttribute("aria-expanded", "false");
+    await page.locator('[data-od-id="svc-row-dsv4-pro-pd"]').click();
+    await expect(page.locator('[data-od-id="svc-detail-dsv4-pro-pd"]')).toHaveCount(1);
+  });
+
+  test("deletes a service after confirming in the console's own dialog", async ({ page }) => {
+    let items = inferenceServiceList();
+    let deleted: { namespace?: string; name?: string } | null = null;
+    // The list is mutable because the delete is answered by re-reading it: the
+    // row has to be gone on the next GET, not merely hidden.
+    const service = (route: import("@playwright/test").Route) => {
+      if (route.request().method() === "DELETE") {
+        deleted = route.request().postDataJSON() as { namespace?: string; name?: string };
+        items = items.filter((s) => !(s.name === deleted!.name && s.namespace === deleted!.namespace));
+        return route.fulfill({ json: { ok: true } });
+      }
+      return route.fulfill({ json: { items } });
+    };
+    await page.route("**/api/inferenceservices?*", service);
+    await page.route("**/api/inferenceservices", service);
+    await page.goto("/cubestack/inference-services");
+
+    // The open row has the width, so its action is laid out in it; the closed
+    // row keeps the same action behind a kebab rather than in the table.
+    await expect(page.locator('[data-od-id="act-del-dsv4-pro-pd"]')).toBeVisible();
+    await expect(page.locator('[data-od-id="act-del-dsv4-flash-pd"]')).toHaveCount(0);
+
+    await page.locator('[data-od-id="act-del-dsv4-pro-pd"]').click();
+    await expect(page.locator('[data-od-id="delete-prompt"]')).toHaveText(
+      "删除推理服务「dsv4-pro-pd」?其控制器创建的资源会一并回收,此操作不可撤销。",
+    );
+    // The row's button only named the target: nothing has been sent.
+    expect(deleted).toBeNull();
+
+    await page.locator('[data-od-id="delete-confirm"]').click();
+    await expect(page.locator('[data-od-id="svc-row-dsv4-pro-pd"]')).toHaveCount(0);
+    await expect(page.locator('[data-od-id="svc-row-dsv4-flash-pd"]')).toBeVisible();
+    expect(deleted).toEqual({ namespace: "project-a", name: "dsv4-pro-pd" });
+  });
+
+  test("keeps a closed row's action behind its kebab", async ({ page }) => {
+    await stubList(page, { items: inferenceServiceList() });
+    await page.goto("/cubestack/inference-services");
+
+    const kebab = page.locator('[data-od-id="svc-ops-dsv4-flash-pd"]');
+    await expect(kebab).toHaveAttribute("aria-expanded", "false");
+    await kebab.click();
+    await expect(kebab).toHaveAttribute("aria-expanded", "true");
+    await expect(page.locator('[data-od-id="act-del-dsv4-flash-pd"]')).toBeVisible();
+    // The kebab does not select the row it sits in: one click means one thing.
+    await expect(page.locator('[data-od-id="svc-row-dsv4-flash-pd"]')).toHaveAttribute("aria-expanded", "false");
   });
 
   test("deploys a service through the wizard and selects it", async ({ page }) => {

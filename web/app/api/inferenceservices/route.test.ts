@@ -7,17 +7,18 @@ import { dictionaries } from "@/lib/i18n/dictionaries";
 
 import { authedGet, authedRequest } from "@/test/auth";
 
-const { listNamespace, listClusterCustomObject, patchNamespacedCustomObject, createNamespacedCustomObject, getNamespacedCustomObject } = vi.hoisted(() => ({
+const { listNamespace, listClusterCustomObject, patchNamespacedCustomObject, createNamespacedCustomObject, getNamespacedCustomObject, deleteNamespacedCustomObject } = vi.hoisted(() => ({
   listNamespace: vi.fn(),
   listClusterCustomObject: vi.fn(),
   patchNamespacedCustomObject: vi.fn(),
   createNamespacedCustomObject: vi.fn(),
   getNamespacedCustomObject: vi.fn(),
+  deleteNamespacedCustomObject: vi.fn(),
 }));
 
 vi.mock("@/lib/kubernetes", () => ({
   getCoreClient: () => ({ listNamespace }),
-  getCustomObjectsClient: () => ({ listClusterCustomObject, patchNamespacedCustomObject, createNamespacedCustomObject, getNamespacedCustomObject }),
+  getCustomObjectsClient: () => ({ listClusterCustomObject, patchNamespacedCustomObject, createNamespacedCustomObject, getNamespacedCustomObject, deleteNamespacedCustomObject }),
 }));
 
 /** The cluster fixture mirrors the real KinD data: 2 services, 1 profile. */
@@ -143,6 +144,7 @@ describe("inference services route", () => {
     patchNamespacedCustomObject.mockReset();
     createNamespacedCustomObject.mockReset();
     getNamespacedCustomObject.mockReset();
+    deleteNamespacedCustomObject.mockReset();
     vi.unstubAllGlobals();
   });
 
@@ -617,4 +619,67 @@ describe("inference services create (POST)", () => {
     }
   });
 
+});
+
+describe("inference services delete (DELETE)", () => {
+  beforeEach(() => {
+    stubCluster();
+    stubPrometheusEmpty();
+    deleteNamespacedCustomObject.mockResolvedValue({});
+  });
+
+  afterEach(() => {
+    deleteNamespacedCustomObject.mockReset();
+    vi.unstubAllGlobals();
+  });
+
+  /** A DELETE with a signed session cookie. */
+  function buildDelete(body: unknown) {
+    return authedRequest({ method: "DELETE", body: JSON.stringify(body) }, "http://localhost/api/inferenceservices");
+  }
+
+  it("deletes the named service in its own namespace", async () => {
+    const { DELETE } = await importRoute();
+    const res = await DELETE(await buildDelete({ namespace: "project-a", name: "dsv4-flash-pd" }), undefined);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+    // Named, not selected: the console holds the composite namespace/name, and
+    // a bare name would delete the wrong namespace's service.
+    expect(deleteNamespacedCustomObject).toHaveBeenCalledWith(
+      expect.objectContaining({
+        group: "ai.cubestack.io",
+        version: "v1alpha1",
+        namespace: "project-a",
+        plural: "inferenceservices",
+        name: "dsv4-flash-pd",
+      }),
+    );
+  });
+
+  it("rejects a DELETE without namespace or name", async () => {
+    const { DELETE } = await importRoute();
+    const res = await DELETE(await buildDelete({ namespace: "project-a" }), undefined);
+    expect(res.status).toBe(400);
+    expect(deleteNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
+  it("answers 404 with the name it could not find", async () => {
+    // Deleting something already gone is not an error the user can act on, but
+    // it must not read as a success either: the console says which name it was.
+    const gone = new Error("not found") as Error & { statusCode: number };
+    gone.statusCode = 404;
+    deleteNamespacedCustomObject.mockRejectedValue(gone);
+    const { DELETE } = await importRoute();
+    const res = await DELETE(await buildDelete({ namespace: "project-a", name: "dsv4-flash-pd" }), undefined);
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "nameMissing", params: { name: "dsv4-flash-pd" }, status: 404 });
+  });
+
+  it("returns a client-safe 500 when the delete call fails", async () => {
+    deleteNamespacedCustomObject.mockRejectedValue(new Error("boom"));
+    const { DELETE } = await importRoute();
+    const res = await DELETE(await buildDelete({ namespace: "project-a", name: "dsv4-flash-pd" }), undefined);
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "Failed to delete inference service", status: 500 });
+  });
 });
