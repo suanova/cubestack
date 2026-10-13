@@ -259,6 +259,31 @@ describe("AgentThread", () => {
     expect(container.querySelector('[data-od-id="agent-error"]')).toBeNull();
   });
 
+  it("reads a restored call with no result as running while the turn waits on the user", () => {
+    // The reloaded view of a write parked on an approval: the history carries the
+    // call and no result, so it has not run — "已完成" is not on the table. Nor is
+    // "已停止": nothing stopped it, the run is still waiting on the user.
+    const parked = agentMsg(1, [text("我来删。"), tool({ done: false, output: undefined })], {
+      approvals: [
+        {
+          callId: "appr-1",
+          name: "shell",
+          command: "kubectl delete pod demo-env-0",
+          level: "write",
+          state: "pending",
+        },
+      ],
+    });
+    const { container } = render([parked], S1);
+
+    expect(cardHead(container).textContent).toContain("运行中");
+    expect(cardHead(container).textContent).not.toContain("已完成");
+    // There is no output yet, so the card stays closed rather than opening onto
+    // an empty box.
+    expect(expanded(container)).toBe("false");
+    expect(output(container)).toBeNull();
+  });
+
   it("draws no bubble at all for a turn parked on a card with nothing else to say", () => {
     // `ask_user` deliberately draws no tool card, so a question asked before the
     // agent said anything left a bare "CUBEPILOT" label over an empty box —
