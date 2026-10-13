@@ -525,7 +525,9 @@ export function FloatingChat() {
     const ctl = new AbortController();
     attachRef.current = ctl;
     try {
-      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/turn/events`, {
+      // Through apiFetch, like the pane's own re-attach: a bare "/api/..." misses
+      // the portal's base path, and a 404 here is the parked card staying lost.
+      const res = await apiFetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/turn/events`, {
         signal: ctl.signal,
       });
       // 404 (not parked) and 409 (another stream holds the session) are the

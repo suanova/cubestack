@@ -1075,7 +1075,10 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
     const ctl = new AbortController();
     attachRef.current = ctl;
     try {
-      const res = await fetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/turn/events`, {
+      // Through apiFetch: a bare "/api/..." misses the portal's base path, and
+      // the re-attach is the one path that brings a parked card back to a pane
+      // that lost its stream — a 404 here leaves the card lost until a reload.
+      const res = await apiFetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/turn/events`, {
         signal: ctl.signal,
       });
       // 404 (not parked) and 409 (another stream holds the session) are the
