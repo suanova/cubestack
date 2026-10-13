@@ -86,23 +86,19 @@ const VIOLET_SOFT = "color-mix(in oklch, var(--violet) 9%, transparent)";
 const ACCENT_FILL = "color-mix(in oklch, var(--accent) 82%, var(--fg))";
 
 // The object list is a draggable pane: the column width is component state,
-// and the resizer handle rides the 16px gutter between the two panes. It can
-// also be collapsed away entirely, which is the reader's way of giving the
-// conversation the width.
+// and the resizer handle rides the 16px gutter between the two panes.
 const LIST_COL_DEFAULT = 157;
 const LIST_COL_MIN = 120;
 const LIST_COL_MAX = 460;
 
-const chatGridSx = (listW: number, collapsed: boolean): SxProps<Theme> => ({
+const chatGridSx = (listW: number): SxProps<Theme> => ({
   // The grid takes the height the pane's flex column leaves it, and its single
   // row takes the grid's: the card stretches into whatever is left instead of
   // being handed a number that only holds while the head keeps its height.
   flex: 1,
   minHeight: 0,
   display: "grid",
-  // Collapsed takes the column *and* its gutter out of the template, so the
-  // card takes the width instead of leaving an empty 16px strip between them.
-  gridTemplateColumns: collapsed ? "minmax(0,1fr)" : `${listW}px 16px minmax(0,1fr)`,
+  gridTemplateColumns: `${listW}px 16px minmax(0,1fr)`,
   gridTemplateRows: "minmax(0, 1fr)",
   // Narrow: the list sits above the card, so the rows go back to their content
   // and the page scrolls as it always did.
@@ -286,9 +282,6 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
   const [paramsAnchor, setParamsAnchor] = useState<HTMLElement | null>(null);
   /** Object-list column width in px; dragged with the pane resizer. */
   const [listW, setListW] = useState(LIST_COL_DEFAULT);
-  /** Collapsed is a choice, not a width: the list and its gutter get out of the
-   *  way whole, which is the reader's way of giving the conversation room. */
-  const [listCollapsed, setListCollapsed] = useState(false);
   const [resizing, setResizing] = useState(false);
   const resizeStart = useRef({ x: 0, w: 0 });
 
@@ -1916,9 +1909,8 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
       </Box>
       {toastView}
 
-      <Box sx={chatGridSx(listW, listCollapsed)}>
+      <Box sx={chatGridSx(listW)}>
         {/* ── objects ── */}
-        {listCollapsed ? null : (
         <Box
           data-od-id="object-list"
           sx={{ "@media (max-width: 1180px)": { mb: "14px" } }}
@@ -2034,7 +2026,6 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
           })}
         </Box>
 
-        )}
         {/* ── resizer: drag to resize the object list column ── */}
         <Box
           data-od-id="pane-resizer"
@@ -2046,7 +2037,6 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
           aria-label={t("cubepilot.chat.resizeAria")}
           onPointerDown={startResize}
           sx={{
-            display: listCollapsed ? "none" : undefined,
             alignSelf: "stretch",
             position: "relative",
             cursor: "col-resize",
@@ -2100,21 +2090,6 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
             }}
           >
             <Box sx={{ display: "flex", alignItems: "center", gap: "10px", minWidth: 0 }}>
-              {/* The conversation is the point of this card, so how much width
-                  the object list takes is the reader's call. */}
-              <Btn
-                variant="ghost"
-                small
-                onClick={() => setListCollapsed((collapsed) => !collapsed)}
-                title={t(listCollapsed ? "cubepilot.chat.objectsExpand" : "cubepilot.chat.objectsCollapse")}
-                // The glyph is a chevron, so the name has to be spelled out for
-                // readers who cannot see it.
-                aria-label={t(listCollapsed ? "cubepilot.chat.objectsExpand" : "cubepilot.chat.objectsCollapse")}
-                aria-expanded={!listCollapsed}
-                data-od-id="toggle-objects"
-              >
-                {listCollapsed ? "»" : "«"}
-              </Btn>
               <Box
                 aria-hidden
                 sx={{
@@ -2149,10 +2124,8 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
                 )
               ) : null}
             </Box>
-            {/* The identity stays left and the room's controls stay right: the
-                width of the object list and the height of the conversation are
-                the same kind of choice, and the clear buttons are the actions
-                that go with them. */}
+            {/* The identity stays left and the actions stay right: the endpoint
+                chip, the clears, and the room's own height control after them. */}
             <Box sx={{ ml: "auto", display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap", maxWidth: "100%" }}>
               {isModel && svc && endpoint ? (
                 <Box

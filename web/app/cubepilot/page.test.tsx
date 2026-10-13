@@ -766,30 +766,6 @@ describe("cubepilot page", () => {
     act(() => root.unmount());
   }, 40000);
 
-  it("collapses the object list and hands its width to the conversation", async () => {
-    // The conversation is what this card is for; how much width the list takes
-    // is the reader's call. Collapsing takes the column out rather than hiding
-    // it, so the card gets the width instead of an empty gutter beside it.
-    const { container, root } = renderPage();
-    await act(async () => {});
-
-    const toggle = container.querySelector('[data-od-id="toggle-objects"]') as HTMLElement;
-    expect(toggle).not.toBeNull();
-    expect(toggle.getAttribute("aria-expanded")).toBe("true");
-    expect(container.querySelector('[data-od-id="object-list"]')).not.toBeNull();
-
-    act(() => toggle.click());
-    await act(async () => {});
-    expect(toggle.getAttribute("aria-expanded")).toBe("false");
-    expect(container.querySelector('[data-od-id="object-list"]')).toBeNull();
-
-    act(() => toggle.click());
-    await act(async () => {});
-    expect(toggle.getAttribute("aria-expanded")).toBe("true");
-    expect(container.querySelector('[data-od-id="object-list"]')).not.toBeNull();
-    act(() => root.unmount());
-  });
-
   it("folds the page's own rows away while the room is expanded", async () => {
     // The head and the tab row are 100px of chrome the conversation can have,
     // but only on the reader's ask — and the control that asked for it sits in
