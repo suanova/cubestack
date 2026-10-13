@@ -63,14 +63,16 @@ test.describe("agent config writes the AgentInstance CR", () => {
 
     await page.goto(`${BASE}/cubepilot`);
     await page.locator('[data-od-id="cp-tab-config"]').click();
-    // Let the card's first read land before typing: the toast below is the plain
-    // "saved" variant, which the pane only picks once it knows the instance
-    // exists, and the prompt field is bound to that same read — a fill typed into
-    // the not-yet-loaded form is what a late read overwrites.
+    // Let the card's first read land before typing: the prompt field is bound to
+    // it, so a fill typed into the not-yet-loaded form is what the late read
+    // overwrites.
     await expect(page.locator('[data-od-id="cp-config-model-select"] option')).not.toHaveCount(0);
     await page.locator('[data-od-id="cp-config-prompt-input"]').fill(`集成测试标记 ${marker}`);
     await page.locator('[data-od-id="cp-config-save"]').click();
-    await expect(page.getByText("配置已保存,模型与系统提示词下一轮对话生效")).toBeVisible();
+    // Either toast means the save went through: the bring-up's warm-up already
+    // provisioned admin-cubepilot, but a cluster without it turns this save into a
+    // create, and the pane words that differently.
+    await expect(page.getByText(/已保存/)).toBeVisible();
 
     // Read it back through the portal's own route, which reads the CR from the
     // cluster — a UI-only memory of the edit would not survive this.
