@@ -148,6 +148,37 @@ var _ = Describe("buildPodSpec", func() {
 		}
 	})
 
+	It("maps each role's GPU resource through its effective accelerator", func() {
+		r := &InferenceServiceReconciler{Scheme: testScheme}
+		profile := &aiv1alpha1.InferenceRuntimeProfile{Spec: aiv1alpha1.InferenceRuntimeProfileSpec{
+			Accelerator: aiv1alpha1.Accelerator{Vendor: aiv1alpha1.AcceleratorVendorMetax, Models: []string{testGPUModelMXC500}},
+			Roles: []aiv1alpha1.Role{
+				{
+					Name:        "prefill",
+					Workload:    aiv1alpha1.Workload{Kind: aiv1alpha1.WorkloadKindDeployment},
+					Accelerator: &aiv1alpha1.Accelerator{Vendor: aiv1alpha1.AcceleratorVendorNvidia, Models: []string{testGPUModelH200}},
+				},
+				{Name: "decode", Workload: aiv1alpha1.Workload{Kind: aiv1alpha1.WorkloadKindDeployment}},
+			},
+		}}
+		isvc := &aiv1alpha1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: testISVCName, Namespace: testNamespace}}
+		gpu := int64(2)
+		rrFor := func(name string) *renderer.RenderedRole {
+			return &renderer.RenderedRole{Name: name, Replicas: 1, PodTemplate: aiv1alpha1.PodTemplate{
+				Image:     testEngineImage,
+				Resources: &aiv1alpha1.PodResources{GPUPerPod: &gpu},
+			}}
+		}
+
+		prefill := r.desiredWorkload(isvc, profile, &profile.Spec.Roles[0], rrFor("prefill"), &renderer.Result{}, modelHostPath())
+		requests := prefill.(*appsv1.Deployment).Spec.Template.Spec.Containers[0].Resources.Requests
+		Expect(requests).To(HaveKey(corev1.ResourceName("nvidia.com/gpu")))
+
+		decode := r.desiredWorkload(isvc, profile, &profile.Spec.Roles[1], rrFor("decode"), &renderer.Result{}, modelHostPath())
+		requests = decode.(*appsv1.Deployment).Spec.Template.Spec.Containers[0].Resources.Requests
+		Expect(requests).To(HaveKey(corev1.ResourceName("metax-tech.com/gpu")))
+	})
+
 	It("attaches a required nodeAffinity In term for multi-model accelerators", func() {
 		spec := &corev1.PodSpec{}
 		attachModelNodeAffinity(spec, testProductLabelMetax, []string{testGPUModelMXC500, testGPUModelMXC550})
