@@ -558,6 +558,10 @@ const OPTIONS = {
       quantizations: ["w8a8"],
       servingMode: "pd-separation",
       gpuPerPod: 8,
+      roles: [
+        { name: "prefill", vendor: "metax", models: ["MXC500"], gpuPerPod: 8 },
+        { name: "decode", vendor: "nvidia", models: ["H200"], gpuPerPod: 8 },
+      ],
       overrides: [
         { name: "decodeReplicas", type: "integer", min: 1, max: 16, enum: null, default: 1, description: null },
         { name: "prefillReplicas", type: "integer", min: 1, max: 8, enum: null, default: 1, description: null },
@@ -713,15 +717,15 @@ describe("deploy wizard", () => {
     await act(async () => {});
     await fillNameAndGoToStep2();
 
-    // pd-separation: one reserved GPU select per role (prefill / decode), both
-    // fixed to the profile's vendor until the operator API supports it.
+    // pd-separation: one read-only GPU select per role, each showing that
+    // role's own accelerator as declared by the profile.
     const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
     expect(step2.textContent).toContain("GPU 类型");
     const prefillGpu = step2.querySelector('[data-od-id="wizard-gpu-prefill"]');
     const decodeGpu = step2.querySelector('[data-od-id="wizard-gpu-decode"]');
     expect(selectText(prefillGpu)).toBe("metax");
-    expect(selectText(decodeGpu)).toBe("metax");
-    expect(step2.textContent).toContain("预留能力");
+    expect(selectText(decodeGpu)).toBe("nvidia");
+    expect(step2.textContent).toContain("不可更改");
 
     act(() => root.unmount());
   });
