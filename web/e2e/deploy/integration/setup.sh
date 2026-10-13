@@ -63,12 +63,21 @@ info "cubepilot stack (operator + api + agent CRDs; web.enabled=false)"
 # this is; a re-run is an upgrade and leaves the CRDs alone (they are stable).
 # --devel: the rolling chart is tagged 1.0.0-latest, and Helm skips prerelease
 # tags unless asked — without it the install silently lands on the older 0.1.0.
-helm upgrade --install cubepilot "${CHART}" --devel ${CHART_VERSION:+--version "${CHART_VERSION}"} \
-  -n "${NS}" \
-  --set web.enabled=false \
-  --set agents.llmEndpoint="${LLM_ENDPOINT}" \
-  --set agents.llmModel="${LLM_MODEL}" \
-  --wait --timeout 300s
+# Harbor drops an occasional blob mid-pull (a CI "TLS handshake timeout"), so
+# retry the install a few times.
+for attempt in 1 2 3; do
+  if helm upgrade --install cubepilot "${CHART}" --devel ${CHART_VERSION:+--version "${CHART_VERSION}"} \
+    -n "${NS}" \
+    --set web.enabled=false \
+    --set agents.llmEndpoint="${LLM_ENDPOINT}" \
+    --set agents.llmModel="${LLM_MODEL}" \
+    --wait --timeout 300s; then
+    break
+  fi
+  [ "${attempt}" -lt 3 ] || die "cubepilot install failed after ${attempt} attempts"
+  info "cubepilot install attempt ${attempt} failed; retrying in $((attempt * 10))s"
+  sleep $((attempt * 10))
+done
 
 # The agent CRDs come from the cubepilot chart; the platform CRDs the portal's
 # other pages read (model catalog, dev environments) come from this repo.
@@ -128,6 +137,27 @@ spec:
   instruction: 报告集群状态,不要修改任何资源
   state: Enabled
 YAML
+
+# cubepilot-api provisions its builtin `admin` AgentInstance the first time its
+# session surface is used and answers 503 while that settles — 20-84s, longer
+# than a caller's own timeout. Warm it to a real 200 so "ready" means serving.
+info "warming the agent API (first-use provisioning)"
+warm_start="${SECONDS}"
+warm_deadline=$(( SECONDS + 420 ))
+warm_ok=""
+while [ "${SECONDS}" -lt "${warm_deadline}" ]; do
+  if kubectl -n "${NS}" exec deploy/portal -- env \
+    WARM_URL="http://cubepilot-api.${NS}.svc:8080/api/v1/sessions" \
+    node -e 'fetch(process.env.WARM_URL, { signal: AbortSignal.timeout(45000) })
+      .then((r) => { console.log("  agent API /sessions -> " + r.status); process.exit(r.status === 200 ? 0 : 1); })
+      .catch((e) => { console.log("  agent API unreachable: " + String(e)); process.exit(1); });'; then
+    warm_ok=yes
+    break
+  fi
+  sleep 5
+done
+[ -n "${warm_ok}" ] || die "agent API did not serve a 200 within $((SECONDS - warm_start))s"
+info "agent API serving (warmed in $((SECONDS - warm_start))s)"
 
 cat <<EOF
 

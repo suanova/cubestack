@@ -73,24 +73,6 @@ jobs:
             --password "${{ secrets.CI_BOT_PASSWORD }}"
       - name: Bring up cubepilot + the portal
         run: bash web/e2e/deploy/integration/setup.sh
-      # cubepilot-api provisions its builtin admin AgentInstance on first use and
-      # answers 503 until that settles — longer than a Playwright test waits, so
-      # a cold first request flakes the suite. Warm that path to a 200 first.
-      - name: Warm up the agent API
-        run: |
-          set -euo pipefail
-          kubectl -n cubestack-system port-forward svc/cubepilot-api 18080:8080 &
-          PF=$!
-          trap 'kill "$PF" 2>/dev/null || true' EXIT
-          deadline=$(( SECONDS + 420 ))
-          code=""
-          while [ "${SECONDS}" -lt "${deadline}" ]; do
-            code="$(curl -sS -o /dev/null -m 40 -w '%{http_code}' http://127.0.0.1:18080/api/v1/sessions || true)"
-            echo "warm-up: HTTP ${code} (${SECONDS}s)"
-            [ "${code}" = "200" ] && break
-            sleep 5
-          done
-          [ "${code}" = "200" ] || { echo "agent API never served 200 (last: ${code})" >&2; exit 1; }
       # Only the chat layer needs a real key; a fork PR never has the secret,
       # so that layer skips and the rest still runs.
       - name: Run the integration suite
