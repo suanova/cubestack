@@ -1908,6 +1908,12 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
         "@media (max-width: 1180px)": { flex: "none", display: "block" },
       }}
     >
+      {/* The chat tab's own line, and it stays the chat tab's: it says what this
+          conversation is, so it is part of the room and lives inside it — it is
+          still there when the page folds its head away for the room. */}
+      <Box data-od-id="chat-sub" sx={{ fontSize: 12, color: "text.secondary", mb: "14px" }}>
+        {t("cubepilot.chat.sub")}
+      </Box>
       {toastView}
 
       <Box sx={chatGridSx(listW, listCollapsed)}>

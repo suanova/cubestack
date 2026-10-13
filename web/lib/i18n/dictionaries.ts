@@ -423,12 +423,13 @@ const zhCN = {
   "dev.delete.confirmRetain": "删除开发环境「{name}」?其 {size} 工作区卷将保留为 {claim}:不会被自动回收,控制台也不列出。",
 
   // 智能助手 (app/cubepilot) — 聊天 / 自动化任务 / 配置。
-  "cubepilot.sub": "AI 运维 · 模型走 AI Gateway · 助手接入真实集群 · 统一工具接口访问 Kubernetes / GPU 集群 / 推理服务 / 存储",
+  "cubepilot.sub": "AI 运维 · 通过统一工具接口访问 Kubernetes / GPU 集群 / 推理服务 / 存储",
   "cubepilot.tab.chat": "聊天",
   "cubepilot.tab.tasks": "自动化任务",
   "cubepilot.tab.config": "配置",
 
   // 聊天 tab
+  "cubepilot.chat.sub": "推理模型与 AI 助手的统一对话入口 · 模型走 AI Gateway · 助手接入真实集群",
   "cubepilot.chat.placeholder": "输入消息,Enter 发送,Shift+Enter 换行",
   "cubepilot.chat.send": "发送",
   "cubepilot.chat.objectsModels": "推理模型",
@@ -1155,10 +1156,11 @@ const zhTW: Dictionary = {
   "dev.delete.confirmRetain": "刪除開發環境「{name}」?其 {size} 工作區卷將保留為 {claim}:不會被自動回收,主控台亦不列出。",
 
   // 智能助手 (app/cubepilot) — 聊天 / 自動化任務 / 設定。
-  "cubepilot.sub": "AI 運維 · 模型走 AI Gateway · 助手串接真實叢集 · 透過統一工具介面存取 Kubernetes / GPU 集群 / 推理服務 / 儲存",
+  "cubepilot.sub": "AI 運維 · 透過統一工具介面存取 Kubernetes / GPU 集群 / 推理服務 / 儲存",
   "cubepilot.tab.chat": "聊天",
   "cubepilot.tab.tasks": "自動化任務",
   "cubepilot.tab.config": "設定",
+  "cubepilot.chat.sub": "推理模型与 AI 助手的统一对话入口 · 模型走 AI Gateway · 助手串接真實叢集",
   "cubepilot.chat.placeholder": "輸入訊息,Enter 傳送,Shift+Enter 換行",
   "cubepilot.chat.send": "傳送",
   "cubepilot.chat.objectsModels": "推理模型",
@@ -1871,10 +1873,11 @@ const en: Dictionary = {
   "dev.delete.confirmRetain": "Delete dev environment \"{name}\"? Its {size} workspace is kept as the claim {claim} — nothing reclaims it, and the console does not list it.",
 
   // Copilot (app/cubepilot) — chat / scheduled tasks / config.
-  "cubepilot.sub": "AI Ops · models via AI Gateway · the assistant talks to the real cluster · Kubernetes / GPU / inference / storage through the unified tool interface",
+  "cubepilot.sub": "AI Ops · access Kubernetes / GPU cluster / inference services / storage through the unified tool interface",
   "cubepilot.tab.chat": "Chat",
   "cubepilot.tab.tasks": "Tasks",
   "cubepilot.tab.config": "Config",
+  "cubepilot.chat.sub": "Unified chat for inference models and AI assistants · models via AI Gateway · the assistant talks to the real cluster",
   "cubepilot.chat.placeholder": "Type a message, Enter to send, Shift+Enter for a new line",
   "cubepilot.chat.send": "Send",
   "cubepilot.chat.objectsModels": "Inference models",

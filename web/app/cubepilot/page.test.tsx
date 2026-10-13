@@ -810,9 +810,11 @@ describe("cubepilot page", () => {
     );
     expect(container.querySelector('[data-od-id="page-head"]')).toBeNull();
     expect(container.querySelector('[data-od-id="cubepilot-tabs"]')).toBeNull();
-    // The room itself is untouched — the same pane, given the rows.
+    // The room itself is untouched — the same pane, given the rows, and the
+    // chat tab's own line goes with it rather than with the head.
     expect(container.querySelector('[data-od-id="pane-chat"]')).not.toBeNull();
     expect(container.querySelector('[data-od-id="chat-thread"]')).not.toBeNull();
+    expect(container.querySelector('[data-od-id="chat-sub"]')).not.toBeNull();
 
     act(() => (container.querySelector('[data-od-id="toggle-room"]') as HTMLElement).click());
     await act(async () => {});
