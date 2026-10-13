@@ -112,6 +112,25 @@ describe("inference services page", () => {
     act(() => root.unmount());
   });
 
+  it("shows a not-ready service as Pending while progressing, 异常 once it has broken", async () => {
+    const list = [
+      // Just created: Ready=False but Progressing=True (Reconciling) — its pods
+      // are still ContainerCreating, which must not read as "abnormal".
+      inferenceServiceSummary({ name: "starting", createdAt: "2026-09-01T07:00:00Z", ready: false, progressing: true }),
+      // Converged then broke: Ready=False with Progressing=False (Converged) —
+      // the genuine abnormal state.
+      inferenceServiceSummary({ name: "broken", createdAt: "2026-09-01T06:00:00Z", ready: false, progressing: false }),
+    ];
+    stubData(list);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    expect((container.querySelector('[data-od-id="svc-row-starting"]') as HTMLElement).textContent).toContain("Pending");
+    expect((container.querySelector('[data-od-id="svc-row-broken"]') as HTMLElement).textContent).toContain("异常");
+
+    act(() => root.unmount());
+  });
+
   it("switches the selected service when a row is clicked", async () => {
     stubData(inferenceServiceList());
     const { container, root } = renderPage();

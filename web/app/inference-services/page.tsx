@@ -75,7 +75,11 @@ function StatusChip({ cls, label }: { cls: StatusClass; label: string }) {
 
 function serviceStatus(s: InferenceServiceSummary): StatusClass {
   if (s.ready === true) return "ready";
-  if (s.ready === false) return "err";
+  // Not ready while the controller is still applying the desired state (first
+  // reconcile, rollout, scaling): the pods are merely starting — ContainerCreating
+  // and the like — so the row reads "Pending", not "abnormal". A service that
+  // had converged and then broke keeps Progressing=False, so it still reads err.
+  if (s.ready === false) return s.progressing ? "pending" : "err";
   return "pending";
 }
 
