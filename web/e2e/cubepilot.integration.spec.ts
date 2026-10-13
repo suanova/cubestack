@@ -84,3 +84,41 @@ test.describe("agent config writes the AgentInstance CR", () => {
     expect(body.config?.userInstructions ?? "").toContain(marker);
   });
 });
+
+test.describe("tasks tab reads real Task CRs", () => {
+  test.beforeEach(async ({ context, page }) => {
+    // This describe asserts Chinese copy, so it needs the same locale pin the
+    // rest of the suite uses (headless Chromium reports en-US).
+    await page.addInitScript(() => localStorage.setItem("cubestack-locale", "zh-CN"));
+    await seedSession(context);
+  });
+
+  const openTasks = async (page: import("@playwright/test").Page) => {
+    await page.goto(`${BASE}/cubepilot`);
+    await page.locator('[data-od-id="cp-tab-tasks"]').click();
+    await expect(page.locator('[data-od-id="cp-tasks-pane"]')).toBeVisible();
+  };
+
+  test("the seeded Task CR is rendered as a row", async ({ page }) => {
+    const marker = process.env.E2E_MARKER ?? "";
+    expect(marker, "E2E_MARKER must be exported by setup.sh / the workflow").not.toBe("");
+    await openTasks(page);
+
+    // Located by the seeded display name, not by row id: the projection's id
+    // derivation is not part of what this test is about.
+    await expect(
+      page.locator('[data-od-id^="cp-task-row-"]').filter({ hasText: marker }),
+    ).toBeVisible();
+    // The empty state must be gone, which is the observable difference between
+    // "the CR reached the page" and "the page rendered nothing".
+    await expect(page.locator('[data-od-id="cp-tasks-pane"]')).not.toContainText("暂无任务");
+  });
+
+  test("the task templates segment lists the operator's presets", async ({ page }) => {
+    await openTasks(page);
+    await page.locator('[data-od-id="cp-tasks-seg-templates"]').click();
+    // The operator publishes the preset display names in English, so the zh-CN
+    // page renders that string verbatim (the CR's spec.displayName).
+    await expect(page.locator('[data-od-id="cp-tasks-templates"]')).toContainText("Daily Cluster Inspection");
+  });
+});
