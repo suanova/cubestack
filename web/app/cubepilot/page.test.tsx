@@ -794,7 +794,7 @@ describe("cubepilot page", () => {
     const resizer = container.querySelector('[data-od-id="pane-resizer"]') as HTMLElement;
     expect(resizer).not.toBeNull();
     expect(resizer.getAttribute("role")).toBe("separator");
-    expect(resizer.getAttribute("aria-valuenow")).toBe("132");
+    expect(resizer.getAttribute("aria-valuenow")).toBe("157");
 
     const drag = (fromX: number, toX: number): void => {
       act(() => {
@@ -808,7 +808,7 @@ describe("cubepilot page", () => {
 
     // Dragging 100px right widens the column by 100px.
     drag(200, 300);
-    expect(resizer.getAttribute("aria-valuenow")).toBe("232");
+    expect(resizer.getAttribute("aria-valuenow")).toBe("257");
 
     // Drags beyond the bounds clamp to the min/max.
     drag(200, 5000);

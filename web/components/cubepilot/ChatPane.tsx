@@ -89,7 +89,7 @@ const ACCENT_FILL = "color-mix(in oklch, var(--accent) 82%, var(--fg))";
 // and the resizer handle rides the 16px gutter between the two panes. It can
 // also be collapsed away entirely, which is the reader's way of giving the
 // conversation the width.
-const LIST_COL_DEFAULT = 132;
+const LIST_COL_DEFAULT = 157;
 const LIST_COL_MIN = 120;
 const LIST_COL_MAX = 460;
 
@@ -1906,7 +1906,9 @@ export function ChatPane() {
               "&:hover": { borderColor: isAgent ? VIOLET_BORDER : "text.primary" },
             }}
           >
-            <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
+            {/* Wraps rather than overflowing: this column is the reader's to
+                drag narrow, and the badge is long in some languages. */}
+            <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
               <Box sx={{ fontSize: 13.5, fontWeight: 600 }}>CubePilot</Box>
               <Box
                 sx={{
