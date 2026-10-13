@@ -2090,10 +2090,10 @@ export function ChatPane() {
               </Box>
               <Box sx={{ minWidth: 0 }}>
                 <Box sx={{ fontSize: 14, fontWeight: 650 }}>{objName}</Box>
-                {/* The agent's phase is the Pill beside the name; the line would
-                    print it a second time. A model's line is its *role*, which
-                    the Pill does not say. */}
-                {isAgent ? null : <Box sx={{ fontSize: 11, color: "text.secondary" }}>{objRole}</Box>}
+                {/* Ready is the one phase the Pill beside the name already says;
+                    every other phase says more here than a Pill can (not
+                    provisioned, starting with a wait, failed). */}
+                {isAgent && agentReady ? null : <Box sx={{ fontSize: 11, color: "text.secondary" }}>{objRole}</Box>}
               </Box>
               {objKind ? (
                 isAgent ? (
