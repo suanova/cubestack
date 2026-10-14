@@ -442,10 +442,8 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
    *  happened without it — the bug the loop exists to fix, reintroduced by the
    *  send that follows it. */
   const followGenRef = useRef(0);
-  /** Bumped whenever a tick stops seeing an active turn. A pending read issued
-   *  before the bump describes a turn that is over — the terminal that ended it
-   *  settled its cards — so applying that answer would leave the dock offering a
-   *  decision nobody is waiting on any more. */
+  /** Bumped when a tick sees no active turn: a pending read issued before that
+   *  describes a turn whose cards the terminal already settled. */
   const turnEpochRef = useRef(0);
   /** True from the moment this pane drives a turn until the server says that turn
    *  has stopped running. While it holds, this pane's own view of the turn is the
@@ -916,20 +914,14 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
     }
   }
 
-  /** Re-attach cards the turn is currently blocked on.
+  /** Re-attach cards the turn is currently blocked on (required after a reload).
    *
-   *  Required after a reload, and — `quiet` — by the follow loop: the runtime
-   *  pushes a card only to the stream that is open when it is raised, and a
-   *  re-attach answers 200 without replaying one, so re-reading the pending set
-   *  is what makes a card raised while this pane had no stream appear without a
-   *  reload. Quiet mode reports nothing: a poll that fails is a lost tick, not
-   *  news for the reader, and the next tick asks again. */
+   *  The follow loop reads them quietly on every tick: a re-attach does not replay
+   *  a card raised before it opened, and a failed poll is a lost tick. */
   async function restorePendingHitl(key: string, opts: { quiet?: boolean } = {}): Promise<void> {
     const gen = genRef.current;
-    // A read is answered for the turn that was running when it was issued. If
-    // that turn ends before the answer lands, the answer is stale: the terminal
-    // settled those cards, and adding one now leaves the dock asking for a
-    // decision that is no longer anybody's to make.
+    // A read answers for the turn that was running when it was issued; if that
+    // turn ends first, the cards it describes are already settled.
     const epoch = turnEpochRef.current;
     const stale = (): boolean => turnEpochRef.current !== epoch;
     /** A card with no turn in the thread to hang it on gets its own bubble. The
@@ -996,9 +988,7 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
           // a reloaded question with no countdown and its controls live past the
           // point the gateway had given it.
           const card = newQuestion(q.id, q.questions ?? [], q.timeoutSeconds, Date.now());
-          // One question reaches the view twice on a poll — once from the stream
-          // that raised it, once from this read — and the id is what says the
-          // two are one card. The approvals' own add reads it the same way.
+          // The stream and this read both describe one question: the id says so.
           attachToNewest((x) =>
             x.questions.some((old) => old.callId === card.callId) ? x : { ...x, questions: [...x.questions, card] },
           );
@@ -1098,9 +1088,8 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
     const ctl = new AbortController();
     attachRef.current = ctl;
     try {
-      // Through apiFetch: a bare "/api/..." misses the portal's base path, and
-      // the re-attach is the one path that brings a parked card back to a pane
-      // that lost its stream — a 404 here leaves the card lost until a reload.
+      // Through apiFetch: a bare "/api/…" misses the portal's base path, and this
+      // is the one path that recovers a parked card.
       const res = await apiFetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/turn/events`, {
         signal: ctl.signal,
       });
@@ -1199,8 +1188,7 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
       if (!res.ok || followGenRef.current !== gen) return;
       const { active } = (await res.json()) as { active?: boolean };
       if (followGenRef.current !== gen) return;
-      // The turn is over: any pending read still in flight is about a turn whose
-      // cards the terminal settled (see turnEpochRef).
+      // No active turn: any pending read in flight is about a settled turn.
       if (active !== true) turnEpochRef.current += 1;
       if (ownTurnRef.current) {
         // A turn this pane started. Its stream is the state, and the history
@@ -1245,11 +1233,8 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
         // pushed to the session's own stream — the one this pane lost. Re-attach
         // so the card arrives here rather than being dropped on the floor.
         void attachToRun(key);
-        // …and read the pending set too, because a re-attach does not REPLAY a
-        // card raised before it opened: measured on the test environment, the
-        // attach answers 200 and carries nothing. The read is the runtime's own
-        // recovery path, so a card raised while this pane had no stream shows up
-        // within a tick instead of waiting for a reload.
+        // …and the pending set too: a re-attach does not replay a card raised
+        // before it opened, so the read is what brings it back without a reload.
         void restorePendingHitl(key, { quiet: true });
         return;
       }
