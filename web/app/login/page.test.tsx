@@ -53,6 +53,16 @@ function fillInput(container: HTMLElement, dataOdId: string, value: string) {
   });
 }
 
+// What the browser's autofill leaves behind: the value is in the DOM, but no
+// input event was fired, so React state never learns about it.
+function autofill(container: HTMLElement, dataOdId: string, value: string) {
+  const input = container.querySelector(`[data-od-id="${dataOdId}"] input`) as HTMLInputElement;
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+  act(() => {
+    setter?.call(input, value);
+  });
+}
+
 function submitForm(container: HTMLElement) {
   const form = container.querySelector("form") as HTMLFormElement;
   act(() => form.requestSubmit());
@@ -97,6 +107,31 @@ describe("login page", () => {
     await act(async () => {});
     expect(container.textContent).toContain("请输入用户名");
 
+    act(() => root.unmount());
+  });
+
+  it("submits credentials the browser autofilled behind React's back", async () => {
+    // Autofill writes into the input without firing onChange, so the box holds
+    // a value React never saw — the old controlled fields read that as "" and
+    // wiped it. The submit reads the form, so the box the user sees filled is
+    // what goes to the server.
+    const assign = installLocation("");
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ user: "admin" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const { container, root } = renderPage();
+
+    autofill(container, "login-username", "admin");
+    autofill(container, "login-password", "saved-secret");
+    submitForm(container);
+    await act(async () => {});
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(init.body))).toEqual({ username: "admin", password: "saved-secret" });
+    expect(assign).toHaveBeenCalledWith("/cubestack");
     act(() => root.unmount());
   });
 

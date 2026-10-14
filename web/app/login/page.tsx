@@ -32,8 +32,11 @@ function readNextPath(): string {
 
 export default function LoginPage() {
   const { t } = useI18n();
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
+  // The two fields are deliberately uncontrolled and the submit reads them off
+  // the form (see onSubmit): the browser's autofill — the saved credential, a
+  // password manager — writes into the input without ever firing React's
+  // onChange, so a copy in state would call a box the user can see filled
+  // "empty" and then write that emptiness back over it on the next render.
   const [fieldError, setFieldError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -43,8 +46,12 @@ export default function LoginPage() {
     if (busy) return;
     setSubmitError(null);
 
-    const user = username.trim();
-    const pass = password;
+    // Read what the fields actually hold — what the user typed, or what the
+    // browser filled in for them — rather than a React copy that autofill
+    // never told us about.
+    const data = new FormData(e.currentTarget);
+    const user = String(data.get("username") ?? "").trim();
+    const pass = String(data.get("password") ?? "");
     if (!user) {
       setFieldError("auth.userRequired");
       return;
@@ -209,30 +216,37 @@ export default function LoginPage() {
             </Typography>
           </Box>
 
+          {/* Placeholder rather than a floating label: the browser hides a
+              placeholder the moment the box holds anything, no matter how it
+              got there, so a field autofilled before React could see it can
+              never be drawn on top of its own hint. The label the placeholder
+              drops is restored for screen readers via aria-label. */}
           <TextField
             autoFocus
-            label={t("auth.username")}
+            placeholder={t("auth.username")}
             variant="outlined"
             size="small"
             fullWidth
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
+            name="username"
+            autoComplete="username"
             error={fieldError !== null}
             helperText={fieldError === "auth.userRequired" ? t("auth.userRequired") : ""}
+            slotProps={{ htmlInput: { "aria-label": t("auth.username") } }}
             sx={{ mb: "16px" }}
             data-od-id="login-username"
           />
 
           <TextField
-            label={t("auth.password")}
+            placeholder={t("auth.password")}
             variant="outlined"
             size="small"
             fullWidth
             type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
+            name="password"
+            autoComplete="current-password"
             error={fieldError !== null}
             helperText={fieldError === "auth.passRequired" ? t("auth.passRequired") : ""}
+            slotProps={{ htmlInput: { "aria-label": t("auth.password") } }}
             sx={{ mb: "22px" }}
             data-od-id="login-password"
           />
