@@ -60,29 +60,34 @@ rules:
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["list"]
-  # List Secrets for two reads, both of which need a namespace the user chooses
-  # and neither of which is a general Secret browser:
+  # The Secrets rule serves three uses in the namespace the user chooses, and
+  # none of them is a general Secret browser:
   #
-  # 1. The dev-environment wizard's SSH key picker, which offers only the Secrets
-  #    that carry the operator's delegation label
-  #    (ai.cubestack.io/ssh-keys-delegated), so it never surfaces a key Secret the
-  #    controller would refuse. That endpoint returns each Secret's name and data
-  #    keys, never its values.
+  # 1. The dev-environment wizard's public-key input (POST
+  #    /api/devenvironments): when the user pastes their own keys, the route
+  #    writes them to a <name>-ssh-user-keys Secret it owns in the environment's
+  #    namespace and spec.ssh.authorizedKeysSecret points at it — the reason the
+  #    rule carries `create`. The write is to that one derived name, and no read
+  #    or update of any other Secret is granted.
   # 2. The connection card's Jupyter token
   #    (/api/devenvironments/token?namespace=&name=), which the card shows behind
-  #    a reveal toggle. The endpoint identifies a DevEnvironment and reads the
-  #    Secret *that environment's own status points at* — the Secret name is never
-  #    taken from the request — so an environment can only yield the credential
-  #    the operator published for it, and this is not a way to read an arbitrary
-  #    Secret by name.
+  #    a reveal toggle.
+  # 3. The connection card's SSH private key
+  #    (/api/devenvironments/ssh-key?namespace=&name=), which hands the user the
+  #    private half of the keypair the controller minted, as a download.
   #
-  # Both go through `list` (field-selected to one name for the token) because
-  # `get` here would be `get` on every Secret in the cluster; the token read is
-  # within what this rule already allows rather than an extension of it. The
-  # namespaced Role above grants no Secret read beyond the htpasswd one.
+  # Both reads (2 and 3) identify a DevEnvironment and read the Secret *that
+  # environment's own status points at* — the Secret name is never taken from
+  # the request — so an environment can only yield the credential the operator
+  # published for it, and this is not a way to read an arbitrary Secret by
+  # name.
+  #
+  # The reads go through `list` (field-selected to one name) because `get` here
+  # would be `get` on every Secret in the cluster. The namespaced Role above
+  # grants no Secret read beyond the htpasswd one.
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["list"]
+    verbs: ["list", "create"]
   # Read and write the operator's CRs. Reads are cluster-wide because the UI
   # aggregates them (listClusterCustomObject) and the CRDs are a mix of
   # namespaced and cluster scope. Writes are cluster-wide because the UI creates

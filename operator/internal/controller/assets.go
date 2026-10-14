@@ -60,7 +60,7 @@ const (
 	// SSH secret data keys. The ssh material is split across two Secrets: the
 	// controller-managed host-key Secret holds the ed25519 host keypair, and the
 	// authorized-keys source holds the content the workload mounts as
-	// authorized_keys — the user's Secret when spec.ssh.keysSecret names one, at
+	// authorized_keys — the user's Secret when spec.ssh.authorizedKeysSecret names one, at
 	// the data key its selector names, else the controller-generated one at
 	// sshClientPubKeyKey.
 	sshHostKeyKey    = "ssh_host_ed25519_key"
@@ -71,7 +71,7 @@ const (
 	// takes sshClientPubKeyKey itself now, and a leftover copy is deleted on
 	// sight: it would otherwise look like the entry to edit, and editing it
 	// changes nothing. It is still the conventional data key in a user's own keys
-	// Secret, which spec.ssh.keysSecret names for itself.
+	// Secret, which spec.ssh.authorizedKeysSecret names for itself.
 	sshAuthorizedKeysKey = "authorized_keys"
 
 	// The generated login keypair, written only into the controller-generated
@@ -81,14 +81,6 @@ const (
 	// container.
 	sshClientKeyKey    = "id_ed25519"
 	sshClientPubKeyKey = "id_ed25519.pub"
-
-	// devEnvSSHKeysDelegatedLabel marks a Secret that explicitly opts in to being
-	// used as an environment's SSH authorized_keys source. Only a Secret carrying
-	// this label may be referenced by spec.ssh.keysSecret: reading an undelegated
-	// Secret would let an environment creator exfiltrate any same-namespace Secret
-	// through the managed SSH secret that the workload mounts.
-	devEnvSSHKeysDelegatedLabel = "ai.cubestack.io/ssh-keys-delegated"
-	devEnvSSHKeysDelegatedValue = "true"
 
 	// workspaceClaimName is the StatefulSet volumeClaimTemplate name. The claim
 	// it provisions is <claim>-<set>-<ordinal> (K8s PVC naming), i.e.

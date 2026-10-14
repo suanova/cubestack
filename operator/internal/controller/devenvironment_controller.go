@@ -933,8 +933,8 @@ func (r *DevEnvironmentReconciler) enqueueAllDevEnvironments(ctx context.Context
 // reference it as their authorized_keys source (spec.ssh.authorizedKeysSecret),
 // so editing it re-reconciles them: the pod's volume is an ordinary Secret mount
 // and kubelet delivers the new bytes on its own, but the reconcile is what
-// re-checks the reference (the Secret may have been undelegated or had the entry
-// removed since) and reports it. The reference is same-namespace
+// re-checks the reference (the entry may have been removed since) and reports it.
+// The reference is same-namespace
 // (corev1.SecretKeySelector), so Secrets in other namespaces short-circuit
 // cheaply.
 func (r *DevEnvironmentReconciler) enqueueForDevEnvAuthorizedKeysSecret(ctx context.Context, obj client.Object) []reconcile.Request {
@@ -1119,7 +1119,7 @@ func l4ListenerFor(protocol corev1.Protocol) (gatewayv1.ProtocolType, string) {
 	return gatewayv1.TCPProtocolType, tcpRouteKind
 }
 
-// sshUserKeysRef is the delegated Secret the environment takes its authorized
+// sshUserKeysRef is the user's own Secret the environment takes its authorized
 // keys from, or nil when the controller generates them instead.
 func sshUserKeysRef(env *aiv1alpha1.DevEnvironment) *corev1.SecretKeySelector {
 	if env.Spec.SSH == nil {
@@ -1129,12 +1129,12 @@ func sshUserKeysRef(env *aiv1alpha1.DevEnvironment) *corev1.SecretKeySelector {
 }
 
 // sshAuthorizedKeysSource is the name and data key of the Secret the pod mounts
-// as /run/ssh/authorized_keys: the user's delegated Secret when the spec names
-// one, at the data key its selector names, else the controller-generated
+// as /run/ssh/authorized_keys: the user's own Secret when the spec names one,
+// at the data key its selector names, else the controller-generated
 // <env>-ssh-client-key at sshClientPubKeyKey — the client keypair's public half,
 // which is the key that actually logs in.
 //
-// The delegated key is always non-empty: the CRD requires the field and rejects
+// The user's key is always non-empty: the CRD requires the field and rejects
 // an empty one, so there is nothing here to fall back to — substituting an entry
 // of our own would mount a file the spec never named.
 //
@@ -3066,14 +3066,14 @@ func (r *DevEnvironmentReconciler) stsSpecHash(env *aiv1alpha1.DevEnvironment) s
 //
 // The material is two Secrets because it is two things with different owners:
 // the host identity, which is the platform's and never leaves the cluster, and
-// the client key, which is the user's credential. When the spec names a delegated
+// the client key, which is the user's credential. When the spec names a user
 // authorized-keys Secret the controller mints the host key only and that Secret
 // is mounted as-is; otherwise it mints a client keypair too, so the environment's
 // owner has a key that actually logs in (design §6.3).
 //
 // The user's Secret is read first, before anything is created: a reference that
-// is missing, undelegated, or lacks the selected data key then leaves no
-// half-provisioned environment behind.
+// is missing or lacks the selected data key then leaves no half-provisioned
+// environment behind.
 //
 // Only the host key produces a revision. The pod reads it through a subPath
 // mount, which never sees an update in place, so a repaired host key only reaches
@@ -3294,7 +3294,7 @@ func sshHostKeySecretName(env *aiv1alpha1.DevEnvironment) string {
 // when the environment supplies no keys of its own: it carries the generated
 // client keypair and the authorized_keys entry the workload mounts. It is named
 // for the key it holds rather than for the mount, which is the job
-// spec.ssh.authorizedKeysSecret names in the delegated case.
+// spec.ssh.authorizedKeysSecret names when the environment brings its own keys.
 func sshClientKeySecretName(env *aiv1alpha1.DevEnvironment) string {
 	return env.Name + "-ssh-client-key"
 }
@@ -3389,8 +3389,8 @@ func generateJupyterToken() (string, error) {
 }
 
 // checkUserAuthorizedKeys verifies the Secret the workload takes its
-// authorized_keys from — spec.ssh.keysSecret, at the data key its selector names
-// — is one the environment may mount.
+// authorized_keys from — spec.ssh.authorizedKeysSecret, at the data key its
+// selector names — is one the environment can mount.
 //
 // The entry has to be present. The volume maps that one data key to the file the
 // images read, and a key absent from the Secret leaves the file out of the mount
@@ -3403,13 +3403,6 @@ func (r *DevEnvironmentReconciler) checkUserAuthorizedKeys(ctx context.Context, 
 	s := &corev1.Secret{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: env.Namespace, Name: ks.Name}, s); err != nil {
 		return err
-	}
-	// Only a Secret that explicitly delegates itself may back authorized_keys:
-	// the workload mounts it directly, so an undelegated reference would let an
-	// environment creator read any same-namespace Secret through their own
-	// container — including another environment's generated login key.
-	if s.Labels[devEnvSSHKeysDelegatedLabel] != devEnvSSHKeysDelegatedValue {
-		return fmt.Errorf("secret %s/%s is not delegated for SSH keys: missing label %q", env.Namespace, ks.Name, devEnvSSHKeysDelegatedLabel)
 	}
 	if _, ok := s.Data[key]; !ok {
 		return fmt.Errorf("secret %s/%s carries no data key %q, which is the entry the pod mounts as authorized_keys", env.Namespace, ks.Name, key)

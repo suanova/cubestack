@@ -156,7 +156,7 @@ vendor image is that its stack exists for the GPU.
 The operator mounts **two ssh files** into the container — nothing is copied, staged, or
 re-permissioned in the container. They come from **two Secrets with different owners**: the host
 identity is always the controller's, while the authorized keys are the user's when
-`spec.ssh.keysSecret` names a Secret and the controller's otherwise.
+`spec.ssh.authorizedKeysSecret` names a Secret and the controller's otherwise.
 
 The host key is a `subPath` file, because sshd wants it at one exact path. The authorized keys are a
 whole-Secret mount of the directory `/run/ssh`, with `items` renaming the selected data key to
@@ -167,12 +167,12 @@ start (see the operator requirements below).
 | Mounted at | Secret key | Secret | Used by |
 |------------|-----------|--------|---------|
 | `/etc/ssh/ssh_host_ed25519_key` (`subPath`) | `ssh_host_ed25519_key` | `<env>-ssh-host-key` (controller-minted) | sshd host identity; its presence gates ssh |
-| `/run/ssh/authorized_keys` | the entry the volume takes, renamed to `authorized_keys` | `spec.ssh.keysSecret`, else `<env>-ssh-authorized-keys` (controller-minted) | keys that may log in |
+| `/run/ssh/authorized_keys` | the entry the volume takes, renamed to `authorized_keys` | `spec.ssh.authorizedKeysSecret`, else `<env>-ssh-client-key` (controller-minted) | keys that may log in |
 
-The entry the volume takes is the one the user's selector names when `spec.ssh.keysSecret` is set, and
-`id_ed25519.pub` in the controller-minted case — the public half of the generated login keypair, taken
-straight out of the Secret rather than copied to a second entry first. `status.sshKeysSecret` names
-that Secret, so it is what a user reads to find where their login keys live. The controller-minted
+The entry the volume takes is the one the user's selector names when `spec.ssh.authorizedKeysSecret` is
+set, and `id_ed25519.pub` in the controller-minted case — the public half of the generated login keypair,
+taken straight out of the Secret rather than copied to a second entry first. `status.sshClientKeySecret`
+names that Secret, so it is what a user reads to find where their login keys live. The controller-minted
 Secret holds the keypair and nothing else: `id_ed25519`, the private half the user retrieves to log in,
 and `id_ed25519.pub`. The volume maps that single entry and no other, so **the generated login private
 key never enters the container**.
@@ -229,8 +229,8 @@ Implemented in **#173**; the controller code is in `operator/internal/controller
   no such roll**: they are an ordinary Secret mount, so kubelet delivers a rotation to the running
   container within its sync period, and the controller deliberately keeps them out of the digest so
   adding a colleague's key does not restart anyone's session. It still watches Secrets, mapping one
-  back to every environment whose `spec.ssh.keysSecret` names it, to re-check a reference that has been
-  undelegated or had its entry removed.
+  back to every environment whose `spec.ssh.authorizedKeysSecret` names it, to re-check a reference
+  whose data entry has been removed or whose Secret the user has deleted.
 - **Set the Secret `defaultMode` from the reading uid, not from the file.** OpenSSH enforces its
   private-key permission check only on a file owned by the uid reading it, and a Secret volume
   materialises its files root-owned — so the mode a reader tolerates follows **who the reader is**.

@@ -36,9 +36,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { DevEnvironmentSummary } from "@/app/api/devenvironments/route";
 import type { DevEnvImageOption, DevEnvOptionsResponse } from "@/app/api/devenvironments/options/route";
-import type { SshKeySecretOption } from "@/app/api/devenvironments/ssh-keys/route";
 import { validationMessage, type ValidationErrorBody } from "@/lib/api-error";
-import { apiFetch } from "@/lib/base-path";
+import { apiFetch, withBasePath } from "@/lib/base-path";
 import { copyText } from "@/lib/clipboard";
 import { PLATFORM_GID, PLATFORM_UID, PLATFORM_USER } from "@/lib/devenvironments/images";
 import { useI18n } from "@/lib/i18n";
@@ -1100,8 +1099,53 @@ function TokenRow({
   );
 }
 
+// The ssh endpoint the operator publishes as ssh://user@host:port (the host
+// bracketed when it is an IPv6 address) — split here so the card can state the
+// login command instead of asking the user to reassemble it from the endpoint.
+function sshParts(address: string): { user: string; host: string; port: string } | null {
+  const m = /^ssh:\/\/([^@\/]+)@(\[[^\]]+\]|[^:\/]+):(\d+)$/.exec(address);
+  if (!m) return null;
+  return { user: m[1], host: m[2].replace(/^\[|\]$/g, ""), port: m[3] };
+}
+
+// The private half of the keypair the operator minted for the environment:
+// the file the user runs `ssh -i id_ed25519 user@host -p port` with. A plain
+// download link — the session cookie authorizes the route, and the Secret the
+// key comes from is derived server-side from the environment's own status, so
+// the href cannot be turned into a read of an arbitrary Secret.
+function SshKeyRow({ name, namespace, address }: { name: string; namespace: string; address: string }) {
+  const { t } = useI18n();
+  const parts = sshParts(address);
+  return (
+    <Box>
+      <Typography sx={{ fontSize: 11, color: "text.secondary", mb: "8px" }}>{t("dev.conn.sshKey")}</Typography>
+      <Box sx={CONN_ROW_SX}>
+        {/* A plain link, not a fetch: the session cookie authorizes the route
+            and the browser saves the file. The base path is the deployment's,
+            so the href goes through withBasePath as every hand-addressed URL does. */}
+        <Box
+          component="a"
+          data-od-id="ssh-key-download"
+          href={withBasePath(`/api/devenvironments/ssh-key?namespace=${encodeURIComponent(namespace)}&name=${encodeURIComponent(name)}`)}
+          sx={{ ...CONN_VALUE_SX, color: "var(--accent-strong)", textDecoration: "none", "&:hover": { textDecoration: "underline" } }}
+        >
+          {t("dev.conn.sshKeyDownload")}
+        </Box>
+      </Box>
+      {/* Stated when the endpoint could be read: without it the command is a
+          guess, and a guess in a credential card is worse than none. */}
+      {parts ? (
+        <Typography data-od-id="ssh-key-hint" sx={{ fontSize: 11, color: "text.secondary", mt: "6px" }}>
+          {t("dev.conn.sshKeyHint", { user: parts.user, host: parts.host, port: parts.port })}
+        </Typography>
+      ) : null}
+    </Box>
+  );
+}
+
 function ConnectionCard({ e, onAct }: { e: DevEnvironmentSummary; onAct: (e: DevEnvironmentSummary, act: string) => void }) {
   const { t } = useI18n();
+  const sshEndpoint = e.endpoints.find((ep) => ep.name === "ssh");
   if (e.phase === "Running" && e.endpoints.length > 0) {
     return (
       <Card title={t("dev.conn.title")} meta={t("dev.conn.meta")}>
@@ -1131,6 +1175,12 @@ function ConnectionCard({ e, onAct }: { e: DevEnvironmentSummary; onAct: (e: Dev
             // one environment would stay revealed — showing the previous
             // environment's credential — when the next row is clicked.
             <TokenRow key={`${e.namespace}/${e.name}`} name={e.name} namespace={e.namespace} secret={e.jupyterTokenSecret} />
+          ) : null}
+          {/* The minted client keypair is published as the private half's Secret
+              name, and only for environments the user did not key with their
+              own — so its presence is what earns the download row. */}
+          {e.sshClientKeySecret && sshEndpoint ? (
+            <SshKeyRow key={`${e.namespace}/${e.name}-ssh-key`} name={e.name} namespace={e.namespace} address={sshEndpoint.address} />
           ) : null}
         </Box>
         {/* Said only when it is true of this environment: the idle clause used to
@@ -1434,13 +1484,13 @@ interface Draft {
   rdmaEnabled: boolean;
   rdmaType: "roce" | "infiniband";
   // spec.ssh: independent of the environment's type. sshEnabled opens the SSH
-  // endpoint on any type (a jupyter + ssh environment); sshKeysSecret /
-  // sshKeysKey point at the user's own key Secret — one of the labelled Secrets
-  // in the namespace, with a data entry to mount as authorized_keys. Empty means
-  // "let the operator mint a keypair" (the default).
+  // endpoint on any type (a jupyter + ssh environment); sshKeys holds the
+  // user's own public keys, one per line — non-empty, the route writes them to
+  // a <name>-ssh-user-keys Secret the operator mounts as authorized_keys.
+  // Empty means "let the operator mint a keypair" (the default), whose private
+  // half the user then downloads from the connection card.
   sshEnabled: boolean;
-  sshKeysSecret: string;
-  sshKeysKey: string;
+  sshKeys: string;
 }
 
 // CPU is picked in cores and memory follows it: the platform offers 1x, 2x or 4x
@@ -1511,15 +1561,8 @@ function CreateWizard({
     rdmaEnabled: false,
     rdmaType: "roce",
     sshEnabled: false,
-    sshKeysSecret: "",
-    sshKeysKey: "",
+    sshKeys: "",
   });
-  // The labelled key Secrets in the current namespace, for the SSH picker.
-  // Loaded on demand (when the SSH toggle is turned on) rather than with the
-  // other options, because it depends on the namespace the user picks in step 1.
-  const [sshSecrets, setSshSecrets] = useState<SshKeySecretOption[]>([]);
-  const [sshSecretsLoading, setSshSecretsLoading] = useState(false);
-  const [sshSecretsError, setSshSecretsError] = useState<string | null>(null);
   const [nameError, setNameError] = useState(false);
   const [imageError, setImageError] = useState(false);
   const [createBusy, setCreateBusy] = useState(false);
@@ -1554,64 +1597,19 @@ function CreateWizard({
 
   const setField = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft((prev) => ({ ...prev, [key]: value }));
 
-  // Loads the labelled key Secrets for one namespace, so the SSH picker can
-  // offer only the Secrets the operator will actually mount. Runs on demand
-  // (when the SSH toggle is turned on) and again if the namespace changes while
-  // SSH is on. A failure or an empty list does not block the step — the user can
-  // still create the environment without a bring-your-own key (the operator
-  // mints a keypair in that case) — so the picker degrades to a hint.
-  const loadSshSecrets = useCallback(async (namespace: string) => {
-    if (!namespace) {
-      setSshSecrets([]);
-      return;
-    }
-    setSshSecretsLoading(true);
-    setSshSecretsError(null);
-    try {
-      const res = await apiFetch(`/api/devenvironments/ssh-keys?namespace=${encodeURIComponent(namespace)}`);
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
-      }
-      const d = (await res.json()) as { secrets: SshKeySecretOption[] };
-      setSshSecrets(d.secrets ?? []);
-    } catch (err) {
-      setSshSecrets([]);
-      setSshSecretsError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setSshSecretsLoading(false);
-    }
-  }, []);
-
-  // The namespace is picked in step 1; the SSH picker (step 3) is scoped to it.
-  // Changing the namespace while SSH is on invalidates the loaded key Secrets,
-  // so they are cleared and re-fetched for the new namespace.
   const changeNamespace = (namespace: string) => {
-    setDraft((prev) => ({ ...prev, namespace, sshKeysSecret: "", sshKeysKey: "" }));
-    if (draft.sshEnabled) {
-      void loadSshSecrets(namespace);
-    }
+    setDraft((prev) => ({ ...prev, namespace }));
   };
 
-  // The SSH toggle: turning it on loads the labelled key Secrets for the current
-  // namespace (so the picker can offer them); turning it off clears the
-  // bring-your-own key selection.
+  // The SSH toggle: turning it on opens the public-key input; turning it off
+  // clears what was typed, so a toggle the user changed their mind about leaves
+  // no half-finished keys behind.
   const toggleSsh = (enabled: boolean) => {
     setDraft((prev) => ({
       ...prev,
       sshEnabled: enabled,
-      ...(enabled ? {} : { sshKeysSecret: "", sshKeysKey: "" }),
+      ...(enabled ? {} : { sshKeys: "" }),
     }));
-    if (enabled) {
-      void loadSshSecrets(draft.namespace);
-    }
-  };
-
-  // Selecting a key Secret also picks its first data entry as the default
-  // authorized_keys key, so the user only has to change it if the Secret holds
-  // several entries.
-  const changeSshSecret = (name: string) => {
-    const secret = sshSecrets.find((s) => s.name === name);
-    setDraft((prev) => ({ ...prev, sshKeysSecret: name, sshKeysKey: secret?.keys[0] ?? "" }));
   };
 
   // Monotonic ids for the step-3 rows, so a row keeps its identity across
@@ -1823,15 +1821,13 @@ function CreateWizard({
       // spec.network: sent only when RDMA is on; rdmaType names the fabric the
       // environment joins. Off, the block is absent — the one spelling of no RDMA.
       ...(draft.rdmaEnabled ? { rdmaEnabled: true, rdmaType: draft.rdmaType } : {}),
-      // spec.ssh: sent only when SSH is on (independent of type). The bring-your-
-      // own key Secret is included only when one is chosen; otherwise the operator
-      // mints a keypair for the environment.
+      // spec.ssh: sent only when SSH is on (independent of type). The user's own
+      // public keys are included only when some are pasted; otherwise the
+      // operator mints a keypair for the environment.
       ...(draft.sshEnabled
         ? {
             sshEnabled: true,
-            ...(draft.sshKeysSecret
-              ? { sshKeysSecret: draft.sshKeysSecret, sshKeysKey: draft.sshKeysKey }
-              : {}),
+            ...(draft.sshKeys.trim() ? { sshKeys: draft.sshKeys.trim() } : {}),
           }
         : {}),
     };
@@ -1927,7 +1923,9 @@ function CreateWizard({
   if (draft.sshEnabled) {
     summaryRows.push([
       t("dev.wizard.ssh"),
-      draft.sshKeysSecret ? `${draft.sshKeysSecret}:${draft.sshKeysKey}` : t("dev.wizard.sshKeysPlatform"),
+      draft.sshKeys.trim()
+        ? t("dev.wizard.sshKeysProvided", { n: draft.sshKeys.split("\n").filter((l) => l.trim()).length })
+        : t("dev.wizard.sshKeysPlatform"),
     ]);
   }
 
@@ -2342,38 +2340,19 @@ function CreateWizard({
                     <Switch size="small" checked={draft.sshEnabled} onChange={(e) => toggleSsh(e.target.checked)} data-od-id="wizard-ssh" />
                   </Box>
                   {draft.sshEnabled ? (
-                    <WizField label={t("dev.wizard.sshKeysSecret")} hint={t("dev.wizard.sshKeysSecretHint")}>
-                      {sshSecretsLoading ? (
-                        <Typography sx={{ fontSize: 12, color: "text.secondary" }} data-od-id="wizard-ssh-keys-loading">
-                          {t("dev.wizard.sshKeysLoading")}
-                        </Typography>
-                      ) : sshSecretsError ? (
-                        <Typography sx={{ fontSize: 12, color: "text.secondary" }} data-od-id="wizard-ssh-keys-error">
-                          {t("dev.wizard.sshKeysError", { error: sshSecretsError })}
-                        </Typography>
-                      ) : sshSecrets.length === 0 ? (
-                        <Typography sx={{ fontSize: 12, color: "text.secondary" }} data-od-id="wizard-ssh-keys-empty">
-                          {t("dev.wizard.sshKeysEmpty")}
-                        </Typography>
-                      ) : (
-                        <>
-                          <Select size="small" fullWidth value={draft.sshKeysSecret} onChange={(e) => changeSshSecret(e.target.value)} data-od-id="wizard-ssh-secret">
-                            <MenuItem value="">{t("dev.wizard.sshKeysPlatform")}</MenuItem>
-                            {sshSecrets.map((s) => (
-                              <MenuItem key={s.name} value={s.name}>{s.name}</MenuItem>
-                            ))}
-                          </Select>
-                          {draft.sshKeysSecret ? (
-                            <WizField label={t("dev.wizard.sshKeysKey")} hint={t("dev.wizard.sshKeysKeyHint")}>
-                              <Select size="small" value={draft.sshKeysKey} onChange={(e) => setField("sshKeysKey", e.target.value)} data-od-id="wizard-ssh-key">
-                                {(sshSecrets.find((s) => s.name === draft.sshKeysSecret)?.keys ?? []).map((k) => (
-                                  <MenuItem key={k} value={k}>{k}</MenuItem>
-                                ))}
-                              </Select>
-                            </WizField>
-                          ) : null}
-                        </>
-                      )}
+                    <WizField label={t("dev.wizard.sshKeys")} hint={t("dev.wizard.sshKeysHint")}>
+                      <TextField
+                        size="small"
+                        fullWidth
+                        multiline
+                        minRows={3}
+                        maxRows={10}
+                        data-od-id="wizard-ssh-keys"
+                        placeholder="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@host"
+                        sx={{ "& .MuiInputBase-input": { fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 11.5 } }}
+                        value={draft.sshKeys}
+                        onChange={(e) => setField("sshKeys", e.target.value)}
+                      />
                     </WizField>
                   ) : null}
                 </WizSection>

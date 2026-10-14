@@ -65,9 +65,9 @@ spec:
   # generated client keypair (whose private half status.sshClientKeySecret then
   # lets the user retrieve, as id_ed25519). That mount is a whole-Secret directory
   # mount rather than a subPath file, so kubelet delivers a rotation to the
-  # running container without a restart. An authorizedKeysSecret has to carry the
-  # label ai.cubestack.io/ssh-keys-delegated: "true": the referenced Secret is
-  # mounted into the workload as it is, so only a Secret that opts in may be named.
+  # running container without a restart. An authorizedKeysSecret must carry its
+  # keys under the data key its selector names: the entry is mounted into the
+  # workload as it is, and a missing entry leaves the container with no keys.
   # Both mount paths are outside the account's home, which the workspace claim may
   # cover and make unwritable; the controller runs an init container that chowns
   # the workspace claim to the container's own user/group so the workspace itself
@@ -76,7 +76,7 @@ spec:
   ssh:
     enabled: true                # enable extra SSH for jupyter/vscode types
     authorizedKeysSecret:
-      name: dev-alice-ssh-keys   # must be labeled ai.cubestack.io/ssh-keys-delegated: "true"
+      name: dev-alice-ssh-keys   # the user's own key Secret, mounted into the workload as it is
       key: authorized_keys       # Secret.data[authorized_keys] holds the authorized_keys content
 
   # Network. An environment can be given RDMA access, per fabric: the cluster

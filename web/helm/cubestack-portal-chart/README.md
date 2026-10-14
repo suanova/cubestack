@@ -208,7 +208,7 @@ namespace only.
 The chart automatically creates namespaced and cluster-scoped RBAC:
 
 - `Role` + `RoleBinding`: `get` on the htpasswd Secret (`secrets.htpasswd.secretName`, `cubestack-htpasswd` by default) in the target namespace
-- `ClusterRole` + `ClusterRoleBinding`: `list` namespaces / nodes / services (the services rule is the AI Gateway discovery in `envoy-gateway-system`), plus exactly the operator-CR verbs the UI calls, cluster-wide (the UI aggregates and writes across namespaces):
+- `ClusterRole` + `ClusterRoleBinding`: `list` namespaces / nodes / services (the services rule is the AI Gateway discovery in `envoy-gateway-system`); `list` + `create` on Secrets, cluster-wide — the `list` (field-selected to one name) serves the connection card's Jupyter token and SSH private-key download, both of which read the Secret *the environment's own status points at* (never a name taken from the request), and the `create` writes the wizard's pasted public keys to the per-environment `<name>-ssh-user-keys` Secret — plus exactly the operator-CR verbs the UI calls, cluster-wide (the UI aggregates and writes across namespaces):
   - `inferenceservices`: create, get, list, patch
   - `devenvironments`: create, delete, list, patch
   - `inferenceruntimeprofiles`, `modelversions`: list

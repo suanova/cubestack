@@ -110,7 +110,7 @@ const (
 	testUserSSHKey       = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ sample-key alice@example.com"
 	// testUserKeysSecret is the user-supplied authorized-keys Secret the case-2
 	// specs reference by name; testUserKeysKey is the data entry its selector
-	// names. Deliberately not "keys": the delegated key is whatever the selector
+	// names. Deliberately not "keys": the user's key is whatever the selector
 	// says, and a fixture named after the retired default would pass even if the
 	// controller ignored it.
 	testUserKeysSecret = "dev-alice-ssh-keys"
@@ -4597,7 +4597,6 @@ var _ = Describe("DevEnvironment controller", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testUserKeysSecret,
 					Namespace: testNamespace,
-					Labels:    map[string]string{devEnvSSHKeysDelegatedLabel: devEnvSSHKeysDelegatedValue},
 				},
 				Data: map[string][]byte{testUserKeysKey: []byte(testUserSSHKey)},
 			}
@@ -4650,7 +4649,6 @@ var _ = Describe("DevEnvironment controller", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "dev-alice-rotate-keys",
 					Namespace: testNamespace,
-					Labels:    map[string]string{devEnvSSHKeysDelegatedLabel: devEnvSSHKeysDelegatedValue},
 				},
 				Data: map[string][]byte{testUserKeysKey: []byte(testUserSSHKey)},
 			}
@@ -4731,7 +4729,6 @@ var _ = Describe("DevEnvironment controller", func() {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      name,
 						Namespace: testNamespace,
-						Labels:    map[string]string{devEnvSSHKeysDelegatedLabel: devEnvSSHKeysDelegatedValue},
 					},
 					Data: map[string][]byte{testUserKeysKey: []byte(testUserSSHKey)},
 				}
@@ -4908,44 +4905,6 @@ var _ = Describe("DevEnvironment controller", func() {
 			}, "15s", "200ms").Should(Succeed())
 		})
 
-		It("rejects an undelegated keysSecret without reading it", func() {
-			// A Secret without the delegation label must never back
-			// authorized_keys: the workload mounts the referenced Secret straight
-			// into the container, so an undelegated reference would let an
-			// environment creator read any same-namespace Secret from inside it.
-			leaked := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Name: "dev-secret-undelegated", Namespace: testNamespace},
-				Data:       map[string][]byte{testUserKeysKey: []byte(testUserSSHKey)},
-			}
-			Expect(k8sClient.Create(ctx, leaked)).To(Succeed())
-			defer func() { _ = k8sClient.Delete(ctx, leaked) }()
-
-			env := validDevEnvironment("de-undelegated")
-			env.Spec.Type = aiv1alpha1.DevEnvironmentTypeSSH
-			env.Spec.SSH = &aiv1alpha1.SSHSpec{
-				Enabled: true,
-				AuthorizedKeysSecret: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: leaked.Name},
-					Key:                  testUserKeysKey,
-				},
-			}
-			Expect(k8sClient.Create(ctx, env)).To(Succeed())
-			defer deleteEnv(env.Name)
-
-			// The reconcile aborts on the undelegated Secret before recording the
-			// SSH reference or creating either managed Secret, so the referenced
-			// keys can never surface as authorized_keys.
-			Eventually(func(g Gomega) {
-				got := &aiv1alpha1.DevEnvironment{}
-				g.Expect(k8sClient.Get(ctx, envKey(env.Name), got)).To(Succeed())
-				g.Expect(got.Status.SSHClientKeySecret).To(BeNil())
-				for _, name := range []string{sshHostKeySecretName(env), sshClientKeySecretName(env)} {
-					s := &corev1.Secret{}
-					g.Expect(apierrors.IsNotFound(k8sClient.Get(ctx, envKey(name), s))).To(BeTrue())
-				}
-			}, "15s", "200ms").Should(Succeed())
-		})
-
 		It("rejects a keysSecret that carries no such data key", func() {
 			// The volume maps the selected entry onto the file sshd reads, and a data
 			// key absent from a Secret leaves that file out of the mount rather than
@@ -4955,7 +4914,6 @@ var _ = Describe("DevEnvironment controller", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "dev-alice-wrong-key",
 					Namespace: testNamespace,
-					Labels:    map[string]string{devEnvSSHKeysDelegatedLabel: devEnvSSHKeysDelegatedValue},
 				},
 				Data: map[string][]byte{"not-the-keys": []byte(testUserSSHKey)},
 			}
@@ -4981,47 +4939,11 @@ var _ = Describe("DevEnvironment controller", func() {
 			}, "15s", "200ms").Should(Succeed())
 		})
 
-		It("refuses to reference another environment's generated keys", func() {
-			// The generated Secrets are ordinary Secrets in the namespace, and what
-			// stops one environment from mounting a peer's login key as its own
-			// authorized_keys is only that the controller never labels them
-			// delegated.
-			peer := validDevEnvironment("de-ssh-peer")
-			peer.Spec.Type = aiv1alpha1.DevEnvironmentTypeSSH
-			Expect(k8sClient.Create(ctx, peer)).To(Succeed())
-			defer deleteEnv(peer.Name)
-
-			generated := &corev1.Secret{}
-			Eventually(func(g Gomega) {
-				g.Expect(k8sClient.Get(ctx, envKey(sshClientKeySecretName(peer)), generated)).To(Succeed())
-			}, "15s", "200ms").Should(Succeed())
-			Expect(generated.Labels).NotTo(HaveKey(devEnvSSHKeysDelegatedLabel))
-
-			thief := validDevEnvironment("de-ssh-thief")
-			thief.Spec.Type = aiv1alpha1.DevEnvironmentTypeSSH
-			thief.Spec.SSH = &aiv1alpha1.SSHSpec{
-				Enabled: true,
-				AuthorizedKeysSecret: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: sshClientKeySecretName(peer)},
-					Key:                  sshClientKeyKey,
-				},
-			}
-			Expect(k8sClient.Create(ctx, thief)).To(Succeed())
-			defer deleteEnv(thief.Name)
-
-			Eventually(func(g Gomega) {
-				got := &aiv1alpha1.DevEnvironment{}
-				g.Expect(k8sClient.Get(ctx, envKey(thief.Name), got)).To(Succeed())
-				g.Expect(got.Status.SSHClientKeySecret).To(BeNil())
-			}, "15s", "200ms").Should(Succeed())
-		})
-
 		It("follows spec.ssh.authorizedKeysSecret as it is added and removed", func() {
 			keys := &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "dev-alice-switch-keys",
 					Namespace: testNamespace,
-					Labels:    map[string]string{devEnvSSHKeysDelegatedLabel: devEnvSSHKeysDelegatedValue},
 				},
 				Data: map[string][]byte{testUserKeysKey: []byte(testUserSSHKey)},
 			}
@@ -5043,7 +4965,7 @@ var _ = Describe("DevEnvironment controller", func() {
 				return got.Status.SSHClientKeySecret.Name
 			}
 
-			// Case 1 to start: no delegated keys, so the controller generates both.
+			// Case 1 to start: no user keys, so the controller generates both.
 			Eventually(func(g Gomega) {
 				g.Expect(refName(g)).To(Equal(sshClientKeySecretName(env)))
 			}, "15s", "200ms").Should(Succeed())
@@ -5625,7 +5547,6 @@ var _ = Describe("DevEnvironment controller", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "de-routes-keys",
 					Namespace: testNamespace,
-					Labels:    map[string]string{devEnvSSHKeysDelegatedLabel: devEnvSSHKeysDelegatedValue},
 				},
 				Data: map[string][]byte{testUserKeysKey: []byte(testUserSSHKey)},
 			}

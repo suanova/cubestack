@@ -7,8 +7,16 @@ import { dictionaries } from "@/lib/i18n/dictionaries";
 
 import { authedGet, authedRequest } from "@/test/auth";
 
-const { listNamespace, listClusterCustomObject, patchNamespacedCustomObject, createNamespacedCustomObject, deleteNamespacedCustomObject } = vi.hoisted(() => ({
+const {
+  listNamespace,
+  createNamespacedSecret,
+  listClusterCustomObject,
+  patchNamespacedCustomObject,
+  createNamespacedCustomObject,
+  deleteNamespacedCustomObject,
+} = vi.hoisted(() => ({
   listNamespace: vi.fn(),
+  createNamespacedSecret: vi.fn(),
   listClusterCustomObject: vi.fn(),
   patchNamespacedCustomObject: vi.fn(),
   createNamespacedCustomObject: vi.fn(),
@@ -16,7 +24,7 @@ const { listNamespace, listClusterCustomObject, patchNamespacedCustomObject, cre
 }));
 
 vi.mock("@/lib/kubernetes", () => ({
-  getCoreClient: () => ({ listNamespace }),
+  getCoreClient: () => ({ listNamespace, createNamespacedSecret }),
   getCustomObjectsClient: () => ({ listClusterCustomObject, patchNamespacedCustomObject, createNamespacedCustomObject, deleteNamespacedCustomObject }),
 }));
 
@@ -75,6 +83,7 @@ async function importRoute() {
 
 function clearMocks() {
   listNamespace.mockClear();
+  createNamespacedSecret.mockClear();
   listClusterCustomObject.mockClear();
   patchNamespacedCustomObject.mockClear();
   createNamespacedCustomObject.mockClear();
@@ -787,25 +796,108 @@ describe("POST /api/devenvironments", () => {
     expect(await rejectedPost({ rdmaEnabled: true, rdmaType: "ethernet" })).toContain("rdmaType");
   });
 
-  it("states spec.ssh only when SSH is on, with the optional bring-your-own key Secret", async () => {
+  it("states spec.ssh only when SSH is on, writing pasted keys to an owned Secret", async () => {
     const withSsh = await postedSpec({ sshEnabled: true });
-    // The block is written only when sshEnabled; with no bring-your-own key
-    // Secret, the operator mints a keypair for the environment.
+    // The block is written only when sshEnabled; with no keys pasted the
+    // operator mints a keypair for the environment, so no Secret is written.
     expect(withSsh.ssh).toEqual({ enabled: true });
+    expect(createNamespacedSecret).not.toHaveBeenCalled();
 
-    const withKey = await postedSpec({ sshEnabled: true, sshKeysSecret: "alice-keys", sshKeysKey: "alice@laptop" });
-    expect(withKey.ssh).toEqual({
+    const keys = ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAliceKey alice@laptop", "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQBobKey bob@work"];
+    const withKeys = await postedSpec({ sshEnabled: true, sshKeys: keys.join("\n") });
+    expect(withKeys.ssh).toEqual({
       enabled: true,
-      authorizedKeysSecret: { name: "alice-keys", key: "alice@laptop" },
+      authorizedKeysSecret: { name: "ok-name-ssh-user-keys", key: "authorized_keys" },
     });
+    // The keys land in the per-environment Secret the CR points at: the name is
+    // derived from the CR's, the data key is the one the operator mounts.
+    expect(createNamespacedSecret).toHaveBeenCalledTimes(1);
+    expect(createNamespacedSecret.mock.calls[0][0].namespace).toBe("project-a");
+    const secret = createNamespacedSecret.mock.calls[0][0].body;
+    expect(secret.metadata.name).toBe("ok-name-ssh-user-keys");
+    expect(secret.data.authorized_keys).toBe(Buffer.from(keys.join("\n") + "\n").toString("base64"));
+    // A create answer without a uid (this helper's fixture) still writes a
+    // working Secret: the owner reference is simply left unsaid.
+    expect(secret.metadata.ownerReferences).toBeUndefined();
 
     // Off: the block is absent, not a false flag the operator would have to read.
     const off = await postedSpec({});
     expect("ssh" in off).toBe(false);
   });
 
-  it("rejects a bring-your-own key Secret that names no data entry", async () => {
-    expect(await rejectedPost({ sshEnabled: true, sshKeysSecret: "alice-keys" })).toBe("sshKeyRequired");
+  it("owns the keys Secret by the environment when the create answer carries a uid", async () => {
+    clearMocks();
+    createNamespacedCustomObject.mockResolvedValue({ metadata: { uid: "uid-123" } });
+    listClusterCustomObject.mockResolvedValue({ items: [] });
+    createNamespacedSecret.mockResolvedValue({});
+    const { POST } = await importRoute();
+    const res = await POST(
+      await authedRequest({
+        method: "POST",
+        body: JSON.stringify({
+          name: "ok-name",
+          namespace: "project-a",
+          type: "ssh",
+          image: "img",
+          storageGi: 100,
+          sshEnabled: true,
+          sshKeys: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAliceKey alice@laptop",
+        }),
+      }),
+      undefined,
+    );
+    expect(res.status).toBe(201);
+    // Owned by the CR, so deleting the environment collects the keys with it.
+    expect(createNamespacedSecret.mock.calls[0][0].body.metadata.ownerReferences).toEqual([
+      { apiVersion: "ai.cubestack.io/v1alpha1", kind: "DevEnvironment", name: "ok-name", uid: "uid-123", controller: true },
+    ]);
+  });
+
+  it("deletes the environment when its keys Secret cannot be written", async () => {
+    clearMocks();
+    createNamespacedCustomObject.mockResolvedValue({ metadata: { uid: "uid-123" } });
+    listClusterCustomObject.mockResolvedValue({ items: [] });
+    createNamespacedSecret.mockRejectedValue(new Error("boom"));
+    const { POST } = await importRoute();
+    const res = await POST(
+      await authedRequest({
+        method: "POST",
+        body: JSON.stringify({
+          name: "ok-name",
+          namespace: "project-a",
+          type: "ssh",
+          image: "img",
+          storageGi: 100,
+          sshEnabled: true,
+          sshKeys: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAliceKey alice@laptop",
+        }),
+      }),
+      undefined,
+    );
+    // A left-behind environment would requeue forever on a Secret that never
+    // appears, so the CR is unwound and the failure reported.
+    expect(res.status).toBe(500);
+    expect(deleteNamespacedCustomObject).toHaveBeenCalledWith(
+      expect.objectContaining({ namespace: "project-a", name: "ok-name" }),
+    );
+  });
+
+  it("refuses pasted keys that are not OpenSSH public keys", async () => {
+    expect(await rejectedPost({ sshEnabled: true, sshKeys: "not-a-key" })).toBe("sshKeyInvalid");
+    // A private half pasted where a public half belongs: it is a secret and it
+    // is not an authorized_keys line.
+    expect(await rejectedPost({ sshEnabled: true, sshKeys: "-----BEGIN OPENSSH PRIVATE KEY-----" })).toBe("sshKeyInvalid");
+    expect(await rejectedPost({ sshEnabled: true, sshKeys: "ssh-ed25519 short" })).toBe("sshKeyInvalid");
+  });
+
+  it("refuses a wall of pasted keys and a name too long for its key Secret", async () => {
+    expect(await rejectedPost({ sshEnabled: true, sshKeys: Array.from({ length: 51 }, (_, i) => `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAliceKey ${i}`).join("\n") })).toBe(
+      "sshKeysTooMany",
+    );
+    // The Secret's name is the CR's name plus -ssh-user-keys, and a DNS label
+    // holds 63: a 50-character name is valid on its own, but not beside the
+    // suffix.
+    expect(await rejectedPost({ name: "a".repeat(50), sshEnabled: true, sshKeys: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAliceKey alice" })).toBe("nameTooLong");
   });
 });
 
