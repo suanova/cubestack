@@ -459,12 +459,18 @@ function AgentBubble({
       {msg.blocks.map((b, bi) => {
         if (b.kind === "tool") {
           const running = !b.done && msg.phase !== "done";
+          // A restored call with no result, in a turn that is waiting on the
+          // user, is the write that is parked: not finished, and not stopped
+          // either — the run is still there. It reads as running (there is
+          // nothing else true to say about it) but stays collapsed, because
+          // there is no output to show yet.
+          const parked = !b.done && msg.phase === "done" && waitingOnUser([msg]) !== null;
           const key = `${sessionKey ?? ""}-${b.callId || `p${mi}-${bi}`}`;
           const open = openedTools[key] ?? running;
           return (
             <Fragment key={bi}>
               <Box data-od-block="tool" sx={{ mt: bi > 0 ? "8px" : 0 }}>
-                <ToolCard block={b} running={running} open={open} onToggle={() => onToggleTool(key, !open)} />
+                <ToolCard block={b} running={running || parked} open={open} onToggle={() => onToggleTool(key, !open)} />
               </Box>
               {bi === lastToolIndex ? settledCards : null}
             </Fragment>
