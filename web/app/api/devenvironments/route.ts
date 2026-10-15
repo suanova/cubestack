@@ -15,6 +15,21 @@ const GROUP = "ai.cubestack.io";
 const VERSION = "v1alpha1";
 const PLURAL_DEVENV = "devenvironments";
 
+// The user's public keys, when the create request carries any: they are
+// written to a per-environment Secret (created after the CR, owned by it) and
+// spec.ssh.authorizedKeysSecret points at the entry the container mounts. The
+// name stays clear of the operator's own managed Secrets (<name>-ssh-host-key,
+// <name>-ssh-client-key, and the pre-split <name>-ssh-keys).
+const SSH_KEYS_SECRET_SUFFIX = "-ssh-user-keys";
+const SSH_KEYS_DATA_KEY = "authorized_keys";
+// A pasted wall of keys is not an authorized_keys: the bound exists so the
+// Secret cannot grow past the size a pod mount and the API server will accept.
+const SSH_KEYS_MAX = 50;
+// The one-line OpenSSH form: key type, base64 blob, optional comment — the
+// shape `ssh-keygen` writes and ssh-copy-id appends.
+const OPENSSH_PUB_KEY_RE =
+  /^(ssh-(rsa|dss|ed25519|ed25519@openssh\.com)|ecdsa-sha2-nistp(256|384|521)|sk-(ssh-ed25519|ecdsa-sha2-nistp(256|384|521))@openssh\.com)\s+[A-Za-z0-9+/]{16,}={0,2}(\s+\S.*)?$/;
+
 /**
  * Shape of a single environment rendered by the /dev-environments page. This is
  * the read/display contract; everything is projected from the live cluster's
@@ -335,12 +350,15 @@ interface CreateBody {
   rdmaEnabled?: boolean; // → spec.network.rdmaEnabled
   rdmaType?: string; // → spec.network.rdmaType
   // spec.ssh: independent of the environment's type — ssh.enabled opens the SSH
-  // endpoint on any type (a jupyter + ssh environment), and authorizedKeysSecret
-  // points at the user's own key Secret. Absent / false = no ssh block (the
-  // type-ssh case is already exposed unconditionally by the operator).
+  // endpoint on any type (a jupyter + ssh environment). Absent / false = no ssh
+  // block (the type-ssh case is already exposed unconditionally by the operator).
   sshEnabled?: boolean; // → spec.ssh.enabled
-  sshKeysSecret?: string; // → spec.ssh.authorizedKeysSecret.name
-  sshKeysKey?: string; // → spec.ssh.authorizedKeysSecret.key
+  // The user's own OpenSSH public keys, one per line. Non-empty, the route
+  // writes them to a <name>-ssh-user-keys Secret in the environment's namespace
+  // and points spec.ssh.authorizedKeysSecret at it — that Secret's
+  // data[authorized_keys] is the file the container mounts. Empty, the operator
+  // mints a client keypair the owner retrieves through status.sshClientKeySecret.
+  sshKeys?: string; // → <name>-ssh-user-keys Secret data[authorized_keys]
 }
 
 /**
@@ -348,8 +366,10 @@ interface CreateBody {
  *
  * Creates a DevEnvironment. Structural validation here (name/type/image/
  * resources), then the CR is written; the operator's controller and admission
- * webhooks re-validate on reconcile. Requires RBAC to create the CR in the
- * target namespace.
+ * webhooks re-validate on reconcile. When the request carries the user's own
+ * public keys, a <name>-ssh-user-keys Secret is written in the same namespace
+ * (owned by the CR) after the CR is. Requires RBAC to create the CR — and the
+ * key Secret, when there are keys — in the target namespace.
  */
 export const POST = withAuth(async (req) => {
   try {
@@ -553,17 +573,39 @@ export const POST = withAuth(async (req) => {
     }
 
     // spec.ssh: written only when sshEnabled (independent of type — a jupyter or
-    // vscode environment can still expose SSH). When a key Secret is named it
-    // must also name a data entry (the CRD requires self.key != ""); the Secret
-    // itself must carry the operator's delegation label, which the operator
-    // checks, not this route.
+    // vscode environment can still expose SSH). Non-empty public keys are
+    // written to <name>-ssh-user-keys and spec.ssh.authorizedKeysSecret points
+    // at data[authorized_keys]; the operator then mounts that entry as the
+    // container's authorized_keys. Empty keys leave the block to the operator,
+    // which mints a client keypair the owner retrieves through
+    // status.sshClientKeySecret.
     const sshEnabled = body.sshEnabled === true;
     let sshAuthorizedKeysSecret: { name: string; key: string } | undefined;
-    if (sshEnabled && body.sshKeysSecret) {
-      if (!body.sshKeysKey) {
-        return ValidationError("sshKeyRequired");
+    let sshUserKeys = "";
+    if (sshEnabled) {
+      const lines = (body.sshKeys ?? "")
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0);
+      if (lines.length > 0) {
+        if (lines.length > SSH_KEYS_MAX) {
+          return ValidationError("sshKeysTooMany", { max: SSH_KEYS_MAX });
+        }
+        for (const line of lines) {
+          if (!OPENSSH_PUB_KEY_RE.test(line)) {
+            return ValidationError("sshKeyInvalid");
+          }
+        }
+        // The key Secret's name is derived from the CR's, and the suffix has to
+        // fit in a DNS label beside it: a longer CR name is valid on its own,
+        // so refuse here with a sentence rather than fail at the Secret write
+        // with an opaque 422.
+        if (body.name.length + SSH_KEYS_SECRET_SUFFIX.length > 63) {
+          return ValidationError("nameTooLong", { max: 63 - SSH_KEYS_SECRET_SUFFIX.length });
+        }
+        sshUserKeys = lines.join("\n") + "\n";
+        sshAuthorizedKeysSecret = { name: body.name + SSH_KEYS_SECRET_SUFFIX, key: SSH_KEYS_DATA_KEY };
       }
-      sshAuthorizedKeysSecret = { name: body.sshKeysSecret, key: body.sshKeysKey };
     }
 
     const core = getCoreClient();
@@ -674,13 +716,61 @@ export const POST = withAuth(async (req) => {
       },
     };
 
-    await co.createNamespacedCustomObject({
+    const created = (await co.createNamespacedCustomObject({
       group: GROUP,
       version: VERSION,
       namespace: body.namespace,
       plural: PLURAL_DEVENV,
       body: cr,
-    });
+    })) as { metadata?: { uid?: string } };
+
+    // The keys Secret follows the CR rather than preceding it: created first it
+    // would be orphaned by a failed CR write, and after — owned by the CR — it
+    // is garbage-collected with the environment. The operator tolerates the
+    // gap: it requeues on the missing Secret until this write lands.
+    if (sshUserKeys && sshAuthorizedKeysSecret) {
+      const uid = created?.metadata?.uid;
+      try {
+        await core.createNamespacedSecret({
+          namespace: body.namespace,
+          body: {
+            metadata: {
+              name: sshAuthorizedKeysSecret.name,
+              namespace: body.namespace,
+              // The controller owner is what collects the Secret when the
+              // environment goes: a uid-less create answer (some client builds)
+              // still yields a working environment, only the Secret outlives it.
+              ...(uid
+                ? {
+                    ownerReferences: [
+                      { apiVersion: `${GROUP}/${VERSION}`, kind: "DevEnvironment", name: body.name, uid, controller: true },
+                    ],
+                  }
+                : {}),
+            },
+            type: "Opaque",
+            data: { [SSH_KEYS_DATA_KEY]: Buffer.from(sshUserKeys, "utf8").toString("base64") },
+          },
+        });
+      } catch (err) {
+        // The environment exists but its keys are not: left alone, the operator
+        // would requeue on a reference to a Secret that never appears. Unwind
+        // the CR (best effort) and report the failure.
+        console.error("Failed to create the ssh keys secret:", err);
+        try {
+          await co.deleteNamespacedCustomObject({
+            group: GROUP,
+            version: VERSION,
+            namespace: body.namespace,
+            plural: PLURAL_DEVENV,
+            name: body.name,
+          });
+        } catch (delErr) {
+          console.error("Failed to delete the dev environment after a keys secret failure:", delErr);
+        }
+        return Response.json({ error: "Failed to create dev environment" }, { status: 500 });
+      }
+    }
     return Response.json({ created: true, name: body.name }, { status: 201 });
   } catch (err) {
     console.error("Failed to create dev environment:", err);

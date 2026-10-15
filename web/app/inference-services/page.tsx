@@ -1370,6 +1370,12 @@ function DeployWizard({
   }, [open]);
 
   const profile = options?.profiles.find((p) => p.name === draft.profileRef) ?? null;
+  // Each GPU role's vendor comes from the profile's per-role accelerator
+  // (effective value: the role's own declaration, else profile-level). The
+  // wizard is read-only: heterogeneous combinations are defined and tested in
+  // the profile, never picked here.
+  const roleVendor = (name: string): string | null =>
+    profile?.roles.find((r) => r.name === name)?.vendor ?? profile?.vendor ?? null;
   // Model versions compatible with the selected profile (architecture + quant).
   const compatibleModels = (options?.modelversions ?? []).filter((mv) => {
     if (!profile) return true;
@@ -1452,12 +1458,12 @@ function DeployWizard({
   };
 
   // Step-3 summary line for the GPU type: one entry per GPU role in
-  // pd-separation mode, a single vendor otherwise (reserved values — see
-  // GpuTypeSelect; per-role heterogeneous selection has no operator API yet).
+  // pd-separation mode, a single vendor otherwise. Values are each role's
+  // effective accelerator from the profile (read-only, see GpuTypeSelect).
   const gpuSummary = !profile
     ? "—"
     : profile.servingMode === "pd-separation"
-      ? `prefill: ${profile.vendor ?? "—"} / decode: ${profile.vendor ?? "—"}`
+      ? `prefill: ${roleVendor("prefill") ?? "—"} / decode: ${roleVendor("decode") ?? "—"}`
       : (profile.vendor ?? "—");
 
   const stepTitles = [
@@ -1557,14 +1563,14 @@ function DeployWizard({
                     </Typography>
                     <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
                       <WizField label="prefill">
-                        <GpuTypeSelect id="wizard-gpu-prefill" vendor={profile.vendor} />
+                        <GpuTypeSelect id="wizard-gpu-prefill" vendor={roleVendor("prefill")} />
                       </WizField>
                       <WizField label="decode">
-                        <GpuTypeSelect id="wizard-gpu-decode" vendor={profile.vendor} />
+                        <GpuTypeSelect id="wizard-gpu-decode" vendor={roleVendor("decode")} />
                       </WizField>
                     </Box>
                     <Typography sx={{ fontSize: 11.5, color: "text.secondary", mt: "8px" }}>
-                      {t("inf.deploy.gpuReserved")}
+                      {t("inf.deploy.gpuPerRole")}
                     </Typography>
                   </Box>
                 ) : profile ? (
@@ -1679,10 +1685,11 @@ function profileSummary(p: CreateOptionsResponse["profiles"][number]): string {
 }
 
 /**
- * GPU type select of the create wizard. Per-role heterogeneous selection
- * (prefill on one vendor, decode on another) is reserved: the operator API
- * does not accept per-role accelerators yet, so the profile's declared vendor
- * is the only option and the select stays disabled until that lands.
+ * GPU type select of the create wizard: read-only, fixed to the role's
+ * effective accelerator as declared by the profile. Heterogeneous
+ * combinations (prefill on one vendor, decode on another) are profile
+ * authoring — InferenceService has no per-role accelerator input, so the
+ * select stays disabled.
  */
 function GpuTypeSelect({ id, vendor }: { id: string; vendor: string | null }) {
   const value = vendor ?? "";

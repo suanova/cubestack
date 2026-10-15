@@ -38,6 +38,7 @@ export interface CreateOptionsResponse {
     /** Profile label inference.ai.cubestack.io/serving-mode: "pd-separation" | "standard" (or null when unlabeled). */
     servingMode: string | null;
     gpuPerPod: number | null;
+    roles: Array<{ name: string; vendor: string | null; models: string[]; gpuPerPod: number | null }>;
     overrides: Array<{
       name: string;
       type: "integer" | "string" | "boolean";
@@ -67,6 +68,8 @@ interface ProfileOverride {
   description?: string;
 }
 interface ProfileRole {
+  name?: string;
+  accelerator?: { vendor?: string; models?: string[] };
   podTemplate?: { resources?: { gpuPerPod?: number } };
 }
 interface ProfileSpec {
@@ -136,6 +139,14 @@ export const GET = withAuth(async () => {
           quantizations: spec.modelRequirements?.quantization ?? [],
           servingMode: p.metadata?.labels?.[SERVING_MODE_LABEL] ?? null,
           gpuPerPod: gpuPerPod || 0,
+          roles: (spec.roles ?? []).map((r) => ({
+            name: r.name ?? "",
+            // Effective accelerator (design §3.2 roles[].accelerator): the
+            // role's own declaration replaces the profile-level one wholesale.
+            vendor: r.accelerator?.vendor ?? spec.accelerator?.vendor ?? null,
+            models: r.accelerator?.models ?? spec.accelerator?.models ?? [],
+            gpuPerPod: r.podTemplate?.resources?.gpuPerPod ?? null,
+          })),
           overrides: (spec.overrides ?? []).map((o) => ({
             name: o.name ?? "",
             type: o.type ?? "integer",

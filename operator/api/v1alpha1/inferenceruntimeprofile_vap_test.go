@@ -289,6 +289,31 @@ var _ = Describe("InferenceRuntimeProfile L1 admission", func() {
 			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid error, got: %v", err)
 			Expect(err.Error()).To(ContainSubstring("dependsOn must reference an existing role"))
 		})
+
+		It("rejects a role declaring accelerator without gpuPerPod", func() {
+			setupIRPVAP()
+			defer cleanupIRPVAP()
+
+			irp := validIRPWithMatchingName()
+			// roles[0] is the CPU-only router: an accelerator cannot steer it.
+			irp.Spec.Roles[0].Accelerator = &Accelerator{Vendor: AcceleratorVendorNvidia, Models: []string{testModelH200}}
+			err := k8sClient.Create(ctx, irp)
+			Expect(err).To(HaveOccurred())
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid error, got: %v", err)
+			Expect(err.Error()).To(ContainSubstring("must declare podTemplate.resources.gpuPerPod"))
+		})
+
+		It("accepts a role-level accelerator overriding the profile vendor", func() {
+			setupIRPVAP()
+			defer cleanupIRPVAP()
+
+			irp := validIRPWithMatchingName()
+			// roles[1] (prefill) declares gpuPerPod; a cross-vendor override is
+			// legal even though the name prefix binds the profile-level metax.
+			irp.Spec.Roles[1].Accelerator = &Accelerator{Vendor: AcceleratorVendorNvidia, Models: []string{testModelH200}}
+			Expect(k8sClient.Create(ctx, irp)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, irp)).To(Succeed())
+		})
 	})
 
 	Context("workload", func() {
@@ -551,7 +576,7 @@ var _ = Describe("InferenceRuntimeProfile L1 admission", func() {
 			defer cleanupIRPVAP()
 
 			irp := validIRPWithMatchingName()
-			irp.Spec.Roles[1].PodTemplate.Labels = map[string]string{"ai.cubestack.io/accelerator-model": "MXC500"}
+			irp.Spec.Roles[1].PodTemplate.Labels = map[string]string{"ai.cubestack.io/accelerator-model": testModelMXC500}
 			err := k8sClient.Create(ctx, irp)
 			Expect(err).To(HaveOccurred())
 			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid error, got: %v", err)

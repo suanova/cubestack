@@ -39,6 +39,19 @@ if [ "$(id -u)" = 0 ] && [ "${HOME:-}" = /home/ubuntu ]; then
   export HOME=/root
 fi
 
+# Enter the home as well as naming it root_dir. The two are not the same lever: root_dir is what the
+# file browser and the kernels are served from, while a process the server spawns inherits *its*
+# working directory — and a terminal is such a process. jupyter_server_terminals spawns one with the
+# cwd the create request carries, JupyterLab's request carries none, so the pty gets whatever
+# directory this one is in: the image's WORKDIR, /home/ubuntu, wherever the environment runs. A root
+# environment would then open every shell in the account this image bakes, on the container's own
+# filesystem, with the workspace at /root unused — the same failure the guard above exists to
+# prevent, one level down. A declared HOME is entered too, for the same reason it is served.
+#
+# No guard: a HOME that is not there is a root_dir that is not there, which the server refuses on
+# its own. The CPU image's launcher enters its home for the same reason (jupyter/start-jupyter.sh).
+cd "$HOME"
+
 # shellcheck disable=SC2086
 exec jupyter lab \
   --ip=0.0.0.0 \

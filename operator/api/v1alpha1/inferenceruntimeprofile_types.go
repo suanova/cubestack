@@ -568,9 +568,26 @@ type Role struct {
 	// PodTemplate is the Pod template of the role.
 	PodTemplate PodTemplate `json:"podTemplate"`
 
+	// Accelerator overrides the profile-level accelerator for this role: a
+	// complete {vendor, models} replacement for heterogeneous profiles (design
+	// §3.2 roles[].accelerator). A role declaring it must declare
+	// podTemplate.resources.gpuPerPod (L1).
+	// +optional
+	Accelerator *Accelerator `json:"accelerator,omitempty"`
+
 	// Service defines the role's Kubernetes Service.
 	// +optional
 	Service *RoleService `json:"service,omitempty"`
+}
+
+// EffectiveAccelerator returns the accelerator governing the role: its own
+// declaration when present, the profile-level value otherwise (design §3.2
+// roles[].accelerator — a complete replacement, never a partial merge).
+func (r *Role) EffectiveAccelerator(profileAccelerator Accelerator) Accelerator {
+	if r.Accelerator != nil {
+		return *r.Accelerator
+	}
+	return profileAccelerator
 }
 
 // EndpointSpec selects the role serving as the service endpoint.

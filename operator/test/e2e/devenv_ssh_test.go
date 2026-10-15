@@ -37,23 +37,22 @@ import (
 // nothing to report.
 //
 // None of them rides the matrix. Every case here either shapes a spec the
-// catalogue would never build — a delegated keys Secret, a withdrawn exposure —
-// or changes the environment's own ssh material underneath a running workload,
-// and a matrix environment is shared by eight other families that would inherit
-// the result.
+// catalogue would never build — a user-supplied keys Secret, a withdrawn
+// exposure — or changes the environment's own ssh material underneath a running
+// workload, and a matrix environment is shared by eight other families that
+// would inherit the result.
 
 func describeSSHContract() {
-	describeDelegatedKeys()
-	describeUndelegatedKeys()
+	describeUserKeys()
 	describeHostKeyRepair()
 	describeSSHWithdrawal()
-	describeLiveUndelegation()
+	describeLiveRemovedEntry()
 }
 
 // --- the material the cases use -----------------------------------------------
 
 // sshKey is a keypair a case owns, with the one-line public form that goes into
-// an authorized_keys file or into a delegated Secret's data.
+// an authorized_keys file or into a user-supplied Secret's data.
 type sshKey struct {
 	Signer ssh.Signer
 	Line   string
@@ -115,118 +114,18 @@ const (
 	hostPubKeyDataKey = "ssh_host_ed25519_key.pub"
 )
 
-// The delegation label, restated. A Secret without it may not back an
-// environment's authorized_keys: the workload mounts the referenced Secret
-// straight into the container, so an undelegated reference would let an
-// environment's creator read any same-namespace Secret from inside it.
-const sshKeysDelegatedLabel = "ai.cubestack.io/ssh-keys-delegated"
-
-// --- I1: a Secret that never opted in -----------------------------------------
-
-// describeUndelegatedKeys is I1.
-func describeUndelegatedKeys() {
-	const (
-		envName = "ssh-undelegated-keys"
-		// The data key the case's selector names. What is mounted is the selected
-		// entry, so the case also proves the selection is honoured rather than a
-		// conventional filename assumed.
-		dataKey = "team_keys"
-		secret  = "ssh-undelegated-keys-keys"
-	)
-
-	var key sshKey
-
-	draftCase{
-		Name:     envName,
-		Image:    devenv.MustImage("ssh-ubuntu22.04"),
-		Identity: devenv.NonRoot,
-		Prepare: func(ctx context.Context) error {
-			var err error
-			if key, err = newSSHKey(); err != nil {
-				return err
-			}
-			// No delegation label: the Secret is well-formed, readable, and carries
-			// exactly the key the selector names. The only thing wrong with it is
-			// that it never opted in, which is why nothing else here is wrong.
-			return createSecret(ctx, secret,
-				map[string][]byte{dataKey: authorizedKeys(key)}, nil)
-		},
-		Shape: func(want *aiv1alpha1.DevEnvironment) {
-			want.Spec.SSH = &aiv1alpha1.SSHSpec{
-				Enabled: true,
-				AuthorizedKeysSecret: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: secret},
-					Key:                  dataKey,
-				},
-			}
-		},
-		Cases: func(open func() *devenv.Environment) {
-			It("I1 refuses an authorized-keys Secret that never opted in",
-				Label(devenv.TierP1, devenv.LabelFamily("I")), func(ctx SpecContext) {
-					env := open()
-
-					// The controller has looked at it: the finalizer is added on the
-					// first pass, before anything is provisioned. Waiting for it is
-					// what makes the absences below findings rather than a race with a
-					// reconcile that has not run yet.
-					Eventually(func() ([]string, error) {
-						if err := env.Refresh(ctx); err != nil {
-							return nil, err
-						}
-						return env.Object().Finalizers, nil
-					}).WithTimeout(time.Minute).WithPolling(2*time.Second).
-						Should(ContainElement(devenv.DevEnvFinalizer),
-							"the controller never took %s on", env.Name)
-
-					// And then, having looked at it, provisioned nothing. Asserted over
-					// a window rather than at an instant: what could go wrong is that
-					// the refusal is a *delay* — the workload comes up a reconcile
-					// later — and an instantaneous check would not see it.
-					Consistently(func() error {
-						pods, err := env.Pods(ctx)
-						if err != nil {
-							return err
-						}
-						if len(pods) > 0 {
-							return fmt.Errorf("the environment is running a pod: %s", podNames(pods))
-						}
-						if err := env.Refresh(ctx); err != nil {
-							return err
-						}
-						if phase := env.Object().Status.Phase; phase != nil && phase.Name == aiv1alpha1.PhaseRunning {
-							return errors.New("the environment reached Running")
-						}
-						return nil
-					}).WithTimeout(30*time.Second).WithPolling(3*time.Second).
-						Should(Succeed(), "an environment on an undelegated keys Secret")
-
-					// The two Secrets the platform mints for an exposed environment: the
-					// host identity, which exists once ssh is served, and the client key,
-					// which it mints only when the spec names no delegated source. Neither
-					// being there is what "nothing was provisioned" means concretely, and
-					// the client key is checked as the *object* rather than only through
-					// status, since a key nothing names would still be one that logs in.
-					Expect(secretExists(ctx, env.SSHHostKeySecretName())).To(BeFalse(),
-						"the platform minted a host key for an environment it should have refused")
-					Expect(secretExists(ctx, env.SSHClientKeySecretName())).To(BeFalse(),
-						"the platform minted a login key for an environment it should have refused")
-					Expect(env.Object().Status.SSHClientKeySecret).To(BeNil())
-				})
-		},
-	}.declare()
-}
-
 // --- I2, I6, I7: the user's own keys ------------------------------------------
 
-// describeDelegatedKeys is I2, I6 and I7, on one environment that delegates.
-func describeDelegatedKeys() {
+// describeUserKeys is I2, I6 and I7, on one environment whose spec names the
+// user's own keys Secret.
+func describeUserKeys() {
 	const (
-		envName = "ssh-delegated-keys"
+		envName = "ssh-user-keys"
 		// Deliberately not "authorized_keys": what the workload mounts is the entry
 		// the selector *names*, so a platform that assumed the conventional key
 		// would serve nobody here.
 		dataKey = "team_keys"
-		secret  = "ssh-delegated-keys-keys"
+		secret  = "ssh-user-keys-keys"
 	)
 
 	var keyA, keyB sshKey
@@ -244,8 +143,7 @@ func describeDelegatedKeys() {
 				return err
 			}
 			return createSecret(ctx, secret,
-				map[string][]byte{dataKey: authorizedKeys(keyA, keyB)},
-				map[string]string{sshKeysDelegatedLabel: "true"})
+				map[string][]byte{dataKey: authorizedKeys(keyA, keyB)})
 		},
 		Shape: func(want *aiv1alpha1.DevEnvironment) {
 			want.Spec.SSH = &aiv1alpha1.SSHSpec{
@@ -257,7 +155,7 @@ func describeDelegatedKeys() {
 			}
 		},
 		Cases: func(open func() *devenv.Environment) {
-			It("I7 admits every key the delegated Secret carries, and no other",
+			It("I7 admits every key the user's Secret carries, and no other",
 				Label(devenv.TierP1, devenv.LabelFamily("I")), func(ctx SpecContext) {
 					env := open()
 					running(ctx, env)
@@ -267,12 +165,12 @@ func describeDelegatedKeys() {
 						res, err := conformance.Dialer.SSH(ctx, sess.Addr(), sess.User(),
 							k.Signer, sess.HostKey(), "true")
 						Expect(err).NotTo(HaveOccurred(),
-							"key %d of the delegated Secret does not log in", i+1)
+							"key %d of the user's Secret does not log in", i+1)
 						Expect(res.ExitCode).To(Equal(0))
 					}
 
 					// The negative control, without which the two logins above prove
-					// only that sshd is listening: with a delegated source the platform
+					// only that sshd is listening: with a user-supplied source the platform
 					// has no key of its own in the container, so a server that admitted
 					// a stranger is one that admitted everything.
 					stranger, err := newSSHKey()
@@ -285,11 +183,11 @@ func describeDelegatedKeys() {
 					// And the platform kept its own key out: a minted client key here
 					// would be one more credential that logs in.
 					Expect(env.Object().Status.SSHClientKeySecret).To(BeNil(),
-						"the platform minted a login key for an environment whose spec delegates")
+						"the platform minted a login key for an environment whose spec names a keys Secret")
 					Expect(secretExists(ctx, env.SSHClientKeySecretName())).To(BeFalse())
 				})
 
-			It("I2 reaches a running environment with a key added to the delegated Secret, without rolling it",
+			It("I2 reaches a running environment with a key added to the user's Secret, without rolling it",
 				Label(devenv.TierP1, devenv.LabelFamily("I")), func(ctx SpecContext) {
 					env := open()
 					running(ctx, env)
@@ -317,7 +215,7 @@ func describeDelegatedKeys() {
 					after, err := env.PodUID(ctx)
 					Expect(err).NotTo(HaveOccurred())
 					Expect(after).To(Equal(before),
-						"adding a key to the delegated Secret rolled the workload, which it must not: the "+
+						"adding a key to the user's Secret rolled the workload, which it must not: the "+
 							"mount is a directory mount precisely so a rotation needs no restart")
 
 					// The key that was already there still works — an update that
@@ -360,7 +258,7 @@ func describeDelegatedKeys() {
 						"a key in $HOME/.ssh/authorized_keys is not served, so ssh-copy-id cannot work "+
 							"against this environment")
 
-					// And it is a *second* path, not a replacement: the delegated keys
+					// And it is a *second* path, not a replacement: the user's keys
 					// still log in.
 					_, err = conformance.Dialer.SSH(ctx, sess.Addr(), sess.User(),
 						keyA.Signer, sess.HostKey(), "true")
@@ -553,7 +451,7 @@ func describeSSHWithdrawal() {
 
 // --- I5: the Secret stops being usable under a running environment ------------
 
-// describeLiveUndelegation is I5.
+// describeLiveRemovedEntry is I5.
 //
 // The design's claim is that the reference is re-checked rather than trusted
 // from creation time. What the platform does with that answer is narrower than
@@ -561,13 +459,13 @@ func describeSSHWithdrawal() {
 //
 //   - it does **not** fall back to a key of its own. That is the property worth
 //     holding on to, and the one a plausible implementation would break: a
-//     platform that minted a login key when its delegated source went bad would
-//     be granting itself access to an environment whose owner had just taken it
-//     away;
+//     platform that minted a login key when its user-supplied source went bad
+//     would be granting itself access to an environment whose owner had just
+//     taken it away;
 //   - it does **not** disturb the running environment. The mounted bytes are in
-//     the container already; nothing about a Secret's metadata can take them
+//     the container already; nothing about a Secret's contents can take them
 //     back, and re-provisioning the workload over it would be an outage for a
-//     metadata change.
+//     data change.
 //
 // What it also does not do — a finding rather than a contract — is report the
 // refusal anywhere a user can see: the reconcile returns the error from the
@@ -578,13 +476,13 @@ func describeSSHWithdrawal() {
 // encoded here as the contract.
 //
 // The Secret's own watch is what makes this a real run of the path rather than a
-// vacuously quiet one: removing the label enqueues the environment, so the
+// vacuously quiet one: removing the data entry enqueues the environment, so the
 // refusal is exercised.
-func describeLiveUndelegation() {
+func describeLiveRemovedEntry() {
 	const (
-		envName = "ssh-undelegated-live"
+		envName = "ssh-removed-entry"
 		dataKey = "team_keys"
-		secret  = "ssh-undelegated-live-keys"
+		secret  = "ssh-removed-entry-keys"
 	)
 
 	var key sshKey
@@ -599,8 +497,7 @@ func describeLiveUndelegation() {
 				return err
 			}
 			return createSecret(ctx, secret,
-				map[string][]byte{dataKey: authorizedKeys(key)},
-				map[string]string{sshKeysDelegatedLabel: "true"})
+				map[string][]byte{dataKey: authorizedKeys(key)})
 		},
 		Shape: func(want *aiv1alpha1.DevEnvironment) {
 			want.Spec.SSH = &aiv1alpha1.SSHSpec{
@@ -612,16 +509,16 @@ func describeLiveUndelegation() {
 			}
 		},
 		Cases: func(open func() *devenv.Environment) {
-			It("I5 keeps the environment's own keys when the delegated Secret stops opting in",
+			It("I5 keeps the environment's own keys when its keys Secret loses the entry",
 				Label(devenv.TierP1, devenv.LabelFamily("I")), func(ctx SpecContext) {
 					env := open()
 					running(ctx, env)
 
-					// Remove the delegation, which is the edit the design names. The
-					// Secret itself is left intact — the same name, the same data key,
-					// the same key — so the only thing that changed is the opt-in.
+					// Delete the data entry the selector names. The Secret itself is
+					// left intact — the same name — so the only thing that changed is
+					// that the entry the pod mounts is no longer there.
 					Expect(patchSecret(ctx, secret, func(s *corev1.Secret) {
-						delete(s.Labels, sshKeysDelegatedLabel)
+						delete(s.Data, dataKey)
 					})).To(Succeed())
 
 					// The consequence, over a window: the platform neither mints a
@@ -633,7 +530,7 @@ func describeLiveUndelegation() {
 							return err
 						}
 						if ref := env.Object().Status.SSHClientKeySecret; ref != nil {
-							return fmt.Errorf("the platform minted %s when its delegated source stopped opting in", ref.Name)
+							return fmt.Errorf("the platform minted %s when its user keys Secret lost its entry", ref.Name)
 						}
 						if secretExists(ctx, env.SSHClientKeySecretName()) {
 							return errors.New("the platform created a login key behind status's back")
@@ -643,14 +540,15 @@ func describeLiveUndelegation() {
 						}
 						return nil
 					}).WithTimeout(30*time.Second).WithPolling(3*time.Second).
-						Should(Succeed(), "the environment after its delegated Secret was undelegated")
+						Should(Succeed(), "the environment after its keys Secret lost the mounted entry")
 
 					// The key the user had still works: whatever the platform decides
 					// about the reference, it cannot un-mount bytes that are already in
 					// the container, and pretending otherwise would be an outage. The
 					// session opens with that key because it is the only one there is:
-					// the platform mints no login key for an environment whose keys are
-					// delegated, which is the property the block above asserts.
+					// the platform mints no login key for an environment whose spec
+					// names a keys Secret, which is the property the block above
+					// asserts.
 					sess := sshReadyWithKey(ctx, env, key.Signer)
 					_, err := sess.Run(ctx, "true")
 					Expect(err).NotTo(HaveOccurred(),
@@ -662,14 +560,9 @@ func describeLiveUndelegation() {
 
 // --- Secret plumbing ----------------------------------------------------------
 
-func createSecret(
-	ctx context.Context,
-	name string,
-	data map[string][]byte,
-	labels map[string]string,
-) error {
+func createSecret(ctx context.Context, name string, data map[string][]byte) error {
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: conformance.Namespace, Labels: labels},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: conformance.Namespace},
 		Type:       corev1.SecretTypeOpaque,
 		Data:       data,
 	}
@@ -682,13 +575,10 @@ func createSecret(
 	}
 	// A name that is already taken is an interrupted run and a second attempt
 	// under the same run id, which reuses the run namespace. What the first
-	// attempt left is the previous keys and — for the case that delegates a
-	// Secret to the platform — the delegation label, and the cases here are
-	// about exactly those two things. So the caller's bytes and the caller's
-	// labels are what stand afterwards, rather than the leftovers.
+	// attempt left is the previous keys, and the cases here are about exactly
+	// those. So the caller's bytes stand afterwards, rather than the leftovers.
 	return patchSecret(ctx, name, func(s *corev1.Secret) {
 		s.Data = data
-		s.Labels = labels
 	})
 }
 

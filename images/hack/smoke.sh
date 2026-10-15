@@ -484,10 +484,17 @@ check_notebook_kernel() {
 #   - with HOME passed, that is what the claim was mounted at, and the launcher must not override
 #     it — a home the spec declared is a statement about where the container will look.
 #
+# A third place the same home has to be is the directory the server *runs in*, and the report answers
+# that too — its "pid" is the server's own. root_dir does not put it there: a terminal is a process
+# the server spawns, jupyter_server_terminals spawns it with the cwd the create request carries, and
+# JupyterLab's request carries none, so the pty inherits the server's working directory. A launcher
+# that names the home but never enters it opens every shell on the image's WORKDIR — /home/ubuntu,
+# which for a root environment is the account the image bakes rather than the workspace.
+#
 # uid 0 throughout, since this is the root branch's check, and no Secret is mounted, so sshd never
 # starts and the run is the launcher alone.
 check_jupyter_home() {
-  local img=$1 home=$2 label=$3 info=""
+  local img=$1 home=$2 label=$3 info="" pid="" cwd=""
   shift 3
   # Named under root_cont like the other root-mode containers, so the EXIT trap owns it too.
   root_cont="cs-smoke-jup-home-$$"
@@ -511,6 +518,16 @@ check_jupyter_home() {
   done
   if [ -n "$info" ]; then
     ok "$label"
+    # Asked of the pid the report names as its own, so this cannot read a bystander's cwd. Only
+    # reported when the report itself was read: a container whose server wrote no report has no pid
+    # to ask, and a second failure would only restate the first.
+    pid="$(printf '%s\n' "$info" | sed -n 's/.*"pid": *\([0-9][0-9]*\).*/\1/p' | head -n 1)"
+    cwd="$("$CONTAINER_TOOL" exec "$root_cont" readlink "/proc/$pid/cwd" 2>/dev/null || true)"
+    if [ -n "$pid" ] && [ "$cwd" = "$home" ]; then
+      ok "$label, and runs in it (a new terminal starts there)"
+    else
+      bad "$label, but the server runs in ${cwd:-<unknown>} — a new terminal would open there"
+    fi
   else
     bad "$label (jupyter does not report $home as the directory it serves)"
     "$CONTAINER_TOOL" logs "$root_cont" 2>&1 | tail -n 20

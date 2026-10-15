@@ -4,6 +4,8 @@ import { renderToString } from "react-dom/server";
 import { act } from "react-dom/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { BASE_PATH } from "@/lib/base-path";
+
 import CubepilotPage from "./page";
 
 // The test file avoids JSX because tsconfig sets jsx: "preserve" (for Next),
@@ -32,7 +34,7 @@ function stubApi(
     history?: Array<{ role: string; content: string }>;
     /** When set, a history answer waits for the test to release it (in order). */
     historyPending?: Array<(items: unknown) => void>;
-    attach?: { events?: unknown[]; emit?: (ev: unknown) => void; calls?: number };
+    attach?: { events?: unknown[]; emit?: (ev: unknown) => void; calls?: number; urls?: string[] };
     /** When set, a status answer waits for the test to release it (in order). */
     agentStatusPending?: Array<(s: unknown) => void>;
     /** When set, a config answer waits for the test to release it (in order). */
@@ -196,6 +198,7 @@ function stubApi(
       // runtime would (a new card, a resolution).
       if (url.endsWith("/turn/events") && opts.attach) {
         opts.attach.calls = (opts.attach.calls ?? 0) + 1;
+        (opts.attach.urls ??= []).push(url);
         const enc = new TextEncoder();
         const stream = new ReadableStream({
           start(controller) {
@@ -673,7 +676,7 @@ describe("cubepilot page", () => {
   // session …; push dropped"). The API's re-attach route is what makes such a
   // card appear, and stay answerable, in place.
   it("a parked turn recovers its card by re-attaching to the run", async () => {
-    const attach: { events?: unknown[]; emit?: (ev: unknown) => void } = {
+    const attach: { events?: unknown[]; emit?: (ev: unknown) => void; calls?: number; urls?: string[] } = {
       events: [
         {
           type: "approval_pending",
@@ -696,6 +699,12 @@ describe("cubepilot page", () => {
     await sendTurn(container, "清理掉那个开发环境");
     expect(await waitFor(() => container.querySelector('[data-od-id="approval-approve"]') !== null)).toBe(true);
     expect(container.textContent ?? "").toContain("kubectl delete pod demo-env-0");
+
+    // …and it asked through the portal's own base path. A bare "/api/…" is a 404
+    // whenever the portal is mounted under one, which leaves this card — the one
+    // path that brings a parked decision back without a reload — lost for good.
+    expect(BASE_PATH).not.toBe("");
+    expect(attach.urls?.[0]?.startsWith(`${BASE_PATH}/api/cubepilot/pilot/`)).toBe(true);
 
     // The decision taken elsewhere arrives on the same stream and settles the
     // card here: a re-attached view is a live one, not a snapshot.

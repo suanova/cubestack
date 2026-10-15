@@ -636,14 +636,14 @@ export function historyToMsgs(items: HistoryMessage[], nextId: () => number, now
     //
     // The message is handled whole and then skipped: its output is one
     // message-level value, attached once to the call it answers, and it is that
-    // card's output — never the turn's narration.
+    // card's output — never the turn's narration. Attached whether or not it
+    // carries text: an empty output is still a result, the same reading the
+    // live fold takes.
     if (it.role === "toolResult") {
       const result =
         typeof it.content === "string" ? it.content : it.content.map((b) => b.text ?? "").join("\n");
-      if (result) {
-        agent = { ...agent, blocks: attachToolResult(agent.blocks, it.toolCallId, result) };
-        out[out.length - 1] = agent;
-      }
+      agent = { ...agent, blocks: attachToolResult(agent.blocks, it.toolCallId, result) };
+      out[out.length - 1] = agent;
       continue;
     }
     const blocks = typeof it.content === "string" ? [{ type: "text" as const, text: it.content }] : it.content;
@@ -655,13 +655,16 @@ export function historyToMsgs(items: HistoryMessage[], nextId: () => number, now
             ? { ...agent, blocks: [...agent.blocks.slice(0, -1), { ...last, text: `${last.text}\n\n${b.text}` }] }
             : { ...agent, blocks: [...agent.blocks, { kind: "text", text: b.text }] };
       } else if (b.type === "toolCall") {
-        // A history call is born finished: its result, if it had one, is a
-        // separate toolResult message handled above.
+        // NOT born finished: the toolResult message handled above is the only
+        // thing that marks this call done. A call with no result in the history
+        // is one the runtime never got back — a write parked on an approval, or
+        // a turn cut short — and calling that "已完成" would be a claim the
+        // history does not support.
         agent = {
           ...agent,
           blocks: [
             ...agent.blocks,
-            { kind: "tool", callId: b.id, name: b.name ?? "tool", args: fmtToolArgs(b.arguments), done: true },
+            { kind: "tool", callId: b.id, name: b.name ?? "tool", args: fmtToolArgs(b.arguments), done: false },
           ],
         };
       }

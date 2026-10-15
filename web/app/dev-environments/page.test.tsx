@@ -25,16 +25,6 @@ const OPTIONS = {
   ],
 };
 
-// The labelled key Secrets the wizard's SSH picker loads when the SSH toggle is
-// turned on (served by /api/devenvironments/ssh-keys).
-const SSH_KEYS = {
-  namespace: "project-a",
-  secrets: [
-    { name: "alice-keys", keys: ["alice@laptop", "alice@phone"] },
-    { name: "bob-keys", keys: ["bob@desktop"] },
-  ],
-};
-
 describe("dev environments page", () => {
   beforeEach(() => {
     localStorage.clear();
@@ -399,6 +389,47 @@ describe("dev environments page", () => {
     expect(container.querySelector('[data-od-id="token-value"]')).toBeNull();
     expect(container.textContent).not.toContain("kubectl -n");
     expect(tokenRequests).toHaveLength(1);
+
+    act(() => root.unmount());
+  });
+
+  it("hands out the minted private key as a download with the login command", async () => {
+    stubData([
+      devEnvironmentSummary({
+        endpoints: [
+          { name: "jupyter", address: "https://dev.cubestack.local/ws/jupyter-nlp-ln" },
+          { name: "ssh", address: "ssh://ubuntu@203.0.113.7:2200" },
+        ],
+      }),
+    ]);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    // The card carries the download — a plain link the session cookie
+    // authorizes — at the deployment's base path, and states the login command
+    // from the ssh endpoint the operator published.
+    const link = container.querySelector('[data-od-id="ssh-key-download"]') as HTMLAnchorElement;
+    expect(link).not.toBeNull();
+    expect(link.getAttribute("href")).toBe("/cubestack/api/devenvironments/ssh-key?namespace=project-a&name=jupyter-nlp-ln");
+    expect(container.querySelector('[data-od-id="ssh-key-hint"]')?.textContent).toContain(
+      "ssh -i id_ed25519 ubuntu@203.0.113.7 -p 2200",
+    );
+
+    act(() => root.unmount());
+  });
+
+  it("shows no key download for an environment keyed with the user's own keys", async () => {
+    // sshClientKeySecret is null when the spec names the user's own key Secret:
+    // no keypair was minted, and there is nothing the card can hand out.
+    stubData([
+      devEnvironmentSummary({
+        sshClientKeySecret: null,
+        endpoints: [{ name: "ssh", address: "ssh://ubuntu@203.0.113.7:2200" }],
+      }),
+    ]);
+    const { container, root } = renderPage();
+    await act(async () => {});
+    expect(container.querySelector('[data-od-id="ssh-key-download"]')).toBeNull();
 
     act(() => root.unmount());
   });
@@ -878,9 +909,6 @@ describe("create wizard", () => {
         const url = String(input);
         if (url.includes("/options")) {
           return Promise.resolve({ ok: true, status: 200, json: async () => OPTIONS });
-        }
-        if (url.includes("/ssh-keys")) {
-          return Promise.resolve({ ok: true, status: 200, json: async () => SSH_KEYS });
         }
         if (rejectCreate && init?.method === "POST") {
           return Promise.resolve({ ok: false, status: rejectCreate.status, json: async () => rejectCreate.body });
@@ -1677,28 +1705,25 @@ describe("create wizard", () => {
     act(() => root.unmount());
   });
 
-  it("sends spec.ssh with a bring-your-own key Secret when SSH is on", async () => {
+  it("sends spec.ssh with the pasted public keys when SSH is on", async () => {
     const { container, root } = renderWithBoth();
     await act(async () => {});
     await toStep3(container);
 
-    // Turning on the SSH toggle loads the labelled key Secrets for the namespace
-    // and exposes the picker (independent of the environment's type).
+    // Turning on the SSH toggle exposes the public-key input (independent of the
+    // environment's type); the route writes the pasted keys to an owned Secret.
     const sshSwitch = document.body.querySelector('[data-od-id="wizard-ssh"] input') as HTMLInputElement;
     await act(async () => {
       sshSwitch.click();
     });
-    // Let the ssh-keys fetch resolve before interacting with the picker.
-    await act(async () => {});
 
-    // Select a labelled key Secret; the key defaults to its first data entry.
-    // The picker opens from its inner combobox, as MUI attaches the mousedown
-    // handler there and the od-id sits on the field root.
-    const sshSecretSelect = document.body.querySelector(
-      '[data-od-id="wizard-ssh-secret"] [role="combobox"]',
-    ) as HTMLElement;
-    expect(sshSecretSelect).not.toBeNull();
-    await selectOption(sshSecretSelect, "alice-keys");
+    const keyArea = document.body.querySelector('[data-od-id="wizard-ssh-keys"] textarea') as HTMLTextAreaElement;
+    expect(keyArea).not.toBeNull();
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")!.set!;
+      setter.call(keyArea, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAliceKey alice@laptop");
+      keyArea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
 
     await nextStep();
     await act(async () => {
@@ -1709,8 +1734,7 @@ describe("create wizard", () => {
     const body = createdBody();
     expect(body).toMatchObject({
       sshEnabled: true,
-      sshKeysSecret: "alice-keys",
-      sshKeysKey: "alice@laptop",
+      sshKeys: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAliceKey alice@laptop",
     });
 
     act(() => root.unmount());

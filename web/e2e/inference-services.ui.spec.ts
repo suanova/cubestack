@@ -22,6 +22,10 @@ const OPTIONS = {
       quantizations: ["w8a8"],
       servingMode: "pd-separation",
       gpuPerPod: 8,
+      roles: [
+        { name: "prefill", vendor: "metax", models: ["MXC500"], gpuPerPod: 8 },
+        { name: "decode", vendor: "nvidia", models: ["H200"], gpuPerPod: 8 },
+      ],
       overrides: [
         { name: "decodeReplicas", type: "integer", min: 1, max: 16, enum: null, default: 2, description: null },
         { name: "prefillReplicas", type: "integer", min: 1, max: 8, enum: null, default: 1, description: null },
@@ -264,11 +268,11 @@ test.describe("inference services landing (mocked data)", () => {
     await page.getByRole("button", { name: "下一步" }).click();
     await expect(page.locator('[data-step="2"]')).toBeVisible();
 
-    // Step 2: the pd-separation profile shows the reserved per-role GPU type
-    // selects, both fixed to the profile vendor until heterogeneous GPUs land.
+    // Step 2: the pd-separation profile shows one read-only GPU select per
+    // role, each fixed to that role's declared accelerator.
     await expect(page.locator('[data-step="2"]')).toContainText("GPU 类型");
     await expect(page.locator('[data-od-id="wizard-gpu-prefill"]')).toContainText("metax");
-    await expect(page.locator('[data-od-id="wizard-gpu-decode"]')).toContainText("metax");
+    await expect(page.locator('[data-od-id="wizard-gpu-decode"]')).toContainText("nvidia");
 
     // Step 2: select the compatible model version.
     await page.getByText("选择模型版本…").click();
@@ -276,6 +280,8 @@ test.describe("inference services landing (mocked data)", () => {
     await expect(page.locator('[data-step="2"]')).toContainText("deepseek-v4-flash-w8a8-v1");
     await page.getByRole("button", { name: "下一步" }).click();
     await expect(page.locator('[data-step="3"]')).toBeVisible();
+    // Step 3: the summary spells out both roles' declared accelerators.
+    await expect(page.locator('[data-step="3"]')).toContainText("prefill: metax / decode: nvidia");
 
     // Step 3: create and expect the new service to appear and be selected.
     await page.locator('[data-od-id="wizard-create"]').click();

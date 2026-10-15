@@ -239,12 +239,13 @@ type SSHSpec struct {
 
 	// AuthorizedKeysSecret is the SSH public key Secret reference. If specified,
 	// the controller generates the environment's host identity alone and mounts
-	// this Secret's data[key] as the container's authorized_keys, so the Secret
-	// must carry the label ai.cubestack.io/ssh-keys-delegated: "true"
-	// — only a Secret that names itself for this use is mounted into a workload.
-	// Otherwise the controller generates the host identity and a client keypair,
-	// and status.sshClientKeySecret names the Secret holding the latter. The
-	// plaintext is never stored in spec.
+	// this Secret's data[key] as the container's authorized_keys — the Secret
+	// holds public keys, and its selected data entry is the file the container
+	// reads, so it must exist at the named key. Otherwise the controller
+	// generates the host identity and a client keypair, and
+	// status.sshClientKeySecret names the Secret holding the latter, whose
+	// private half the environment's owner retrieves to log in. The plaintext
+	// is never stored in spec.
 	// +kubebuilder:validation:XValidation:rule="self.key != ''",message="key must name the Secret data entry the container mounts"
 	// +optional
 	AuthorizedKeysSecret *corev1.SecretKeySelector `json:"authorizedKeysSecret,omitempty"`

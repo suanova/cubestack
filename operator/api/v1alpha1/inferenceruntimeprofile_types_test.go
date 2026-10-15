@@ -35,6 +35,8 @@ func intstrPtr(v intstr.IntOrString) *intstr.IntOrString { return &v }
 const (
 	testModelArchitecture = "deepseek_v4"
 	testQuantization      = "w8a8"
+	testModelMXC500       = "MXC500"
+	testModelH200         = "H200"
 	testEndpointPortName  = "http"
 	testRefNamespace      = "project-a"
 	testRefServiceName    = "dsv4-flash-pd"
@@ -53,7 +55,7 @@ func validInferenceRuntimeProfile(name string) *InferenceRuntimeProfile {
 		Spec: InferenceRuntimeProfileSpec{
 			Accelerator: Accelerator{
 				Vendor: AcceleratorVendorMetax,
-				Models: []string{"MXC500"},
+				Models: []string{testModelMXC500},
 			},
 			Engine: Engine{
 				Name:    "sglang",
@@ -487,5 +489,18 @@ var _ = Describe("InferenceRuntimeProfile", func() {
 				func(s *InferenceRuntimeProfileSpec) { s.Roles[0].Service.Ports[0].Port = 70000 },
 				"spec.roles[0].service.ports[0].port"),
 		)
+	})
+})
+
+var _ = Describe("Role.EffectiveAccelerator", func() {
+	It("returns the role's own accelerator when declared", func() {
+		role := &Role{Accelerator: &Accelerator{Vendor: AcceleratorVendorNvidia, Models: []string{testModelH200}}}
+		profileAccel := Accelerator{Vendor: AcceleratorVendorMetax, Models: []string{testModelMXC500}}
+		Expect(role.EffectiveAccelerator(profileAccel)).To(Equal(*role.Accelerator))
+	})
+
+	It("falls back to the profile-level accelerator when not declared", func() {
+		profileAccel := Accelerator{Vendor: AcceleratorVendorMetax, Models: []string{testModelMXC500}}
+		Expect((&Role{}).EffectiveAccelerator(profileAccel)).To(Equal(profileAccel))
 	})
 })

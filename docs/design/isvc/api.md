@@ -334,6 +334,8 @@ VAP 校验无法防止 DELETE+CREATE 组合操作，平台允许该组合操作�
 | `vendor` | enum | L0：必填、枚举 | GPU 资源名映射，根据厂商映射为 Kubernetes GPU 扩展资源名。例如 `metax` → `metax-tech.com/gpu`，`nvidia` → `nvidia.com/gpu`。Controller 使用该资源名，根据 `gpuPerPod` 为 Pod 设置 GPU `requests` 和 `limits`。                          |
 | `models` | list | L0：必填、string 列表 | 限制可调度的 GPU 型号，Controller 根据声明的 GPU 型号自动注入节点选择约束。单个型号使用 `nodeSelector`；多个型号使用 `nodeAffinity` 的 `In` 表达式，因为 `nodeSelector` 无法表示多个型号之间的“或”关系。型号值须与厂商设备插件写入的节点 label 值一致（见「节点 GPU 型号信息」）。约束只注入**声明了 GPU**（`resources.gpuPerPod`）的 role；CPU-only 辅助 role（如 router）不受 GPU 型号限制、可调度到任意节点。 |
 
+**role 级覆盖**：上述声明是 Profile 级默认值——未声明 `roles[].accelerator` 的 role 一律使用它。role 可通过声明 `roles[].accelerator` 完整覆盖（vendor 与 models 整体替换，见 `roles[].accelerator` 小节）；Profile 级 `accelerator` 始终必填：除作为默认值外，它还是命名规则 `<vendor>-<engine>-` 中 vendor 的来源。
+
 **GPU 型号约束的目的**
 
 GPU 扩展资源通常只区分厂商，不区分具体 GPU 型号。例如，在混合部署 C500 和 C550 的 MetaX 集群中，两类 GPU 节点可能都提供：`metax-tech.com/gpu`。如果 `InferenceRuntimeProfile` 仅请求该 GPU 资源，而没有限制 GPU 型号，则一个已经针对 C500 验证的 `InferenceRuntimeProfile` 仍可能被调度到 C550 节点。这可能导致：
@@ -419,6 +421,7 @@ GPU 扩展资源通常只区分厂商，不区分具体 GPU 型号。例如，�
 |---|---|---|---|
 | `name` | string | L0：必填；L1：同一 Profile 内唯一 | role 名，作为引用锚点：`endpoint.role`、`dependsOn` 和模板 `{{ roles.<name>.* }}` 均按名引用；生成的资源名中也包含它（`<isvc>-<role>`）。 |
 | `dependsOn` | list | L1：引用的 role 名必须存在；L2：依赖构成 DAG（拓扑排序时检测循环） | role 间的启动依赖，构成 DAG。Controller 按拓扑序创建并做就绪门控（见 §4.3）。 |
+| `accelerator` | object | L0：可选；L1：声明时必须声明 `podTemplate.resources.gpuPerPod` | 该 role 使用的 GPU 厂商与型号，完整覆盖 Profile 级 `accelerator`；未声明时使用 Profile 级声明。语义见 `roles[].accelerator`。 |
 
 ##### roles[].podTemplate
 
@@ -482,6 +485,20 @@ Controller 将此模板按 `workload.kind` 写入对应位置：`LeaderWorkerSet
 | `startupPolicy` | enum | L0：v1 固定 `LeaderCreated` | 组内启动顺序：`LeaderCreated` 即先创建 leader，再创建 worker。 |
 
 **更新策略**：`LeaderWorkerSet` 固定 `rolloutStrategy: RollingUpdate{maxSurge: 0, maxUnavailable: 1}`（§4.3）；`Deployment` 固定 `strategy: RollingUpdate{maxSurge: 0, maxUnavailable: 1}`——先杀后建、不并发绑定 host 端口，即使 podTemplate 启用 hostNetwork 固定端口也同样安全（前提是 `hostPort` 已声明，见 `podTemplate.hostNetwork` 字段说明）。`replicas = 1` 时两种 kind 的更新都等价于全停重建。更新中断影响见 §5.2。
+
+##### roles[].accelerator
+
+`roles[].accelerator`（可选，`{vendor, models}`，与 Profile 级 `accelerator` 同构）声明该 role 使用的 GPU 厂商与型号，用于 PD 分离等场景下的异构配置，例如 prefill 运行在 metax 节点、decode 运行在 nvidia 节点。
+
+| 规则 | 内容 |
+|---|---|
+| 覆盖语义 | 声明后**完整替换** Profile 级 `accelerator`：`vendor` 与 `models` 一起生效，不做字段级继承——不存在“vendor 覆盖、models 继承”的歧义组合；未声明时该 role 使用 Profile 级声明。 |
+| L1 前置条件 | 声明了 `accelerator` 的 role 必须声明 `podTemplate.resources.gpuPerPod`。GPU 资源映射与型号约束注入只作用于请求 GPU 的 role，CPU-only role（如 router）上的声明永远不生效；`spec` 不可变，因此在创建时拒绝而不是静默忽略。 |
+| 生效范围 | 该 role 的 GPU 资源名按有效 vendor 映射（§4.3 资源映射）；型号约束按有效 `models` 注入（单型号 `nodeSelector` / 多型号 `nodeAffinity In`，§3.2）；`podTemplate.nodeSelector` 钉住注入 label 的冲突检查（`ModelSchedulingConflict`）按该 role 的有效 `models` 判定。 |
+| 命名与升级 | 命名规则不变：`<vendor>-<engine>-` 前缀取 Profile 级 `accelerator.vendor`。异构 Profile 同样以“新名称新对象 + 迁移 `profileRef`”升级（§3.2 命名规则与不可变性）。 |
+| 用户输入 | `InferenceService` 不提供 role 级 accelerator 输入：异构组合由管理员在 Profile 中定义并验证，用户只能在已发布的 Profile 中选择。组合是否可用（含跨厂商引擎的互通性）是 Profile 作者的验证责任。 |
+
+同 vendor、不同型号的逐 role 钉定（如 prefill 限 MXC500、decode 限 MXC550）是同一机制的合法用法，不需要额外规则。
 
 ##### 其他字段
 
@@ -786,7 +803,7 @@ env:
 
 **Service 映射**：`service.ports[]`（targetPort 可取容器端口名）；`service.headless: true` 额外生成 `<isvc>-<role>-hl`（ClusterIP: None）。**selector 按 workload 类型区分**：`LeaderWorkerSet` role 的 Service 只选组长——selector 在 Controller 标签之外追加 `leaderworkerset.sigs.k8s.io/worker-index: "0"`。组内只有 leader 提供该 role 的端点，worker 跑引擎的 headless 侧（如 vLLM 多机 PP/TP 的 `--headless`），把流量分摊给整组会打到不接请求的 Pod；反过来若让 worker 探针失败以躲开流量，则组永不就绪（LWS 组就绪 = leader 就绪 ∧ worker 就绪）。headless Service **保持不过滤**，按 Pod 发现正是它的用途。`Deployment` role 与 `group.size=1` 的 LWS role 行为不变（后者唯一 Pod 的 worker-index 同样是 0）。Service 名即 `roles.<name>.serviceName` 上下文值，供跨 role 发现：`http://{{ roles.prefill.serviceName }}:30000`。未声明 `service` 的 role 没有 Service，`roles.<name>.serviceName` 指向不存在的对象——引用方应只依赖声明了 `service` 的 role。
 
-**资源映射**：`gpuPerPod` → `accelerator.vendor` 映射的资源名（metax → `metax-tech.com/gpu`，nvidia → `nvidia.com/gpu`）的 requests+limits；`cpu`/`memory` → requests。
+**资源映射**：`gpuPerPod` → 该 role **有效 `accelerator`**（`roles[].accelerator` 覆盖优先，否则 Profile 级，见 §3.2）的 vendor 映射的资源名（metax → `metax-tech.com/gpu`，nvidia → `nvidia.com/gpu`）的 requests+limits；`cpu`/`memory` → requests。
 
 **依赖顺序**：`dependsOn` 构成 DAG，创建按拓扑序执行，且采用**就绪门控**——被依赖 role 的工作负载就绪后，才创建依赖它的 role。这样避免依赖方（如 router）在被依赖方尚未可用时启动，空转并产生误导性的失败探针。被依赖 role 未就绪时，依赖 role 不计入 Ready（`requireAllRoles` 聚合）。更新时同样按拓扑序执行：被依赖的 role 先更新，端点 role 最后更新（§5.1）。
 
@@ -924,3 +941,4 @@ ModelVersion 与 InferenceRuntimeProfile 的 spec 均不可变（§3.1、§3.2�
 - [ ] 更新顺序的全局串行推进（§5.1）：无依赖关系的 role 也逐个滚动——一个 role 的工作负载更新完成且就绪后，才更新下一个——使中断窗口可预测（§5.2）。**依赖收敛门控已实现**（模板变化的 role 等待其 `dependsOn` 依赖采用新模板且就绪，幂等推进无需跨 reconcile 状态）；剩余差距仅是无依赖关系 role 的并行滚动 vs 全局串行。
 - [ ] ModelVersion / InferenceRuntimeProfile 的 in-use finalizer：组织对象仍被引用时删除。
 - [ ] InferenceRuntimeProfile：增加 leaderPatch：为 leader 和 worker 提供差异化配置，通过受控合并写入 LWS `leaderTemplate`。仅在两者启动入口不同（如 Ray head/worker、MPI launcher）或 leader 资源不同的引擎中使用。
+- [ ] InferenceService：多模型挂载（`mounts[].model` 的多 key 形态，§4.5 已预留；当前固定 `main`）与每 role 独立模型引用（异构厂商的引擎可能需要不同权重格式或量化时，prefill/decode 挂载不同的模型制品）。两者相互关联，需要一起做独立的 API 设计。

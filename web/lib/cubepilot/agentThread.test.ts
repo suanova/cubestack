@@ -25,7 +25,7 @@ import {
   waitingOnUser,
 } from "./agentThread";
 import type { AgentApproval, AgentBlock, AgentMsg, AgentQuestion, ThreadMsg } from "./agentThread";
-import type { AgentSseEvent } from "./types";
+import type { AgentSseEvent, HistoryMessage } from "./types";
 
 const T0 = 1_700_000_000_000;
 
@@ -554,6 +554,34 @@ describe("historyToMsgs", () => {
   it("marks a restored turn finished, so it renders settled rather than in flight", () => {
     const out = historyToMsgs([{ role: "assistant", content: [{ type: "text", text: "a" }] }], nextId, T0);
     expect((out[0] as AgentMsg).phase).toBe("done");
+  });
+
+  it("marks a restored call done only when the history carries its result", () => {
+    // A call whose result is not in the history is one the runtime never got
+    // back: a write parked on an approval, or a turn cut short. Restoring it as
+    // done made its card read 已完成 for a command that had not run.
+    const turn: HistoryMessage[] = [
+      { role: "assistant", content: [{ type: "text", text: "我来删。" }] },
+      {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "c1", name: "exec", arguments: { cmd: "kubectl delete pod demo" } }],
+      },
+    ];
+    const parked = historyToMsgs(turn, nextId, T0)[0] as AgentMsg;
+    expect(toolsOf(parked.blocks)[0]).toMatchObject({ callId: "c1", done: false });
+    expect(toolsOf(parked.blocks)[0].output).toBeUndefined();
+
+    const answered = historyToMsgs(
+      [...turn, { role: "toolResult", toolCallId: "c1", content: [{ type: "text", text: "pod deleted" }] }],
+      nextId,
+      T0,
+    )[0] as AgentMsg;
+    expect(toolsOf(answered.blocks)[0]).toMatchObject({ callId: "c1", done: true, output: "pod deleted" });
+
+    // An empty result is still a result — the tool returned, with nothing to
+    // say — which is the reading the live fold already takes.
+    const empty = historyToMsgs([...turn, { role: "toolResult", toolCallId: "c1", content: [] }], nextId, T0)[0] as AgentMsg;
+    expect(toolsOf(empty.blocks)[0]).toMatchObject({ callId: "c1", done: true });
   });
 });
 

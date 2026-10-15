@@ -358,7 +358,7 @@ func (r *InferenceServiceReconciler) applyWorkload(ctx context.Context, isvc *ai
 // desiredWorkload builds the role's Deployment or LeaderWorkerSet with the
 // template-hash annotations (design §5.1).
 func (r *InferenceServiceReconciler) desiredWorkload(isvc *aiv1alpha1.InferenceService, profile *aiv1alpha1.InferenceRuntimeProfile, role *aiv1alpha1.Role, rr *renderer.RenderedRole, rendered *renderer.Result, model *aiv1alpha1.ModelVersion) client.Object {
-	podSpec := buildPodSpec(rr.PodTemplate, isvc.Name, model, profile.Spec.Accelerator.Vendor)
+	podSpec := buildPodSpec(rr.PodTemplate, isvc.Name, model, role.EffectiveAccelerator(profile.Spec.Accelerator).Vendor)
 	// Roles that referenced {{ model.credentialsPath }} get the S3 credentials
 	// Secret volume injected (design §4.5).
 	if rr.UsesCredentials {
