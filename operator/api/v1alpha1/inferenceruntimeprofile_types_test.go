@@ -245,17 +245,27 @@ var _ = Describe("InferenceRuntimeProfile", func() {
 			Expect(k8sClient.Delete(ctx, irp)).To(Succeed())
 		})
 
-		It("accepts a podAntiAffinity topologyKey and round-trips the spec", func() {
-			irp := validInferenceRuntimeProfile("irp-antiaffinity")
-			irp.Spec.PodAntiAffinity = &PodAntiAffinity{TopologyKey: "kubernetes.io/hostname"}
+		It("accepts the templated scheduling fields and round-trips the spec", func() {
+			// Both admitted forms of both fields: a literal, and the {{ overrides.* }}
+			// placeholder the shipped bundles use. Neither field can be enum-validated
+			// — enum is an exact string match, so it would reject the placeholder at
+			// CREATE — which is why they are Pattern-validated here and the resolved
+			// value is checked by the renderer: a placement token, a label pair.
+			for _, policy := range []PodAntiAffinityPolicy{"preferred", "{{ overrides.replicaPlacement }}"} {
+				for _, selector := range []string{"node-pool=inference", "{{ overrides.nodeSelector }}"} {
+					irp := validInferenceRuntimeProfile("irp-antiaffinity")
+					irp.Spec.PodAntiAffinity = &PodAntiAffinity{Policy: policy, TopologyKey: testHostnameTopologyKey}
+					irp.Spec.NodeSelector = selector
 
-			Expect(k8sClient.Create(ctx, irp)).To(Succeed())
+					Expect(k8sClient.Create(ctx, irp)).To(Succeed())
 
-			got := &InferenceRuntimeProfile{}
-			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: irp.Name}, got)).To(Succeed())
-			Expect(got.Spec).To(Equal(irp.Spec))
+					got := &InferenceRuntimeProfile{}
+					Expect(k8sClient.Get(ctx, client.ObjectKey{Name: irp.Name}, got)).To(Succeed())
+					Expect(got.Spec).To(Equal(irp.Spec))
 
-			Expect(k8sClient.Delete(ctx, irp)).To(Succeed())
+					Expect(k8sClient.Delete(ctx, irp)).To(Succeed())
+				}
+			}
 		})
 
 		//nolint:dupl // status subresource round-trip mirrors the ModelVersion test
@@ -476,6 +486,24 @@ var _ = Describe("InferenceRuntimeProfile", func() {
 					}
 				},
 				"spec.podAntiAffinity.policy"),
+			Entry("nodeSelector without a value",
+				"irp-invalid-nodeselector-key-only",
+				func(s *InferenceRuntimeProfileSpec) {
+					s.NodeSelector = "node-pool"
+				},
+				"spec.nodeSelector"),
+			Entry("nodeSelector with two pairs",
+				"irp-invalid-nodeselector-two-pairs",
+				func(s *InferenceRuntimeProfileSpec) {
+					s.NodeSelector = "node-pool=inference gpu=yes"
+				},
+				"spec.nodeSelector"),
+			Entry("nodeSelector with more than one placeholder",
+				"irp-invalid-nodeselector-template",
+				func(s *InferenceRuntimeProfileSpec) {
+					s.NodeSelector = "{{ overrides.nodeSelector }} {{ overrides.other }}"
+				},
+				"spec.nodeSelector"),
 			Entry("probe without httpGet or tcpSocket",
 				"irp-invalid-probe-no-action",
 				func(s *InferenceRuntimeProfileSpec) {

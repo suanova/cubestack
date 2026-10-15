@@ -26,9 +26,9 @@ export function inferenceServiceSummary(
     modelVersion: null,
     overrideNums: { decodeReplicas: 2, prefillReplicas: 1, maxModelLen: 131072 },
     overrides: [
-      { name: "prefillReplicas", type: "integer", min: 1, max: 8, enum: null, current: 1 },
-      { name: "decodeReplicas", type: "integer", min: 1, max: 16, enum: null, current: 2 },
-      { name: "groupSize", type: "integer", min: null, max: null, enum: [1, 2, 4], current: 1 },
+      { name: "prefillReplicas", type: "integer", min: 1, max: 8, enum: null, current: 1, default: 1 },
+      { name: "decodeReplicas", type: "integer", min: 1, max: 16, enum: null, current: 2, default: 2 },
+      { name: "groupSize", type: "integer", min: null, max: null, enum: [1, 2, 4], current: 1, default: 1 },
     ],
     ready: null,
     progressing: false,

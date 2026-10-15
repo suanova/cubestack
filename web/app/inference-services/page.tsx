@@ -1040,7 +1040,12 @@ function scaleValueValid(o: InferenceServiceSummary["overrides"][number], v: num
   if (v === undefined || v === null) return false;
   if (o.type === "boolean") return typeof v === "boolean";
   if (o.type === "string") {
-    if (typeof v !== "string" || v.trim() === "") return false;
+    if (typeof v !== "string") return false;
+    // An empty box is empty input — unless the profile declares "" as a value,
+    // in which case empty is a state (the nodeSelector knob means "no node
+    // selector" when empty) and must be settable back to it. The operator
+    // trims the resolved value, so blank counts as empty here too.
+    if (v.trim() === "") return o.default === "";
     return o.enum === null || o.enum.some((e) => e === v);
   }
   if (typeof v !== "number" || !Number.isInteger(v)) return false;

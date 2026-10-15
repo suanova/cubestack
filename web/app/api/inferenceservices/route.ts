@@ -58,6 +58,9 @@ export interface InferenceServiceSummary {
     max: number | null;
     enum: Array<number | string> | null;
     current: number | string | boolean | null;
+    // the profile's declared default, which current falls back to; an empty
+    // string here is a declared value ("off"), not a missing one
+    default: number | string | boolean | null;
   }>;
   // observed state (null until the controller reports it)
   ready: boolean | null;
@@ -242,6 +245,7 @@ function project(
       max: num(o.max),
       enum: o.enum ?? null,
       current,
+      default: isPrim(o.default) ? o.default : null,
     };
   });
 

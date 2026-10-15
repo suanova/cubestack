@@ -2,11 +2,13 @@ package renderer
 
 import (
 	"fmt"
+	"maps"
 	"math"
 	"slices"
 	"strconv"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/api/validate/content"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	aiv1alpha1 "github.com/suanova/cubestack/api/v1alpha1"
@@ -118,7 +120,13 @@ func Render(isvc *aiv1alpha1.InferenceService, profile *aiv1alpha1.InferenceRunt
 		s3CredentialsSet: model.Spec.Storage.Strategy == aiv1alpha1.StorageStrategyS3 && model.Spec.Storage.S3 != nil && model.Spec.Storage.S3.CredentialsRef != nil,
 	}
 
+	// The placement policy and the node selector are each a single profile-level
+	// value — one declaration covers every role — so they are rendered once here
+	// rather than per role.
 	res.PodAntiAffinityPolicy, res.Errors = resolvePodAntiAffinity(ctx, profile.Spec.PodAntiAffinity, res.Errors)
+	var nodeSelector map[string]string
+	nodeSelector, res.Errors = resolveNodeSelector(ctx, profile.Spec.NodeSelector, res.Errors)
+
 	// Roles: structure first, then pod template. Errors accumulate; later
 	// fields are still rendered so the message aggregates all failures.
 	for i := range profile.Spec.Roles {
@@ -147,6 +155,9 @@ func Render(isvc *aiv1alpha1.InferenceService, profile *aiv1alpha1.InferenceRunt
 		ctx.role = roleV
 		rr.PodTemplate, res.Errors = renderPodTemplate(ctx, rr.PodTemplate, res.Errors)
 		rr.UsesCredentials = roleV.usesCredentials
+		// The service-level selector merges before the model pin so that a pair
+		// naming the vendor product label goes through the conflict rule below.
+		mergeNodeSelector(&rr, nodeSelector)
 		res.Errors = injectModelSelector(&rr, role.EffectiveAccelerator(profile.Spec.Accelerator), res.Errors)
 		// A role that will receive the injected S3 credentials volume must not
 		// declare a podTemplate volume of the same name: the pod template would
@@ -245,15 +256,35 @@ type renderContext struct {
 	role *roleVars
 }
 
+// mergeNodeSelector merges the service-level node selector pair into the role's
+// pod template nodeSelector, for every role: which nodes the service runs on is a
+// property of the service, and a CPU-only role quietly left off the pool the
+// service was pinned to would be a surprise rather than a feature. The merge is a
+// plain map assignment — a pod's nodeSelector is one flat map the apiserver ANDs
+// — and it happens before injectModelSelector so that a pair naming the vendor
+// product label is caught by that conflict rule instead of silently overriding
+// the model pin. The map is safe to write: renderPodTemplate has already replaced
+// it with its own freshly built copy.
+func mergeNodeSelector(rr *RenderedRole, sel map[string]string) {
+	if len(sel) == 0 {
+		return
+	}
+	if rr.PodTemplate.NodeSelector == nil {
+		rr.PodTemplate.NodeSelector = make(map[string]string, len(sel))
+	}
+	maps.Copy(rr.PodTemplate.NodeSelector, sel)
+}
+
 // injectModelSelector constrains the role's scheduling to its effective
 // accelerator models (design §3.2: the role's own accelerator when declared,
 // the profile-level value otherwise): one model merges into the pod template
 // nodeSelector, several models produce a required nodeAffinity In term on the
 // vendor product label (recorded in the rendered role for the controller).
-// A podTemplate.nodeSelector pinning the vendor label to a value outside the
-// declared models is a ModelSchedulingConflict: the merge would render a pod
-// that can never be scheduled, and the immutable profile must fail at the
-// Rendered stage.
+// A node selector pinning the vendor label to a value outside the declared
+// models is a ModelSchedulingConflict: the merge would render a pod that can
+// never be scheduled, and the immutable profile must fail at the Rendered stage.
+// The pin may be the role's own podTemplate.nodeSelector or the service-level
+// nodeSelector merged in just before this call.
 func injectModelSelector(rr *RenderedRole, accel aiv1alpha1.Accelerator, errs []Error) []Error {
 	if len(accel.Models) == 0 {
 		return errs
@@ -274,7 +305,7 @@ func injectModelSelector(rr *RenderedRole, accel aiv1alpha1.Accelerator, errs []
 		if !slices.Contains(accel.Models, pinned) {
 			return append(errs, Error{
 				Reason: ReasonModelSchedulingConflict,
-				Msg: fmt.Sprintf("role %q podTemplate.nodeSelector pins %q to %q, which contradicts the declared accelerator models %v",
+				Msg: fmt.Sprintf("role %q node selector pins %q to %q, which contradicts the declared accelerator models %v",
 					rr.Name, label, pinned, accel.Models),
 			})
 		}
@@ -548,6 +579,57 @@ func resolvePodAntiAffinity(ctx *renderContext, aa *aiv1alpha1.PodAntiAffinity, 
 			Msg:    fmt.Sprintf("podAntiAffinity.policy does not resolve to required, preferred or none: %q", rendered),
 		})
 	}
+}
+
+// resolveNodeSelector renders the profile's nodeSelector template and parses the
+// resolved pair (design §3.2). Only overrides.* is allowed in this field, like
+// the workload structure fields and the placement policy: which nodes a service
+// runs on is the fact the site brings to the profile, not something derived from
+// the service or from the model. An empty resolved value — what a profile whose
+// nodeSelector override carries the empty default gets — adds no selector at all,
+// and so does an absent field. The value is one Kubernetes label pair key=value,
+// checked with the same rules the apiserver applies to a pod's nodeSelector —
+// content.IsLabelKey for the key and content.IsLabelValue for the value, the two
+// functions pkg/util/validation re-exports as the deprecated IsQualifiedName and
+// IsValidLabelValue: a pair that cannot be a node selector fails the render with
+// InvalidOverride, so a typo surfaces on the Rendered condition instead of
+// leaving every replica Pending on a node that can never match. That the key
+// exists on some node is not checked here or anywhere else — the profile's
+// accelerator.models constraint is matched by the scheduler too, not by the
+// operator, which reads no Node.
+func resolveNodeSelector(ctx *renderContext, field string, errs []Error) (map[string]string, []Error) {
+	if field == "" {
+		return nil, errs
+	}
+	rendered, renderErrs := renderString(ctx, field, workloadAllowed)
+	errs = append(errs, renderErrs...)
+	if len(renderErrs) > 0 {
+		return nil, errs
+	}
+	pair := strings.TrimSpace(rendered)
+	if pair == "" {
+		return nil, errs
+	}
+	key, value, ok := strings.Cut(pair, "=")
+	if !ok || key == "" || value == "" {
+		return nil, append(errs, Error{
+			Reason: ReasonInvalidOverride,
+			Msg:    fmt.Sprintf("nodeSelector does not resolve to a key=value label pair: %q", rendered),
+		})
+	}
+	if problems := content.IsLabelKey(key); len(problems) > 0 {
+		return nil, append(errs, Error{
+			Reason: ReasonInvalidOverride,
+			Msg:    fmt.Sprintf("nodeSelector key %q is not a valid Kubernetes label key: %s", key, problems[0]),
+		})
+	}
+	if problems := content.IsLabelValue(value); len(problems) > 0 {
+		return nil, append(errs, Error{
+			Reason: ReasonInvalidOverride,
+			Msg:    fmt.Sprintf("nodeSelector value %q is not a valid Kubernetes label value: %s", value, problems[0]),
+		})
+	}
+	return map[string]string{key: value}, errs
 }
 
 // renderPodTemplate renders the templated fields of a pod template: command,

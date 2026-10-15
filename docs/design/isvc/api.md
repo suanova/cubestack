@@ -348,16 +348,19 @@ GPU 扩展资源通常只区分厂商，不区分具体 GPU 型号。例如，�
 
 **与 podTemplate.nodeSelector 的组合** 
 
-自动注入的 GPU 型号约束与管理员在 podTemplate 中声明的节点选择条件可以同时存在。两者遵循 Kubernetes 原生的 AND 语义：
+自动注入的 GPU 型号约束与节点选择条件可以同时存在。来源共三处，全部遵循 Kubernetes 原生的 AND 语义：
 
 - `accelerator.models` 负责限制 GPU 型号；
-- 管理员在 `podTemplate.nodeSelector` 中声明其他节点约束，例如机架、机房或其它基础设施属性。
+- 管理员在 `podTemplate.nodeSelector` 中声明其他节点约束，例如机架、机房或其它基础设施属性；
+- 站点在**服务级** `spec.nodeSelector` 中声明集群侧的标签（如 `node-pool=inference`）。它是一个 string 而非 map，值来自 override（如 `{{ overrides.nodeSelector }}`），**默认为空表示不注入任何约束**；声明后并入**全部 role**（含 CPU-only 辅助 role——服务只有一处调度归属，把辅助 role 悄悄留在池外会是意外而非特性）。它与 `podTemplate.nodeSelector` 是普通 map 合并，同名键以 `spec.nodeSelector` 为准。
 
 不需要定义额外的字段合并规则。最终只有同时满足所有约束的节点才能被调度。
 
 唯一的实现注意点：多型号的 `nodeAffinity` 以 `In` 表达式形式并入 `nodeAffinity` 的**每一个**已有 `NodeSelectorTerm`（terms 之间是 Kubernetes OR 语义）——不能作为新的替代 term 追加，否则仅匹配旧 term 的节点会绕过型号约束。未来若平台自身需要 AND 型 term（而非替代型），也按此规则与型号约束同 term 合并。
 
-唯一需要显式处理的冲突：管理员把注入用的厂商型号 label key 写进了 `podTemplate.nodeSelector`，但值不在 `accelerator.models` 中——这种声明无论怎么调度都永不满足（同 key 不同值，K8s 对 nodeSelector 的 key 不做合并）。Controller 在渲染阶段将其判为 `Rendered=False, reason=ModelSchedulingConflict`（Profile spec 不可变，不能等部署后才发现）。值属于 `models` 的等价声明（如 `metax-tech.com/gpu.product: MXC500`）则与注入一致，不报错。
+唯一需要显式处理的冲突：管理员把注入用的厂商型号 label key 写进了 `podTemplate.nodeSelector`，或服务级 `spec.nodeSelector` 经 override 渲染成了同一个 key，但值不在 `accelerator.models` 中——这种声明无论怎么调度都永不满足（同 key 不同值，K8s 对 nodeSelector 的 key 不做合并）。Controller 在渲染阶段将其判为 `Rendered=False, reason=ModelSchedulingConflict`（Profile spec 不可变，不能等部署后才发现）。值属于 `models` 的等价声明（如 `metax-tech.com/gpu.product: MXC500`）则与注入一致，不报错。服务级 `spec.nodeSelector` 的合并发生在型号注入之前，正是为了让这条规则一并覆盖它，而不是让 override 静默盖掉型号约束。
+
+服务级 `spec.nodeSelector` 的取值是**语法**校验，不是**存在性**校验：渲染时按 apiserver 对 `nodeSelector` 的同一套规则校验键值（`IsLabelKey`/`IsLabelValue`），非法即 `InvalidOverride`；该标签是否真的存在于某个节点上则不由 Controller 检查——与 `accelerator.models` 一致，型号 label 也是由调度器匹配的，Operator 不读 Node。
 
 **与多节点 HostPath 的关系** 
 
@@ -494,7 +497,7 @@ Controller 将此模板按 `workload.kind` 写入对应位置：`LeaderWorkerSet
 |---|---|
 | 覆盖语义 | 声明后**完整替换** Profile 级 `accelerator`：`vendor` 与 `models` 一起生效，不做字段级继承——不存在“vendor 覆盖、models 继承”的歧义组合；未声明时该 role 使用 Profile 级声明。 |
 | L1 前置条件 | 声明了 `accelerator` 的 role 必须声明 `podTemplate.resources.gpuPerPod`。GPU 资源映射与型号约束注入只作用于请求 GPU 的 role，CPU-only role（如 router）上的声明永远不生效；`spec` 不可变，因此在创建时拒绝而不是静默忽略。 |
-| 生效范围 | 该 role 的 GPU 资源名按有效 vendor 映射（§4.3 资源映射）；型号约束按有效 `models` 注入（单型号 `nodeSelector` / 多型号 `nodeAffinity In`，§3.2）；`podTemplate.nodeSelector` 钉住注入 label 的冲突检查（`ModelSchedulingConflict`）按该 role 的有效 `models` 判定。 |
+| 生效范围 | 该 role 的 GPU 资源名按有效 vendor 映射（§4.3 资源映射）；型号约束按有效 `models` 注入（单型号 `nodeSelector` / 多型号 `nodeAffinity In`，§3.2）；`podTemplate.nodeSelector` 和服务级 `spec.nodeSelector` 钉住注入 label 的冲突检查（`ModelSchedulingConflict`）按该 role 的有效 `models` 判定。 |
 | 命名与升级 | 命名规则不变：`<vendor>-<engine>-` 前缀取 Profile 级 `accelerator.vendor`。异构 Profile 同样以“新名称新对象 + 迁移 `profileRef`”升级（§3.2 命名规则与不可变性）。 |
 | 用户输入 | `InferenceService` 不提供 role 级 accelerator 输入：异构组合由管理员在 Profile 中定义并验证，用户只能在已发布的 Profile 中选择。组合是否可用（含跨厂商引擎的互通性）是 Profile 作者的验证责任。 |
 
@@ -510,6 +513,7 @@ Controller 将此模板按 `workload.kind` 写入对应位置：`LeaderWorkerSet
 | `endpoint.role` | string | L0：必填；L1：必须存在于 `roles`，且该 role 须定义 `service` | 作为服务对外端点的 role 名称。Controller 以该 role 的 Service 作为内部端点（InferenceService 的 `status.endpoint.internal`）；`publish: true` 时，它同时是模型目录条目的后端（目录对象的 endpoints 指向该 Service）。渲染后 Service 的可解析性由 `EndpointReady` 校验（见 §3.3）。 |
 | `endpoint.portName` | string | L0：可选，默认 `http`；L2：渲染后须存在于端点 Service 的端口中（`EndpointReady`） | 对外端点使用的 Service 端口名，与 `endpoint.role` 一起确定目录条目后端的端口。 |
 | `readinessPolicy.requireAllRoles` | bool | L0：v1alpha1 固定 `true` | 服务就绪条件的聚合方式：所有 role 的工作负载和 Pod 都就绪后，InferenceService 才会标记为 Ready。 |
+| `nodeSelector` | string | L0：可选；只能是一个 `key=value` 字面量或单个 `{{ ... }}` 占位符（同 `podAntiAffinity.policy`，用 pattern 而非 `enum`：精确匹配会在 CREATE 时拒绝占位符）；L2：渲染后须解析为一个合法 K8s label 键值对，否则 `InvalidOverride` 且 Rendered=False；若该键是厂商型号 label 而值不在 `accelerator.models` 中，则 `ModelSchedulingConflict` | 服务级节点选择：一个 `key=value` 标签对，声明一次即并入**全部 role** 的 PodSpec `nodeSelector`。之所以是 string 而不是 map，是因为标签的**键属于集群、不属于 Profile**——站点把 GPU 节点分成若干资源池，池名是站点的事实，Profile 作者无从预知，且 Profile 的 `spec` 一经创建不可修改；而 `podTemplate.nodeSelector` 的键由 Profile 作者写死，map 的 key 也不参与模板渲染（§3.2）。取值从集群自身读取（`kubectl get nodes --show-labels`），**默认为空 = 不注入任何选择器**，与本字段引入前的调度行为完全一致；因此它只能收窄可选节点集。与 `podTemplate.nodeSelector`、`accelerator.models` 的型号约束按 K8s AND 语义合并（§3.2）。一个服务只有一个该值，没有按 role 区分的手段。 |
 | `podAntiAffinity` | object | L0：可选；`topologyKey` 必填且为合法 K8s label key；`policy` 可选，只能取 `required`/`preferred`/`none` 之一或单个 `{{ ... }}` 占位符（不能是 `enum`——精确匹配会在 CREATE 时拒绝占位符，故用 pattern 校验）；L2：`policy` 渲染后须解析为三者之一，否则 `InvalidOverride` 且 Rendered=False（不回退为 `required`） | 同服务 Pod 反亲和：`{policy, topologyKey}`。`policy` 选择强度：`required`（硬约束，`requiredDuringSchedulingIgnoredDuringExecution`，**默认值**，也是本字段引入前的行为）要求本服务**全部 role** 的 Pod（leader/worker、跨组、跨 role）在声明的拓扑域内互不共置；`preferred`（软约束，权重 100）在拓扑域足够时同样分散，域不足时允许共置，不会为等空闲节点而 Pending；`none` 不注入任何反亲和项。声明一次，Controller 将其注入每个 role 的 PodSpec。labelSelector 由平台固定为本服务（`ai.cubestack.io/inference-service`），不可自定义——用于多副本组异机/异域散布；单副本无效果。与 `accelerator.models` 的 nodeSelector/nodeAffinity（§3.2）按 K8s AND 语义叠加：`none` 只移除反亲和项，不影响 nodeAffinity。`policy` 可写模板（如 `{{ overrides.replicaPlacement }}`）交由 override 控制。`topologyKey` 在 `none` 下必填但不起作用。 |
 
 #### Status
@@ -790,7 +794,7 @@ env:
 | —（固定值） | `restartPolicy: RecreateGroupOnPodRestart` | 引擎进程组语义：组内一进程死全组重建 |
 | —（固定值） | `networkConfig.subdomainPolicy: UniquePerReplica` | 稳定主机名（分布式发现） |
 | —（固定值，不开放） | `rolloutStrategy: RollingUpdate{maxSurge: 0, maxUnavailable: 1}` | GPU 集群 surge 不现实；replicas=1 时等价 Recreate |
-| 调度约束 | `nodeSelector`（podTemplate 手写）与 `accelerator.models` 推导（§3.2）合并 | K8s 原生 AND：nodeSelector 与 nodeAffinity 交集 |
+| 调度约束 | `podTemplate.nodeSelector`（Profile 手写）、`spec.nodeSelector`（服务级，值来自 override）与 `accelerator.models` 推导（§3.2）三者合并 | K8s 原生 AND：nodeSelector 与 nodeAffinity 交集。服务级值默认为空则不注入；L2 冲突即 Rendered=False：渲染结果非法为 `InvalidOverride`，把型号 label 钉到 `accelerator.models` 之外为 `ModelSchedulingConflict` |
 
 **Deployment(`kind: Deployment`)**
 

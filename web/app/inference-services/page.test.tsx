@@ -266,7 +266,7 @@ describe("inference services page", () => {
         name: "str-enum",
         namespace: "project-a",
         overrides: [
-          { name: "quantization", type: "string", min: null, max: null, enum: ["w8a8", "fp16"], current: null },
+          { name: "quantization", type: "string", min: null, max: null, enum: ["w8a8", "fp16"], current: null, default: "w8a8" },
         ],
       }),
     ];
@@ -298,8 +298,8 @@ describe("inference services page", () => {
         name: "stale-enum",
         namespace: "project-a",
         overrides: [
-          { name: "quantization", type: "string", min: null, max: null, enum: ["w8a8", "fp16"], current: "int4" },
-          { name: "maxModelLen", type: "integer", min: 1, max: 100, enum: null, current: 10 },
+          { name: "quantization", type: "string", min: null, max: null, enum: ["w8a8", "fp16"], current: "int4", default: "w8a8" },
+          { name: "maxModelLen", type: "integer", min: 1, max: 100, enum: null, current: 10, default: 1 },
         ],
       }),
     ];
@@ -332,8 +332,8 @@ describe("inference services page", () => {
         name: "delims",
         namespace: "project-a",
         overrides: [
-          { name: "a", type: "string", min: null, max: null, enum: null, current: "p;b=q" },
-          { name: "b", type: "string", min: null, max: null, enum: null, current: "r" },
+          { name: "a", type: "string", min: null, max: null, enum: null, current: "p;b=q", default: "p" },
+          { name: "b", type: "string", min: null, max: null, enum: null, current: "r", default: "r" },
         ],
       }),
     ];
@@ -371,6 +371,62 @@ describe("inference services page", () => {
     });
     await act(async () => {});
     expect(patches[0]?.overrides).toEqual({ a: "p", b: "q;b=r" });
+
+    act(() => root.unmount());
+  });
+
+  it("lets a string override whose declared default is empty be cleared", async () => {
+    // A knob like nodeSelector declares "" as its value: empty means "off", so
+    // the box must accept it (and send it) instead of reading it as missing
+    // input. A string override with no declared default keeps rejecting empty.
+    const list = [
+      inferenceServiceSummary({
+        name: "node-selector",
+        namespace: "project-a",
+        overrides: [
+          { name: "nodeSelector", type: "string", min: null, max: null, enum: null, current: "node-pool=inference", default: "" },
+          { name: "endpoint", type: "string", min: null, max: null, enum: null, current: "http://rgw:8080", default: null },
+        ],
+      }),
+    ];
+    const patches: Array<Record<string, unknown> | undefined> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method === "PATCH") {
+          patches.push(JSON.parse(String(init.body)));
+          return { ok: true, status: 200, json: async () => ({ ok: true }) };
+        }
+        return { ok: true, status: 200, json: async () => ({ items: list }) };
+      }),
+    );
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    const inputs = container.querySelectorAll("input");
+    expect(inputs).toHaveLength(2);
+    const applyBtn = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "应用");
+    const setValue = async (el: HTMLInputElement, v: string) => {
+      await act(async () => {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
+        setter.call(el, v);
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    };
+
+    await setValue(inputs[0] as HTMLInputElement, "");
+    expect((applyBtn as HTMLButtonElement).disabled).toBe(false);
+    await act(async () => {
+      (applyBtn as HTMLElement).click();
+    });
+    await act(async () => {});
+    // Cleared to empty on the wire — the state a site returns to when it wants
+    // no node selector at all. The panel sends every knob it declares.
+    expect(patches[0]?.overrides).toEqual({ nodeSelector: "", endpoint: "http://rgw:8080" });
+
+    // The second knob declares no default, so an empty box is still invalid.
+    await setValue(inputs[1] as HTMLInputElement, "");
+    expect((applyBtn as HTMLButtonElement).disabled).toBe(true);
 
     act(() => root.unmount());
   });

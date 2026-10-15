@@ -680,6 +680,22 @@ type InferenceRuntimeProfileSpec struct {
 	// Endpoint selects the role serving as the service endpoint.
 	Endpoint EndpointSpec `json:"endpoint"`
 
+	// NodeSelector additionally constrains every pod of this service (of every
+	// role) to the nodes carrying one declared label. The value is a single
+	// Kubernetes label pair, "key=value", and may be a template referencing
+	// overrides, e.g. '{{ overrides.nodeSelector }}'; a resolved value that is
+	// not a valid pair fails the render with InvalidOverride. It is a string
+	// rather than a map because the label's key belongs to the cluster and not
+	// to the profile: a site that splits its nodes into pools names the pool
+	// itself, whereas the keys of podTemplate.nodeSelector are fixed by the
+	// profile author. The pair is merged into every role's nodeSelector — a
+	// plain AND with the accelerator model pin, which it must not contradict —
+	// and an empty value adds no selector at all, which is what every profile
+	// that leaves the field unset does.
+	// +optional
+	// +kubebuilder:validation:Pattern="^([^{}=]+=[^{}=]+|[{]{2}[^{}]*[}]{2})$"
+	NodeSelector string `json:"nodeSelector,omitempty"`
+
 	// PodAntiAffinity places this service's pods (of every role) across the
 	// given topology domains, with the strength selected by Policy: a required
 	// policy keeps no two pods of the service on one domain, a preferred policy
