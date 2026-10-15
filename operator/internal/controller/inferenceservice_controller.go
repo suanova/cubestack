@@ -25,7 +25,9 @@ limitations under the License.
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=leaderworkerset.x-k8s.io,resources=leaderworkersets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=aigateway.envoyproxy.io,resources=aigatewayroutes;aiservicebackends,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=aigateway.envoyproxy.io,resources=aigatewayroutes,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=aigateway.envoyproxy.io,resources=aiservicebackends,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=referencegrants,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=gateway.envoyproxy.io,resources=backends,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;watch;create;update;patch;delete
 
@@ -57,6 +59,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
 	aiv1alpha1 "github.com/suanova/cubestack/api/v1alpha1"
@@ -76,8 +79,14 @@ type InferenceServiceReconciler struct {
 	// catalog entry of a published service attaches to (spec.parentRefs).
 	GatewayName      string
 	GatewayNamespace string
-	// CatalogHostname is the shared model-catalog entry hostname every
-	// published service attaches to (design §3.3).
+	// CatalogRoute is the name of the platform's pre-installed shared
+	// AIGatewayRoute (in GatewayNamespace) that published services attach a
+	// rule to. The operator never creates it; a missing one degrades to
+	// CatalogRouteNotFound (design §3.3).
+	CatalogRoute string
+	// CatalogHostname, when set, is surfaced in status.endpoint.public so the
+	// Agent Router can advertise the shared catalog's host. It is a display
+	// value only — it no longer gates publishing.
 	CatalogHostname string
 	// AgentRouterAvailable reports whether the cluster serves the Agent
 	// Router CRDs. Probed once at startup (AgentRouterAvailable below).
@@ -140,6 +149,46 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
+	}
+
+	// A service being deleted must shed its rule from the platform's shared
+	// catalog route before it goes: the rule lives in another namespace, is not
+	// owned by the service, and would otherwise be stranded. The other catalog
+	// objects cascade through their ownerRef, so only the shared rule needs the
+	// finalizer. The guard is on the finalizer's presence, not on spec.route —
+	// a service that was published and later had publish flipped off still
+	// carries a rule to remove, and the finalizer is only ever added while the
+	// service is being reconciled as published.
+	if isvc.DeletionTimestamp != nil {
+		if !slices.Contains(isvc.Finalizers, inferenceServiceCatalogFinalizer) {
+			return ctrl.Result{}, nil
+		}
+		if err := r.removeCatalogRule(ctx, &isvc); err != nil {
+			return ctrl.Result{}, err
+		}
+		// Re-fetch for a fresh resourceVersion before mutating finalizers: any
+		// status write during the delete reconcile bumped it, so a stale Update
+		// would 409-conflict and force a retry reconcile.
+		fresh := &aiv1alpha1.InferenceService{}
+		if err := r.Get(ctx, req.NamespacedName, fresh); err != nil {
+			return ctrl.Result{}, client.IgnoreNotFound(err)
+		}
+		fresh.Finalizers = slices.DeleteFunc(fresh.Finalizers, func(f string) bool {
+			return f == inferenceServiceCatalogFinalizer
+		})
+		return ctrl.Result{}, r.Update(ctx, fresh)
+	}
+
+	if !slices.Contains(isvc.Finalizers, inferenceServiceCatalogFinalizer) && isvc.Spec.Route != nil && isvc.Spec.Route.Publish {
+		// Patch, not Update: Update sends the whole object and carries the
+		// resourceVersion we read, so any write landing in between 409-conflicts
+		// and forces a retry reconcile. A merge patch has no such precondition,
+		// and the finalizer is the only field this call means to change.
+		patch := client.MergeFrom(isvc.DeepCopy())
+		isvc.Finalizers = append(isvc.Finalizers, inferenceServiceCatalogFinalizer)
+		if err := r.Patch(ctx, &isvc, patch); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	resolved, err := r.resolve(ctx, &isvc)
@@ -348,11 +397,11 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// Same rule as above for the Agent Router catalog objects: with the
 		// CRDs served, their status writes (and external edits or deletions)
 		// must re-run the acceptance check of the owning service.
-		b = b.Owns(&aigwv1beta1.AIGatewayRoute{}).
+		b = b.Owns(&gatewayv1.ReferenceGrant{}).
 			Owns(&aigwv1beta1.AIServiceBackend{}).
 			Owns(&egv1alpha1.Backend{}).
 			Watches(&aigwv1beta1.AIGatewayRoute{},
-				handler.EnqueueRequestsFromMapFunc(r.enqueueForOwnedCatalogObject)).
+				handler.EnqueueRequestsFromMapFunc(r.enqueueForSharedCatalogRoute)).
 			Watches(&aigwv1beta1.AIServiceBackend{},
 				handler.EnqueueRequestsFromMapFunc(r.enqueueForOwnedCatalogObject)).
 			Watches(&egv1alpha1.Backend{},
@@ -395,6 +444,29 @@ func (r *InferenceServiceReconciler) enqueueForOwnedCatalogObject(_ context.Cont
 		return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: owner.Name}}}
 	}
 	return nil
+}
+
+// enqueueForSharedCatalogRoute maps a change to the platform's shared catalog
+// route to every published service, whose rule lives in that route and must be
+// re-reconciled when the route is edited or its acceptance changes. Only the
+// single route named by CatalogRoute in GatewayNamespace is meaningful; any
+// other AIGatewayRoute is left to the owning controller (the per-service
+// routes the previous design created are gone, but the CRD still allows
+// arbitrary routes in the cluster).
+func (r *InferenceServiceReconciler) enqueueForSharedCatalogRoute(ctx context.Context, obj client.Object) []reconcile.Request {
+	route := obj.(*aigwv1beta1.AIGatewayRoute)
+	if route.Name != r.CatalogRoute || route.Namespace != r.GatewayNamespace {
+		return nil
+	}
+	var reqs []reconcile.Request
+	var list aiv1alpha1.InferenceServiceList
+	if err := r.List(ctx, &list, client.MatchingFields{publishIndexKey: "true"}); err != nil {
+		return nil
+	}
+	for i := range list.Items {
+		reqs = append(reqs, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: list.Items[i].Namespace, Name: list.Items[i].Name}})
+	}
+	return reqs
 }
 
 // enqueueForSourceConfigMap maps a ConfigMap in cubestack-system to the

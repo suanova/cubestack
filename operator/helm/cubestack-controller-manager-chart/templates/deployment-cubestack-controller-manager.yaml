@@ -31,6 +31,9 @@ spec:
         - --gateway-name={{ . }}
         {{- end }}
         - --gateway-namespace={{ .Values.gateway.namespace | default "envoy-gateway-system" }}
+        {{- with .Values.gateway.catalogRoute }}
+        - --gateway-catalog-route={{ . }}
+        {{- end }}
         {{- with .Values.gateway.dataplaneNamespace }}
         - --gateway-dataplane-namespace={{ . }}
         {{- end }}

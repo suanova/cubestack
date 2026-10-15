@@ -87,6 +87,15 @@ rules:
   - aigateway.envoyproxy.io
   resources:
   - aigatewayroutes
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - aigateway.envoyproxy.io
+  resources:
   - aiservicebackends
   verbs:
   - create
@@ -141,6 +150,7 @@ rules:
   resources:
   - httproutes
   - listenersets
+  - referencegrants
   - tcproutes
   - udproutes
   verbs:

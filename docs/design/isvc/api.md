@@ -664,7 +664,7 @@ status:
 | `Provisioned` | 渲染后的 asset ConfigMap、模型 PVC 与 S3 凭据 Secret 副本（§3.1 S3 策略）已在服务 namespace 中创建成功；源 Secret 轮换后副本的重新同步同样由该 condition 反映。仅指对象创建/同步成功；PVC 的绑定与存储供给由存储系统完成，其异常通过 Pod 事件体现。 | `AssetConfigMapFailed`、`PVCCreateFailed`、`SecretCopyFailed` |
 | `WorkloadsApplied` | 期望配置已完整写入 Service 与工作负载（LWS/Deployment），即渲染结果已下发到期望版本。只表示配置已应用，不表示就绪：滚动更新期间保持 `True`，Pod 未就绪由 `Ready` 与 `roles[]` 反映。 | `ServiceApplyFailed`、`WorkloadApplyFailed` |
 | `EndpointReady` | 无论 `publish` 取值，内部端点都必须实际可访问：`endpoint.role` 渲染后指向存在的 role，该 role 的 Service 中存在名为 `endpoint.portName`（默认 `http`）的端口，且该 Service 至少有一个就绪的后端端点（对应 Pod 已通过就绪探针）。该 condition 决定 `status.endpoint.internal` 是否有效；`RouteReady` 仅在它为 True 后才在网关上创建路由。 | `EndpointRoleNotFound`、`EndpointPortNotFound`、`EndpointNotReady` |
-| `RouteReady` | 仅覆盖模型目录里的公开条目。`publish: true` 时，`modelName` 在已发布服务中全平台唯一，且三个目录对象**已生成并被 Agent Router 接受**：EG `Backend` `<isvc>-endpoint`、`AIServiceBackend` `<isvc>-backend`、`AIGatewayRoute` `<isvc>-route`（均以 `EndpointReady` 解析出的 Service 端口为后端；接受 = `AIGatewayRoute` 与 `AIServiceBackend` 的 `Accepted` 条件均为 `True`，任一未接受即为 False，依赖 `EndpointReady=True`）；`modelName` 与他人冲突时，保留先占用者当前有效的目录条目，本服务保持 False。等待接受期间为 `False`，reason 为 `GatewayNotAccepted`；集群未安装 Agent Router CRD 时降级为 `False`，reason 为 `AgentRouterUnavailable`；目录入口 hostname 未配置（或网关未配置、网关 CRD 缺失）时降级为 `False`，reason 为 `GatewayNotConfigured`。`publish: false` 时为 `True`，reason 为 `NotPublished`，表示未请求发布目录条目。 | `ModelNameConflict`、`GatewayNotAccepted`、`AgentRouterUnavailable`、`GatewayNotConfigured`、`EndpointNotReady` |
+| `RouteReady` | 仅覆盖模型目录里的公开条目。`publish: true` 时，`modelName` 在已发布服务中全平台唯一，且本服务在**平台预装的共享 `AIGatewayRoute`**（`--gateway-catalog-route`）里**已有一条 rule**、该 rule 引用的两个 owned 对象已生成：EG `Backend` `<isvc>-endpoint` 与 `AIServiceBackend` `<isvc>-backend`（均以 `EndpointReady` 解析出的 Service 端口为后端；跨 namespace 的 backendRef 另需 `ReferenceGrant` `<isvc>-grant` 授权）。接受判定 = **共享路由 `Accepted=True`** 且 **本服务 `AIServiceBackend` `Accepted=True`**，且本服务的 rule 仍在共享路由里，三者缺一即 False（依赖 `EndpointReady=True`）。`modelName` 与他人冲突时，保留先占用者当前有效的 rule，本服务保持 False。等待接受期间为 `False`，reason 为 `GatewayNotAccepted`；集群未安装 Agent Router CRD 时降级为 `False`，reason 为 `AgentRouterUnavailable`；平台未预装共享路由时降级为 `False`，reason 为 `CatalogRouteNotFound`；平台 Gateway 未配置（`--gateway-name` 为空）时降级为 `False`，reason 为 `GatewayNotConfigured`；本服务 rule 尚不存在且共享路由已达 15 条上限时降级为 `False`，reason 为 `CatalogFull`。`publish: false` 时为 `True`，reason 为 `NotPublished`，表示未请求发布目录条目。 | `ModelNameConflict`、`GatewayNotAccepted`、`AgentRouterUnavailable`、`CatalogRouteNotFound`、`GatewayNotConfigured`、`CatalogFull`、`EndpointNotReady` |
 | `Ready` | 按 `readinessPolicy.requireAllRoles` 聚合。v1 要求所有 role 的工作负载（LWS/Deployment）和 Pod 都就绪。 | `RolesNotReady`（message 包含各 role 的状态） |
 | `Progressing` | spec 变更后，Controller 是否仍在应用期望配置。该条件与 `Ready` 独立。 | `True`：`Reconciling`、`Rollout` 或 `Scaling`；`False`：`Converged` |
 | `ProfileDeprecated`（警示） | 引用的 Profile 带有 deprecated label（`ai.cubestack.io/deprecated`）。 | 不阻断；提示迁移 |
@@ -690,7 +690,7 @@ Controller 监听 `InferenceService` 及其引用关系的变化、解析引用�
 - `InferenceRuntimeProfile` / `ModelVersion`：平台管理员可写（create/update/delete）；用户可读（get/list）；controller 需要 get/list/watch 和 status 写权限；
 - `cubestack-system` namespace 下的 `ConfigMap`：平台管理员可写（create/update/delete）；controller 需要 get/list/watch 和 status 写权限；
 - `InferenceService`：用户可在各自 namespace 创建；
-- `publish: true` 的服务，Controller 需要在服务 namespace 创建三个模型目录对象的权限（get/list/watch/create/update/patch/delete）：`gateway.envoyproxy.io` 的 `backends`、`aigateway.envoyproxy.io` 的 `aiservicebackends` 与 `aigatewayroutes`；另外需要 `gateway.networking.k8s.io` 的 `httproutes` 删除权限——清理 owner 为本服务的旧 per-model hostname 路由，`publish` 两种取值下都执行（见模型目录发布设计 D2）。
+- `publish: true` 的服务，Controller 需要在服务 namespace 创建 owned 目录对象的权限（get/list/watch/create/update/patch/delete）：`gateway.envoyproxy.io` 的 `backends`、`aigateway.envoyproxy.io` 的 `aiservicebackends` 与 `gateway.networking.k8s.io` 的 `referencegrants`；对平台预装的共享 `AIGatewayRoute` 只读 + 写规则（get/list/watch/update/patch，不 create/delete，平台对象不归 controller 所有）。另外需要 `gateway.networking.k8s.io` 的 `httproutes` 删除权限——清理 owner 为本服务的旧 per-model hostname 路由，`publish` 两种取值下都执行（见模型目录发布设计 D2）。
 - Controller 需要在用户 namespace 下创建 LWS/Deployment/Service/ConfigMap/PVC 的权限。
 - `Static` 策略下，controller 需要读取 operator 配置引用的 Ceph 凭据（rook-ceph namespace 中的 Secret/ConfigMap）并访问 Ceph mon，用于 subvolume 的 `getpath` 与 quota 只读解析。
 - 静态 PV 的 controller 自动化（§7 TODO）落地后，controller 还需要 `persistentvolumes` 的 create/delete 权限。
@@ -724,10 +724,10 @@ Controller 监听 `InferenceService` 及其引用关系的变化、解析引用�
         │ (EndpointReady)
         ▼
  6) 目录发布        仅 publish=true 且 EndpointReady=True
-                    - modelName 全平台唯一性（冲突保留先占用者的目录条目，本服务 False）
-                    - 创建/更新三个目录对象（Backend / AIServiceBackend / AIGatewayRoute）
-                      并等待 Agent Router 接受
-                      （AIServiceBackend 与 AIGatewayRoute 的 Accepted 均为 True）
+                    - modelName 全平台唯一性（冲突保留先占用者的 rule，本服务 False）
+                    - 创建/更新 owned 对象（Backend / AIServiceBackend / ReferenceGrant）
+                      并在平台预装的共享 AIGatewayRoute 里 upsert 本服务的一条 rule
+                    - 等待接受（共享路由 Accepted 与本服务 AIServiceBackend Accepted 均 True）
         │ (RouteReady)
         ▼
  7) 聚合 status     roles[] / endpoint / revision / observedGeneration

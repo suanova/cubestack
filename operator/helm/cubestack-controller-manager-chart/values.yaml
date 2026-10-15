@@ -40,10 +40,16 @@ gateway:
   # exists. The default is the platform convention: the namespace Envoy
   # Gateway and its `eg` GatewayClass are installed in (Prerequisites).
   namespace: envoy-gateway-system           # --gateway-namespace
-  # Shared model-catalog hostname published InferenceServices attach to: every
-  # published service is one model of this one catalog entry, selected by the
-  # model name in the request. Empty = flag omitted, which leaves publishing
-  # off (RouteReady=False, GatewayNotConfigured).
+  # Name of the platform's pre-installed shared AIGatewayRoute (in
+  # `namespace` above) that published InferenceServices attach a rule to. The
+  # operator reads and edits a rule in this route but never creates it, so this
+  # must match the route the platform installs. A missing route degrades to
+  # RouteReady=False, CatalogRouteNotFound.
+  catalogRoute: cubestack-ai-gateway        # --gateway-catalog-route
+  # Shared model-catalog hostname surfaced in status.endpoint.public so the
+  # Agent Router can advertise the catalog's host. Display only — it no longer
+  # gates publishing. Empty = flag omitted, which leaves status.endpoint.public
+  # unset.
   catalogHostname: ""           # --gateway-catalog-hostname
   # Namespace the Gateway's dataplane (proxy) pods run in — not the namespace
   # of the Gateway object itself. Read by the DevEnvironment controller: it is

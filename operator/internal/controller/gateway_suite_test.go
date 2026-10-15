@@ -91,3 +91,62 @@ var _ = Describe("enqueueForOwnedCatalogObject", func() {
 		Expect(r.enqueueForOwnedCatalogObject(ctx, foreign)).To(BeEmpty())
 	})
 })
+
+var _ = Describe("enqueueForSharedCatalogRoute", func() {
+	It("maps the shared catalog route to every published service and ignores other routes", func() {
+		// The index backs this map: the suite registers it before the specs run.
+		published := &aiv1alpha1.InferenceService{
+			ObjectMeta: metav1.ObjectMeta{Name: "shared-pub", Namespace: testNamespace},
+			Spec: aiv1alpha1.InferenceServiceSpec{
+				ModelRef: testModelRef, ProfileRef: "watch-prof",
+				Route: &aiv1alpha1.RouteSpec{Publish: true, ModelName: "shared-pub-model"},
+			},
+		}
+		unpublished := &aiv1alpha1.InferenceService{
+			ObjectMeta: metav1.ObjectMeta{Name: "shared-unpub", Namespace: testNamespace},
+			Spec:       aiv1alpha1.InferenceServiceSpec{ModelRef: testModelRef, ProfileRef: "watch-prof"},
+		}
+		Expect(k8sClient.Create(ctx, published)).To(Succeed())
+		Expect(k8sClient.Create(ctx, unpublished)).To(Succeed())
+
+		// The map lists through the cache index, so the reconciler must use the
+		// manager's cache client (where registerSharedIndexes ran), not the
+		// direct k8sClient, which would ignore MatchingFields and return every
+		// service.
+		r := routeReconciler()
+		r.Client = testMgr.GetClient()
+		// The index is read from the cache, which lags the direct client: wait
+		// until it observes the published service. Other specs in the shared
+		// envtest cluster may have left published services behind, so the index
+		// is not expected to hold exactly one entry — only membership is
+		// asserted below.
+		Eventually(func() bool {
+			var list aiv1alpha1.InferenceServiceList
+			Expect(r.List(ctx, &list, client.MatchingFields{publishIndexKey: "true"})).To(Succeed())
+			for i := range list.Items {
+				if list.Items[i].Namespace == testNamespace && list.Items[i].Name == "shared-pub" {
+					return true
+				}
+			}
+			return false
+		}, "2s").Should(BeTrue())
+
+		shared := &aigwv1beta1.AIGatewayRoute{ObjectMeta: metav1.ObjectMeta{Name: testCatalogRoute, Namespace: testGatewayNamespace}}
+		reqs := r.enqueueForSharedCatalogRoute(ctx, shared)
+		names := map[string]bool{}
+		for _, req := range reqs {
+			names[req.Namespace+"/"+req.Name] = true
+		}
+		Expect(names).To(HaveKey(testNamespace+"/shared-pub"))
+		Expect(names).NotTo(HaveKey(testNamespace+"/shared-unpub"))
+
+		// A route of the same name in another namespace is not the shared one.
+		foreign := shared.DeepCopy()
+		foreign.Namespace = "somewhere-else"
+		Expect(r.enqueueForSharedCatalogRoute(ctx, foreign)).To(BeEmpty())
+		// A route in the right namespace with another name is likewise not.
+		other := shared.DeepCopy()
+		other.Name = "another-route"
+		Expect(r.enqueueForSharedCatalogRoute(ctx, other)).To(BeEmpty())
+	})
+})

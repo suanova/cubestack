@@ -27,6 +27,13 @@ const (
 	// credentialsRefIndexKey is the cache index field for
 	// ModelVersion storage.s3.credentialsRef.name.
 	credentialsRefIndexKey = "storage.s3.credentialsRef.name"
+
+	// publishIndexKey is the cache index field for InferenceService.spec.route.publish,
+	// holding the single key "true" for services that publish a catalog rule. It
+	// backs the shared catalog route watch: an edit to the platform's shared
+	// route re-enqueues exactly the published services, whose rules must be
+	// reconciled against the edited object.
+	publishIndexKey = "spec.route.publish"
 )
 
 var (
@@ -57,6 +64,18 @@ func registerAllIndexes(mgr ctrl.Manager) error {
 	if err := mgr.GetCache().IndexField(ctx, &aiv1alpha1.InferenceService{}, profileRefIndexKey,
 		func(o client.Object) []string {
 			return []string{o.(*aiv1alpha1.InferenceService).Spec.ProfileRef}
+		}); err != nil {
+		return err
+	}
+	// Only published services contribute to the index key; a nil Route means the
+	// service is not published and never attaches a rule to the shared route.
+	if err := mgr.GetCache().IndexField(ctx, &aiv1alpha1.InferenceService{}, publishIndexKey,
+		func(o client.Object) []string {
+			isvc := o.(*aiv1alpha1.InferenceService)
+			if isvc.Spec.Route != nil && isvc.Spec.Route.Publish {
+				return []string{"true"}
+			}
+			return nil
 		}); err != nil {
 		return err
 	}

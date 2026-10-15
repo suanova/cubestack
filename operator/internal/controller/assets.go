@@ -45,6 +45,15 @@ const (
 	managedByLabelKey        = "ai.cubestack.io/managed-by"
 	managedByValue           = "inference-Controller"
 
+	// inferenceServiceCatalogFinalizer guards the rule a published service
+	// contributes to the platform's shared catalog route: that rule lives in
+	// another namespace, is not owned by the service, and would otherwise be
+	// stranded when the service is deleted. The catalog objects in the service's
+	// own namespace cascade through their ownerRef; only the shared route's rule
+	// needs explicit removal, and the finalizer is what lets the service wait for
+	// it.
+	inferenceServiceCatalogFinalizer = "ai.cubestack.io/isvc-catalog-rule"
+
 	assetSourceAnnotationKey = "ai.cubestack.io/asset-source"
 	assetHashAnnotationKey   = "ai.cubestack.io/asset-hash"
 

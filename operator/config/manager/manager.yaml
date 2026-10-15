@@ -71,9 +71,14 @@ spec:
           # chart's gateway.namespace defaults. The chart renders both flags
           # from its gateway.* values, so a change here has to be made there
           # too.
-          # --gateway-catalog-hostname is intentionally not set: publishing
-          # stays off (RouteReady=False, GatewayNotConfigured) until a catalog
-          # hostname is added via your overlay, e.g.:
+          # --gateway-catalog-route defaults to the platform's shared
+          # AIGatewayRoute (cubestack-ai-gateway, in --gateway-namespace); set
+          # it if the platform installs the route under another name. The
+          # operator edits a rule in that route but never creates it — a missing
+          # one degrades to RouteReady=False, CatalogRouteNotFound.
+          # --gateway-catalog-hostname is display only (surfaced in
+          # status.endpoint.public) and is intentionally not set here; add it via
+          # your overlay to surface the catalog's public host, e.g.:
           #   - --gateway-catalog-hostname=ai.example.com
           - --gateway-name=cubestack-gateway
           - --gateway-namespace=envoy-gateway-system

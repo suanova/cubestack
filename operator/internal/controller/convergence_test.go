@@ -42,7 +42,7 @@ func convergenceReconciler() *InferenceServiceReconciler {
 	return &InferenceServiceReconciler{
 		Client: k8sClient, Scheme: testScheme,
 		GatewayName: testGatewayName, GatewayNamespace: testGatewayNamespace,
-		CatalogHostname: testCatalogHostname, AgentRouterAvailable: true,
+		CatalogRoute: testCatalogRoute, CatalogHostname: testCatalogHostname, AgentRouterAvailable: true,
 	}
 }
 
@@ -104,8 +104,10 @@ func readyEndpoints(name string) {
 // Router, so the spec writes the conditions it would. g is the Eventually
 // block's Gomega so a not-yet-created object retries instead of failing.
 func acceptCatalogObjects(g Gomega, name string) {
-	route := &aigwv1beta1.AIGatewayRoute{}
-	g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-route", Namespace: testNamespace}, route)).To(Succeed())
+	// The route-level acceptance lives on the platform's shared route; the
+	// per-service acceptance lives on the service's AIServiceBackend.
+	route := sharedCatalogRoute()
+	g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
 	route.Status.Conditions = []metav1.Condition{{
 		Type: aigwv1beta1.ConditionTypeAccepted, Status: metav1.ConditionTrue, Reason: aiAcceptedReason,
 		LastTransitionTime: metav1.Now(), ObservedGeneration: route.Generation,
@@ -152,6 +154,9 @@ var _ = Describe("convergence", func() {
 
 	It("publishes the catalog objects for a published service with a ready endpoint", func() {
 		name := "conv-publish"
+		// The platform's shared route must exist before the publish step can
+		// attach the service's rule to it.
+		ensureSharedCatalogRoute()
 		convergenceISVC(name, true)
 
 		Expect(reconcileConvergence(name)).To(Succeed())
@@ -163,17 +168,23 @@ var _ = Describe("convergence", func() {
 		// assertions until they win.
 		Eventually(func(g Gomega) {
 			g.Expect(reconcileConvergence(name)).To(Succeed())
-			route := &aigwv1beta1.AIGatewayRoute{}
-			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-route", Namespace: testNamespace}, route)).To(Succeed())
-			g.Expect(route.Spec.Hostnames).To(Equal([]gatewayv1.Hostname{testCatalogHostname}))
+			route := sharedCatalogRoute()
+			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
+			isvc := &aiv1alpha1.InferenceService{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: testNamespace}, isvc)).To(Succeed())
+			// The service's rule is in the shared route, matched on its model
+			// name and routing to its AIServiceBackend.
+			idx := findCatalogRuleIndex(route.Spec.Rules, isvc)
+			g.Expect(idx).NotTo(Equal(-1))
+			g.Expect(route.Spec.Rules[idx].Matches[0].Headers[0].Value).To(Equal("conv-flash"))
+			g.Expect(route.Spec.Rules[idx].BackendRefs[0].Name).To(Equal(name + "-backend"))
 			// No Agent Router controller runs in envtest — accept the catalog
 			// objects directly so RouteReady can converge.
 			acceptCatalogObjects(g, name)
 			g.Expect(reconcileConvergence(name)).To(Succeed())
-			got := &aiv1alpha1.InferenceService{}
-			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: testNamespace}, got)).To(Succeed())
-			g.Expect(meta.FindStatusCondition(got.Status.Conditions, aiv1alpha1.ConditionRouteReady).Status).To(Equal(metav1.ConditionTrue))
-			g.Expect(got.Status.Endpoint.Public).To(Equal("https://" + testCatalogHostname))
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: testNamespace}, isvc)).To(Succeed())
+			g.Expect(meta.FindStatusCondition(isvc.Status.Conditions, aiv1alpha1.ConditionRouteReady).Status).To(Equal(metav1.ConditionTrue))
+			g.Expect(isvc.Status.Endpoint.Public).To(Equal("https://" + testCatalogHostname))
 		}, "15s", "200ms").Should(Succeed())
 	})
 

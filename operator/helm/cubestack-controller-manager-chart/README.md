@@ -335,14 +335,18 @@ Gateway API object, because the chart writes none:
   Gateway, so the chart always renders it, under a `| default` guard — a release
   that rendered a bare flag is still pointed at `gateway.namespace`.
 - **Flags an empty value omits** — `name`, `catalogHostname`,
-  `dataplaneNamespace`. Omitting `catalogHostname` just leaves publishing off;
+  `dataplaneNamespace`. Omitting `catalogHostname` just leaves
+  `status.endpoint.public` unset (display only, no longer a publish gate);
   omitting `name` is not a switch either (see the table) — leave `name` set.
+  `catalogRoute` is always rendered; publishing is on when it names a route the
+  platform has installed.
 
 | Key | Manager flag | Default | Notes |
 |---|---|---|---|
 | `gateway.name` | `--gateway-name` | `cubestack-gateway` | Names the platform's Gateway — the object the operator publishes through and attaches ListenerSets to. Leave it set. Empty = flag omitted, and the two controllers then disagree: publishing is off (`RouteReady=False`, `GatewayNotConfigured`), while the DevEnvironment controller falls back to the manager's own built-in name, `cubestack-gateway` — looked for in whatever namespace `gateway.namespace` gave it, since that flag renders either way. |
 | `gateway.namespace` | `--gateway-namespace` | `envoy-gateway-system` | Namespace of that Gateway object — **not** where its dataplane pods run (`dataplaneNamespace`). Always rendered. Must match where the platform created the Gateway; `envoy-gateway-system` is where Envoy Gateway and the `eg` class live, so it is the conventional home unless the Gateway was put elsewhere. |
-| `gateway.catalogHostname` | `--gateway-catalog-hostname` | `""` | Empty = flag omitted. **Set this to enable publishing**: the shared hostname the model catalog answers on. Every published service is one model of that single catalog entry, addressed by the model name in the request body. |
+| `gateway.catalogRoute` | `--gateway-catalog-route` | `cubestack-ai-gateway` | Name of the platform's **pre-installed** shared `AIGatewayRoute` (in `gateway.namespace`) that published `InferenceService`s attach a rule to. The operator reads and edits a rule in this route but **never creates it**, so this must name the route the platform installs. A missing route degrades to `RouteReady=False`, `CatalogRouteNotFound`. Always rendered. |
+| `gateway.catalogHostname` | `--gateway-catalog-hostname` | `""` | Empty = flag omitted. Display only: surfaced in `status.endpoint.public` so the Agent Router can advertise the catalog's host. It no longer gates publishing — publishing is on when the shared route and the platform Gateway are configured. |
 | `gateway.dataplaneNamespace` | `--gateway-dataplane-namespace` | `envoy-gateway-system` | Names the namespace the Gateway's dataplane pods run in. **Not** a publishing switch. Two things read it: environment pods admit ingress from that Gateway, and the controller looks up the dataplane Service there to learn which port each listener is reachable on. Empty = flag omitted: environments stay default-deny inbound, and endpoint addresses fall back to assuming the listener port is the reachable one — true of a LoadBalancer or ClusterIP dataplane, not of a NodePort one. |
 
 `dataplaneNamespace` is the key here the **DevEnvironment** controller is
@@ -354,12 +358,16 @@ platform convention. Whether the port
 published for a listener is the listener's own port or the nodePort it was
 renumbered onto is decided by that class's `EnvoyProxy`, not by anything here.
 `name` and `namespace` reach that controller too, as the Gateway its ListenerSets
-attach to; `catalogHostname` configures the
-InferenceService publishing path only.
+attach to; `catalogRoute` and `catalogHostname` configure the
+InferenceService publishing path (`catalogRoute` names the route the operator
+edits a rule in, `catalogHostname` only surfaces the public address).
 
 The defaults are the platform convention — `cubestack-gateway` in
-`envoy-gateway-system` — so an install against a platform that followed the
-Prerequisites only needs the catalog hostname:
+`envoy-gateway-system`, with the shared route `cubestack-ai-gateway` in that
+namespace — so an install against a platform that followed the Prerequisites
+works out of the box: publishing is on as long as the platform has installed
+the shared route. Set the catalog hostname only to surface the public address
+in `status.endpoint.public`:
 
 ```bash
 helm install cubestack ./helm/cubestack-controller-manager-chart -n cubestack-system \
