@@ -20,6 +20,9 @@ const OPTIONS = {
     { tag: "harbor.isuanova.com/suanova/jupyter-maca-pytorch:latest", label: "suanova/jupyter-maca-pytorch · Metax MACA · JupyterLab (ubuntu)", user: "ubuntu", interface: "jupyter", vendor: "metax" },
     { tag: "harbor.isuanova.com/suanova/ssh-maca-pytorch:latest", label: "suanova/ssh-maca-pytorch · Metax MACA · SSH (ubuntu)", user: "ubuntu", interface: "ssh", vendor: "metax" },
   ],
+  // What the cluster's nodes advertise, per vendor — the wizard's model select
+  // is exactly this list plus "any".
+  gpuModels: { nvidia: ["A100", "H200"], metax: ["MXC500", "MXC550"] },
 };
 
 function stubList(page: Page, payload: object) {
@@ -315,6 +318,7 @@ test.describe("dev environments landing (mocked data)", () => {
       runAsGroup: 100,
     });
     expect(posts[0]).not.toHaveProperty("gpuCount");
+    expect(posts[0]).not.toHaveProperty("gpuModel");
   });
 
   test("a typed image and a hand-edited identity reach the API", async ({ page }) => {

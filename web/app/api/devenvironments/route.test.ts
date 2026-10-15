@@ -43,7 +43,7 @@ function stubCluster() {
           type: "jupyter",
           image: "harbor.isuanova.com/suanova/jupyter-cuda-pytorch:latest",
           running: true,
-          resources: { gpu: { vendor: "nvidia", count: 2 }, cpu: "16", memory: "64Gi" },
+          resources: { gpu: { vendor: "nvidia", count: 2, model: "H200" }, cpu: "16", memory: "64Gi" },
           storage: { size: "200Gi", mountPath: "/home/ubuntu" },
           lifecycle: { idleTimeout: 3600 },
         },
@@ -115,7 +115,7 @@ describe("GET /api/devenvironments", () => {
       type: "jupyter",
       image: "harbor.isuanova.com/suanova/jupyter-cuda-pytorch:latest",
       running: true,
-      resources: { gpu: { vendor: "nvidia", count: 2 }, cpu: "16", memory: "64Gi" },
+      resources: { gpu: { vendor: "nvidia", count: 2, model: "H200" }, cpu: "16", memory: "64Gi" },
       storage: { size: "200Gi", mountPath: "/home/ubuntu" },
       idleTimeout: 3600,
       phase: "Running",
@@ -133,7 +133,9 @@ describe("GET /api/devenvironments", () => {
     // a null rather than an empty record the UI would have to know to skip.
     expect(ssh.jupyterTokenSecret).toBeNull();
     // gpu.vendor is taken as written and gpu.count falls back to the CRD's 1.
-    expect(ssh.resources.gpu).toEqual({ vendor: "metax", count: 1 });
+    // The model, unstated, is null rather than "" — an environment that left the
+    // model open, which is a different statement from naming one.
+    expect(ssh.resources.gpu).toEqual({ vendor: "metax", count: 1, model: null });
   });
 
   it("projects spec.volumes / ports / runtime without inventing a workspace path", async () => {
@@ -325,6 +327,45 @@ describe("POST /api/devenvironments", () => {
         storage: { size: "300Gi" },
         lifecycle: { idleTimeout: 1800 },
       },
+    });
+  });
+
+  it("pins the environment to the model it names, and leaves the model open otherwise", async () => {
+    // The model is written in the vendor's own spelling — the value its device
+    // plugin puts on the node label, which is what the operator matches it
+    // against. Nothing here translates or normalises it.
+    expect(await postedSpec({ accelerator: "nvidia", gpuCount: 2, gpuModel: "H200" })).toMatchObject({
+      resources: { gpu: { vendor: "nvidia", count: 2, model: "H200" } },
+    });
+
+    // "Any" is the absence of the field, not an empty string: the CRD rejects a
+    // zero-length model at MinLength 1, and an unpinned environment is free to
+    // land on any node offering the vendor's card.
+    const open = await postedSpec({ accelerator: "metax", gpuCount: 1 });
+    expect(open.resources).toMatchObject({ gpu: { vendor: "metax", count: 1 } });
+    expect((open.resources as { gpu: Record<string, unknown> }).gpu).not.toHaveProperty("model");
+  });
+
+  it("ignores a model sent with no accelerator", async () => {
+    // Like the count, the model is read only when one is wanted: "none" omits
+    // the whole block, so there is nothing left for a model to describe — and a
+    // request that describes nothing must not be refused for it.
+    const spec = await postedSpec({ accelerator: "none", gpuModel: "H200" });
+    expect("gpu" in (spec.resources as Record<string, unknown>)).toBe(false);
+  });
+
+  it("refuses a model that is not a name any node could carry", async () => {
+    // The shape is the CRD's own (operator/api/v1alpha1/devenvironment_types.go):
+    // a malformed model is refused because no cluster could ever satisfy one,
+    // whereas a well-formed model this cluster does not have is a different
+    // matter — the spec is applied as written and the environment stays Pending.
+    expect(await rejectedPost({ accelerator: "nvidia", gpuModel: "H 200" })).toBe("gpuModelInvalid");
+    expect(await rejectedPost({ accelerator: "nvidia", gpuModel: "-H200" })).toBe("gpuModelInvalid");
+    expect(await rejectedPost({ accelerator: "nvidia", gpuModel: "a".repeat(64) })).toBe("gpuModelInvalid");
+
+    // Which models exist is the cluster's business, not this route's.
+    expect(await postedSpec({ accelerator: "metax", gpuModel: "MXC550" })).toMatchObject({
+      resources: { gpu: { model: "MXC550" } },
     });
   });
 

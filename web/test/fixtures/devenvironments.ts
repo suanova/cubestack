@@ -19,7 +19,7 @@ export function devEnvironmentSummary(
     type: "jupyter",
     image: "harbor.isuanova.com/suanova/jupyter-cuda-pytorch:latest",
     running: true,
-    resources: { gpu: { vendor: "nvidia", count: 1 }, cpu: "16", memory: "64Gi" },
+    resources: { gpu: { vendor: "nvidia", count: 1, model: "H200" }, cpu: "16", memory: "64Gi" },
     storage: { size: "200Gi", mountPath: "/home/ubuntu", pvcRetention: "delete" },
     // One of each step-3 field, so the spec panel's rows for them have
     // something to read. The env value is deliberately absent from the

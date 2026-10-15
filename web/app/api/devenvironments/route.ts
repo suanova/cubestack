@@ -48,8 +48,10 @@ export interface DevEnvironmentSummary {
     // Null when the environment requests no accelerator — spec.resources.gpu
     // is absent. The CRD deliberately has no "count: 0": omitting the block is
     // the only way to ask for no GPU, and it is also what exempts an image
-    // from the brand gate.
-    gpu: { vendor: "nvidia" | "metax"; count: number } | null;
+    // from the brand gate. `model` is null when the environment left the model
+    // open, which is not the same as an empty model: the CRD rejects "" — an
+    // unpinned environment may land on any node offering the vendor's card.
+    gpu: { vendor: "nvidia" | "metax"; count: number; model: string | null } | null;
     cpu: string;
     memory: string;
   };
@@ -97,7 +99,7 @@ interface Endpoint {
   address?: string;
 }
 interface DevEnvResources {
-  gpu?: { vendor?: string; count?: number };
+  gpu?: { vendor?: string; count?: number; model?: string };
   cpu?: string;
   memory?: string;
 }
@@ -144,9 +146,10 @@ function project(env: DevEnv): DevEnvironmentSummary {
     running: spec.running ?? false,
     resources: {
       // The vendor defaults to nvidia and the count to 1 exactly as the CRD
-      // does; an absent gpu block stays absent rather than becoming a GPU.
+      // does; an absent gpu block stays absent rather than becoming a GPU. An
+      // absent model stays null: it is an open model, not an empty one.
       gpu: gpu
-        ? { vendor: gpu.vendor === "metax" ? "metax" : "nvidia", count: num(gpu.count) || 1 }
+        ? { vendor: gpu.vendor === "metax" ? "metax" : "nvidia", count: num(gpu.count) || 1, model: gpu.model?.trim() || null }
         : null,
       cpu: spec.resources?.cpu ?? "—",
       memory: spec.resources?.memory ?? "—",
@@ -250,6 +253,14 @@ const DEVENV_TYPES = ["jupyter", "ssh", "vscode"] as const;
 // The accelerator is a single choice, "none" included, mirroring
 // spec.resources.gpu.vendor plus the absence of the block.
 const ACCELERATORS = ["none", "nvidia", "metax"] as const;
+// spec.resources.gpu.model's own validation, mirrored from the CRD's markers
+// (operator/api/v1alpha1/devenvironment_types.go): a malformed model is refused
+// because no cluster could ever satisfy one, whereas a well-formed model that no
+// node offers is a different matter — the spec is applied as written and the
+// environment stays Pending. Which models exist is the cluster's business, not
+// this route's, so only the shape is checked here.
+const GPU_MODEL_RE = /^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$/;
+const GPU_MODEL_MAX = 63;
 // corev1.EnvVar.name's own validation, enforced by the API server and nothing
 // else — an invalid name would surface as an opaque 422 on the CR, not here.
 const ENV_NAME_RE = /^[-._a-zA-Z][-._a-zA-Z0-9]*$/;
@@ -320,6 +331,9 @@ interface CreateBody {
   image?: string;
   accelerator?: string;
   gpuCount?: number;
+  // spec.resources.gpu.model, in the vendor's own spelling — the value its
+  // device plugin writes to the node label. Absent = any model of the vendor.
+  gpuModel?: string;
   cpu?: string;
   memory?: string;
   storageGi?: number;
@@ -405,6 +419,13 @@ export const POST = withAuth(async (req) => {
     const gpuCount = body.gpuCount ?? 1;
     if (gpuEnabled && (!Number.isInteger(gpuCount) || gpuCount < 1 || gpuCount > 16)) {
       return ValidationError("gpuCountInvalid");
+    }
+    // Like the count, the model is read only when an accelerator is wanted:
+    // "none" drops it the same way it drops the count, rather than refusing a
+    // request whose spec ignores it.
+    const gpuModel = body.gpuModel?.trim() ?? "";
+    if (gpuEnabled && gpuModel && (gpuModel.length > GPU_MODEL_MAX || !GPU_MODEL_RE.test(gpuModel))) {
+      return ValidationError("gpuModelInvalid", { max: GPU_MODEL_MAX });
     }
     if (body.storageGi !== undefined && (body.storageGi < 20 || body.storageGi > 800)) {
       return ValidationError("storageInvalid");
@@ -678,7 +699,11 @@ export const POST = withAuth(async (req) => {
         image,
         running: true,
         resources: {
-          ...(gpuEnabled ? { gpu: { vendor: accelerator, count: gpuCount } } : {}),
+          // The model is written only when one was pinned: "any" is the absence
+          // of the field, and an empty string would be a MinLength rejection.
+          ...(gpuEnabled
+            ? { gpu: { vendor: accelerator, count: gpuCount, ...(gpuModel ? { model: gpuModel } : {}) } }
+            : {}),
           ...(body.cpu ? { cpu: body.cpu } : {}),
           ...(body.memory ? { memory: body.memory } : {}),
         },

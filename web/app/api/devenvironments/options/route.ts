@@ -1,3 +1,5 @@
+import type { V1Node } from "@kubernetes/client-node";
+
 import { getCoreClient } from "@/lib/kubernetes";
 import { withAuth } from "@/lib/auth/guard";
 import { DEV_IMAGES } from "@/lib/devenvironments/images";
@@ -64,20 +66,98 @@ function offered(name: string): boolean {
   return !name.startsWith("kube-") && !PLATFORM_NAMESPACES.has(name);
 }
 
+/** The vendors the wizard's accelerator select offers, in its own order. */
+const GPU_VENDORS = ["nvidia", "metax"] as const;
+type GpuVendor = (typeof GPU_VENDORS)[number];
+
+/**
+ * What each vendor's device plugin writes to the nodes it drives: the label
+ * carrying the card's model, and the extended resource carrying how many the
+ * node offers.
+ *
+ * The operator keeps its own copy of both for the scheduling side
+ * (operator/internal/controller/podspec.go): it turns spec.resources.gpu.model
+ * into a nodeSelector on exactly this label, matched verbatim. The strings are
+ * written twice because the portal reads the label and the operator writes the
+ * selector — a divergence would offer a model that no node can ever match.
+ */
+const GPU_NODE_ATTRS: Record<GpuVendor, { label: string; resource: string }> = {
+  nvidia: { label: "nvidia.com/gpu.product", resource: "nvidia.com/gpu" },
+  metax: { label: "metax-tech.com/gpu.product", resource: "metax-tech.com/gpu" },
+};
+
+/**
+ * Whether a pod asking for this vendor's accelerator could ever land on `node`.
+ *
+ * Offered models come from nodes that can actually run one, not from every node
+ * that carries a label. The operator asks the same question before it counts a
+ * node at all — uncordoned and untainted in
+ * operator/test/e2e/devenv/devices.go's `schedulable`, with devices to spare in
+ * the caller — and this asks it too, plus readiness. A device plugin leaves its
+ * label behind when its node is cordoned, is tainted out of reach, stops
+ * reporting for duty, or comes back without devices; a model offered off such a
+ * node is a choice whose only outcome is a development environment stuck in
+ * Pending, which reports no error to explain itself.
+ *
+ * `PreferNoSchedule` is deliberately not a bar, matching the operator: it is a
+ * preference the scheduler weighs against the rest of the cluster, and calling
+ * it one would hide a model the cluster could have served.
+ */
+function hostable(node: V1Node, vendor: GpuVendor): boolean {
+  if (node.spec?.unschedulable) return false;
+  if ((node.spec?.taints ?? []).some((t) => t.effect === "NoSchedule" || t.effect === "NoExecute")) return false;
+  if (!(node.status?.conditions ?? []).some((c) => c.type === "Ready" && c.status === "True")) return false;
+  return Number(node.status?.allocatable?.[GPU_NODE_ATTRS[vendor].resource] ?? 0) > 0;
+}
+
+/**
+ * The models the cluster advertises, per vendor: the distinct product-label
+ * values across the nodes that could run one, sorted so the select's order does
+ * not depend on the order the API server happened to return its nodes in. A
+ * vendor no node carries yields an empty list, which is the answer the wizard
+ * shows as "any" alone rather than an error.
+ */
+function advertisedModels(nodes: V1Node[]): { nvidia: string[]; metax: string[] } {
+  const found: Record<GpuVendor, Set<string>> = { nvidia: new Set(), metax: new Set() };
+  for (const node of nodes) {
+    for (const vendor of GPU_VENDORS) {
+      if (!hostable(node, vendor)) continue;
+      const model = node.metadata?.labels?.[GPU_NODE_ATTRS[vendor].label];
+      if (model) found[vendor].add(model);
+    }
+  }
+  return { nvidia: [...found.nvidia].sort(), metax: [...found.metax].sort() };
+}
+
 /** Catalog the create wizard needs, read from the live cluster. */
 export interface DevEnvOptionsResponse {
   namespaces: Array<{ name: string }>;
   /** The namespace the wizard opens on — never silently a platform namespace. */
   defaultNamespace: string | null;
   images: DevEnvImageOption[];
+  /**
+   * The GPU models the cluster's nodes advertise, per vendor, as the wizard
+   * offers them. Only nodes that could actually run a pod contribute. Empty for
+   * a vendor the cluster does not carry — and empty for both when the node list
+   * could not be read, which is why the select is built to show "any" on its
+   * own rather than assuming a non-empty list.
+   */
+  gpuModels: { nvidia: string[]; metax: string[] };
 }
 
 /**
  * GET /api/devenvironments/options
  *
- * Namespaces come from the live cluster; the image catalog is static. The
- * wizard uses these to populate its namespace select and the image combobox,
- * and to pre-fill the runtime identity the user may then edit.
+ * Namespaces and GPU models come from the live cluster; the image catalog is
+ * static. The wizard uses these to populate its namespace select, the image
+ * combobox and the model select, and to pre-fill the runtime identity the user
+ * may then edit.
+ *
+ * The namespace list is a prerequisite — the wizard cannot open without a home
+ * for the environment — so a failure there fails the request. The models are an
+ * enrichment: they only narrow an accelerator request, and a principal without
+ * `list nodes` can still create a CPU environment, so that read is best-effort
+ * and its failure leaves the select showing "any" alone.
  */
 export const GET = withAuth(async () => {
   try {
@@ -90,10 +170,20 @@ export const GET = withAuth(async () => {
       .filter(offered)
       .sort();
 
+    let nodes: V1Node[] = [];
+    try {
+      nodes = (await core.listNode()).items ?? [];
+    } catch (err) {
+      // Logged rather than swallowed: an empty select is otherwise
+      // indistinguishable from "this cluster has no GPUs".
+      console.warn("Failed to read the cluster's GPU models:", err);
+    }
+
     const response: DevEnvOptionsResponse = {
       namespaces: names.map((name) => ({ name })),
       defaultNamespace: defaultNamespaceOf(names),
       images: IMAGES,
+      gpuModels: advertisedModels(nodes),
     };
 
     return Response.json(response);

@@ -23,6 +23,10 @@ const OPTIONS = {
     { tag: "harbor.isuanova.com/suanova/jupyter-maca-pytorch:latest", label: "suanova/jupyter-maca-pytorch · Metax MACA · JupyterLab (ubuntu)", user: "ubuntu", interface: "jupyter", vendor: "metax" },
     { tag: "harbor.isuanova.com/suanova/ssh-maca-pytorch:latest", label: "suanova/ssh-maca-pytorch · Metax MACA · SSH (ubuntu)", user: "ubuntu", interface: "ssh", vendor: "metax" },
   ],
+  // What the cluster's nodes advertise, in each vendor's device-plugin spelling.
+  // More than one model per vendor, so the list's order — not just its contents —
+  // is something a case can assert.
+  gpuModels: { nvidia: ["A100", "H200"], metax: ["MXC500", "MXC550"] },
 };
 
 describe("dev environments page", () => {
@@ -947,6 +951,11 @@ describe("create wizard", () => {
     return options.map((o) => o.textContent ?? "");
   }
 
+  /** Step 2's GPU-model select — present only once an accelerator is chosen. */
+  function gpuModelSelect(): HTMLElement {
+    return document.body.querySelector('[data-od-id="wizard-gpu-model"] [role="combobox"]') as HTMLElement;
+  }
+
   /** Step 2's selects in render order: accelerator, cpu, memory, idle. */
   function step2Selects(): HTMLElement[] {
     return Array.from(document.body.querySelectorAll('[data-step="2"] [role="combobox"]')) as HTMLElement[];
@@ -1236,6 +1245,82 @@ describe("create wizard", () => {
     await selectOption(acceleratorSelect(), "nvidia");
     // Choosing a vendor is what brings the count back.
     expect(Array.from(document.body.querySelectorAll('[data-step="2"] input[type="number"]'))).toHaveLength(2);
+
+    act(() => root.unmount());
+  });
+
+  it("offers the models the cluster advertises, and sends the one chosen", async () => {
+    const { container, root } = renderWithBoth();
+    await act(async () => {});
+    await toStep2(container);
+
+    // No accelerator, no model: the field arrives with the card count, not
+    // before it, because "无(纯 CPU)" has nothing for a model to describe.
+    expect(gpuModelSelect()).toBeNull();
+
+    await selectOption(acceleratorSelect(), "nvidia");
+    // A closed list of what this cluster's nodes advertise, plus "any": a model
+    // no node carries would pin the environment to a node that does not exist.
+    expect(await selectOption(gpuModelSelect(), "H200")).toEqual(["任意(不限定型号)", "A100", "H200"]);
+
+    await nextStep();
+    await nextStep();
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="wizard-create"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    expect(createdBody()).toMatchObject({ accelerator: "nvidia", gpuCount: 1, gpuModel: "H200" });
+
+    act(() => root.unmount());
+  });
+
+  it("clears the model when the vendor changes, and sends none for `any`", async () => {
+    const { container, root } = renderWithBoth();
+    await act(async () => {});
+    await toStep2(container);
+
+    await selectOption(acceleratorSelect(), "nvidia");
+    await selectOption(gpuModelSelect(), "H200");
+
+    // The other vendor's models are the other vendor's: a pin carried across the
+    // change would name a card the operator can never match, because the label
+    // and the model always have to describe one vendor.
+    await selectOption(acceleratorSelect(), "metax");
+    expect(gpuModelSelect().textContent).toBe("任意(不限定型号)");
+    expect(await selectOption(gpuModelSelect(), "MXC500")).toEqual(["任意(不限定型号)", "MXC500", "MXC550"]);
+
+    // Back to "any": the field is absent from the body, not sent empty.
+    await selectOption(gpuModelSelect(), "任意(不限定型号)");
+    await nextStep();
+    await nextStep();
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="wizard-create"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    const body = createdBody();
+    expect(body).toMatchObject({ accelerator: "metax" });
+    expect(body).not.toHaveProperty("gpuModel");
+
+    act(() => root.unmount());
+  });
+
+  it("sends no model at all when no accelerator is chosen", async () => {
+    const { container, root } = renderWithBoth();
+    await act(async () => {});
+    await toStep2(container);
+
+    await nextStep();
+    await nextStep();
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="wizard-create"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    // Not a stale default carried along for the ride: the body describes no
+    // card, so it describes no model either.
+    expect(createdBody()).not.toHaveProperty("gpuModel");
 
     act(() => root.unmount());
   });

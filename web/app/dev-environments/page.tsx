@@ -589,11 +589,13 @@ function EnvTable({
           <tbody>
             {items.flatMap((e) => {
               const sel = envKey(e) === selectedKey;
-              // The accelerator cell: "2 × nvidia", or the no-accelerator label
-              // when the environment carries no spec.resources.gpu block.
+              // The accelerator cell: "2 × nvidia · H200", or the no-accelerator
+              // label when the environment carries no spec.resources.gpu block.
+              // The model is appended only when one was pinned — an environment
+              // that left it open says so by saying nothing.
               const gpu = e.resources.gpu;
               const gpuText = gpu
-                ? `${gpu.count} × ${gpu.vendor === "metax" ? "metax" : "GPU"}`
+                ? `${gpu.count} × ${gpu.vendor === "metax" ? "metax" : "GPU"}${gpu.model ? ` · ${gpu.model}` : ""}`
                 : t("dev.gpu.none");
               const row = (
                 <tr
@@ -1228,7 +1230,7 @@ function SpecCard({ e }: { e: DevEnvironmentSummary }) {
   const rows: Array<[string, string]> = [
     [t("dev.spec.type"), e.type],
     [t("dev.spec.image"), e.image],
-    [t("dev.spec.gpu"), gpu ? `${gpu.count} × ${gpu.vendor}` : t("dev.gpu.none")],
+    [t("dev.spec.gpu"), gpu ? `${gpu.count} × ${gpu.vendor}${gpu.model ? ` · ${gpu.model}` : ""}` : t("dev.gpu.none")],
     [t("dev.spec.cpu"), `${t("dev.cpu.cores", { n: e.resources.cpu })} / ${e.resources.memory}`],
     [
       t("dev.spec.storage"),
@@ -1440,6 +1442,10 @@ interface Draft {
   image: string;
   accelerator: "none" | "nvidia" | "metax";
   gpuCount: number;
+  // spec.resources.gpu.model, in the vendor's own spelling — the value its
+  // device plugin writes to the node label. "" is "any": the absence of the
+  // field, not an empty model (which the CRD rejects at MinLength 1).
+  gpuModel: string;
   cpu: string;
   memory: string;
   storageGi: number;
@@ -1537,6 +1543,7 @@ function CreateWizard({
     // "none" rather than defaulting the environment into a brand-gate failure.
     accelerator: "none",
     gpuCount: 1,
+    gpuModel: "",
     cpu: "2",
     memory: "4Gi",
     // The smallest workspace the route accepts, not the largest: a claim is
@@ -1631,6 +1638,13 @@ function CreateWizard({
       const tier = MEM_TIER.find((t) => `${Number(prev.cpu) * t}Gi` === prev.memory) ?? 2;
       return { ...prev, cpu, memory: `${Number(cpu) * tier}Gi` };
     });
+
+  // Changing the vendor changes which models are on offer, so the pin is cleared
+  // rather than left naming a card of the vendor the user moved away from — a
+  // pairing the operator could never schedule, since the label and the model
+  // always have to describe one vendor.
+  const setAccelerator = (accelerator: Draft["accelerator"]) =>
+    setDraft((prev) => (prev.accelerator === accelerator ? prev : { ...prev, accelerator, gpuModel: "" }));
 
   // Re-derives the identity only when the tag actually changes: the freeSolo
   // Autocomplete echoes the same value back on blur, and re-deriving there would
@@ -1780,6 +1794,9 @@ function CreateWizard({
       // A card count is only meaningful with an accelerator: sending the stale
       // default alongside "none" would describe a GPU the user did not ask for.
       ...(gpuRequested ? { gpuCount: draft.gpuCount } : {}),
+      // A model is sent only when one was pinned. "Any" is the absence of the
+      // field rather than an empty string, which is a model the CRD rejects.
+      ...(gpuRequested && draft.gpuModel ? { gpuModel: draft.gpuModel } : {}),
       cpu: draft.cpu,
       memory: draft.memory,
       storageGi: draft.storageGi,
@@ -1867,6 +1884,11 @@ function CreateWizard({
   // notebook nobody can reach.
   const imageOptions = (options?.images ?? []).filter((img) => img.interface === draft.type);
 
+  // The models the chosen vendor's device plugin advertises on this cluster.
+  // Empty when it advertises none — or when the options read could not list the
+  // nodes, which the select handles the same way, by offering "any" alone.
+  const gpuModels = draft.accelerator === "none" ? [] : (options?.gpuModels?.[draft.accelerator] ?? []);
+
   // Switching the type keeps the vendor when the catalog has the pair: the two
   // images of a stack differ only in the mode baked into them, so a CUDA
   // environment moved to ssh lands on ssh-cuda-pytorch rather than on the CPU
@@ -1889,7 +1911,7 @@ function CreateWizard({
     [t("dev.wizard.namespace"), draft.namespace],
     [t("dev.wizard.type"), draft.type],
     [t("dev.wizard.image"), draft.image],
-    [t("dev.wizard.accelerator"), gpuRequested ? `${draft.gpuCount} × ${draft.accelerator}` : t("dev.wizard.accelerator.none")],
+    [t("dev.wizard.accelerator"), gpuRequested ? `${draft.gpuCount} × ${draft.accelerator}${draft.gpuModel ? ` · ${draft.gpuModel}` : ""}` : t("dev.wizard.accelerator.none")],
     [t("dev.wizard.cpu"), t("dev.cpu.cores", { n: draft.cpu })],
     [t("dev.wizard.memory"), draft.memory],
     [t("dev.wizard.storage"), `${draft.storageGi}Gi`],
@@ -2052,16 +2074,40 @@ function CreateWizard({
               <Box data-step="2">
                 <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" }, gap: "0 14px" }}>
                   <WizField label={t("dev.wizard.accelerator")}>
-                    <Select size="small" fullWidth value={draft.accelerator} onChange={(e) => setField("accelerator", e.target.value as Draft["accelerator"])}>
+                    <Select size="small" fullWidth value={draft.accelerator} onChange={(e) => setAccelerator(e.target.value as Draft["accelerator"])}>
                       <MenuItem value="none">{t("dev.wizard.accelerator.none")}</MenuItem>
                       <MenuItem value="nvidia">nvidia</MenuItem>
                       <MenuItem value="metax">metax</MenuItem>
                     </Select>
                   </WizField>
+                  {/* Both of the other accelerator fields exist only once one is
+                      wanted: "none" has no card count and no model, and showing
+                      them disabled would suggest a choice the spec ignores.
+
+                      The model is a closed list of what this cluster's nodes
+                      actually advertise, plus "any" — the absence of the field,
+                      which is what leaves the environment free to land on any
+                      node offering the vendor's card. It stays on offer when the
+                      list is empty, because "any" is then the only honest answer
+                      and hiding the field would make that indistinguishable from
+                      a cluster that was never asked. */}
                   {gpuRequested ? (
-                    <WizField label={t("dev.wizard.gpuCount")} error={gpuError} errorText={t("dev.wizard.errGpu")}>
-                      <TextField size="small" fullWidth type="number" inputProps={{ min: 1, max: 16 }} value={draft.gpuCount} onChange={(e) => setField("gpuCount", Number(e.target.value))} />
-                    </WizField>
+                    <>
+                      <WizField label={t("dev.wizard.gpuCount")} error={gpuError} errorText={t("dev.wizard.errGpu")}>
+                        <TextField size="small" fullWidth type="number" inputProps={{ min: 1, max: 16 }} value={draft.gpuCount} onChange={(e) => setField("gpuCount", Number(e.target.value))} />
+                      </WizField>
+                      <WizField label={t("dev.wizard.gpuModel")}>
+                        {/* `displayEmpty` because "" is a real choice here — the
+                            "any" entry — and without it the box would render
+                            blank, which reads as a field nobody filled in. */}
+                        <Select size="small" fullWidth displayEmpty data-od-id="wizard-gpu-model" value={draft.gpuModel} onChange={(e) => setField("gpuModel", e.target.value)}>
+                          <MenuItem value="">{t("dev.wizard.gpuModel.any")}</MenuItem>
+                          {gpuModels.map((m) => (
+                            <MenuItem key={m} value={m}>{m}</MenuItem>
+                          ))}
+                        </Select>
+                      </WizField>
+                    </>
                   ) : null}
                   <WizField label={t("dev.wizard.cpu")}>
                     <Select size="small" fullWidth value={draft.cpu} onChange={(e) => setCpu(e.target.value)}>

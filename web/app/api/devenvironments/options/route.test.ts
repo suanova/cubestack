@@ -3,10 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { authedGet, bareGet } from "@/test/auth";
 
-const { listNamespace } = vi.hoisted(() => ({ listNamespace: vi.fn() }));
+const { listNamespace, listNode } = vi.hoisted(() => ({ listNamespace: vi.fn(), listNode: vi.fn() }));
 
 vi.mock("@/lib/kubernetes", () => ({
-  getCoreClient: () => ({ listNamespace }),
+  getCoreClient: () => ({ listNamespace, listNode }),
 }));
 
 /** The namespaces a live CubeStack install advertises. */
@@ -14,11 +14,51 @@ function stubNamespaces(names: string[]) {
   listNamespace.mockResolvedValue({ items: names.map((name) => ({ metadata: { name } })) });
 }
 
+/**
+ * A node as the route reads one. `labels` alone is the ordinary case — a node
+ * up and serving with its device plugin's product label on it — so a case that
+ * is about which models are on offer states only that. The rest describe the
+ * ways a node keeps its label without being able to run anything.
+ */
+interface StubNode {
+  labels: Record<string, string>;
+  /** The Ready condition's status. Defaults to true. */
+  ready?: boolean;
+  /** Set to cordon the node. */
+  unschedulable?: boolean;
+  taints?: Array<{ effect: string }>;
+  /** Its allocatable extended resources, e.g. `{ "nvidia.com/gpu": "8" }`. */
+  allocatable?: Record<string, string>;
+}
+
+function stubNodes(nodes: StubNode[]) {
+  listNode.mockResolvedValue({
+    items: nodes.map((n) => ({
+      metadata: { labels: n.labels },
+      spec: { unschedulable: n.unschedulable ?? false, taints: n.taints ?? [] },
+      status: {
+        conditions: [{ type: "Ready", status: n.ready === false ? "False" : "True" }],
+        // The route asks a node for its GPU count, so a node whose plugin is
+        // working states one unless the case is about one whose does not.
+        allocatable: n.allocatable ?? { "nvidia.com/gpu": "8", "metax-tech.com/gpu": "8" },
+      },
+    })),
+  });
+}
+
 async function options(): Promise<{ namespaces: Array<{ name: string }>; defaultNamespace: string | null }> {
   const { GET } = await import("./route");
   const res = await GET(await authedGet(), undefined);
   expect(res.status).toBe(200);
   return res.json();
+}
+
+/** The models the wizard is sent, per vendor. */
+async function gpuModels(): Promise<{ nvidia: string[]; metax: string[] }> {
+  const { GET } = await import("./route");
+  const res = await GET(await authedGet(), undefined);
+  expect(res.status).toBe(200);
+  return (await res.json()).gpuModels;
 }
 
 /** The catalog the wizard is sent, with the axes it selects on. */
@@ -33,6 +73,10 @@ describe("GET /api/devenvironments/options", () => {
   beforeEach(() => {
     vi.resetModules();
     listNamespace.mockReset();
+    // A cluster with no GPU nodes is the default, so a case that is about
+    // namespaces says nothing about models and does not have to.
+    listNode.mockReset();
+    listNode.mockResolvedValue({ items: [] });
     delete process.env.CUBESTACK_DEFAULT_NAMESPACE;
   });
   afterEach(() => {
@@ -123,11 +167,82 @@ describe("GET /api/devenvironments/options", () => {
     ]);
   });
 
+  it("lists the models the cluster's nodes advertise, per vendor", async () => {
+    stubNamespaces(["default"]);
+    stubNodes([
+      { labels: { "nvidia.com/gpu.product": "H200" } },
+      { labels: { "nvidia.com/gpu.product": "A100" } },
+      // The same card on a second node is one choice, not two.
+      { labels: { "nvidia.com/gpu.product": "H200" } },
+      { labels: { "metax-tech.com/gpu.product": "MXC550" } },
+      // A CPU node carries no product label and contributes nothing.
+      { labels: {} },
+    ]);
+
+    // Sorted, so the select's order does not depend on the order the API server
+    // happened to return its nodes in.
+    expect(await gpuModels()).toEqual({ nvidia: ["A100", "H200"], metax: ["MXC550"] });
+  });
+
+  it("offers no model for a vendor the cluster does not carry", async () => {
+    stubNamespaces(["default"]);
+    stubNodes([{ labels: { "nvidia.com/gpu.product": "H200" } }]);
+
+    // Empty rather than absent: the wizard's select offers "any" alone, which is
+    // also what a cluster with no GPUs at all gets.
+    expect(await gpuModels()).toEqual({ nvidia: ["H200"], metax: [] });
+  });
+
+  it("leaves out a model only a node that cannot run a pod advertises", async () => {
+    stubNamespaces(["default"]);
+    stubNodes([
+      { labels: { "nvidia.com/gpu.product": "H200" } },
+      // A device plugin keeps its label when its node goes down, and comes back
+      // with it: the model is what the node last reported, not what it has.
+      { labels: { "nvidia.com/gpu.product": "A100" }, ready: false },
+      // Cordoned: still Ready, still labelled, and the scheduler will put
+      // nothing on it.
+      { labels: { "nvidia.com/gpu.product": "V100" }, unschedulable: true },
+      // Tainted out of reach. The environments this wizard creates carry no
+      // tolerations, so a NoSchedule or NoExecute taint is a bar for them.
+      { labels: { "nvidia.com/gpu.product": "P100" }, taints: [{ effect: "NoSchedule" }] },
+      { labels: { "nvidia.com/gpu.product": "T4" }, taints: [{ effect: "NoExecute" }] },
+      // The plugin stopped advertising devices: the label is stale.
+      { labels: { "nvidia.com/gpu.product": "K80" }, allocatable: { "nvidia.com/gpu": "0" } },
+    ]);
+
+    // Only the one node that would actually accept the pod. Offering the rest
+    // would be offering a choice whose only outcome is an environment pinned to
+    // a model no node can serve — and Pending reports no error to explain that.
+    expect(await gpuModels()).toEqual({ nvidia: ["H200"], metax: [] });
+  });
+
+  it("keeps a model a PreferNoSchedule node advertises", async () => {
+    stubNamespaces(["default"]);
+    stubNodes([{ labels: { "nvidia.com/gpu.product": "H200" }, taints: [{ effect: "PreferNoSchedule" }] }]);
+
+    // A preference, not a bar: the scheduler weighs it against the rest of the
+    // cluster, so hiding the model would hide one this cluster could still run.
+    expect(await gpuModels()).toEqual({ nvidia: ["H200"], metax: [] });
+  });
+
+  it("still serves the catalog when the nodes cannot be read", async () => {
+    stubNamespaces(["default", "project-a"]);
+    listNode.mockRejectedValue(new Error("forbidden"));
+
+    // The models only narrow an accelerator request, so a principal without
+    // `list nodes` — or a flaky read — must not take the whole wizard down: a
+    // CPU environment is still creatable, and the select degrades to "any".
+    expect((await options()).namespaces).toEqual([{ name: "default" }, { name: "project-a" }]);
+    expect(await gpuModels()).toEqual({ nvidia: [], metax: [] });
+  });
+
   it("rejects an unauthenticated request", async () => {
     stubNamespaces(["default"]);
     const { GET } = await import("./route");
     const res = await GET(await bareGet(), undefined);
     expect(res.status).toBe(401);
     expect(listNamespace).not.toHaveBeenCalled();
+    expect(listNode).not.toHaveBeenCalled();
   });
 });
