@@ -13,6 +13,7 @@ import { ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch } from "@/lib/base-path";
 import { phaseText, waitingSeconds } from "@/lib/cubepilot/agentThread";
 import { MAX_PROVIDER_MODELS, modelIdError, modelKey } from "@/lib/cubepilot/llm";
+import { providerNameNotice } from "@/lib/cubepilot/provider-names";
 import {
   PLATFORM_MODEL_NAME,
   displayModelName,
@@ -96,6 +97,10 @@ export function ConfigPane() {
   /** Which LLM source the card shows: the platform's catalog or your own. */
   const [llmSource, setLlmSource] = useState<"system" | "external">("system");
   const [llmForm, setLlmForm] = useState({ name: "", endpoint: "", models: "", apiKey: "", public: false });
+  /** What the runtime makes of the name being typed. Shown under the field so a
+   *  name that means something to the runtime is not discovered by a dead
+   *  assistant. */
+  const llmNameNotice = providerNameNotice(llmForm.name);
   const [editingProvider, setEditingProvider] = useState("");
   const [llmBusy, setLlmBusy] = useState(false);
   /** The ids the last fetch found, plus how many the endpoint offered in total
@@ -626,6 +631,25 @@ export function ConfigPane() {
                     sx={{ ...monoSx, fontSize: 12.5 }}
                     data-od-id="cp-config-llm-name"
                   />
+                  {llmForm.name.trim() !== "" ? (
+                    <Box
+                      sx={{
+                        fontSize: 11,
+                        lineHeight: 1.5,
+                        color: llmNameNotice.kind === "reserved-plugin" ? "warning.main" : "text.secondary",
+                      }}
+                      data-od-id="cp-config-llm-name-note"
+                    >
+                      {llmNameNotice.kind === "reserved-plugin"
+                        ? t("cubepilot.config.llmNameReservedPlugin", {
+                            provider: llmNameNotice.provider ?? "",
+                            suggestion: llmNameNotice.suggestion ?? "",
+                          })
+                        : llmNameNotice.kind === "builtin"
+                          ? t("cubepilot.config.llmNameBuiltin")
+                          : t("cubepilot.config.llmNameCustom")}
+                    </Box>
+                  ) : null}
                   <CpInput
                     placeholder={t("cubepilot.config.llmEndpointPh")}
                     aria-label={t("cubepilot.config.llmEndpointPh")}
