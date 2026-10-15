@@ -78,7 +78,10 @@ export interface InferenceServiceSummary {
   }>;
   internalEndpoint: string | null;
   publicEndpoint: string | null;
-  /** Best-effort engine metrics; null when Prometheus has none. */
+  /**
+   * Best-effort engine metrics; null when Prometheus has none. `p95` is in
+   * milliseconds (the engine histogram itself is in seconds).
+   */
   metrics: { qps: number | null; p95: number | null; tps: number | null; spark: number[] | null } | null;
 }
 
@@ -319,9 +322,14 @@ export const GET = withAuth(async () => {
     // backend, which now times out) degrades that service to `metrics: null`
     // (the page then shows its empty state).
     const metrics = await Promise.all(
-      isvcs.map((isvc) =>
-        loadMetrics(isvc.metadata?.namespace ?? "", isvc.metadata?.name ?? "").catch(() => null),
-      ),
+      isvcs.map((isvc) => {
+        const profile = byProfile.get(isvc.spec?.profileRef ?? "");
+        return loadMetrics(
+          isvc.metadata?.namespace ?? "",
+          isvc.metadata?.name ?? "",
+          profile?.spec?.engine?.name,
+        ).catch(() => null);
+      }),
     );
 
     const items = isvcs.map((isvc, i) =>
@@ -587,32 +595,62 @@ function serviceMatcher(namespace: string, name: string): string {
 }
 
 /**
- * Standard selectors for the engine exporters (vLLM / SGLang) exposed through
- * Prometheus, scoped to one inference service. Without a live exporter the
- * queries return nothing and the service shows its empty state.
+ * The engine exporters name their families per engine, so each is addressed
+ * explicitly instead of through one regex spanning both. vLLM counts finished
+ * requests in `vllm:request_success_total`, SGLang in `sglang:num_requests_total`;
+ * both expose generated tokens as `<engine>:generation_tokens_total`, and the
+ * end-to-end request latency as a histogram in `<engine>:e2e_request_latency_seconds`.
+ * A loose `.*latency.*bucket` matcher also catches vLLM's per-token
+ * `vllm:inter_token_latency_seconds_bucket`, which makes Prometheus reject the
+ * whole query ("vector cannot contain metrics with the same labelset").
  */
-const qpsQuery = (ns: string, name: string) =>
-  `sum(rate({__name__=~"sglang:.*:num_generate_tokens_total|vllm:.*:requests_total",${serviceMatcher(ns, name)}}[5m]))`;
-const p95Query = (ns: string, name: string) =>
-  `histogram_quantile(0.95, sum(rate({__name__=~"sglang.*e2e_latency_seconds|vllm.*latency.*bucket",${serviceMatcher(ns, name)}}[5m])) by (le))`;
-const tpsQuery = (ns: string, name: string) =>
-  `sum(rate({__name__=~"sglang:.*:num_generate_tokens_total|vllm.*num_generated_tokens_total",${serviceMatcher(ns, name)}}[5m]))`;
+const ENGINE_FAMILIES: Record<string, { requests: string; tokens: string; latency: string }> = {
+  vllm: {
+    requests: "vllm:request_success_total",
+    tokens: "vllm:generation_tokens_total",
+    latency: "vllm:e2e_request_latency_seconds_bucket",
+  },
+  sglang: {
+    requests: "sglang:num_requests_total",
+    tokens: "sglang:generation_tokens_total",
+    latency: "sglang:e2e_request_latency_seconds_bucket",
+  },
+};
+
+/**
+ * Standard selectors for the engine exporter of one inference service, one
+ * family per query. Without a live exporter the queries return nothing and the
+ * service shows its empty state.
+ */
+const qpsQuery = (engine: string, ns: string, name: string) =>
+  `sum(rate(${ENGINE_FAMILIES[engine].requests}{${serviceMatcher(ns, name)}}[5m]))`;
+const p95Query = (engine: string, ns: string, name: string) =>
+  `histogram_quantile(0.95, sum(rate(${ENGINE_FAMILIES[engine].latency}{${serviceMatcher(ns, name)}}[5m])) by (le))`;
+const tpsQuery = (engine: string, ns: string, name: string) =>
+  `sum(rate(${ENGINE_FAMILIES[engine].tokens}{${serviceMatcher(ns, name)}}[5m]))`;
 
 async function loadMetrics(
   namespace: string,
   name: string,
+  engine: string | null | undefined,
 ): Promise<NonNullable<InferenceServiceSummary["metrics"]> | null> {
+  // An engine we have no families for (or a service whose profile does not
+  // resolve) has nothing to query: the service shows its empty state rather
+  // than another engine's numbers.
+  const key = engine?.toLowerCase() ?? "";
+  if (!ENGINE_FAMILIES[key]) return null;
   const now = Math.floor(Date.now() / 1000);
   const start = now - SPARK_POINTS * SPARK_STEP_SECONDS;
-  const [qps, p95, tps, spark] = await Promise.all([
-    queryInstant(qpsQuery(namespace, name)),
-    queryInstant(p95Query(namespace, name)),
-    queryInstant(tpsQuery(namespace, name)),
-    queryRange(qpsQuery(namespace, name), start, now, SPARK_STEP_SECONDS, SPARK_POINTS),
+  const [qps, p95Seconds, tps, spark] = await Promise.all([
+    queryInstant(qpsQuery(key, namespace, name)),
+    queryInstant(p95Query(key, namespace, name)),
+    queryInstant(tpsQuery(key, namespace, name)),
+    queryRange(qpsQuery(key, namespace, name), start, now, SPARK_STEP_SECONDS, SPARK_POINTS),
   ]);
   // Without a single sample across any family we treat it as "no data".
-  if (qps === null && p95 === null && tps === null && !spark) return null;
-  return { qps, p95, tps, spark };
+  if (qps === null && p95Seconds === null && tps === null && !spark) return null;
+  // The latency histogram is in seconds; the console renders milliseconds.
+  return { qps, p95: p95Seconds === null ? null : p95Seconds * 1000, tps, spark };
 }
 
 async function queryInstant(query: string): Promise<number | null> {

@@ -123,6 +123,48 @@ function stubPrometheusEmpty() {
   );
 }
 
+/** Record every PromQL query the route issues; answer with no samples. */
+function stubRecordingPrometheus(queries: string[]) {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL) => {
+      queries.push(new URL(String(input)).searchParams.get("query") ?? "");
+      return { ok: true, status: 200, json: async () => ({ data: { result: [] } }) };
+    }),
+  );
+}
+
+/**
+ * Stub a cluster holding one service (`svc`) whose profile names `engine`
+ * (`null` models a profile that carries no engine at all).
+ */
+function stubSingleService(engine: string | null) {
+  const base = listClusterCustomObject.getMockImplementation()!;
+  listClusterCustomObject.mockImplementation(({ plural }: { plural: string }) => {
+    if (plural === "inferenceservices") {
+      return Promise.resolve({
+        items: [
+          {
+            metadata: { name: "svc", namespace: "project-a", creationTimestamp: "2026-09-01T06:12:00Z" },
+            spec: { modelRef: "deepseek-v4-flash-w8a8-v1", profileRef: "engine-profile" },
+          },
+        ],
+      });
+    }
+    if (plural === "inferenceruntimeprofiles") {
+      return Promise.resolve({
+        items: [
+          {
+            metadata: { name: "engine-profile" },
+            spec: { engine: engine === null ? undefined : { name: engine, version: "v1" } },
+          },
+        ],
+      });
+    }
+    return base({ plural });
+  });
+}
+
 async function importRoute() {
   return import("./route");
 }
@@ -231,6 +273,93 @@ describe("inference services route", () => {
     // llm must not match llm2-*.
     const matchers = queries.map((q) => q.match(/service=~"([^"]+)"/)?.[1] ?? "");
     expect(new Set(matchers)).toEqual(new Set(["^llm(-.*)?$", "^llm2(-.*)?$"]));
+  });
+
+  it("queries the engine's own metric families, one family per query", async () => {
+    // The engines do not share family names, and a matcher spanning families
+    // would pull in a second latency histogram (vLLM's per-token
+    // `vllm:inter_token_latency_seconds_bucket` alongside the e2e one), which
+    // Prometheus rejects outright.
+    const { GET } = await importRoute();
+
+    for (const [engine, families] of [
+      ["vLLM", ["vllm:request_success_total", "vllm:generation_tokens_total", "vllm:e2e_request_latency_seconds_bucket"]],
+      ["sglang", ["sglang:num_requests_total", "sglang:generation_tokens_total", "sglang:e2e_request_latency_seconds_bucket"]],
+    ] as const) {
+      stubSingleService(engine);
+      const queries: string[] = [];
+      stubRecordingPrometheus(queries);
+      expect((await GET(await authedGet(), undefined)).status).toBe(200);
+
+      // Three instant queries plus the sparkline's range query, which reuses
+      // the QPS one.
+      expect(queries).toHaveLength(4);
+      for (const [family, n] of [
+        [families[0], 2],
+        [families[1], 1],
+        [families[2], 1],
+      ] as const) {
+        expect(queries.filter((q) => q.includes(`${family}{namespace="project-a"`))).toHaveLength(n);
+      }
+      // The engine name is matched case-insensitively and no query drifts onto
+      // the other engine's families.
+      const other = engine === "vLLM" ? "sglang:" : "vllm:";
+      expect(queries.every((q) => !q.includes(other) && !q.includes("__name__=~"))).toBe(true);
+    }
+  });
+
+  it("parses the engine samples and reports P95 in milliseconds", async () => {
+    // Magnitudes taken from the cluster's own vLLM exporter: 0.0037 req/s,
+    // 0.64 tok/s and a 4.875 s end-to-end latency histogram.
+    stubSingleService("vllm");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(String(input));
+        const query = url.searchParams.get("query") ?? "";
+        const start = Number(url.searchParams.get("start"));
+        const result = url.pathname.endsWith("/query_range")
+          ? [{ values: [[start, "0.031"], [start + 150, "0.004"]] }]
+          : [
+              {
+                value: [
+                  start,
+                  query.includes("request_success_total")
+                    ? "0.0037"
+                    : query.includes("e2e_request_latency_seconds_bucket")
+                      ? "4.875"
+                      : "0.64",
+                ],
+              },
+            ];
+        return { ok: true, status: 200, json: async () => ({ data: { result } }) };
+      }),
+    );
+
+    const { GET } = await importRoute();
+    const body = await (await GET(await authedGet(), undefined)).json();
+    const m = body.items[0].metrics;
+    expect(m.qps).toBeCloseTo(0.0037);
+    expect(m.tps).toBeCloseTo(0.64);
+    // 4.875 s of engine histogram -> milliseconds, the unit the console prints.
+    expect(m.p95).toBeCloseTo(4875);
+    // Sparkline: one point per step, gaps carried forward.
+    expect(m.spark).toHaveLength(12);
+    expect(m.spark[0]).toBeCloseTo(0.031);
+    expect(m.spark[11]).toBeCloseTo(0.004);
+  });
+
+  it("queries nothing for an engine it has no families for", async () => {
+    // An engine the console cannot map (a profile pointing at something else)
+    // must show its empty state, never a neighbouring engine's numbers.
+    stubSingleService("tgi");
+    const queries: string[] = [];
+    stubRecordingPrometheus(queries);
+
+    const { GET } = await importRoute();
+    const body = await (await GET(await authedGet(), undefined)).json();
+    expect(queries).toHaveLength(0);
+    expect(body.items[0].metrics).toBeNull();
   });
 
   it("patches the overrides via a merge patch on PATCH", async () => {
