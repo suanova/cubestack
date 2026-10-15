@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	aiv1alpha1 "github.com/suanova/cubestack/api/v1alpha1"
@@ -448,6 +449,39 @@ var _ = Describe("checkRoute", func() {
 		Expect(r.removeCatalogRule(ctx, mustGetISVC(ctx, name))).To(Succeed())
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
 		Expect(findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, name))).To(Equal(-1))
+	})
+
+	It("keeps a finalizer another controller added concurrently", func() {
+		// The suite's manager reconciles every real object in the cluster, so a
+		// spec pinning a stale write must not share an object with it. This runs
+		// the write against a fake client: the pattern under test is the same —
+		// a merge patch spelling out the whole finalizers list, guarded by the
+		// resourceVersion it read.
+		c := fake.NewClientBuilder().WithScheme(testMgr.GetScheme()).Build()
+		r := routeReconciler()
+		r.Client = c
+		isvc := routeISVC("fake-race-finalizer", true)
+		Expect(c.Create(ctx, isvc)).To(Succeed())
+		stale := &aiv1alpha1.InferenceService{}
+		Expect(c.Get(ctx, client.ObjectKeyFromObject(isvc), stale)).To(Succeed())
+
+		// Another controller adds its finalizer after this reconcile read the
+		// service: the deferred patch must conflict rather than write a
+		// finalizers list that drops it.
+		live := &aiv1alpha1.InferenceService{}
+		Expect(c.Get(ctx, client.ObjectKeyFromObject(isvc), live)).To(Succeed())
+		live.Finalizers = append(live.Finalizers, "example.com/other")
+		Expect(c.Update(ctx, live)).To(Succeed())
+		err := r.ensureCatalogFinalizer(ctx, stale)
+		Expect(apierrors.IsConflict(err)).To(BeTrue())
+
+		// Retrying against a fresh read adds ours without dropping theirs.
+		fresh := &aiv1alpha1.InferenceService{}
+		Expect(c.Get(ctx, client.ObjectKeyFromObject(isvc), fresh)).To(Succeed())
+		Expect(r.ensureCatalogFinalizer(ctx, fresh)).To(Succeed())
+		got := &aiv1alpha1.InferenceService{}
+		Expect(c.Get(ctx, client.ObjectKeyFromObject(isvc), got)).To(Succeed())
+		Expect(got.Finalizers).To(ContainElements(inferenceServiceCatalogFinalizer, "example.com/other"))
 	})
 
 	It("reports GatewayNotAccepted when the catalog objects are not yet observed", func() {

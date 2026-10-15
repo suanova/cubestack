@@ -357,11 +357,13 @@ func (r *InferenceServiceReconciler) ensureCatalogFinalizer(ctx context.Context,
 	if slices.Contains(isvc.Finalizers, inferenceServiceCatalogFinalizer) || isvc.Spec.Route == nil || !isvc.Spec.Route.Publish {
 		return nil
 	}
-	// Patch, not Update: Update sends the whole object and carries the
-	// resourceVersion we read, so any write landing in between 409-conflicts
-	// and forces a retry reconcile. A merge patch has no such precondition,
-	// and the finalizer is the only field this call means to change.
-	patch := client.MergeFrom(isvc.DeepCopy())
+	// Patch, not Update: the finalizer is the only field this call means to
+	// change. The patch carries the resourceVersion we read (optimistic lock)
+	// because a merge patch spells out the whole finalizers list as we saw it:
+	// without the lock, a finalizer another controller adds after our read
+	// would be silently dropped by this write. With it, such a write 409s and
+	// this reconcile retries against a fresh read.
+	patch := client.MergeFromWithOptions(isvc.DeepCopy(), client.MergeFromWithOptimisticLock{})
 	isvc.Finalizers = append(isvc.Finalizers, inferenceServiceCatalogFinalizer)
 	return r.Patch(ctx, isvc, patch)
 }
