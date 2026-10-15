@@ -37,6 +37,13 @@ type Result struct {
 	Roles     []RenderedRole
 	Assets    map[string]map[string]string
 	Errors    []Error
+
+	// PodAntiAffinityPolicy is the rendered placement policy of the profile's
+	// podAntiAffinity (design §3.2): "required", "preferred" or "none". It is
+	// empty when the profile declares no podAntiAffinity at all; a declared
+	// podAntiAffinity whose policy is unset renders as "required", the
+	// behaviour of every profile written before the policy existed.
+	PodAntiAffinityPolicy string
 }
 
 // RenderedRole is one profile role with the workload structure resolved and
@@ -111,6 +118,7 @@ func Render(isvc *aiv1alpha1.InferenceService, profile *aiv1alpha1.InferenceRunt
 		s3CredentialsSet: model.Spec.Storage.Strategy == aiv1alpha1.StorageStrategyS3 && model.Spec.Storage.S3 != nil && model.Spec.Storage.S3.CredentialsRef != nil,
 	}
 
+	res.PodAntiAffinityPolicy, res.Errors = resolvePodAntiAffinity(ctx, profile.Spec.PodAntiAffinity, res.Errors)
 	// Roles: structure first, then pod template. Errors accumulate; later
 	// fields are still rendered so the message aggregates all failures.
 	for i := range profile.Spec.Roles {
@@ -510,6 +518,36 @@ func resolveReplicas(ctx *renderContext, roleName string, field *intstr.IntOrStr
 		return 0, append(errs, Error{Reason: ReasonInvalidOverride, Msg: fmt.Sprintf("replicas of role %q value %d exceeds the Kubernetes int32 range", roleName, n)})
 	}
 	return n, errs
+}
+
+// resolvePodAntiAffinity renders the profile's podAntiAffinity.policy template
+// and validates the resolved token (design §3.2). Only overrides.* is allowed in
+// this field, exactly like the workload structure fields: how a service spreads
+// is a user knob, not something derived from the service. A profile that
+// declares no podAntiAffinity renders empty — the controller then injects
+// nothing — while a declared one whose policy is unset renders as "required",
+// the behaviour of every profile written before the field existed.
+func resolvePodAntiAffinity(ctx *renderContext, aa *aiv1alpha1.PodAntiAffinity, errs []Error) (string, []Error) {
+	if aa == nil {
+		return "", errs
+	}
+	rendered, renderErrs := renderString(ctx, string(aa.Policy), workloadAllowed)
+	errs = append(errs, renderErrs...)
+	if len(renderErrs) > 0 {
+		return "", errs
+	}
+	policy := aiv1alpha1.PodAntiAffinityPolicy(strings.TrimSpace(rendered))
+	switch policy {
+	case "", aiv1alpha1.PodAntiAffinityPolicyRequired:
+		return string(aiv1alpha1.PodAntiAffinityPolicyRequired), errs
+	case aiv1alpha1.PodAntiAffinityPolicyPreferred, aiv1alpha1.PodAntiAffinityPolicyNone:
+		return string(policy), errs
+	default:
+		return "", append(errs, Error{
+			Reason: ReasonInvalidOverride,
+			Msg:    fmt.Sprintf("podAntiAffinity.policy does not resolve to required, preferred or none: %q", rendered),
+		})
+	}
 }
 
 // renderPodTemplate renders the templated fields of a pod template: command,

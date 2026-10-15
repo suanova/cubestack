@@ -1,6 +1,8 @@
 package renderer
 
 import (
+	"strconv"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -12,8 +14,9 @@ import (
 )
 
 const (
-	overridePrefillReplicas = "prefillReplicas"
-	bootstrapAsset          = "bootstrap"
+	overridePrefillReplicas  = "prefillReplicas"
+	overrideReplicaPlacement = "replicaPlacement"
+	bootstrapAsset           = "bootstrap"
 	// assetDataKey is the single asset data key of the render specs.
 	assetDataKey = "key"
 	// assetDataValue is the single asset data value of the render specs.
@@ -46,7 +49,11 @@ func renderProfile() *aiv1alpha1.InferenceRuntimeProfile {
 			Overrides: []aiv1alpha1.Override{
 				{Name: overridePrefillReplicas, Type: aiv1alpha1.OverrideTypeInteger, Default: &apiextensionsv1.JSON{Raw: []byte("1")}},
 				{Name: overrideMode, Type: aiv1alpha1.OverrideTypeString, Default: &apiextensionsv1.JSON{Raw: []byte(`"pd"`)}},
+				{Name: overrideReplicaPlacement, Type: aiv1alpha1.OverrideTypeString, Default: &apiextensionsv1.JSON{Raw: []byte(`"preferred"`)}},
 			},
+			// The templated declaration the shipped bundles use, so the fixture
+			// exercises a policy that comes from an override rather than a literal.
+			PodAntiAffinity: &aiv1alpha1.PodAntiAffinity{Policy: "{{ overrides.replicaPlacement }}", TopologyKey: "kubernetes.io/hostname"},
 			Roles: []aiv1alpha1.Role{
 				{
 					Name:     "router",
@@ -100,7 +107,8 @@ var _ = Describe("Render", func() {
 	It("renders all variable namespaces and resolves workload structure", func() {
 		res := Render(renderISVC(), renderProfile(), renderModel(), map[string]map[string]string{bootstrapAsset: {assetDataKey: assetDataValue}})
 		Expect(res.Errors).To(BeEmpty())
-		Expect(res.Overrides).To(Equal(map[string]string{overridePrefillReplicas: "3", overrideMode: "pd"}))
+		Expect(res.Overrides).To(Equal(map[string]string{overridePrefillReplicas: "3", overrideMode: "pd", overrideReplicaPlacement: "preferred"}))
+		Expect(res.PodAntiAffinityPolicy).To(Equal("preferred"), "the profile default resolves through the templated declaration")
 
 		Expect(res.Roles).To(HaveLen(2))
 		router := res.Roles[0]
@@ -287,6 +295,61 @@ var _ = Describe("Render", func() {
 		res := Render(renderISVC(), p, renderModel(), nil)
 		Expect(res.Errors).To(BeEmpty())
 		Expect(res.Roles[0].Replicas).To(Equal(int64(1)))
+	})
+
+	// userPlacement sets the user's value for the replicaPlacement override.
+	userPlacement := func(v string) func(*aiv1alpha1.InferenceRuntimeProfile, *aiv1alpha1.InferenceService) {
+		return func(_ *aiv1alpha1.InferenceRuntimeProfile, isvc *aiv1alpha1.InferenceService) {
+			isvc.Spec.Overrides[overrideReplicaPlacement] = apiextensionsv1.JSON{Raw: []byte(strconv.Quote(v))}
+		}
+	}
+	// dropUserPlacement unsets it, so the profile's default applies.
+	dropUserPlacement := func(_ *aiv1alpha1.InferenceRuntimeProfile, isvc *aiv1alpha1.InferenceService) {
+		delete(isvc.Spec.Overrides, overrideReplicaPlacement)
+	}
+	// policyTemplate writes a raw policy template in place of the fixture's.
+	policyTemplate := func(tmpl string) func(*aiv1alpha1.InferenceRuntimeProfile, *aiv1alpha1.InferenceService) {
+		return func(p *aiv1alpha1.InferenceRuntimeProfile, _ *aiv1alpha1.InferenceService) {
+			p.Spec.PodAntiAffinity.Policy = aiv1alpha1.PodAntiAffinityPolicy(tmpl)
+		}
+	}
+
+	// noError is the wantReason of the entries that render without an error.
+	noError := ErrorReason("")
+
+	DescribeTable("resolves the podAntiAffinity policy",
+		func(mutate func(*aiv1alpha1.InferenceRuntimeProfile, *aiv1alpha1.InferenceService), wantPolicy string, wantReason ErrorReason) {
+			p := renderProfile()
+			isvc := renderISVC()
+			mutate(p, isvc)
+			res := Render(isvc, p, renderModel(), nil)
+			if wantReason == noError {
+				Expect(res.Errors).To(BeEmpty())
+				Expect(res.PodAntiAffinityPolicy).To(Equal(wantPolicy))
+				return
+			}
+			Expect(res.Errors).To(HaveLen(1))
+			Expect(res.Errors[0].Reason).To(Equal(wantReason))
+			Expect(res.PodAntiAffinityPolicy).To(BeEmpty(), "a policy that does not resolve is no policy, never a half-resolved one")
+		},
+		Entry("the user's value wins over the default", userPlacement("preferred"), "preferred", noError),
+		Entry("required", userPlacement("required"), "required", noError),
+		Entry("none", userPlacement("none"), "none", noError),
+		Entry("the profile default applies when the user sets nothing", dropUserPlacement, "preferred", noError),
+		Entry("an undeclared policy is required, as it was before the field existed", policyTemplate(""), "required", noError),
+		Entry("a literal policy needs no override", policyTemplate("preferred"), "preferred", noError),
+		Entry("surrounding whitespace is tolerated", policyTemplate("required\n"), "required", noError),
+		Entry("a token outside the three policies is rejected", policyTemplate("{{ overrides.mode }}"), "", ReasonInvalidOverride),
+		Entry("an undeclared override is rejected", policyTemplate("{{ overrides.undeclared }}"), "", ReasonUnknownPlaceholder),
+		Entry("a namespace outside overrides is rejected", policyTemplate("{{ service.name }}"), "", ReasonPhaseViolation),
+	)
+
+	It("reports no policy when the profile declares no podAntiAffinity", func() {
+		p := renderProfile()
+		p.Spec.PodAntiAffinity = nil
+		res := Render(renderISVC(), p, renderModel(), nil)
+		Expect(res.Errors).To(BeEmpty())
+		Expect(res.PodAntiAffinityPolicy).To(BeEmpty(), "the controller injects only what the profile declares")
 	})
 
 	It("fails with UnknownPlaceholder for unknown variables", func() {

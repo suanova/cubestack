@@ -114,37 +114,109 @@ var _ = Describe("buildPodSpec", func() {
 		Expect(c.ReadinessProbe.FailureThreshold).To(Equal(int32(30)))
 	})
 
-	It("attaches the service-wide podAntiAffinity term with the platform selector", func() {
+	// hostnameTerm is the term every policy derives from this topologyKey; what
+	// the policy selects is only where the term is written.
+	hostnameTerm := corev1.PodAffinityTerm{
+		LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"ai.cubestack.io/inference-service": testISVCName}},
+		TopologyKey:   "kubernetes.io/hostname",
+	}
+
+	DescribeTable("attaches the service-wide podAntiAffinity term the policy selects",
+		func(policy aiv1alpha1.PodAntiAffinityPolicy, wantRequired []corev1.PodAffinityTerm, wantPreferred []corev1.WeightedPodAffinityTerm) {
+			spec := &corev1.PodSpec{}
+			attachServiceAntiAffinity(spec, testISVCName, "kubernetes.io/hostname", policy)
+			Expect(spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution).To(Equal(wantRequired))
+			Expect(spec.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution).To(Equal(wantPreferred))
+		},
+		Entry("required writes the hard term", aiv1alpha1.PodAntiAffinityPolicyRequired,
+			[]corev1.PodAffinityTerm{hostnameTerm}, nil),
+		Entry("an unset policy is required, as it was before the policy existed", aiv1alpha1.PodAntiAffinityPolicy(""),
+			[]corev1.PodAffinityTerm{hostnameTerm}, nil),
+		Entry("preferred writes the same term at the maximum scheduler weight", aiv1alpha1.PodAntiAffinityPolicyPreferred,
+			nil, []corev1.WeightedPodAffinityTerm{{Weight: antiAffinityPreferredWeight, PodAffinityTerm: hostnameTerm}}),
+	)
+
+	It("injects no anti-affinity at all when the policy is none", func() {
+		// Not merely an empty term list: none must not allocate Affinity either,
+		// so the pod spec stays equal to one written without any anti-affinity.
 		spec := &corev1.PodSpec{}
-		attachServiceAntiAffinity(spec, testISVCName, "kubernetes.io/hostname")
-		Expect(spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution).To(Equal([]corev1.PodAffinityTerm{{
-			LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"ai.cubestack.io/inference-service": testISVCName}},
-			TopologyKey:   "kubernetes.io/hostname",
-		}}))
+		attachServiceAntiAffinity(spec, testISVCName, "kubernetes.io/hostname", aiv1alpha1.PodAntiAffinityPolicyNone)
+		Expect(spec.Affinity).To(BeNil())
 	})
 
-	It("propagates the profile-level podAntiAffinity to every role workload", func() {
-		// The declaration lives once at profile scope; desiredWorkload must put
-		// the identical term on every role's pod spec — a role without the term
-		// could co-locate with a constrained role, breaking the mutual guarantee.
+	It("keeps a role's model node affinity when the policy is none", func() {
+		// A multi-model role carries a nodeAffinity of its own; that constraint is
+		// independent of the service-wide spread and has to survive.
+		modelAffinity := &corev1.NodeAffinity{}
+		spec := &corev1.PodSpec{Affinity: &corev1.Affinity{NodeAffinity: modelAffinity}}
+		attachServiceAntiAffinity(spec, testISVCName, "kubernetes.io/hostname", aiv1alpha1.PodAntiAffinityPolicyNone)
+		Expect(spec.Affinity.NodeAffinity).To(BeIdenticalTo(modelAffinity))
+		Expect(spec.Affinity.PodAntiAffinity).To(BeNil())
+	})
+
+	// roleWorkloads builds both role workloads of a profile that declares the
+	// given rendered placement policy, in role order.
+	roleWorkloads := func(policy aiv1alpha1.PodAntiAffinityPolicy) []*appsv1.Deployment {
 		r := &InferenceServiceReconciler{Scheme: testScheme}
 		profile := &aiv1alpha1.InferenceRuntimeProfile{Spec: aiv1alpha1.InferenceRuntimeProfileSpec{
 			PodAntiAffinity: &aiv1alpha1.PodAntiAffinity{TopologyKey: "topology.kubernetes.io/zone"},
 			Roles: []aiv1alpha1.Role{
 				{Name: testApplyRouterRole, Workload: aiv1alpha1.Workload{Kind: aiv1alpha1.WorkloadKindDeployment}},
-				{Name: "prefill", Workload: aiv1alpha1.Workload{Kind: aiv1alpha1.WorkloadKindDeployment}},
+				{Name: testApplyPrefillRole, Workload: aiv1alpha1.Workload{Kind: aiv1alpha1.WorkloadKindDeployment}},
 			},
 		}}
 		isvc := &aiv1alpha1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: testISVCName, Namespace: testNamespace}}
-		wantTerm := corev1.PodAffinityTerm{
-			LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"ai.cubestack.io/inference-service": testISVCName}},
-			TopologyKey:   "topology.kubernetes.io/zone",
-		}
+		rendered := &renderer.Result{PodAntiAffinityPolicy: string(policy)}
+		deps := make([]*appsv1.Deployment, 0, len(profile.Spec.Roles))
 		for _, role := range profile.Spec.Roles {
 			rr := &renderer.RenderedRole{Name: role.Name, Replicas: 1, PodTemplate: aiv1alpha1.PodTemplate{Image: testEngineImage}}
-			obj := r.desiredWorkload(isvc, profile, &role, rr, &renderer.Result{}, modelHostPath())
-			dep := obj.(*appsv1.Deployment)
-			Expect(dep.Spec.Template.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution).To(Equal([]corev1.PodAffinityTerm{wantTerm}))
+			obj := r.desiredWorkload(isvc, profile, &role, rr, rendered, modelHostPath())
+			deps = append(deps, obj.(*appsv1.Deployment))
+		}
+		return deps
+	}
+
+	zoneTerm := corev1.PodAffinityTerm{
+		LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"ai.cubestack.io/inference-service": testISVCName}},
+		TopologyKey:   "topology.kubernetes.io/zone",
+	}
+
+	DescribeTable("propagates the profile-level podAntiAffinity to every role workload",
+		func(policy aiv1alpha1.PodAntiAffinityPolicy, wantRequired []corev1.PodAffinityTerm, wantPreferred []corev1.WeightedPodAffinityTerm) {
+			// The declaration lives once at profile scope; desiredWorkload must put
+			// the identical term on every role's pod spec — a role without the term
+			// could co-locate with a constrained role and the spread would not hold.
+			deps := roleWorkloads(policy)
+			Expect(deps).To(HaveLen(2))
+			for _, dep := range deps {
+				Expect(dep.Spec.Template.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution).To(Equal(wantRequired))
+				Expect(dep.Spec.Template.Spec.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution).To(Equal(wantPreferred))
+			}
+		},
+		Entry("required", aiv1alpha1.PodAntiAffinityPolicyRequired, []corev1.PodAffinityTerm{zoneTerm}, nil),
+		Entry("preferred", aiv1alpha1.PodAntiAffinityPolicyPreferred, nil,
+			[]corev1.WeightedPodAffinityTerm{{Weight: antiAffinityPreferredWeight, PodAffinityTerm: zoneTerm}}),
+	)
+
+	It("leaves every role workload without affinity when the policy is none", func() {
+		deps := roleWorkloads(aiv1alpha1.PodAntiAffinityPolicyNone)
+		Expect(deps).To(HaveLen(2))
+		for _, dep := range deps {
+			Expect(dep.Spec.Template.Spec.Affinity).To(BeNil())
+		}
+	})
+
+	It("rolls the workload when the policy changes", func() {
+		// The policy is written to the pod spec before templateHashAnnotations
+		// hashes it, so flipping it changes the pod hash and rolls the workload
+		// with no rollout plumbing of its own.
+		required := roleWorkloads(aiv1alpha1.PodAntiAffinityPolicyRequired)
+		none := roleWorkloads(aiv1alpha1.PodAntiAffinityPolicyNone)
+		Expect(none).To(HaveLen(len(required)))
+		for i := range required {
+			requiredHash := required[i].Spec.Template.Annotations[templateHashAnnotationKey]
+			Expect(requiredHash).NotTo(BeEmpty())
+			Expect(none[i].Spec.Template.Annotations[templateHashAnnotationKey]).NotTo(Equal(requiredHash))
 		}
 	})
 

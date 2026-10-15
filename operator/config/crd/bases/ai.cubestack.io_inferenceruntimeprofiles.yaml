@@ -230,15 +230,30 @@ spec:
                 type: array
               podAntiAffinity:
                 description: |-
-                  PodAntiAffinity spreads this service's pods (of every role) across the
-                  given topology domains: no two pods of the service may share a domain.
-                  The label selector is fixed by the platform to the service itself.
+                  PodAntiAffinity places this service's pods (of every role) across the
+                  given topology domains, with the strength selected by Policy: a required
+                  policy keeps no two pods of the service on one domain, a preferred policy
+                  spreads them only where the domains allow it, and a none policy places
+                  them freely. The label selector is fixed by the platform to the service
+                  itself.
                 properties:
+                  policy:
+                    description: |-
+                      Policy is the placement strength of the term: required (the default when
+                      unset, and the behaviour of every profile written before this field
+                      existed) is a hard constraint, preferred is a soft one, and none injects
+                      no term. It may be a template referencing overrides, e.g.
+                      '{{ overrides.replicaPlacement }}'; the rendered token is validated when
+                      the service is rendered, and a value that is not one of the three fails
+                      the render with InvalidOverride rather than falling back to required.
+                    pattern: ^(required|preferred|none|[{]{2}[^{}]*[}]{2})$
+                    type: string
                   topologyKey:
                     description: |-
                       TopologyKey is the domain across which the service's pods must be
                       spread, e.g. kubernetes.io/hostname. Must be a valid Kubernetes label
                       key: an optional lowercase DNS prefix followed by a lowercase name.
+                      Required even when Policy is none, where it is simply unused.
                     pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?([.][a-z0-9]([-a-z0-9]*[a-z0-9])?)*[/])?[a-z0-9]([-a-z0-9_.]*[a-z0-9])?$
                     type: string
                 required:

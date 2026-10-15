@@ -417,14 +417,53 @@ type EmptyDirVolume struct {
 	SizeLimit *resource.Quantity `json:"sizeLimit,omitempty"`
 }
 
-// PodAntiAffinity is the supported pod anti-affinity subset: one required
-// term spreading this service's pods across the given topology domains.
-// Declaring it gives the scheduler a hard constraint: no two pods carrying
-// the service label may share a topology domain.
+// PodAntiAffinityPolicy is the placement strength of the service-wide
+// podAntiAffinity term. The values byte-match the tokens a profile is expected
+// to carry in its replicaPlacement override, so the field can be templated from
+// it verbatim: policy: '{{ overrides.replicaPlacement }}'.
+type PodAntiAffinityPolicy string
+
+const (
+	// PodAntiAffinityPolicyRequired is the hard spread: no two pods of the
+	// service may share the topology domain
+	// (requiredDuringSchedulingIgnoredDuringExecution). It is what an unset
+	// policy means, so a profile that predates this field keeps its hard
+	// constraint.
+	PodAntiAffinityPolicyRequired PodAntiAffinityPolicy = "required"
+
+	// PodAntiAffinityPolicyPreferred is the soft spread: the scheduler is asked
+	// to spread the service's pods across the topology domains but may co-locate
+	// them when there are too few (preferredDuringSchedulingIgnoredDuringExecution).
+	PodAntiAffinityPolicyPreferred PodAntiAffinityPolicy = "preferred"
+
+	// PodAntiAffinityPolicyNone injects no anti-affinity term at all: the
+	// service's pods may share a topology domain.
+	PodAntiAffinityPolicyNone PodAntiAffinityPolicy = "none"
+)
+
+// PodAntiAffinity is the supported pod anti-affinity subset: one term spreading
+// this service's pods across the given topology domains, with the placement
+// strength selected by Policy. A required Policy gives the scheduler a hard
+// constraint: no two pods carrying the service label may share a topology
+// domain. A preferred Policy asks for the same spread but lets the scheduler
+// co-locate the pods when the domains are too few. A none Policy injects no
+// term at all.
 type PodAntiAffinity struct {
+	// Policy is the placement strength of the term: required (the default when
+	// unset, and the behaviour of every profile written before this field
+	// existed) is a hard constraint, preferred is a soft one, and none injects
+	// no term. It may be a template referencing overrides, e.g.
+	// '{{ overrides.replicaPlacement }}'; the rendered token is validated when
+	// the service is rendered, and a value that is not one of the three fails
+	// the render with InvalidOverride rather than falling back to required.
+	// +optional
+	// +kubebuilder:validation:Pattern="^(required|preferred|none|[{]{2}[^{}]*[}]{2})$"
+	Policy PodAntiAffinityPolicy `json:"policy,omitempty"`
+
 	// TopologyKey is the domain across which the service's pods must be
 	// spread, e.g. kubernetes.io/hostname. Must be a valid Kubernetes label
 	// key: an optional lowercase DNS prefix followed by a lowercase name.
+	// Required even when Policy is none, where it is simply unused.
 	// +kubebuilder:validation:Pattern="^([a-z0-9]([-a-z0-9]*[a-z0-9])?([.][a-z0-9]([-a-z0-9]*[a-z0-9])?)*[/])?[a-z0-9]([-a-z0-9_.]*[a-z0-9])?$"
 	TopologyKey string `json:"topologyKey"`
 }
@@ -641,9 +680,12 @@ type InferenceRuntimeProfileSpec struct {
 	// Endpoint selects the role serving as the service endpoint.
 	Endpoint EndpointSpec `json:"endpoint"`
 
-	// PodAntiAffinity spreads this service's pods (of every role) across the
-	// given topology domains: no two pods of the service may share a domain.
-	// The label selector is fixed by the platform to the service itself.
+	// PodAntiAffinity places this service's pods (of every role) across the
+	// given topology domains, with the strength selected by Policy: a required
+	// policy keeps no two pods of the service on one domain, a preferred policy
+	// spreads them only where the domains allow it, and a none policy places
+	// them freely. The label selector is fixed by the platform to the service
+	// itself.
 	// +optional
 	PodAntiAffinity *PodAntiAffinity `json:"podAntiAffinity,omitempty"`
 

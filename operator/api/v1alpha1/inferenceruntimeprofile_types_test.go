@@ -47,6 +47,10 @@ const (
 	testIBHostPath       = "/dev/infiniband"
 	testModelMountPath   = "/workspace/model"
 	testRDMAResourceName = "rdma/ib_shared_devices"
+
+	// testHostnameTopologyKey is the topology domain the podAntiAffinity specs
+	// spread across.
+	testHostnameTopologyKey = "kubernetes.io/hostname"
 )
 
 func validInferenceRuntimeProfile(name string) *InferenceRuntimeProfile {
@@ -457,6 +461,21 @@ var _ = Describe("InferenceRuntimeProfile", func() {
 					s.PodAntiAffinity = &PodAntiAffinity{TopologyKey: "not a label key"}
 				},
 				"spec.podAntiAffinity.topologyKey"),
+			Entry("podAntiAffinity with an unsupported policy",
+				"irp-invalid-antiaffinity-policy",
+				func(s *InferenceRuntimeProfileSpec) {
+					s.PodAntiAffinity = &PodAntiAffinity{Policy: "spread", TopologyKey: testHostnameTopologyKey}
+				},
+				"spec.podAntiAffinity.policy"),
+			Entry("podAntiAffinity with more than one policy placeholder",
+				"irp-invalid-antiaffinity-policy-template",
+				func(s *InferenceRuntimeProfileSpec) {
+					s.PodAntiAffinity = &PodAntiAffinity{
+						Policy:      "{{ overrides.replicaPlacement }} {{ overrides.other }}",
+						TopologyKey: testHostnameTopologyKey,
+					}
+				},
+				"spec.podAntiAffinity.policy"),
 			Entry("probe without httpGet or tcpSocket",
 				"irp-invalid-probe-no-action",
 				func(s *InferenceRuntimeProfileSpec) {

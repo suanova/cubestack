@@ -181,25 +181,56 @@ func buildPodSpec(pt aiv1alpha1.PodTemplate, isvcName string, model *aiv1alpha1.
 	return spec
 }
 
+// antiAffinityPreferredWeight is the scheduler weight of a preferred
+// anti-affinity term: the maximum (100), so a soft spread pushes the scheduler
+// as hard as a required term whenever the topology domains allow it, and only
+// yields — scheduling the pods together rather than leaving them Pending — when
+// they do not.
+const antiAffinityPreferredWeight int32 = 100
+
 // attachServiceAntiAffinity adds the service-wide anti-affinity term to one
-// role's pod spec (design §3.2 podAntiAffinity): no two pods of this service
-// may share the declared topology domain. The label selector is fixed by the
-// platform to the service label — it cannot be customized. desiredWorkload
-// calls it for every role from the single profile-level declaration, so all
-// role pods carry the same term and the guarantee is mutual.
-func attachServiceAntiAffinity(spec *corev1.PodSpec, isvcName, topologyKey string) {
+// role's pod spec (design §3.2 podAntiAffinity), with the strength the profile's
+// rendered policy selects: required keeps no two pods of this service on one
+// topology domain, preferred asks for the same spread but permits co-location
+// when the domains are too few, and none adds no term at all. An empty policy is
+// required, the behaviour of every profile written before the policy existed.
+// The switch is otherwise total: the renderer fails a policy that is none of the
+// three, so only these values reach here.
+// The label selector is fixed by the platform to the service label — it cannot
+// be customized. desiredWorkload calls it for every role from the single
+// profile-level declaration, so every role pod is treated alike: no role is left
+// free to co-locate while another is constrained.
+func attachServiceAntiAffinity(spec *corev1.PodSpec, isvcName, topologyKey string, policy aiv1alpha1.PodAntiAffinityPolicy) {
+	if policy == "" {
+		policy = aiv1alpha1.PodAntiAffinityPolicyRequired
+	}
+	// none injects nothing, and returns before touching spec.Affinity so it does
+	// not leave an empty Affinity/PodAntiAffinity behind. Any node affinity a
+	// role carries (the multi-model constraint above) is a separate, independent
+	// constraint and survives.
+	if policy == aiv1alpha1.PodAntiAffinityPolicyNone {
+		return
+	}
+	term := corev1.PodAffinityTerm{
+		LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{inferenceServiceLabelKey: isvcName}},
+		TopologyKey:   topologyKey,
+	}
 	if spec.Affinity == nil {
 		spec.Affinity = &corev1.Affinity{}
 	}
 	if spec.Affinity.PodAntiAffinity == nil {
 		spec.Affinity.PodAntiAffinity = &corev1.PodAntiAffinity{}
 	}
+	if policy == aiv1alpha1.PodAntiAffinityPolicyPreferred {
+		spec.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution = append(
+			spec.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution,
+			corev1.WeightedPodAffinityTerm{Weight: antiAffinityPreferredWeight, PodAffinityTerm: term},
+		)
+		return
+	}
 	spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution = append(
 		spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution,
-		corev1.PodAffinityTerm{
-			LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{inferenceServiceLabelKey: isvcName}},
-			TopologyKey:   topologyKey,
-		},
+		term,
 	)
 }
 

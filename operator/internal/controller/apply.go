@@ -373,10 +373,11 @@ func (r *InferenceServiceReconciler) desiredWorkload(isvc *aiv1alpha1.InferenceS
 	// added before hashing so the volumes are part of the pod hash.
 	addMountAssetVolumes(&podSpec, isvc.Name, profile.Spec.Assets)
 	// The service-wide podAntiAffinity (design §3.2) is a single profile-level
-	// declaration propagated to every role, so each role pod carries the same
-	// term and no role can co-locate with another in the topology domain.
-	if profile.Spec.PodAntiAffinity != nil {
-		attachServiceAntiAffinity(&podSpec, isvc.Name, profile.Spec.PodAntiAffinity.TopologyKey)
+	// declaration propagated to every role, so no role is placed differently
+	// from another. The strength — a hard spread, a soft one, or no term at all
+	// — is the profile's rendered policy, which an override can drive.
+	if aa := profile.Spec.PodAntiAffinity; aa != nil {
+		attachServiceAntiAffinity(&podSpec, isvc.Name, aa.TopologyKey, aiv1alpha1.PodAntiAffinityPolicy(rendered.PodAntiAffinityPolicy))
 	}
 	mountsModel := len(rr.PodTemplate.Mounts) > 0
 	// Hash the labels that are actually written to the pod template: a
