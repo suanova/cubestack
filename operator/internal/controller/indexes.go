@@ -29,11 +29,16 @@ const (
 	credentialsRefIndexKey = "storage.s3.credentialsRef.name"
 
 	// publishIndexKey is the cache index field for InferenceService.spec.route.publish,
-	// holding the single key "true" for services that publish a catalog rule. It
-	// backs the shared catalog route watch: an edit to the platform's shared
-	// route re-enqueues exactly the published services, whose rules must be
-	// reconciled against the edited object.
+	// holding the single key publishIndexValue for services that publish a
+	// catalog rule. It backs the shared catalog route watch: an edit to the
+	// platform's shared route re-enqueues exactly the published services, whose
+	// rules must be reconciled against the edited object.
 	publishIndexKey = "spec.route.publish"
+
+	// publishIndexValue is the boolean-true string the publish index holds for a
+	// published service (the value paired with publishIndexKey). The same
+	// boolean-true marker is reused on headless Services, so it is shared.
+	publishIndexValue = "true"
 )
 
 var (
@@ -73,7 +78,7 @@ func registerAllIndexes(mgr ctrl.Manager) error {
 		func(o client.Object) []string {
 			isvc := o.(*aiv1alpha1.InferenceService)
 			if isvc.Spec.Route != nil && isvc.Spec.Route.Publish {
-				return []string{"true"}
+				return []string{publishIndexValue}
 			}
 			return nil
 		}); err != nil {

@@ -151,44 +151,16 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, err
 	}
 
-	// A service being deleted must shed its rule from the platform's shared
-	// catalog route before it goes: the rule lives in another namespace, is not
-	// owned by the service, and would otherwise be stranded. The other catalog
-	// objects cascade through their ownerRef, so only the shared rule needs the
-	// finalizer. The guard is on the finalizer's presence, not on spec.route —
-	// a service that was published and later had publish flipped off still
-	// carries a rule to remove, and the finalizer is only ever added while the
-	// service is being reconciled as published.
+	// A service being deleted sheds its rule from the platform's shared catalog
+	// route (and the finalizer that guards that removal) before it goes; a
+	// published service that is not being deleted makes sure it carries that
+	// finalizer. The rule lives in another namespace and is not owned by the
+	// service, so the finalizer is what lets the service wait for its removal.
 	if isvc.DeletionTimestamp != nil {
-		if !slices.Contains(isvc.Finalizers, inferenceServiceCatalogFinalizer) {
-			return ctrl.Result{}, nil
-		}
-		if err := r.removeCatalogRule(ctx, &isvc); err != nil {
-			return ctrl.Result{}, err
-		}
-		// Re-fetch for a fresh resourceVersion before mutating finalizers: any
-		// status write during the delete reconcile bumped it, so a stale Update
-		// would 409-conflict and force a retry reconcile.
-		fresh := &aiv1alpha1.InferenceService{}
-		if err := r.Get(ctx, req.NamespacedName, fresh); err != nil {
-			return ctrl.Result{}, client.IgnoreNotFound(err)
-		}
-		fresh.Finalizers = slices.DeleteFunc(fresh.Finalizers, func(f string) bool {
-			return f == inferenceServiceCatalogFinalizer
-		})
-		return ctrl.Result{}, r.Update(ctx, fresh)
+		return ctrl.Result{}, r.finalizeCatalogRule(ctx, req, &isvc)
 	}
-
-	if !slices.Contains(isvc.Finalizers, inferenceServiceCatalogFinalizer) && isvc.Spec.Route != nil && isvc.Spec.Route.Publish {
-		// Patch, not Update: Update sends the whole object and carries the
-		// resourceVersion we read, so any write landing in between 409-conflicts
-		// and forces a retry reconcile. A merge patch has no such precondition,
-		// and the finalizer is the only field this call means to change.
-		patch := client.MergeFrom(isvc.DeepCopy())
-		isvc.Finalizers = append(isvc.Finalizers, inferenceServiceCatalogFinalizer)
-		if err := r.Patch(ctx, &isvc, patch); err != nil {
-			return ctrl.Result{}, err
-		}
+	if err := r.ensureCatalogFinalizer(ctx, &isvc); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	resolved, err := r.resolve(ctx, &isvc)
@@ -206,25 +178,8 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	desired.Status.Roles = nil
 	desired.Status.Endpoint = nil
 	setResolvedCondition(&desired.Status.Conditions, resolved)
-	if resolved.profile != nil {
-		desired.Status.Profile = &aiv1alpha1.ProfileStatus{Name: resolved.profile.Name}
-		// Keep the last adopted revision of the same profile: ProfileDrifted
-		// compares the current hash against it while changed profile content is
-		// not yet adopted. A different profile has no baseline revision.
-		if isvc.Status.Profile != nil && isvc.Status.Profile.Name == resolved.profile.Name {
-			desired.Status.Profile.Revision = isvc.Status.Profile.Revision
-		}
-	} else if isvc.Status.Profile != nil && isvc.Status.Profile.Name != isvc.Spec.ProfileRef {
-		// A switched reference must not linger, but a same-name reference
-		// keeps its echo — including the adopted revision, the drift baseline
-		// that must survive the profile's deletion and recreation.
-		desired.Status.Profile = nil
-	}
-	if resolved.model != nil {
-		desired.Status.Model = &aiv1alpha1.ModelStatus{Name: resolved.model.Spec.Model, Version: resolved.model.Spec.Version}
-	} else {
-		desired.Status.Model = nil
-	}
+	setProfileEcho(desired, &isvc, resolved.profile)
+	setModelEcho(desired, resolved.model)
 
 	if !resolved.resolved() {
 		// A stale Rendered from a previous spec must not persist, and the
@@ -364,6 +319,82 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	return ctrl.Result{}, r.updateStatusIfChanged(ctx, &isvc, desired)
 }
 
+// finalizeCatalogRule removes the catalog finalizer from a service that is
+// being deleted, after shedding its rule from the platform's shared catalog
+// route. The rule lives in another namespace and is not owned by the service,
+// so it is removed explicitly here; the other catalog objects cascade through
+// their ownerRef. The guard is on the finalizer's presence, not on spec.route —
+// a service that was published and later had publish flipped off still carries
+// a rule to remove, and the finalizer is only ever added while the service is
+// being reconciled as published. A service without the finalizer has nothing to
+// shed, so deletion proceeds immediately.
+func (r *InferenceServiceReconciler) finalizeCatalogRule(ctx context.Context, req ctrl.Request, isvc *aiv1alpha1.InferenceService) error {
+	if !slices.Contains(isvc.Finalizers, inferenceServiceCatalogFinalizer) {
+		return nil
+	}
+	if err := r.removeCatalogRule(ctx, isvc); err != nil {
+		return err
+	}
+	// Re-fetch for a fresh resourceVersion before mutating finalizers: any
+	// status write during the delete reconcile bumped it, so a stale Update
+	// would 409-conflict and force a retry reconcile.
+	fresh := &aiv1alpha1.InferenceService{}
+	if err := r.Get(ctx, req.NamespacedName, fresh); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	fresh.Finalizers = slices.DeleteFunc(fresh.Finalizers, func(f string) bool {
+		return f == inferenceServiceCatalogFinalizer
+	})
+	return r.Update(ctx, fresh)
+}
+
+// ensureCatalogFinalizer adds the catalog finalizer to a published service that
+// does not already carry it, so its rule survives the service's deletion until
+// it is shed. A service that is not published — or already carries the
+// finalizer — is left untouched: the finalizer is added only for the
+// publish=true state, and a missing one means nothing needs guarding.
+func (r *InferenceServiceReconciler) ensureCatalogFinalizer(ctx context.Context, isvc *aiv1alpha1.InferenceService) error {
+	if slices.Contains(isvc.Finalizers, inferenceServiceCatalogFinalizer) || isvc.Spec.Route == nil || !isvc.Spec.Route.Publish {
+		return nil
+	}
+	// Patch, not Update: Update sends the whole object and carries the
+	// resourceVersion we read, so any write landing in between 409-conflicts
+	// and forces a retry reconcile. A merge patch has no such precondition,
+	// and the finalizer is the only field this call means to change.
+	patch := client.MergeFrom(isvc.DeepCopy())
+	isvc.Finalizers = append(isvc.Finalizers, inferenceServiceCatalogFinalizer)
+	return r.Patch(ctx, isvc, patch)
+}
+
+// setProfileEcho fills the profile status echo from the resolved profile. A
+// resolved profile sets the echo, keeping the last adopted revision of the
+// same profile: ProfileDrifted compares the current hash against it while
+// changed profile content is not yet adopted, and a different profile has no
+// baseline revision. With no resolved profile a switched reference is cleared,
+// while a same-name reference keeps its echo — including the adopted revision,
+// the drift baseline that must survive the profile's deletion and recreation.
+func setProfileEcho(desired, isvc *aiv1alpha1.InferenceService, profile *aiv1alpha1.InferenceRuntimeProfile) {
+	if profile != nil {
+		desired.Status.Profile = &aiv1alpha1.ProfileStatus{Name: profile.Name}
+		if isvc.Status.Profile != nil && isvc.Status.Profile.Name == profile.Name {
+			desired.Status.Profile.Revision = isvc.Status.Profile.Revision
+		}
+		return
+	}
+	if isvc.Status.Profile != nil && isvc.Status.Profile.Name != isvc.Spec.ProfileRef {
+		desired.Status.Profile = nil
+	}
+}
+
+// setModelEcho fills the model status echo from the resolved model version.
+func setModelEcho(desired *aiv1alpha1.InferenceService, model *aiv1alpha1.ModelVersion) {
+	if model != nil {
+		desired.Status.Model = &aiv1alpha1.ModelStatus{Name: model.Spec.Model, Version: model.Spec.Version}
+		return
+	}
+	desired.Status.Model = nil
+}
+
 // updateStatusIfChanged writes the desired status only when it differs from
 // the observed one.
 func (r *InferenceServiceReconciler) updateStatusIfChanged(ctx context.Context, isvc *aiv1alpha1.InferenceService, desired *aiv1alpha1.InferenceService) error {
@@ -460,7 +491,7 @@ func (r *InferenceServiceReconciler) enqueueForSharedCatalogRoute(ctx context.Co
 	}
 	var reqs []reconcile.Request
 	var list aiv1alpha1.InferenceServiceList
-	if err := r.List(ctx, &list, client.MatchingFields{publishIndexKey: "true"}); err != nil {
+	if err := r.List(ctx, &list, client.MatchingFields{publishIndexKey: publishIndexValue}); err != nil {
 		return nil
 	}
 	for i := range list.Items {

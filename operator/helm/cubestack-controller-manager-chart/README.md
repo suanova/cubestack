@@ -334,18 +334,19 @@ Gateway API object, because the chart writes none:
   which is the convention but not necessarily where this platform put the
   Gateway, so the chart always renders it, under a `| default` guard — a release
   that rendered a bare flag is still pointed at `gateway.namespace`.
-- **Flags an empty value omits** — `name`, `catalogHostname`,
+- **Flags an empty value omits** — `name`, `catalogRoute`, `catalogHostname`,
   `dataplaneNamespace`. Omitting `catalogHostname` just leaves
   `status.endpoint.public` unset (display only, no longer a publish gate);
   omitting `name` is not a switch either (see the table) — leave `name` set.
-  `catalogRoute` is always rendered; publishing is on when it names a route the
-  platform has installed.
+  An emptied `catalogRoute` likewise falls back to the manager's own default,
+  `cubestack-ai-gateway`; publishing is on when it names a route the platform
+  has installed.
 
 | Key | Manager flag | Default | Notes |
 |---|---|---|---|
 | `gateway.name` | `--gateway-name` | `cubestack-gateway` | Names the platform's Gateway — the object the operator publishes through and attaches ListenerSets to. Leave it set. Empty = flag omitted, and the two controllers then disagree: publishing is off (`RouteReady=False`, `GatewayNotConfigured`), while the DevEnvironment controller falls back to the manager's own built-in name, `cubestack-gateway` — looked for in whatever namespace `gateway.namespace` gave it, since that flag renders either way. |
 | `gateway.namespace` | `--gateway-namespace` | `envoy-gateway-system` | Namespace of that Gateway object — **not** where its dataplane pods run (`dataplaneNamespace`). Always rendered. Must match where the platform created the Gateway; `envoy-gateway-system` is where Envoy Gateway and the `eg` class live, so it is the conventional home unless the Gateway was put elsewhere. |
-| `gateway.catalogRoute` | `--gateway-catalog-route` | `cubestack-ai-gateway` | Name of the platform's **pre-installed** shared `AIGatewayRoute` (in `gateway.namespace`) that published `InferenceService`s attach a rule to. The operator reads and edits a rule in this route but **never creates it**, so this must name the route the platform installs. A missing route degrades to `RouteReady=False`, `CatalogRouteNotFound`. Always rendered. |
+| `gateway.catalogRoute` | `--gateway-catalog-route` | `cubestack-ai-gateway` | Name of the platform's **pre-installed** shared `AIGatewayRoute` (in `gateway.namespace`) that published `InferenceService`s attach a rule to. The operator reads and edits a rule in this route but **never creates it**, so this must name the route the platform installs. A missing route degrades to `RouteReady=False`, `CatalogRouteNotFound`. Empty = flag omitted; the manager's own default, `cubestack-ai-gateway`, then applies. |
 | `gateway.catalogHostname` | `--gateway-catalog-hostname` | `""` | Empty = flag omitted. Display only: surfaced in `status.endpoint.public` so the Agent Router can advertise the catalog's host. It no longer gates publishing — publishing is on when the shared route and the platform Gateway are configured. |
 | `gateway.dataplaneNamespace` | `--gateway-dataplane-namespace` | `envoy-gateway-system` | Names the namespace the Gateway's dataplane pods run in. **Not** a publishing switch. Two things read it: environment pods admit ingress from that Gateway, and the controller looks up the dataplane Service there to learn which port each listener is reachable on. Empty = flag omitted: environments stay default-deny inbound, and endpoint addresses fall back to assuming the listener port is the reachable one — true of a LoadBalancer or ClusterIP dataplane, not of a NodePort one. |
 
@@ -389,10 +390,13 @@ upgrading.
 
 The kustomize deployment (`make deploy`) sets the same `--gateway-name` /
 `--gateway-namespace` args in `operator/config/manager/manager.yaml`, as
-literals rather than values: `cubestack-gateway` in `envoy-gateway-system`;
-`--gateway-catalog-hostname` and `--gateway-dataplane-namespace` are left to
-your overlay there, so a kustomize install keeps environment pods default-deny
-inbound and publishing off until a hostname is added. Like the chart, it creates
+literals rather than values: `cubestack-gateway` in `envoy-gateway-system`.
+`--gateway-catalog-route` is left to the manager's own default
+(`cubestack-ai-gateway`), so publishing is on as long as the platform installed
+the shared route; `--gateway-catalog-hostname` and `--gateway-dataplane-namespace`
+are left to your overlay there, so a kustomize install keeps environment pods
+default-deny inbound and surfaces no public address until a hostname is added.
+Like the chart, it creates
 no Gateway and no `ClientTrafficPolicy`: both are the platform's, and the
 reference shape is `operator/test/e2e/assets/gateway.yaml`.
 

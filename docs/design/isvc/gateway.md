@@ -236,8 +236,9 @@ spec:
 ### D5 配置面
 
 - 新增 operator flag `--gateway-catalog-route`（默认 `cubestack-ai-gateway`），helm values
-  `gateway.catalogRoute`，走现有 `gateway.*` 接线方式；**始终渲染**（它有平台约定默认值），必须与
-  平台预装的共享路由同名，否则 `CatalogRouteNotFound`。
+  `gateway.catalogRoute`，走现有 `gateway.*` 接线方式；空值省略该 flag，由 manager 自身默认
+  （`cubestack-ai-gateway`）兜底——两者同为平台约定值，必须与平台预装的共享路由同名，
+  否则 `CatalogRouteNotFound`。
 - `--gateway-catalog-hostname`（`gateway.catalogHostname`）降级为**展示项**：只决定
   `status.endpoint.public` 是否展示，空 = 不展示；不再门控发布。
 - 验证集群取值：`catalogRoute=cubestack-ai-gateway`（在 `envoy-gateway-system`）、

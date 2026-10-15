@@ -46,6 +46,11 @@ const testOverrideMode = "mode"
 // requires a non-empty value).
 const testModelRef = "model-ref"
 
+// testWatchProfile is the profileRef the watch-mapping specs use for their
+// owner-fixture services: a value distinct from the reconciled profile so the
+// specs can assert the watch fires on a reference rather than on the object.
+const testWatchProfile = "watch-prof"
+
 // testOverrideGroupSize is the override name the group-size spec appends to
 // validRenderProfile's declarations.
 const testOverrideGroupSize = "groupSize"

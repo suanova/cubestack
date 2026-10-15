@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -245,6 +246,14 @@ func catalogRuleEqual(a, b aigwv1beta1.AIGatewayRouteRule) bool {
 // service only ever touches its own rule, the retries converge. An unchanged
 // rule is left untouched: updating an identical object would bump the
 // resourceVersion and re-enqueue through the shared-route watch in a loop.
+//
+// The model-name uniqueness and rule-capacity checks run inside the retry
+// closure against the freshly read route, not against a snapshot taken earlier
+// in checkRoute: two services publishing at once with the same model name
+// would otherwise both pass a pre-check and the conflict retry would append
+// both rules, and the same race could push the route past its cap. When a
+// check fails the closure returns the matching sentinel so the caller maps it
+// to the condition reason instead of a hard error.
 func (r *InferenceServiceReconciler) upsertCatalogRule(ctx context.Context, isvc *aiv1alpha1.InferenceService, modelName string) error {
 	// No shared route configured: nothing to write, and building the addressing
 	// object with an empty name would reject every request. checkRoute reaches
@@ -259,6 +268,14 @@ func (r *InferenceServiceReconciler) upsertCatalogRule(ctx context.Context, isvc
 		if err := r.Get(ctx, client.ObjectKeyFromObject(route), route); err != nil {
 			return err
 		}
+		// Re-validate against the current route on every attempt: the checks are
+		// only meaningful against the state we are about to write into.
+		if r.catalogModelNameTaken(route, isvc) {
+			return errCatalogModelNameTaken
+		}
+		if findCatalogRuleIndex(route.Spec.Rules, isvc) < 0 && len(route.Spec.Rules) >= catalogRuleMax {
+			return errCatalogRouteFull
+		}
 		idx := findCatalogRuleIndex(route.Spec.Rules, isvc)
 		if idx >= 0 {
 			if catalogRuleEqual(route.Spec.Rules[idx], desired) {
@@ -271,6 +288,16 @@ func (r *InferenceServiceReconciler) upsertCatalogRule(ctx context.Context, isvc
 		return r.Update(ctx, route)
 	})
 }
+
+// Sentinel errors from the shared-route write's optimistic retry, mapped to the
+// matching RouteReady reason by checkRoute. They are deliberately not API
+// errors: RetryOnConflict must not treat them as a 409 to back off and
+// re-run, and the caller must report them as a stable condition rather than
+// fail the reconcile.
+var (
+	errCatalogModelNameTaken = errors.New("catalog model name is claimed by another rule")
+	errCatalogRouteFull      = errors.New("shared catalog route is at its rule cap")
+)
 
 // removeCatalogRule deletes this service's rule from the shared catalog route.
 // A missing route or an absent rule is a no-op, so it is safe to call on every
@@ -381,7 +408,19 @@ func (r *InferenceServiceReconciler) checkRoute(ctx context.Context, isvc *aiv1a
 	if err := applyOwned(ctx, r.Client, isvc, grant, referenceGrantNeedsUpdate); err != nil {
 		return routeErr(check, err)
 	}
+	// The optimistic retry re-validates the model name and the rule cap against
+	// the route's current state and reports a conflict or a full route through
+	// a sentinel rather than a hard error: a lost race is a stable condition for
+	// this service (first-come-keeps / at capacity), not a failure to requeue.
 	if err := r.upsertCatalogRule(ctx, isvc, modelName); err != nil {
+		if errors.Is(err, errCatalogModelNameTaken) {
+			check.Reason = RouteModelNameConflict
+			return check, nil
+		}
+		if errors.Is(err, errCatalogRouteFull) {
+			check.Reason = RouteCatalogFull
+			return check, nil
+		}
 		return routeErr(check, err)
 	}
 	// Re-fetch after the writes: the acceptance check must not run against a

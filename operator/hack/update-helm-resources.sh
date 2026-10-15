@@ -78,11 +78,11 @@ sed -i 's|namespace: cubestack-system|namespace: {{ .Release.Namespace }}|g' "${
 # Rewrite the manager's platform-Gateway args into values-driven Go template
 # conditionals: --gateway-name (a literal from the config/manager base) becomes
 # a {{- with .Values.gateway.name }} block, and the flags deliberately absent
-# from the kustomize base, see config/manager/manager.yaml — the catalog
-# hostname and the dataplane namespace — are injected as
+# from the kustomize base, see config/manager/manager.yaml — the shared catalog
+# route, the catalog hostname and the dataplane namespace — are injected as
 # {{- if/with .Values.gateway.* }} blocks.
 # Each flag renders only while its value is non-empty, so an empty name
-# reproduces the unconfigured state (publishing off).
+# reproduces the unconfigured state (no gateway to publish to).
 #
 # --gateway-namespace is the exception: it renders unconditionally, from
 # .Values.gateway.namespace, and with `| default` rather than a {{- with }}
@@ -117,6 +117,9 @@ awk '
   print ind "- --gateway-name={{ . }}"
   print ind "{{- end }}"
   print ind "- --gateway-namespace={{ .Values.gateway.namespace | default \"envoy-gateway-system\" }}"
+  print ind "{{- with .Values.gateway.catalogRoute }}"
+  print ind "- --gateway-catalog-route={{ . }}"
+  print ind "{{- end }}"
   print ind "{{- with .Values.gateway.dataplaneNamespace }}"
   print ind "- --gateway-dataplane-namespace={{ . }}"
   print ind "{{- end }}"
@@ -204,12 +207,15 @@ rm -f "${OUT}"
 # --- 3. Validate the values-driven chart content (manager gateway args, absence of the platform's objects) ---
 # The manager's platform-Gateway args are injected into the deployment
 # template from .Values.gateway (section 2 rewrite). Assert the rendered args
-# for every value combination that changes behavior: defaults pass name and
-# the dataplane namespace but no catalog hostname; an explicit hostname is
-# passed verbatim; an emptied name or dataplane namespace drops its flag; and
-# emptying those reproduces the publish-off state — no --gateway-name, no
-# --gateway-catalog-hostname, no --gateway-dataplane-namespace (RouteReady=False,
-# GatewayNotConfigured, and environments left default-deny inbound). The
+# for every value combination that changes behavior: defaults pass name, the
+# shared catalog route and the dataplane namespace but no catalog hostname (the
+# hostname is display-only — publishing depends on the name and the shared
+# route, not on it); an explicit route or hostname is passed verbatim; an
+# emptied name, route or dataplane namespace drops its flag; and emptying those
+# reproduces the unconfigured state — no --gateway-name, no
+# --gateway-catalog-route, no --gateway-catalog-hostname, no
+# --gateway-dataplane-namespace (RouteReady=False, GatewayNotConfigured, and
+# environments left default-deny inbound). The
 # namespace is not in that set: it always renders, from .Values.gateway.namespace,
 # because an omitted flag would leave the manager's own envoy-gateway-system
 # default in force. A silent no-op here would ship a chart whose publish feature
@@ -240,10 +246,18 @@ expect_render() {
 expect_render defaults present '^[[:space:]]*- --gateway-name=cubestack-gateway$' --namespace cubestack-system
 expect_render defaults present '^[[:space:]]*- --gateway-namespace=envoy-gateway-system$' --namespace cubestack-system
 expect_render defaults absent  '^[[:space:]]*- --gateway-catalog-hostname=' --namespace cubestack-system
+# The shared catalog route renders from the chart's default value: it names the
+# platform's pre-installed AIGatewayRoute the operator publishes into. A value
+# that did not reach the rendered args would leave the manager's own default in
+# force instead of the name the release chose.
+expect_render defaults present '^[[:space:]]*- --gateway-catalog-route=cubestack-ai-gateway$' --namespace cubestack-system
+# A custom shared route name is passed verbatim.
+expect_render route-custom present '^[[:space:]]*- --gateway-catalog-route=my-catalog-route$' --set gateway.catalogRoute=my-catalog-route
 # The dataplane namespace is passed by default: it is what lets the DevEnvironment
 # controller admit the Gateway's proxies into environment pods.
 expect_render defaults present '^[[:space:]]*- --gateway-dataplane-namespace=envoy-gateway-system$' --namespace cubestack-system
-# Setting the catalog hostname enables catalog publishing.
+# The catalog hostname is display-only (the status public address); setting it
+# passes the flag through but does not gate publishing.
 expect_render catalog-set present '^[[:space:]]*- --gateway-catalog-hostname=ai\.example\.com$' --set gateway.catalogHostname=ai.example.com
 # The retired gateway.domain is inert: a values file that still carries it must
 # render nothing (the flag is gone from the manager) rather than fail the
@@ -265,10 +279,10 @@ expect_render dataplane-empty present '^[[:space:]]*- --gateway-name=cubestack-g
 expect_render ns-release present '^[[:space:]]*- --gateway-namespace=envoy-gateway-system$' --namespace cubestack-prod
 # All the optional flags empty: reproduce the unconfigured state. Only the
 # namespace line is left, and it is asserted present rather than skipped.
-expect_render all-empty absent '^[[:space:]]*- --gateway-(name|catalog-hostname|dataplane-namespace)=' \
-  --set gateway.name= --set gateway.catalogHostname= --set gateway.dataplaneNamespace=
+expect_render all-empty absent '^[[:space:]]*- --gateway-(name|catalog-hostname|catalog-route|dataplane-namespace)=' \
+  --set gateway.name= --set gateway.catalogHostname= --set gateway.catalogRoute= --set gateway.dataplaneNamespace=
 expect_render all-empty present '^[[:space:]]*- --gateway-namespace=envoy-gateway-system$' \
-  --set gateway.name= --set gateway.catalogHostname= --set gateway.dataplaneNamespace=
+  --set gateway.name= --set gateway.catalogHostname= --set gateway.catalogRoute= --set gateway.dataplaneNamespace=
 # The namespace follows its value verbatim, and an emptied value must NOT drop
 # the flag: an omitted flag falls back to envoy-gateway-system inside the
 # manager. These two pin the `| default` choice — the first proves a custom

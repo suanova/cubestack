@@ -52,7 +52,7 @@ var _ = Describe("enqueueForOwnedLWS", func() {
 	It("maps an owned LeaderWorkerSet to its InferenceService", func() {
 		owner := &aiv1alpha1.InferenceService{
 			ObjectMeta: metav1.ObjectMeta{Name: testLWSWatchName, Namespace: testNamespace},
-			Spec:       aiv1alpha1.InferenceServiceSpec{ModelRef: testModelRef, ProfileRef: "watch-prof"},
+			Spec:       aiv1alpha1.InferenceServiceSpec{ModelRef: testModelRef, ProfileRef: testWatchProfile},
 		}
 		Expect(k8sClient.Create(ctx, owner)).To(Succeed())
 		lws := &leaderworkersetv1.LeaderWorkerSet{

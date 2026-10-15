@@ -107,12 +107,13 @@ func sharedCatalogRoute() *aigwv1beta1.AIGatewayRoute {
 	return &aigwv1beta1.AIGatewayRoute{ObjectMeta: metav1.ObjectMeta{Name: testCatalogRoute, Namespace: testGatewayNamespace}}
 }
 
-// ensureSharedCatalogRoute persists the shared route with no rules and returns
-// a fresh copy. The platform owns the object; the specs only need it to exist
-// so a published service has a route to attach a rule to. It is reset to zero
-// rules on every call: the suite shares one envtest cluster and one shared
-// route, so a spec must not see another spec's rules.
-func ensureSharedCatalogRoute() *aigwv1beta1.AIGatewayRoute {
+// ensureSharedCatalogRoute persists the shared route with no rules. The
+// platform owns the object; the specs only need it to exist so a published
+// service has a route to attach a rule to. It is reset to zero rules on every
+// call: the suite shares one envtest cluster and one shared route, so a spec
+// must not see another spec's rules. Specs that need the route read it back
+// through sharedCatalogRoute.
+func ensureSharedCatalogRoute() {
 	ensureGatewayNamespace()
 	route := sharedCatalogRoute()
 	// The CRD requires spec.rules to be present: an empty slice is valid where
@@ -121,16 +122,13 @@ func ensureSharedCatalogRoute() *aigwv1beta1.AIGatewayRoute {
 	err := k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)
 	if apierrors.IsNotFound(err) {
 		Expect(k8sClient.Create(ctx, route)).To(Succeed())
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
-		return route
+		return
 	}
 	Expect(err).NotTo(HaveOccurred())
 	if len(route.Spec.Rules) > 0 {
 		route.Spec.Rules = []aigwv1beta1.AIGatewayRouteRule{}
 		Expect(k8sClient.Update(ctx, route)).To(Succeed())
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
 	}
-	return route
 }
 
 // aiAcceptedReason is the reason the Agent Router controller writes on the
@@ -285,7 +283,7 @@ var _ = Describe("checkRoute", func() {
 		// Fill the shared route with catalogRuleMax foreign rules, none of them
 		// this service's.
 		route.Spec.Rules = make([]aigwv1beta1.AIGatewayRouteRule, 0, catalogRuleMax)
-		for i := 0; i < catalogRuleMax; i++ {
+		for i := range catalogRuleMax {
 			route.Spec.Rules = append(route.Spec.Rules, aigwv1beta1.AIGatewayRouteRule{
 				BackendRefs: []aigwv1beta1.AIGatewayRouteRuleBackendRef{{Name: "foreign-" + strconv.Itoa(i), Weight: ptr(int32(1)), Priority: ptr(uint32(0))}},
 			})
@@ -297,6 +295,43 @@ var _ = Describe("checkRoute", func() {
 		check, err := routeReconciler().checkRoute(ctx, mustGetISVC(ctx, name), routeProfile(name+"-prof"), readyEndpoint(name), testEngineModel)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(check.Reason).To(Equal(RouteCatalogFull))
+	})
+
+	It("refuses a conflicting name or a full route inside the write itself", func() {
+		// The checkRoute pre-checks are a fast path; the authoritative ones run
+		// inside the write's conflict retry, against the route state each
+		// attempt reads. Drive the write directly to pin that path: a state the
+		// pre-check never saw must be refused by the write, not appended by a
+		// retry.
+		ensureSharedCatalogRoute()
+		other := routeISVC("route-race-other", true)
+		Expect(k8sClient.Create(ctx, other)).To(Succeed())
+		r := routeReconciler()
+		_, err := r.checkRoute(ctx, mustGetISVC(ctx, "route-race-other"), routeProfile("pr"), readyEndpoint("route-race-other"), testEngineModel)
+		Expect(err).NotTo(HaveOccurred())
+
+		// The other service's rule claims the model name both services declare:
+		// the write itself must refuse the second rule.
+		name := "route-race"
+		Expect(k8sClient.Create(ctx, routeISVC(name, true))).To(Succeed())
+		err = r.upsertCatalogRule(ctx, mustGetISVC(ctx, name), testEngineModel)
+		Expect(err).To(MatchError(errCatalogModelNameTaken))
+
+		// The same holds for the rule cap: once the route is full, the write
+		// refuses a new rule instead of letting the retry overfill it.
+		route := sharedCatalogRoute()
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
+		for len(route.Spec.Rules) < catalogRuleMax {
+			route.Spec.Rules = append(route.Spec.Rules, aigwv1beta1.AIGatewayRouteRule{
+				BackendRefs: []aigwv1beta1.AIGatewayRouteRuleBackendRef{{Name: "filler-" + strconv.Itoa(len(route.Spec.Rules)), Weight: ptr(int32(1)), Priority: ptr(uint32(0))}},
+			})
+		}
+		Expect(k8sClient.Update(ctx, route)).To(Succeed())
+		full := routeISVC("route-race-full", true)
+		full.Spec.Route.ModelName = "another-model"
+		Expect(k8sClient.Create(ctx, full)).To(Succeed())
+		err = r.upsertCatalogRule(ctx, mustGetISVC(ctx, "route-race-full"), testEngineModel)
+		Expect(err).To(MatchError(errCatalogRouteFull))
 	})
 
 	It("reports AgentRouterUnavailable when the cluster serves no Agent Router CRDs", func() {
