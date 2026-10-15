@@ -119,9 +119,32 @@ var _ = Describe("Render", func() {
 		Expect(res.Assets).To(Equal(map[string]map[string]string{bootstrapAsset: {assetDataKey: "value"}}))
 	})
 
+	It("resolves a templated gpuPerPod to a concrete Int without mutating the input", func() {
+		p := renderProfile()
+		tpl := intstr.FromString("{{ overrides.prefillReplicas }}")
+		p.Spec.Roles[1].PodTemplate.Resources = &aiv1alpha1.PodResources{GPUPerPod: &tpl}
+		res := Render(renderISVC(), p, renderModel(), map[string]map[string]string{bootstrapAsset: {assetDataKey: "value"}})
+		Expect(res.Errors).To(BeEmpty())
+		// prefillReplicas resolves to "3" in renderISVC.
+		Expect(res.Roles[1].PodTemplate.Resources.GPUPerPod.Type).To(Equal(intstr.Int))
+		Expect(res.Roles[1].PodTemplate.Resources.GPUPerPod.IntValue()).To(Equal(3))
+		// The input profile is not mutated: its template stays a string.
+		Expect(p.Spec.Roles[1].PodTemplate.Resources.GPUPerPod.Type).To(Equal(intstr.String))
+	})
+
+	It("rejects a templated gpuPerPod that does not resolve to a positive integer", func() {
+		p := renderProfile()
+		// mode resolves to "pd" (a string), which is not a positive integer.
+		tpl := intstr.FromString("{{ overrides.mode }}")
+		p.Spec.Roles[1].PodTemplate.Resources = &aiv1alpha1.PodResources{GPUPerPod: &tpl}
+		res := Render(renderISVC(), p, renderModel(), map[string]map[string]string{bootstrapAsset: {assetDataKey: "value"}})
+		Expect(res.Errors).To(HaveLen(1))
+		Expect(res.Errors[0].Reason).To(Equal(ReasonInvalidOverride))
+	})
+
 	// gpuPrefill marks the prefill role as the GPU role of the fixture profile.
 	gpuPrefill := func(p *aiv1alpha1.InferenceRuntimeProfile) {
-		p.Spec.Roles[1].PodTemplate.Resources = &aiv1alpha1.PodResources{GPUPerPod: ptrTo(int64(8))}
+		p.Spec.Roles[1].PodTemplate.Resources = &aiv1alpha1.PodResources{GPUPerPod: ptrTo(intstr.FromInt32(8))}
 	}
 
 	It("injects a single accelerator model as a nodeSelector on the GPU role only", func() {

@@ -336,10 +336,10 @@ type PodResources struct {
 	Memory *resource.Quantity `json:"memory,omitempty"`
 
 	// GPUPerPod is the number of GPUs per Pod, mapped to the vendor's extended
-	// resource and written to both requests and limits.
+	// resource and written to both requests and limits. May be a template
+	// referencing overrides; the resolved value must be a positive integer.
 	// +optional
-	// +kubebuilder:validation:Minimum=1
-	GPUPerPod *int64 `json:"gpuPerPod,omitempty"`
+	GPUPerPod *intstr.IntOrString `json:"gpuPerPod,omitempty"`
 
 	// ExtendedResources lists additional extended resources, e.g.
 	// rdma/ib_shared_devices (the InfiniBand fabric; rdma/roce_shared_devices is

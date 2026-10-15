@@ -534,6 +534,28 @@ func renderPodTemplate(ctx *renderContext, pt aiv1alpha1.PodTemplate, errs []Err
 	pt.NodeSelector = renderMap(pt.NodeSelector, render)
 	pt.Labels = renderMap(pt.Labels, render)
 	pt.Annotations = renderMap(pt.Annotations, render)
+
+	// gpuPerPod may be a template referencing overrides (e.g. the tensor-
+	// parallel size of a profile whose pod must be granted as many GPUs as the
+	// engine shards the model across). Resolve it to a concrete Int so
+	// buildPodSpec reads a plain count. A plain-Int value is left as-is. Copy
+	// the resources struct first: pt.Resources is shared with the input
+	// profile and the renderer must not mutate it.
+	if pt.Resources != nil && pt.Resources.GPUPerPod != nil && pt.Resources.GPUPerPod.Type == intstr.String {
+		res := *pt.Resources
+		rendered, renderErrs := renderString(ctx, pt.Resources.GPUPerPod.StrVal, podTemplateAllowed)
+		errs = append(errs, renderErrs...)
+		if len(renderErrs) == 0 {
+			n, perr := strconv.ParseInt(strings.TrimSpace(rendered), 10, 64)
+			if perr != nil || n < 1 {
+				errs = append(errs, Error{Reason: ReasonInvalidOverride, Msg: fmt.Sprintf("gpuPerPod of role %q does not resolve to a positive integer: %q", ctx.role.name, rendered)})
+			} else {
+				v := intstr.FromInt32(int32(n))
+				res.GPUPerPod = &v
+				pt.Resources = &res
+			}
+		}
+	}
 	return pt, errs
 }
 

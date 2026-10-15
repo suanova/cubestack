@@ -1140,7 +1140,7 @@ func (in *PodResources) DeepCopyInto(out *PodResources) {
 	}
 	if in.GPUPerPod != nil {
 		in, out := &in.GPUPerPod, &out.GPUPerPod
-		*out = new(int64)
+		*out = new(intstr.IntOrString)
 		**out = **in
 	}
 	if in.ExtendedResources != nil {

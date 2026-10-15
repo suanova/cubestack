@@ -685,12 +685,14 @@ spec:
                                 (handled by the fields above; L1 VAP).
                               type: object
                             gpuPerPod:
+                              anyOf:
+                              - type: integer
+                              - type: string
                               description: |-
                                 GPUPerPod is the number of GPUs per Pod, mapped to the vendor's extended
-                                resource and written to both requests and limits.
-                              format: int64
-                              minimum: 1
-                              type: integer
+                                resource and written to both requests and limits. May be a template
+                                referencing overrides; the resolved value must be a positive integer.
+                              x-kubernetes-int-or-string: true
                             memory:
                               anyOf:
                               - type: integer

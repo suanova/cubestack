@@ -122,7 +122,7 @@ func validInferenceRuntimeProfile(name string) *InferenceRuntimeProfile {
 					PodTemplate: PodTemplate{
 						Image: "registry.local/prefill:v1",
 						Resources: &PodResources{
-							GPUPerPod: ptrTo(int64(8)),
+							GPUPerPod: ptrTo(intstr.FromInt32(8)),
 						},
 						Mounts: []ModelMount{
 							{Model: "main", At: testModelMountPath, ReadOnly: true},
@@ -147,7 +147,7 @@ func validInferenceRuntimeProfile(name string) *InferenceRuntimeProfile {
 					PodTemplate: PodTemplate{
 						Image: "registry.local/decode:v1",
 						Resources: &PodResources{
-							GPUPerPod: ptrTo(int64(8)),
+							GPUPerPod: ptrTo(intstr.FromInt32(8)),
 						},
 						Mounts: []ModelMount{
 							{Model: "main", At: testModelMountPath, ReadOnly: true},

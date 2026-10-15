@@ -108,7 +108,9 @@ func buildPodSpec(pt aiv1alpha1.PodTemplate, isvcName string, model *aiv1alpha1.
 		}
 		if pt.Resources.GPUPerPod != nil {
 			resourceName := corev1.ResourceName(vendorResource(vendor))
-			gpu := *resource.NewQuantity(*pt.Resources.GPUPerPod, resource.DecimalSI)
+			// The renderer resolves a templated gpuPerPod to a concrete Int, so
+			// IntValue() here is the final GPU count for every role.
+			gpu := *resource.NewQuantity(int64(pt.Resources.GPUPerPod.IntValue()), resource.DecimalSI)
 			container.Resources.Requests[resourceName] = gpu
 			container.Resources.Limits[resourceName] = gpu
 		}
