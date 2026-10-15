@@ -411,12 +411,15 @@ export function FloatingChat() {
       // session that is not parked, and a read that could not be made is not
       // that answer.
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      // Parsed BEFORE the check: reading the body is a suspension point, so a
+      // turn that settles while it is read would otherwise slip past the
+      // generation and epoch checks and attach cards to a turn already done.
+      const { approvals } = (await res.json()) as { approvals?: PendingApproval[] };
       if (genRef.current === gen && !stale()) {
         // A LIST, oldest first: a session can hold several pending approvals
         // at once, and the oldest is not the only one this surface offers. An
         // empty one draws nothing, which is why the read above reports its
         // failures rather than leaving this branch to say it silently.
-        const { approvals } = (await res.json()) as { approvals?: PendingApproval[] };
         for (const a of approvals ?? []) {
           if (a.approvalId) {
             // Through the fold's own add, so a stream event that already
@@ -432,7 +435,7 @@ export function FloatingChat() {
       // Staying silent would leave a parked turn looking idle, with no card
       // anywhere — and the card is the only place the decision can be made.
       // Same reason the question read below reports its failures.
-      if (!opts.quiet && genRef.current === gen) {
+      if (!opts.quiet && genRef.current === gen && !stale()) {
         setMsgs((m) => [
           ...m,
           { ...newAgentMsg(nextId()), phase: "done", error: t("cubepilot.chat.pendingApprovalUnavailable", { error: String(e) }) },
@@ -444,10 +447,11 @@ export function FloatingChat() {
       // An empty collection is "nothing is pending", and a read that FAILED is
       // thrown so that it is reported rather than folded into "idle".
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      // Same ordering as the approval read above, for the same reason.
+      const { questions } = (await res.json()) as {
+        questions?: Array<{ id?: string; questions?: AgentQuestionItem[]; timeoutSeconds?: number }>;
+      };
       if (genRef.current === gen && !stale()) {
-        const { questions } = (await res.json()) as {
-          questions?: Array<{ id?: string; questions?: AgentQuestionItem[]; timeoutSeconds?: number }>;
-        };
         for (const q of questions ?? []) {
           if (!q.id) continue;
           // The response carries what is LEFT of the gateway's deadline, so a
@@ -460,7 +464,7 @@ export function FloatingChat() {
         }
       }
     } catch (e) {
-      if (!opts.quiet && genRef.current === gen) {
+      if (!opts.quiet && genRef.current === gen && !stale()) {
         setMsgs((m) => [
           ...m,
           { ...newAgentMsg(nextId()), phase: "done", error: t("cubepilot.chat.pendingQuestionUnavailable", { error: String(e) }) },
