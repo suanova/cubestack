@@ -16,6 +16,8 @@ const (
 	bootstrapAsset          = "bootstrap"
 	// assetDataKey is the single asset data key of the render specs.
 	assetDataKey = "key"
+	// assetDataValue is the single asset data value of the render specs.
+	assetDataValue = "value"
 )
 
 const (
@@ -96,7 +98,7 @@ func renderModel() *aiv1alpha1.ModelVersion {
 
 var _ = Describe("Render", func() {
 	It("renders all variable namespaces and resolves workload structure", func() {
-		res := Render(renderISVC(), renderProfile(), renderModel(), map[string]map[string]string{bootstrapAsset: {assetDataKey: "value"}})
+		res := Render(renderISVC(), renderProfile(), renderModel(), map[string]map[string]string{bootstrapAsset: {assetDataKey: assetDataValue}})
 		Expect(res.Errors).To(BeEmpty())
 		Expect(res.Overrides).To(Equal(map[string]string{overridePrefillReplicas: "3", overrideMode: "pd"}))
 
@@ -117,14 +119,14 @@ var _ = Describe("Render", func() {
 		Expect(prefill.PodTemplate.Env[0].Value).To(Equal(stringPtr("3")))
 		Expect(prefill.PodTemplate.Env[1].Value).To(Equal(stringPtr("prefill")))
 
-		Expect(res.Assets).To(Equal(map[string]map[string]string{bootstrapAsset: {assetDataKey: "value"}}))
+		Expect(res.Assets).To(Equal(map[string]map[string]string{bootstrapAsset: {assetDataKey: assetDataValue}}))
 	})
 
 	It("resolves a templated gpuPerPod to a concrete Int without mutating the input", func() {
 		p := renderProfile()
 		tpl := intstr.FromString("{{ overrides.prefillReplicas }}")
 		p.Spec.Roles[1].PodTemplate.Resources = &aiv1alpha1.PodResources{GPUPerPod: &tpl}
-		res := Render(renderISVC(), p, renderModel(), map[string]map[string]string{bootstrapAsset: {assetDataKey: "value"}})
+		res := Render(renderISVC(), p, renderModel(), map[string]map[string]string{bootstrapAsset: {assetDataKey: assetDataValue}})
 		Expect(res.Errors).To(BeEmpty())
 		// prefillReplicas resolves to "3" in renderISVC.
 		Expect(res.Roles[1].PodTemplate.Resources.GPUPerPod.Type).To(Equal(intstr.Int))
@@ -138,7 +140,7 @@ var _ = Describe("Render", func() {
 		// mode resolves to "pd" (a string), which is not a positive integer.
 		tpl := intstr.FromString("{{ overrides.mode }}")
 		p.Spec.Roles[1].PodTemplate.Resources = &aiv1alpha1.PodResources{GPUPerPod: &tpl}
-		res := Render(renderISVC(), p, renderModel(), map[string]map[string]string{bootstrapAsset: {assetDataKey: "value"}})
+		res := Render(renderISVC(), p, renderModel(), map[string]map[string]string{bootstrapAsset: {assetDataKey: assetDataValue}})
 		Expect(res.Errors).To(HaveLen(1))
 		Expect(res.Errors[0].Reason).To(Equal(ReasonInvalidOverride))
 	})
