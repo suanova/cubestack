@@ -147,6 +147,40 @@ describe("useInstancePoll", () => {
     expect(poll).toHaveBeenCalledTimes(1);
   });
 
+  it("does not stack a second chain when the tab is looked at mid-ask", async () => {
+    let first = true;
+    let releaseFirst: (v: boolean | null) => void = () => {};
+    const poll = vi.fn(async () => {
+      if (first) {
+        first = false;
+        return await new Promise<boolean | null>((r) => {
+          releaseFirst = r;
+        });
+      }
+      return false;
+    });
+    render({ active: true, poll });
+    await advance(INSTANCE_POLL_MS);
+    expect(poll).toHaveBeenCalledTimes(1); // the first ask is in flight
+
+    // Looked at while that ask is in flight: the answer on its way is stale, so
+    // one follow-up is owed — but starting it here would leave two chains
+    // arming timers, of which `timer` remembers one.
+    act(() => document.dispatchEvent(new Event("visibilitychange")));
+    expect(poll).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      releaseFirst(false);
+      await Promise.resolve();
+    });
+    expect(poll).toHaveBeenCalledTimes(2); // the follow-up, at once
+
+    await advance(60_000);
+    // One chain at the cap: 15s, 30s, 45s, 60s past the follow-up. Two chains
+    // would be ~10 asks.
+    expect(poll.mock.calls.length).toBeLessThanOrEqual(7);
+  });
+
   it("stops on unmount", async () => {
     const poll = vi.fn(async () => false);
     render({ active: true, poll });

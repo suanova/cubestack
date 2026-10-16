@@ -28,25 +28,42 @@ export function useInstancePoll(active: boolean, poll: () => Promise<boolean | n
     let wait = INSTANCE_POLL_MS;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let stopped = false;
+    // One ask at a time, and at most one timer: a visibility change during an
+    // in-flight ask queues a follow-up instead of starting a second chain
+    // (two chains each arm a timer, and only the last handle is clearable).
+    let asking = false;
+    let askAgain = false;
+
+    const arm = () => {
+      timer = setTimeout(() => void tick(), wait);
+    };
 
     const tick = async () => {
+      if (stopped || asking) return;
+      asking = true;
       let exists: boolean | null = null;
       try {
         exists = await pollRef.current();
       } catch {
         // A poll that throws says nothing about the instance: keep asking.
       }
+      asking = false;
       if (stopped) return;
       wait = exists === false ? Math.min(wait * 2, INSTANCE_POLL_MAX_MS) : INSTANCE_POLL_MS;
+      if (askAgain) {
+        askAgain = false;
+        void tick();
+        return;
+      }
       arm();
-    };
-
-    const arm = () => {
-      timer = setTimeout(() => void tick(), wait);
     };
 
     const onVisibilityChange = () => {
       if (document.hidden || stopped) return;
+      if (asking) {
+        askAgain = true;
+        return;
+      }
       if (timer) clearTimeout(timer);
       void tick();
     };
