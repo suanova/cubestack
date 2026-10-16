@@ -427,6 +427,121 @@ export function openQuestions(msg: AgentMsg): AgentQuestion[] {
   return msg.questions.filter((q) => q.state === "pending" || q.state === "submitting");
 }
 
+export interface PendingHitlSnapshot {
+  approvalIds: ReadonlySet<string>;
+  questionIds: ReadonlySet<string>;
+}
+
+function isAgentMessage<T extends { role: string }>(message: T): message is T & AgentMsg {
+  return message.role === "agent";
+}
+
+/** Capture pending cards before a read so it cannot retire a card added while
+ *  the request is in flight. */
+export function snapshotPendingHitl(messages: readonly { role: string }[]): PendingHitlSnapshot {
+  const approvalIds = new Set<string>();
+  const questionIds = new Set<string>();
+  for (const message of messages) {
+    if (!isAgentMessage(message)) continue;
+    for (const approval of message.approvals) {
+      if (approval.state === "pending") approvalIds.add(approval.callId);
+    }
+    for (const question of message.questions) {
+      if (question.state === "pending") questionIds.add(question.callId);
+    }
+  }
+  return { approvalIds, questionIds };
+}
+
+function mapAgentMessages<T extends { role: string }>(
+  messages: T[],
+  update: (message: AgentMsg) => AgentMsg,
+): Array<T | AgentMsg> {
+  let changed = false;
+  const next = messages.map((message) => {
+    if (!isAgentMessage(message)) return message;
+    const updated = update(message);
+    if (updated === message) return message;
+    changed = true;
+    return updated;
+  });
+  return changed ? next : messages;
+}
+
+/** Retire only snapshot cards that remain pending when the read completes. */
+export function retireMissingApprovals<T extends { role: string }>(
+  messages: T[],
+  snapshotIds: ReadonlySet<string>,
+  pendingIds: ReadonlySet<string>,
+): Array<T | AgentMsg> {
+  return mapAgentMessages(messages, (message) => {
+    let changed = false;
+    const approvals = message.approvals.map((approval) => {
+      if (
+        approval.state !== "pending" ||
+        !snapshotIds.has(approval.callId) ||
+        pendingIds.has(approval.callId)
+      ) {
+        return approval;
+      }
+      changed = true;
+      return { ...approval, state: "stopped" as const, error: undefined };
+    });
+    return changed ? { ...message, approvals } : message;
+  });
+}
+
+/** Retire only snapshot questions that remain pending when the read completes. */
+export function retireMissingQuestions<T extends { role: string }>(
+  messages: T[],
+  snapshotIds: ReadonlySet<string>,
+  pendingIds: ReadonlySet<string>,
+): Array<T | AgentMsg> {
+  return mapAgentMessages(messages, (message) => {
+    let changed = false;
+    const questions = message.questions.map((question) => {
+      if (
+        question.state !== "pending" ||
+        !snapshotIds.has(question.callId) ||
+        pendingIds.has(question.callId)
+      ) {
+        return question;
+      }
+      changed = true;
+      return { ...question, state: "expired" as const, error: undefined };
+    });
+    return changed ? { ...message, questions } : message;
+  });
+}
+
+/** A later pending read can correct a card retired by an older response. */
+export function restorePendingApproval(msg: AgentMsg, card: AgentApproval): AgentMsg {
+  const current = msg.approvals.find((approval) => approval.callId === card.callId);
+  if (!current) return addApproval(msg, card);
+  if (current.state !== "stopped") return msg;
+  return {
+    ...msg,
+    approvals: msg.approvals.map((approval) =>
+      approval.callId === card.callId ? { ...card, state: "pending", error: undefined } : approval,
+    ),
+  };
+}
+
+/** A later pending read can correct a question retired by an older response. */
+export function restorePendingQuestion(msg: AgentMsg, card: AgentQuestion): AgentMsg {
+  const current = msg.questions.find((question) => question.callId === card.callId);
+  if (!current) return { ...msg, questions: [...msg.questions, card] };
+  if (current.state !== "expired") return msg;
+  return {
+    ...msg,
+    questions: msg.questions.map((question) =>
+      question.callId === card.callId
+        ? { ...card, ...(current.answers ? { answers: current.answers } : {}) }
+        : question,
+    ),
+  };
+}
+
 /** Merge `cards` onto one message, dropping what it already holds. */
 function mergeOpenCards(msg: AgentMsg, approvals: AgentApproval[], questions: AgentQuestion[]): AgentMsg {
   let out = approvals.reduce(addApproval, msg);

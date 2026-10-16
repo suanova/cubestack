@@ -31,7 +31,6 @@ import type { PointerEvent as ReactPointerEvent } from "react";
 
 import { apiFetch } from "@/lib/base-path";
 import {
-  addApproval,
   carryOpenCards,
   greetingTexts,
   adoptsRestoredThread,
@@ -42,6 +41,11 @@ import {
   newQuestion,
   openApprovals,
   openQuestions,
+  retireMissingApprovals,
+  retireMissingQuestions,
+  restorePendingApproval,
+  restorePendingQuestion,
+  snapshotPendingHitl,
   phaseText,
   waitingSeconds,
   turnStatus,
@@ -271,6 +275,8 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
   const [objKind, setObjKind] = useState<"model" | "agent" | null>(null);
   const [svcId, setSvcId] = useState<string | null>(null);
   const [msgs, setMsgs] = useState<ChatMsg[]>([]);
+  const msgsRef = useRef(msgs);
+  msgsRef.current = msgs;
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [thinkingText, setThinkingText] = useState<string | null>(null);
@@ -942,9 +948,10 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
       const card = newApproval({ ...a, name: a.tool });
       // Through the fold's own add, so a stream event that already described
       // this approval is not doubled by the read that describes it again.
-      attachToNewest((x) => addApproval(x, card));
+      attachToNewest((x) => restorePendingApproval(x, card));
     };
     try {
+      const snapshotIds = snapshotPendingHitl(msgsRef.current).approvalIds;
       const res = await apiFetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/approvals`);
       // A failed read is thrown so that it is reported rather than folded into
       // "nothing is parked": an empty collection is the ordinary answer for a
@@ -956,6 +963,9 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
         // not parked — the collection exists and is empty, so a read that
         // succeeded and found nothing never reaches the catch below.
         const { approvals } = (await res.json()) as { approvals?: PendingApproval[] };
+        const items = approvals ?? [];
+        const pendingIds = new Set(items.flatMap((approval) => (approval.approvalId ? [approval.approvalId] : [])));
+        setMsgs((current) => retireMissingApprovals(current, snapshotIds, pendingIds));
         for (const a of approvals ?? []) {
           if (a.approvalId) attachApproval(a);
         }
@@ -973,6 +983,7 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
       }
     }
     try {
+      const snapshotIds = snapshotPendingHitl(msgsRef.current).questionIds;
       const res = await apiFetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/questions`);
       // A failed read is thrown so that it is reported rather than folded into
       // "idle"; an empty collection is not a failure, it is nothing pending.
@@ -981,6 +992,9 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
         const { questions } = (await res.json()) as {
           questions?: Array<{ id?: string; questions?: AgentQuestionItem[]; timeoutSeconds?: number }>;
         };
+        const items = questions ?? [];
+        const pendingIds = new Set(items.flatMap((question) => (question.id ? [question.id] : [])));
+        setMsgs((current) => retireMissingQuestions(current, snapshotIds, pendingIds));
         for (const q of questions ?? []) {
           if (!q.id) continue;
           // Through the same constructor the streamed card uses: the response
@@ -989,9 +1003,7 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
           // point the gateway had given it.
           const card = newQuestion(q.id, q.questions ?? [], q.timeoutSeconds, Date.now());
           // The stream and this read both describe one question: the id says so.
-          attachToNewest((x) =>
-            x.questions.some((old) => old.callId === card.callId) ? x : { ...x, questions: [...x.questions, card] },
-          );
+          attachToNewest((x) => restorePendingQuestion(x, card));
         }
       }
     } catch (e) {

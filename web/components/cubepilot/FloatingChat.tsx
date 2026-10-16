@@ -24,7 +24,6 @@ import { Fragment, useEffect, useRef, useState } from "react";
 
 import { apiFetch } from "@/lib/base-path";
 import {
-  addApproval,
   carryOpenCards,
   greetingTexts,
   phaseText,
@@ -36,6 +35,11 @@ import {
   newQuestion,
   openApprovals,
   openQuestions,
+  retireMissingApprovals,
+  retireMissingQuestions,
+  restorePendingApproval,
+  restorePendingQuestion,
+  snapshotPendingHitl,
   turnStatus,
   waitingOnUser,
   type AgentApproval,
@@ -124,6 +128,8 @@ export function FloatingChat() {
 
   const [open, setOpen] = useState(false);
   const [msgs, setMsgs] = useState<ThreadMsg[]>([]);
+  const msgsRef = useRef(msgs);
+  msgsRef.current = msgs;
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null);
@@ -405,6 +411,7 @@ export function FloatingChat() {
       });
     };
     try {
+      const snapshotIds = snapshotPendingHitl(msgsRef.current).approvalIds;
       const res = await apiFetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/approvals`);
       // A failed read is thrown so that it is reported rather than folded into
       // "nothing is parked": an empty collection is the ordinary answer for a
@@ -416,6 +423,9 @@ export function FloatingChat() {
       // generation and epoch checks and attach cards to a turn already done.
       const { approvals } = (await res.json()) as { approvals?: PendingApproval[] };
       if (genRef.current === gen && !stale()) {
+        const items = approvals ?? [];
+        const pendingIds = new Set(items.flatMap((approval) => (approval.approvalId ? [approval.approvalId] : [])));
+        setMsgs((current) => retireMissingApprovals(current, snapshotIds, pendingIds));
         // A LIST, oldest first: a session can hold several pending approvals
         // at once, and the oldest is not the only one this surface offers. An
         // empty one draws nothing, which is why the read above reports its
@@ -426,7 +436,7 @@ export function FloatingChat() {
             // described this approval is not doubled by the read that describes
             // it again.
             const card = newApproval({ ...a, name: a.tool });
-            attachToNewest((x) => addApproval(x, card));
+            attachToNewest((x) => restorePendingApproval(x, card));
           }
         }
       }
@@ -443,6 +453,7 @@ export function FloatingChat() {
       }
     }
     try {
+      const snapshotIds = snapshotPendingHitl(msgsRef.current).questionIds;
       const res = await apiFetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(key)}/questions`);
       // An empty collection is "nothing is pending", and a read that FAILED is
       // thrown so that it is reported rather than folded into "idle".
@@ -452,15 +463,16 @@ export function FloatingChat() {
         questions?: Array<{ id?: string; questions?: AgentQuestionItem[]; timeoutSeconds?: number }>;
       };
       if (genRef.current === gen && !stale()) {
+        const items = questions ?? [];
+        const pendingIds = new Set(items.flatMap((question) => (question.id ? [question.id] : [])));
+        setMsgs((current) => retireMissingQuestions(current, snapshotIds, pendingIds));
         for (const q of questions ?? []) {
           if (!q.id) continue;
           // The response carries what is LEFT of the gateway's deadline, so a
           // restored card gets the same countdown as a streamed one.
           const card = newQuestion(q.id, q.questions ?? [], q.timeoutSeconds, Date.now());
           // The stream and this read both describe one question: the id says so.
-          attachToNewest((x) =>
-            x.questions.some((old) => old.callId === card.callId) ? x : { ...x, questions: [...x.questions, card] },
-          );
+          attachToNewest((x) => restorePendingQuestion(x, card));
         }
       }
     } catch (e) {

@@ -18,7 +18,12 @@ import {
   newApproval,
   newQuestion,
   remainingSeconds,
+  retireMissingApprovals,
+  retireMissingQuestions,
+  restorePendingApproval,
+  restorePendingQuestion,
   seedAnswers,
+  snapshotPendingHitl,
   TOOL_SUMMARY_CHARS,
   toolSummary,
   turnStatus,
@@ -257,6 +262,81 @@ describe("applyAgentEvent — questions", () => {
     expect(stateAfter("cancelled")).toBe("cancelled");
     expect(stateAfter("expired")).toBe("expired");
     expect(stateAfter()).toBe("answered");
+  });
+});
+
+describe("pending HITL reconciliation", () => {
+  it("retires only snapshot cards missing from the response", () => {
+    const initial = {
+      ...newAgentMsg(1, T0),
+      approvals: [newApproval({ approvalId: "a1" })],
+      questions: [newQuestion("q1", [], 45, T0)],
+    };
+    const snapshot = snapshotPendingHitl([initial]);
+    const current = [
+      {
+        ...initial,
+        approvals: [...initial.approvals, newApproval({ approvalId: "a2" })],
+        questions: [...initial.questions, newQuestion("q2", [], 45, T0)],
+      },
+    ];
+
+    const afterApprovals = retireMissingApprovals(current, snapshot.approvalIds, new Set());
+    const afterQuestions = retireMissingQuestions(afterApprovals, snapshot.questionIds, new Set());
+    expect(afterQuestions[0].approvals.map((approval) => [approval.callId, approval.state])).toEqual([
+      ["a1", "stopped"],
+      ["a2", "pending"],
+    ]);
+    expect(afterQuestions[0].questions.map((question) => [question.callId, question.state])).toEqual([
+      ["q1", "expired"],
+      ["q2", "pending"],
+    ]);
+  });
+
+  it("preserves local submissions started while a read is in flight", () => {
+    const initial = {
+      ...newAgentMsg(1, T0),
+      approvals: [newApproval({ approvalId: "a1" })],
+      questions: [newQuestion("q1", [], 45, T0)],
+    };
+    const snapshot = snapshotPendingHitl([initial]);
+    const current = [
+      {
+        ...initial,
+        approvals: [{ ...initial.approvals[0], state: "deciding" as const }],
+        questions: [{ ...initial.questions[0], state: "submitting" as const }],
+      },
+    ];
+
+    const afterApprovals = retireMissingApprovals(current, snapshot.approvalIds, new Set());
+    const afterQuestions = retireMissingQuestions(afterApprovals, snapshot.questionIds, new Set());
+    expect(afterQuestions[0].approvals[0].state).toBe("deciding");
+    expect(afterQuestions[0].questions[0].state).toBe("submitting");
+  });
+
+  it("revives cards when a later pending read confirms they are still open", () => {
+    const retired = {
+      ...newAgentMsg(1, T0),
+      approvals: [{ ...newApproval({ approvalId: "a1" }), state: "stopped" as const }],
+      questions: [{ ...newQuestion("q1", [], 45, T0), state: "expired" as const }],
+    };
+    const approval = restorePendingApproval(retired, newApproval({ approvalId: "a1", command: "kubectl get pods" }));
+    const question = restorePendingQuestion(approval, newQuestion("q1", [], 60, T0 + 1));
+
+    expect(question.approvals[0]).toMatchObject({ state: "pending", command: "kubectl get pods" });
+    expect(question.questions[0]).toMatchObject({ state: "pending", deadline: T0 + 60_001 });
+
+    const resolved = {
+      ...newAgentMsg(2, T0),
+      approvals: [{ ...newApproval({ approvalId: "a2" }), state: "approved" as const }],
+      questions: [{ ...newQuestion("q2", [], 45, T0), state: "answered" as const }],
+    };
+    const unchanged = restorePendingQuestion(
+      restorePendingApproval(resolved, newApproval({ approvalId: "a2" })),
+      newQuestion("q2", [], 60, T0 + 1),
+    );
+    expect(unchanged.approvals[0].state).toBe("approved");
+    expect(unchanged.questions[0].state).toBe("answered");
   });
 });
 
