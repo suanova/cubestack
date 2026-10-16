@@ -1,8 +1,9 @@
-import { createElement } from "react";
+import { createElement, type ReactElement } from "react";
 import { createRoot } from "react-dom/client";
 import { act } from "react-dom/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { DashboardsLanding } from "./dashboards-landing";
 import DashboardsPage from "./page";
 
 // The test files avoid JSX because tsconfig sets jsx: "preserve" (for Next),
@@ -43,6 +44,36 @@ function viewerText(container: HTMLElement): string {
   return container.querySelector('[data-od-id="dash-viewer"]')?.textContent ?? "";
 }
 
+// The route component only picks the deep-link values out of the request and
+// hands them to the landing, so its own contract is checked on the returned
+// element's props; the landing's rendering is covered below.
+type LandingProps = { requestedDashboard: string | null; requestedScope: string | null };
+
+async function routeProps(searchParams: Record<string, string | string[] | undefined>): Promise<LandingProps> {
+  const element = (await DashboardsPage({ searchParams: Promise.resolve(searchParams) })) as ReactElement<LandingProps>;
+  return element.props;
+}
+
+describe("dashboards route", () => {
+  it("resolves ?dashboard= and ?scope= from the request into the landing props", async () => {
+    expect(await routeProps({ dashboard: "inference-service-dashboard", scope: "gpu" })).toEqual({
+      requestedDashboard: "inference-service-dashboard",
+      requestedScope: "gpu",
+    });
+  });
+
+  it("passes no deep link through when the request carries none", async () => {
+    expect(await routeProps({})).toEqual({ requestedDashboard: null, requestedScope: null });
+  });
+
+  it("ignores a repeated param rather than guessing which one was meant", async () => {
+    expect(await routeProps({ dashboard: ["a", "b"] })).toEqual({
+      requestedDashboard: null,
+      requestedScope: null,
+    });
+  });
+});
+
 describe("dashboards landing page", () => {
   beforeEach(() => {
     // Pin the platform locale to zh-CN so assertions don't depend on jsdom's
@@ -60,12 +91,12 @@ describe("dashboards landing page", () => {
     document.body.innerHTML = "";
   });
 
-  function renderPage(searchParams?: Promise<{ [key: string]: string | string[] | undefined }>) {
+  function renderLanding(props: LandingProps = { requestedDashboard: null, requestedScope: null }) {
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
     act(() => {
-      root.render(createElement(DashboardsPage, searchParams ? { searchParams } : {}));
+      root.render(createElement(DashboardsLanding, props));
     });
     return { container, root };
   }
@@ -78,7 +109,7 @@ describe("dashboards landing page", () => {
       }),
     );
 
-    const { container, root } = renderPage();
+    const { container, root } = renderLanding();
     // Request unresolved → still loading, even though dashboards.length === 0.
     expect(container.querySelector('[role="progressbar"]')).not.toBeNull();
 
@@ -100,7 +131,7 @@ describe("dashboards landing page", () => {
       Promise.resolve({ metadata: { name }, spec: {} }),
     );
 
-    const { container, root } = renderPage();
+    const { container, root } = renderLanding();
     await act(async () => {});
 
     // The dropdown is present with the localized label.
@@ -117,7 +148,7 @@ describe("dashboards landing page", () => {
     act(() => root.unmount());
   });
 
-  it("preselects the dashboard named by the ?dashboard= query param", async () => {
+  it("preselects the dashboard the request named", async () => {
     fetchDashboards.mockResolvedValue(DASHBOARDS);
     fetchDashboard.mockImplementation((_project: string, name: string) =>
       Promise.resolve({ metadata: { name }, spec: {} }),
@@ -125,9 +156,10 @@ describe("dashboards landing page", () => {
 
     // Overview KPI cards land here with e.g. /dashboards?dashboard=resource-overview-dashboard;
     // a matching name must win over the default first item.
-    const { container, root } = renderPage(
-      Promise.resolve({ dashboard: "kubernetes-cluster-resources-overview" }),
-    );
+    const { container, root } = renderLanding({
+      requestedDashboard: "kubernetes-cluster-resources-overview",
+      requestedScope: null,
+    });
     await act(async () => {});
 
     expect(fetchDashboard).toHaveBeenLastCalledWith("monitoring", "kubernetes-cluster-resources-overview");
@@ -137,13 +169,13 @@ describe("dashboards landing page", () => {
     act(() => root.unmount());
   });
 
-  it("falls back to the default when the query param matches nothing", async () => {
+  it("falls back to the default when the named dashboard is not provisioned", async () => {
     fetchDashboards.mockResolvedValue(DASHBOARDS);
     fetchDashboard.mockImplementation((_project: string, name: string) =>
       Promise.resolve({ metadata: { name }, spec: {} }),
     );
 
-    const { container, root } = renderPage(Promise.resolve({ dashboard: "nope-dashboard" }));
+    const { container, root } = renderLanding({ requestedDashboard: "nope-dashboard", requestedScope: null });
     await act(async () => {});
 
     expect(fetchDashboard).toHaveBeenLastCalledWith("monitoring", "resource-overview-dashboard");
@@ -158,7 +190,7 @@ describe("dashboards landing page", () => {
       Promise.resolve({ metadata: { name }, spec: {} }),
     );
 
-    const { container, root } = renderPage();
+    const { container, root } = renderLanding();
     await act(async () => {});
 
     // A deployment whose Perses project carries other dashboards is still usable:
@@ -175,7 +207,7 @@ describe("dashboards landing page", () => {
       Promise.resolve({ metadata: { name }, spec: {} }),
     );
 
-    const { container, root } = renderPage();
+    const { container, root } = renderLanding();
     await act(async () => {});
     expect(viewerText(container)).toContain("dashboard:resource-overview-dashboard");
 
@@ -203,7 +235,7 @@ describe("dashboards landing page", () => {
   it("renders the localized error message when the request fails", async () => {
     fetchDashboards.mockRejectedValue(new Error("boom"));
 
-    const { container, root } = renderPage();
+    const { container, root } = renderLanding();
     await act(async () => {});
 
     expect(container.textContent).toContain("加载看板列表失败: boom");
