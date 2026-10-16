@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// +kubebuilder:rbac:groups=ai.cubestack.io,resources=inferenceservices,verbs=get;list;watch
+// +kubebuilder:rbac:groups=ai.cubestack.io,resources=inferenceservices,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=ai.cubestack.io,resources=inferenceservices/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=ai.cubestack.io,resources=inferenceruntimeprofiles,verbs=get;list;watch
 // +kubebuilder:rbac:groups=ai.cubestack.io,resources=modelversions,verbs=get;list;watch

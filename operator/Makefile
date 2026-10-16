@@ -460,6 +460,11 @@ helm-e2e-crd-check: ## Verify chart CRDs plus the prerequisite lws/gateway CRDs,
 	$(HELM_E2E_KUBECTL) auth can-i update devenvironments.ai.cubestack.io \
 		--as=system:serviceaccount:$(HELM_NAMESPACE):cubestack-controller-manager -n $(HELM_NAMESPACE) | grep -qx yes \
 		|| { echo "manager SA cannot update DevEnvironments (the controller adds and removes its finalizer with Update)"; exit 1; }; \
+	for verb in patch update; do \
+		$(HELM_E2E_KUBECTL) auth can-i $$verb inferenceservices.ai.cubestack.io \
+			--as=system:serviceaccount:$(HELM_NAMESPACE):cubestack-controller-manager -n $(HELM_NAMESPACE) | grep -qx yes \
+			|| { echo "manager SA cannot $$verb InferenceServices (the controller adds its catalog finalizer with Patch and removes it with Update)"; exit 1; }; \
+	done; \
 	echo "platform Gateway the chart points at (the release does not create it):"; \
 	$(HELM_E2E_KUBECTL) get gateway cubestack-gateway -n $(ENVOY_GATEWAY_NAMESPACE) >/dev/null \
 		|| { echo "MISSING: no platform Gateway in $(ENVOY_GATEWAY_NAMESPACE) — the chart expects one to exist (chart README, Prerequisites)"; exit 1; }
