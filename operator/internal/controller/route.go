@@ -134,19 +134,19 @@ func (r *InferenceServiceReconciler) desiredAIServiceBackend(isvc *aiv1alpha1.In
 }
 
 // desiredReferenceGrant builds the ReferenceGrant, in the service's namespace,
-// that authorises the platform Gateway (in the Gateway's namespace) to
-// reference this service's AIServiceBackend. Cross-namespace backendRef is the
-// only reference that crosses a namespace boundary here — the shared catalog
-// route lives in the Gateway's namespace while the AIServiceBackend lives in
-// the service's — so the grant's `to` names only the AIServiceBackend; the
-// Backend is referenced by a same-namespace AIServiceBackend and needs none.
+// that authorises the shared catalog AIGatewayRoute (in the Gateway's
+// namespace) to reference this service's AIServiceBackend — the route's
+// backendRef is what crosses the namespace boundary, the Gateway itself never
+// names the AIServiceBackend. The grant's `to` names only the
+// AIServiceBackend; the Backend is referenced by a same-namespace
+// AIServiceBackend and needs none.
 func (r *InferenceServiceReconciler) desiredReferenceGrant(isvc *aiv1alpha1.InferenceService) *gatewayv1.ReferenceGrant {
 	grant := &gatewayv1.ReferenceGrant{
 		ObjectMeta: metav1.ObjectMeta{Name: referenceGrantName(isvc), Namespace: isvc.Namespace, Labels: routeLabels(isvc)},
 		Spec: gatewayv1.ReferenceGrantSpec{
 			From: []gatewayv1.ReferenceGrantFrom{{
-				Group:     gatewayv1.Group(gatewayAPIGroup),
-				Kind:      gatewayv1.Kind(gatewayKind),
+				Group:     gatewayv1.Group(aigwv1beta1.GroupName),
+				Kind:      gatewayv1.Kind("AIGatewayRoute"),
 				Namespace: gatewayv1.Namespace(r.GatewayNamespace),
 			}},
 			To: []gatewayv1.ReferenceGrantTo{{

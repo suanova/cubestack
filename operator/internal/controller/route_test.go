@@ -700,7 +700,7 @@ var _ = Describe("desired catalog objects", func() {
 		Expect(metav1.IsControlledBy(sb, isvc)).To(BeTrue())
 	})
 
-	It("renders the ReferenceGrant authorising the Gateway to the AIServiceBackend", func() {
+	It("renders the ReferenceGrant authorising the shared catalog route to the AIServiceBackend", func() {
 		isvc := routeISVC("catalog-isvc", true)
 		grant := routeReconciler().desiredReferenceGrant(isvc)
 
@@ -708,8 +708,8 @@ var _ = Describe("desired catalog objects", func() {
 		Expect(grant.Namespace).To(Equal(testNamespace))
 		expectCatalogLabels(grant.Labels)
 		Expect(grant.Spec.From).To(HaveLen(1))
-		Expect(string(grant.Spec.From[0].Group)).To(Equal(gatewayAPIGroup))
-		Expect(string(grant.Spec.From[0].Kind)).To(Equal(gatewayKind))
+		Expect(string(grant.Spec.From[0].Group)).To(Equal("aigateway.envoyproxy.io"))
+		Expect(string(grant.Spec.From[0].Kind)).To(Equal("AIGatewayRoute"))
 		Expect(string(grant.Spec.From[0].Namespace)).To(Equal(testGatewayNamespace))
 		Expect(grant.Spec.To).To(HaveLen(1))
 		Expect(string(grant.Spec.To[0].Group)).To(Equal("aigateway.envoyproxy.io"))
