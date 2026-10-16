@@ -141,6 +141,38 @@ describe("getOwnedAgentInstanceCr", () => {
     getNamespacedCustomObject.mockRejectedValue(e);
     expect(await getOwnedAgentInstanceCr("alice")).toBeNull();
   });
+
+  // What the apiserver answers for a GET of a missing object vs. of an API group
+  // it does not serve: the first names the object in `details`, the second has
+  // none. Only the second is worth a warning.
+  const apiError = (body: unknown) => Object.assign(new Error("HTTP-Code: 404"), { code: 404, body: JSON.stringify(body) });
+
+  it("treats a missing object as an ordinary absence, not a warning", async () => {
+    getNamespacedCustomObject.mockRejectedValue(
+      apiError({
+        kind: "Status",
+        status: "Failure",
+        message: 'agentinstances.ai.cubestack.io "alice-cubepilot" not found',
+        reason: "NotFound",
+        details: { name: "alice-cubepilot", group: "ai.cubestack.io", kind: "agentinstances" },
+        code: 404,
+      }),
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(await getOwnedAgentInstanceCr("alice")).toBeNull();
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("warns when the 404 has no details: the API group (or the CRD) is gone", async () => {
+    getNamespacedCustomObject.mockRejectedValue(
+      apiError({ kind: "Status", status: "Failure", message: "the server could not find the requested resource", reason: "NotFound", code: 404 }),
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(await getOwnedAgentInstanceCr("alice")).toBeNull();
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
 });
 
 const template = (spec: AgentTemplateCr["spec"]): AgentTemplateCr => ({ metadata: { name: "cubepilot" }, spec });
