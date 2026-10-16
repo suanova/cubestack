@@ -35,7 +35,9 @@ import {
   newApproval,
   newQuestion,
   openApprovals,
+  openCardIds,
   openQuestions,
+  settleCardsAbsent,
   turnStatus,
   waitingOnUser,
   type AgentApproval,
@@ -124,6 +126,14 @@ export function FloatingChat() {
 
   const [open, setOpen] = useState(false);
   const [msgs, setMsgs] = useState<ThreadMsg[]>([]);
+  /** The newest thread, for the reads a long-lived loop takes: `startFollowing`
+   *  holds the closure of the render it was started in, so a read that compared
+   *  a pending answer against that render's `msgs` would be comparing it
+   *  against a thread minutes old. */
+  const msgsRef = useRef<ThreadMsg[]>([]);
+  useEffect(() => {
+    msgsRef.current = msgs;
+  }, [msgs]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null);
@@ -393,6 +403,11 @@ export function FloatingChat() {
     const gen = genRef.current;
     const epoch = turnEpochRef.current;
     const stale = (): boolean => turnEpochRef.current !== epoch;
+    // The cards open when this pass starts. The reads below settle whatever is
+    // missing from them, so the sweep has to know what a card that arrived
+    // while a read was in flight would look like: it is not in here, and an
+    // answer taken before it existed cannot speak for it.
+    const before = openCardIds(msgsRef.current);
     /** A card with no turn in the thread to hang it on gets its own bubble.
      *  The phase is `done`, never the constructor's `thinking`: this turn is
      *  PARKED, not running. */
@@ -420,8 +435,10 @@ export function FloatingChat() {
         // at once, and the oldest is not the only one this surface offers. An
         // empty one draws nothing, which is why the read above reports its
         // failures rather than leaving this branch to say it silently.
+        const wanted = new Set<string>();
         for (const a of approvals ?? []) {
           if (a.approvalId) {
+            wanted.add(a.approvalId);
             // Through the fold's own add, so a stream event that already
             // described this approval is not doubled by the read that describes
             // it again.
@@ -429,6 +446,9 @@ export function FloatingChat() {
             attachToNewest((x) => addApproval(x, card));
           }
         }
+        // The answer is the whole pending set, so an open card it does not
+        // carry was decided in another window: retire it here too.
+        setMsgs((list) => settleCardsAbsent(list, "approvals", wanted, before.approvals));
       }
     } catch (e) {
       // The read failed, so whether a write is parked is simply unknown.
@@ -452,8 +472,10 @@ export function FloatingChat() {
         questions?: Array<{ id?: string; questions?: AgentQuestionItem[]; timeoutSeconds?: number }>;
       };
       if (genRef.current === gen && !stale()) {
+        const wanted = new Set<string>();
         for (const q of questions ?? []) {
           if (!q.id) continue;
+          wanted.add(q.id);
           // The response carries what is LEFT of the gateway's deadline, so a
           // restored card gets the same countdown as a streamed one.
           const card = newQuestion(q.id, q.questions ?? [], q.timeoutSeconds, Date.now());
@@ -462,6 +484,9 @@ export function FloatingChat() {
             x.questions.some((old) => old.callId === card.callId) ? x : { ...x, questions: [...x.questions, card] },
           );
         }
+        // Same as the approval read above: a question this answer does not
+        // carry is gone (answered in another window, or expired).
+        setMsgs((list) => settleCardsAbsent(list, "questions", wanted, before.questions));
       }
     } catch (e) {
       if (!opts.quiet && genRef.current === gen && !stale()) {

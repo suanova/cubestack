@@ -41,7 +41,9 @@ import {
   newApproval,
   newQuestion,
   openApprovals,
+  openCardIds,
   openQuestions,
+  settleCardsAbsent,
   phaseText,
   waitingSeconds,
   turnStatus,
@@ -271,6 +273,14 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
   const [objKind, setObjKind] = useState<"model" | "agent" | null>(null);
   const [svcId, setSvcId] = useState<string | null>(null);
   const [msgs, setMsgs] = useState<ChatMsg[]>([]);
+  /** The newest thread, for the reads a long-lived loop takes: `startFollowing`
+   *  holds the closure of the render it was started in, so a read that compared
+   *  a pending answer against that render's `msgs` would be comparing it
+   *  against a thread minutes old. */
+  const msgsRef = useRef<ChatMsg[]>([]);
+  useEffect(() => {
+    msgsRef.current = msgs;
+  }, [msgs]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [thinkingText, setThinkingText] = useState<string | null>(null);
@@ -924,6 +934,11 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
     // turn ends first, the cards it describes are already settled.
     const epoch = turnEpochRef.current;
     const stale = (): boolean => turnEpochRef.current !== epoch;
+    // The cards open when this pass starts. The reads below settle whatever is
+    // missing from them, so the sweep has to know what a card that arrived
+    // while a read was in flight would look like: it is not in here, and an
+    // answer taken before it existed cannot speak for it.
+    const before = openCardIds(msgsRef.current);
     /** A card with no turn in the thread to hang it on gets its own bubble. The
      *  phase is `done`, never the constructor's `thinking`: this turn is PARKED,
      *  not running, and a live phase would start the 1 Hz ticker and paint a
@@ -956,9 +971,16 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
         // not parked — the collection exists and is empty, so a read that
         // succeeded and found nothing never reaches the catch below.
         const { approvals } = (await res.json()) as { approvals?: PendingApproval[] };
+        const wanted = new Set<string>();
         for (const a of approvals ?? []) {
-          if (a.approvalId) attachApproval(a);
+          if (a.approvalId) {
+            wanted.add(a.approvalId);
+            attachApproval(a);
+          }
         }
+        // The answer is the whole pending set, so an open card it does not
+        // carry was decided in another window: retire it here too.
+        setMsgs((list) => settleCardsAbsent(list, "approvals", wanted, before.approvals));
       }
     } catch (e) {
       // The read failed, so whether a write is parked is simply unknown. Staying
@@ -981,8 +1003,10 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
         const { questions } = (await res.json()) as {
           questions?: Array<{ id?: string; questions?: AgentQuestionItem[]; timeoutSeconds?: number }>;
         };
+        const wanted = new Set<string>();
         for (const q of questions ?? []) {
           if (!q.id) continue;
+          wanted.add(q.id);
           // Through the same constructor the streamed card uses: the response
           // carries what is LEFT of the gateway's deadline, and dropping it left
           // a reloaded question with no countdown and its controls live past the
@@ -993,6 +1017,9 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
             x.questions.some((old) => old.callId === card.callId) ? x : { ...x, questions: [...x.questions, card] },
           );
         }
+        // Same as the approval read above: a question this answer does not
+        // carry is gone (answered in another window, or expired).
+        setMsgs((list) => settleCardsAbsent(list, "questions", wanted, before.questions));
       }
     } catch (e) {
       // The read failed, so whether the agent is parked on a question is simply
