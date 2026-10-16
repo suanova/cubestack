@@ -13,7 +13,28 @@ vi.mock("@/lib/kubernetes", () => ({
 const { httpsRequest, httpsAgent } = vi.hoisted(() => ({ httpsRequest: vi.fn(), httpsAgent: vi.fn() }));
 vi.mock("node:https", () => ({ request: httpsRequest, Agent: httpsAgent }));
 
-import { GATEWAY_NAMESPACE, clearGatewayCaches, gatewayCatalog, gatewayFetch, gatewayTokenHeader, resolveGatewayBase } from "./gateway";
+import {
+  GATEWAY_NAME,
+  GATEWAY_NAMESPACE,
+  clearGatewayCaches,
+  gatewayCatalog,
+  gatewayFetch,
+  gatewayTokenHeader,
+  resolveGatewayBase,
+} from "./gateway";
+
+// The dataplane Service Envoy Gateway generates for a Gateway. Its name ends in
+// a random suffix, so callers identify it by the label Envoy Gateway stamps on
+// it — never by name.
+const DATAPLANE_LABEL = "gateway.envoyproxy.io/owning-gateway-name";
+function dataplaneService(over: { name?: string; port?: number; gateway?: string } = {}) {
+  const {
+    name = "envoy-envoy-gateway-system-cubestack-gateway-27dc8f39",
+    port = 8080,
+    gateway = "cubestack-gateway",
+  } = over;
+  return { metadata: { name, labels: { [DATAPLANE_LABEL]: gateway } }, spec: { ports: [{ port }] } };
+}
 
 describe("lib/cubepilot/gateway", () => {
   afterEach(() => {
@@ -63,9 +84,7 @@ describe("lib/cubepilot/gateway", () => {
     vi.stubEnv("KUBERNETES_SERVICE_HOST", "10.0.0.1");
     vi.stubEnv("KUBERNETES_SERVICE_PORT", "443");
     vi.stubEnv("CUBESTACK_GATEWAY_TOKEN", "tok-123");
-    listNamespacedService.mockResolvedValue({
-      items: [{ metadata: { name: "envoy-default-ai-gateway-27dc8f39" }, spec: { ports: [{ port: 8080 }] } }],
-    });
+    listNamespacedService.mockResolvedValue({ items: [dataplaneService()] });
     const seen: Record<string, unknown> = {};
     vi.stubGlobal(
       "fetch",
@@ -76,7 +95,7 @@ describe("lib/cubepilot/gateway", () => {
       }),
     );
     expect((await gatewayFetch("/v1/models")).status).toBe(200);
-    expect(seen.url).toBe("http://envoy-default-ai-gateway-27dc8f39.envoy-gateway-system.svc:8080/v1/models");
+    expect(seen.url).toBe("http://envoy-envoy-gateway-system-cubestack-gateway-27dc8f39.envoy-gateway-system.svc:8080/v1/models");
     expect(seen.headers).toEqual({ Authorization: "Bearer tok-123" });
   });
 
@@ -87,32 +106,43 @@ describe("lib/cubepilot/gateway", () => {
   it("uses the discovered service when found (in cluster)", async () => {
     vi.stubEnv("KUBERNETES_SERVICE_HOST", "10.0.0.1");
     vi.stubEnv("KUBERNETES_SERVICE_PORT", "443");
-    listNamespacedService.mockResolvedValue({
-      items: [{ metadata: { name: "envoy-default-ai-gateway-27dc8f39" }, spec: { ports: [{ port: 8080 }] } }],
-    });
+    listNamespacedService.mockResolvedValue({ items: [dataplaneService()] });
     const base = await resolveGatewayBase();
-    expect(base).toEqual({ url: "http://envoy-default-ai-gateway-27dc8f39.envoy-gateway-system.svc:8080", via: "direct" });
+    expect(base).toEqual({
+      url: "http://envoy-envoy-gateway-system-cubestack-gateway-27dc8f39.envoy-gateway-system.svc:8080",
+      via: "direct",
+    });
   });
 
-  it("falls back to the well-known default base in-cluster when discovery finds nothing", async () => {
+  it("ignores a dataplane Service that belongs to another Gateway", async () => {
+    // The bug this guards: the base was picked by the Service's name
+    // (`/ai-gateway/i`), which missed Gateway/cubestack-gateway's dataplane and
+    // fell back to a DNS name nothing in the cluster answers.
+    vi.stubEnv("KUBERNETES_SERVICE_HOST", "10.0.0.1");
+    vi.stubEnv("KUBERNETES_SERVICE_PORT", "443");
+    listNamespacedService.mockResolvedValue({
+      items: [dataplaneService({ name: "envoy-default-ai-gateway-27dc8f39", gateway: "ai-gateway" })],
+    });
+    expect(await resolveGatewayBase()).toBeNull();
+  });
+
+  it("returns null in-cluster when discovery finds nothing", async () => {
     vi.stubEnv("KUBERNETES_SERVICE_HOST", "10.0.0.1");
     vi.stubEnv("KUBERNETES_SERVICE_PORT", "443");
     listNamespacedService.mockResolvedValue({ items: [] });
-    const base = await resolveGatewayBase();
-    expect(base).toEqual({ url: "http://envoy-default-ai-gateway.envoy-gateway-system.svc:8080", via: "direct" });
+    expect(await resolveGatewayBase()).toBeNull();
   });
 
-  it("falls back to the default in-cluster when discovery is denied (RBAC)", async () => {
+  it("returns null in-cluster when the Service list is denied (RBAC)", async () => {
     vi.stubEnv("KUBERNETES_SERVICE_HOST", "10.0.0.1");
     vi.stubEnv("KUBERNETES_SERVICE_PORT", "443");
     const e = new Error("403 forbidden") as Error & { statusCode: number };
     e.statusCode = 403;
     listNamespacedService.mockRejectedValue(e);
-    const base = await resolveGatewayBase();
-    expect(base).toEqual({ url: "http://envoy-default-ai-gateway.envoy-gateway-system.svc:8080", via: "direct" });
+    expect(await resolveGatewayBase()).toBeNull();
   });
 
-  it("returns null off-cluster when discovery finds nothing (no in-cluster default)", async () => {
+  it("returns null off-cluster when discovery finds nothing", async () => {
     listNamespacedService.mockResolvedValue({ items: [] });
     expect(await resolveGatewayBase()).toBeNull();
   });
@@ -126,7 +156,7 @@ describe("lib/cubepilot/gateway", () => {
       vi.stubEnv("KUBERNETES_SERVICE_HOST", "10.0.0.1");
       vi.stubEnv("KUBERNETES_SERVICE_PORT", "443");
       listNamespacedService.mockResolvedValue({
-        items: [{ metadata: { name: "envoy-default-ai-gateway-27dc8f39" }, spec: { ports: [{ port: 8080 }] } }],
+        items: [dataplaneService()],
       });
     } else {
       vi.stubEnv("CUBESTACK_GATEWAT_URL", "https://gw.test");
@@ -160,7 +190,7 @@ describe("lib/cubepilot/gateway", () => {
     vi.stubEnv("KUBERNETES_SERVICE_HOST", "10.0.0.1");
     vi.stubEnv("KUBERNETES_SERVICE_PORT", "443");
     listNamespacedService.mockResolvedValue({
-      items: [{ metadata: { name: "envoy-default-ai-gateway-27dc8f39" }, spec: { ports: [{ port: 8080 }] } }],
+      items: [dataplaneService()],
     });
     await resolveGatewayBase();
     await resolveGatewayBase();
@@ -172,7 +202,7 @@ describe("lib/cubepilot/gateway", () => {
     // caller's timeout has to be wired to it explicitly: an endpoint that never
     // answers would otherwise hold the caller — and its stream — open.
     listNamespacedService.mockResolvedValue({
-      items: [{ metadata: { name: "envoy-default-ai-gateway-27dc8f39" }, spec: { ports: [{ port: 8080 }] } }],
+      items: [dataplaneService()],
     });
     const destroy = vi.fn();
     httpsRequest.mockReturnValue({ on: vi.fn().mockReturnThis(), write: vi.fn(), end: vi.fn(), destroy });
@@ -187,7 +217,7 @@ describe("lib/cubepilot/gateway", () => {
     vi.stubEnv("KUBERNETES_SERVICE_HOST", "10.0.0.1");
     vi.stubEnv("KUBERNETES_SERVICE_PORT", "443");
     listNamespacedService.mockResolvedValue({
-      items: [{ metadata: { name: "envoy-default-ai-gateway-27dc8f39" }, spec: { ports: [{ port: 8080 }] } }],
+      items: [dataplaneService()],
     });
     const [a, b] = await Promise.all([resolveGatewayBase(), resolveGatewayBase()]);
     expect(a).toEqual(b);
@@ -252,5 +282,14 @@ describe("GATEWAY_NAMESPACE", () => {
   it("resolves to a non-empty namespace", () => {
     expect(GATEWAY_NAMESPACE).toBe(process.env.CUBESTACK_GATEWAY_NAMESPACE?.trim() || "envoy-gateway-system");
     expect(GATEWAY_NAMESPACE.length).toBeGreaterThan(0);
+  });
+});
+
+describe("GATEWAY_NAME", () => {
+  // Same rule as the namespace above: an unset/blank CUBESTACK_GATEWAY_NAME
+  // falls back to the name the chart and the operator default to.
+  it("resolves to the platform Gateway's name", () => {
+    expect(GATEWAY_NAME).toBe(process.env.CUBESTACK_GATEWAY_NAME?.trim() || "cubestack-gateway");
+    expect(GATEWAY_NAME.length).toBeGreaterThan(0);
   });
 });

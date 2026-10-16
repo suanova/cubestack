@@ -2,12 +2,13 @@
 // server-side route handlers. The base URL is resolved as:
 //   1. CUBESTACK_GATEWAT_URL when set (e.g. http://<node>:30880 for a
 //      NodePort, or an in-cluster DNS name);
-//   2. the ai-gateway Service discovered in envoy-gateway-system:
+//   2. the dataplane Service of Gateway/<CUBESTACK_GATEWAY_NAME>, discovered in
+//      envoy-gateway-system by the label Envoy Gateway stamps on it:
 //      - inside the cluster: plain in-cluster DNS (http://<svc>.<ns>.svc:<port>);
 //      - local dev: the API-server service proxy, which works off-cluster and
-//        is authenticated with the kubeconfig credentials (client certs/token);
-//   3. in-cluster last resort: the well-known default base
-//      (DEFAULT_GATEWAY_BASE), which needs no RBAC to list Services.
+//        is authenticated with the kubeconfig credentials (client certs/token).
+//      The Service's generated name ends in a random suffix, so it is found by
+//      label rather than guessed from a name.
 // CUBESTACK_GATEWAY_TOKEN, when set, is sent as a bearer header on every
 // gateway request.
 
@@ -24,13 +25,15 @@ import type { GatewayModel } from "./types";
  *  (CUBESTACK_GATEWAY_NAMESPACE overrides the default). */
 export const GATEWAY_NAMESPACE = (process.env.CUBESTACK_GATEWAY_NAMESPACE ?? "").trim() || "envoy-gateway-system";
 
-/**
- * Well-known in-cluster base of the Envoy AI Gateway. Used when the portal
- * runs inside a cluster and CUBESTACK_GATEWAT_URL is unset — including when
- * Service discovery is unavailable (e.g. no RBAC to list Services). It is an
- * in-cluster DNS name, so it is only offered when actually running in-cluster.
- */
-const DEFAULT_GATEWAY_BASE = "http://envoy-default-ai-gateway.envoy-gateway-system.svc:8080";
+/** The platform Gateway whose dataplane serves the model catalog
+ *  (CUBESTACK_GATEWAY_NAME overrides the default). It is the same name the
+ *  operator is given as --gateway-name and the chart renders as gateway.name. */
+export const GATEWAY_NAME = (process.env.CUBESTACK_GATEWAY_NAME ?? "").trim() || "cubestack-gateway";
+
+/** The label Envoy Gateway puts on the dataplane Service it generates for a
+ *  Gateway. The Service's name is `envoy-<namespace>-<gateway>-<random>`, so
+ *  this label — not the name — is what identifies the one we want. */
+const GATEWAY_DATAPLANE_NAME_LABEL = "gateway.envoyproxy.io/owning-gateway-name";
 
 /** A resolved gateway base plus how to reach it. */
 export interface GatewayBase {
@@ -54,10 +57,10 @@ function safeRead(path: string): string | undefined {
 }
 
 /**
- * Discover the ai-gateway Service in envoy-gateway-system and map it to a
- * reachable base: an in-cluster DNS URL when running in the cluster, or an
- * API-server service-proxy URL off-cluster. Null when nothing is found or the
- * cluster cannot be listed.
+ * Discover the dataplane Service of Gateway/GATEWAY_NAME in GATEWAY_NAMESPACE
+ * and map it to a reachable base: an in-cluster DNS URL when running in the
+ * cluster, or an API-server service-proxy URL off-cluster. Null when nothing is
+ * found or the cluster cannot be listed.
  *
  * The answer is memoized (see BASE_TTL_MS): discovery is a Service LIST, and
  * every gateway call used to pay for one.
@@ -66,7 +69,9 @@ async function discoverGatewayBase(): Promise<GatewayBase | null> {
   try {
     const core = getCoreClient();
     const res = await core.listNamespacedService({ namespace: GATEWAY_NAMESPACE });
-    const svc = (res.items ?? []).find((s) => /ai-gateway/i.test(s.metadata?.name ?? ""));
+    const svc = (res.items ?? []).find(
+      (s) => s.metadata?.labels?.[GATEWAY_DATAPLANE_NAME_LABEL] === GATEWAY_NAME,
+    );
     if (!svc) return null;
     const name = svc.metadata?.name ?? "";
     const port = svc.spec?.ports?.[0]?.port ?? 8080;
@@ -115,8 +120,8 @@ export function clearGatewayCaches(): void {
 
 /**
  * Resolve the gateway base. CUBESTACK_GATEWAT_URL wins; otherwise the
- * ai-gateway Service is discovered (see discoverGatewayBase); in-cluster,
- * the well-known default base is the last resort; null when nothing applies.
+ * Gateway's dataplane Service is discovered (see discoverGatewayBase); null
+ * when there is nothing to discover and no URL was configured.
  */
 export async function resolveGatewayBase(): Promise<GatewayBase | null> {
   const explicit = (process.env.CUBESTACK_GATEWAT_URL ?? "").trim();
@@ -134,14 +139,9 @@ export async function resolveGatewayBase(): Promise<GatewayBase | null> {
       baseCache = { base: discovered, loadedAt: Date.now() };
       return discovered;
     }
-    if (inCluster()) {
-      logger("gateway").debug("base from the well-known in-cluster name", { url: DEFAULT_GATEWAY_BASE });
-      const base: GatewayBase = { url: DEFAULT_GATEWAY_BASE, via: "direct" };
-      baseCache = { base, loadedAt: Date.now() };
-      return base;
-    }
     logger("gateway").warn("no gateway base resolved — system model list and playground chat are unavailable", {
-      hint: "set CUBESTACK_GATEWAT_URL or install the gateway in " + GATEWAY_NAMESPACE,
+      gateway: `${GATEWAY_NAMESPACE}/${GATEWAY_NAME}`,
+      hint: "set CUBESTACK_GATEWAT_URL, or point CUBESTACK_GATEWAY_NAME / CUBESTACK_GATEWAY_NAMESPACE at the platform Gateway",
     });
     baseCache = { base: null, loadedAt: Date.now() };
     return null;
@@ -335,7 +335,7 @@ export async function gatewayFetch(path: string, init: RequestInit = {}): Promis
   const base = await resolveGatewayBase();
   if (!base) {
     throw new Error(
-      `AI gateway not found: set CUBESTACK_GATEWAT_URL or install the gateway in namespace ${GATEWAY_NAMESPACE}`,
+      `AI gateway not found: no dataplane Service for Gateway ${GATEWAY_NAMESPACE}/${GATEWAY_NAME} — set CUBESTACK_GATEWAT_URL, or CUBESTACK_GATEWAY_NAME / CUBESTACK_GATEWAY_NAMESPACE`,
     );
   }
   const token = gatewayTokenHeader();
