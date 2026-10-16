@@ -967,11 +967,14 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
       // session that is not parked, and a read that could not be made is not
       // that answer.
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      // Parsed BEFORE the check: reading the body is a suspension point, so a
+      // turn that settles while it is read would otherwise slip past the
+      // generation and epoch checks and settle cards on a turn already done.
+      const approvals = pendingCollection<PendingApproval>(await res.json(), "approvals");
       if (genRef.current === gen && !stale()) {
         // A LIST, and an empty one is the ordinary answer for a session that is
         // not parked — the collection exists and is empty, so a read that
         // succeeded and found nothing never reaches the catch below.
-        const approvals = pendingCollection<PendingApproval>(await res.json(), "approvals");
         const wanted = new Set<string>();
         for (const a of approvals) {
           if (a.approvalId) {
@@ -1000,12 +1003,13 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
       // A failed read is thrown so that it is reported rather than folded into
       // "idle"; an empty collection is not a failure, it is nothing pending.
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      if (res.ok && genRef.current === gen && !stale()) {
-        const questions = pendingCollection<{
-          id?: string;
-          questions?: AgentQuestionItem[];
-          timeoutSeconds?: number;
-        }>(await res.json(), "questions");
+      // Same ordering as the approval read above, for the same reason.
+      const questions = pendingCollection<{
+        id?: string;
+        questions?: AgentQuestionItem[];
+        timeoutSeconds?: number;
+      }>(await res.json(), "questions");
+      if (genRef.current === gen && !stale()) {
         const wanted = new Set<string>();
         for (const q of questions) {
           if (!q.id) continue;
