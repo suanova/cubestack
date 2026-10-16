@@ -85,7 +85,7 @@ function stubCluster() {
           {
             spec: { profileRef: "profile-a" },
             status: {
-              conditions: [{ type: "Ready", status: "True" }],
+              phase: { name: "Ready" },
               roles: [
                 { name: "engine", replicas: 2, groupSize: 2 }, // 2 groups x 2 pods x 1 gpu = 4
                 { name: "router", replicas: 1, groupSize: null }, // CPU-only role -> 0
@@ -95,7 +95,7 @@ function stubCluster() {
           {
             spec: { profileRef: "profile-a" },
             status: {
-              conditions: [{ type: "Progressing", status: "True" }],
+              phase: { name: "Progressing" },
               roles: [{ name: "engine", replicas: 4, groupSize: 1 }], // 4 x 1 x 1 = 4
             },
           },
@@ -160,7 +160,7 @@ describe("overview route", () => {
         allocated: 11,
         free: 9,
       },
-      inference: { total: 2, ready: 1, scaling: 1 },
+      inference: { total: 2, ready: 1, progressing: 1 },
       devenv: { total: 3, running: 2, stopped: 1 },
     });
     // The trend is real Prometheus data: 3 points padded to the 48-bucket chart.

@@ -62,9 +62,9 @@ export interface InferenceServiceSummary {
     // string here is a declared value ("off"), not a missing one
     default: number | string | boolean | null;
   }>;
-  // observed state (null until the controller reports it)
-  ready: boolean | null;
-  progressing: boolean;
+  // observed state (phase is null until the controller reports it)
+  phase: string | null;
+  phaseReason: string | null;
   conditions: Array<{
     type: string;
     status: string;
@@ -114,6 +114,7 @@ interface IsvcSpec {
   };
 }
 interface IsvcStatus {
+  phase?: { name?: string; reason?: string };
   conditions?: Condition[];
   roles?: RoleStatus[];
   model?: { name?: string; version?: string };
@@ -163,11 +164,6 @@ function findGpuRole(profile: Profile | undefined): ProfileRole | null {
 
 function num(v: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
-}
-
-function condTrue(conds: Condition[] | undefined, type: string): boolean | null {
-  const c = conds?.find((x) => x.type === type);
-  return c ? c.status === "True" : null;
 }
 
 /**
@@ -279,8 +275,8 @@ function project(
     modelVersion: status.model?.version ?? null,
     overrideNums,
     overrides,
-    ready: condTrue(status.conditions, "Ready"),
-    progressing: condTrue(status.conditions, "Progressing") === true,
+    phase: status.phase?.name ?? null,
+    phaseReason: status.phase?.reason ?? null,
     conditions: (status.conditions ?? []).map((c) => ({
       type: c.type ?? "?",
       status: c.status ?? "Unknown",

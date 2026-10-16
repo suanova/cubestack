@@ -96,8 +96,9 @@ describe("inference services page", () => {
     expect(container.textContent).toContain("decodeReplicas 2");
     expect(container.textContent).toContain("prefillReplicas 1");
     expect(container.textContent).toContain("groupSize 1");
-    // Both services are pending (no status yet from the controller).
-    expect(container.textContent).toContain("Pending");
+    // No status from the controller yet -> no phase, so the status chip shows
+    // its placeholder rather than inventing one.
+    expect((container.querySelector('[data-od-id="svc-row-dsv4-flash-pd"]') as HTMLElement).textContent).toContain("—");
 
     // First in the list is selected (newest): its engine/value params show.
     expect(container.textContent).toContain("访问端点");
@@ -112,21 +113,24 @@ describe("inference services page", () => {
     act(() => root.unmount());
   });
 
-  it("shows a not-ready service as Pending while progressing, 异常 once it has broken", async () => {
+  it("renders the phase the controller reported, and nothing else", async () => {
     const list = [
-      // Just created: Ready=False but Progressing=True (Reconciling) — its pods
-      // are still ContainerCreating, which must not read as "abnormal".
-      inferenceServiceSummary({ name: "starting", createdAt: "2026-09-01T07:00:00Z", ready: false, progressing: true }),
-      // Converged then broke: Ready=False with Progressing=False (Converged) —
-      // the genuine abnormal state.
-      inferenceServiceSummary({ name: "broken", createdAt: "2026-09-01T06:00:00Z", ready: false, progressing: false }),
+      // Just created: the operator reads it as Progressing (Reconciling) — the
+      // row must not call that broken.
+      inferenceServiceSummary({ name: "starting", createdAt: "2026-09-01T07:00:00Z", phase: "Progressing", phaseReason: "Reconciling" }),
+      // Converged then broke: the operator's own verdict.
+      inferenceServiceSummary({ name: "broken", createdAt: "2026-09-01T06:00:00Z", phase: "Failed", phaseReason: "RolesNotReady" }),
+      inferenceServiceSummary({ name: "up", createdAt: "2026-09-01T05:00:00Z", phase: "Ready", phaseReason: "Ready" }),
     ];
     stubData(list);
     const { container, root } = renderPage();
     await act(async () => {});
 
-    expect((container.querySelector('[data-od-id="svc-row-starting"]') as HTMLElement).textContent).toContain("Pending");
-    expect((container.querySelector('[data-od-id="svc-row-broken"]') as HTMLElement).textContent).toContain("异常");
+    const chip = (name: string) =>
+      (container.querySelector(`[data-od-id="svc-row-${name}"]`) as HTMLElement).textContent;
+    expect(chip("starting")).toContain("Progressing");
+    expect(chip("broken")).toContain("Failed");
+    expect(chip("up")).toContain("Ready");
 
     act(() => root.unmount());
   });
@@ -444,6 +448,38 @@ describe("inference services page", () => {
     });
     expect(container.querySelectorAll('[data-od-id^="svc-row-"]')).toHaveLength(0);
     expect(container.textContent).toContain("当前筛选条件下没有服务");
+
+    act(() => root.unmount());
+  });
+
+  it("keeps a failed service out of 准备中, where it is not preparing", async () => {
+    stubData([
+      inferenceServiceSummary({ name: "up", createdAt: "2026-09-01T07:00:00Z", phase: "Ready" }),
+      inferenceServiceSummary({ name: "starting", createdAt: "2026-09-01T06:00:00Z", phase: "Progressing" }),
+      inferenceServiceSummary({ name: "unreported", createdAt: "2026-09-01T05:30:00Z", phase: null }),
+      inferenceServiceSummary({ name: "broken", createdAt: "2026-09-01T05:00:00Z", phase: "Failed" }),
+    ]);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    const rows = () =>
+      Array.from(container.querySelectorAll('[data-od-id^="svc-row-"]')).map(
+        (r) => r.getAttribute("data-od-id"),
+      );
+    expect(rows()).toHaveLength(4);
+
+    const tabs = container.querySelectorAll('[role="tab"]');
+    await act(async () => {
+      (tabs[1] as HTMLElement).click(); // Ready
+    });
+    expect(rows()).toEqual(["svc-row-up"]);
+
+    await act(async () => {
+      (tabs[2] as HTMLElement).click(); // 准备中
+    });
+    // A service the controller has not reported on is still starting, so it
+    // belongs here; a Failed one is not preparing and is reached through 全部.
+    expect(rows()).toEqual(["svc-row-starting", "svc-row-unreported"]);
 
     act(() => root.unmount());
   });

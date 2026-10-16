@@ -69,9 +69,9 @@ test.describe("inference services landing (mocked data)", () => {
     await expect(table).toContainText("dsv4-pro-pd");
     await expect(table).toContainText("dsv4-flash-pd");
 
-    // The fixture has no reported status -> both render as Pending.
+    // The fixture has no reported phase -> the chip shows its placeholder.
     const pro = page.locator('[data-od-id="svc-row-dsv4-pro-pd"]');
-    await expect(pro).toContainText("Pending");
+    await expect(pro).toContainText("—");
     await expect(pro).toContainText("sglang");
     await expect(pro).toContainText("8 × MXC500");
     // Replicas render multi-line, one row per integer override the profile declares.
@@ -83,10 +83,10 @@ test.describe("inference services landing (mocked data)", () => {
     await expect(pro).toContainText("deepseek-v4-pro-w8a8-v1");
   });
 
-  test("filters rows by Ready / 扩缩容中 tab", async ({ page }) => {
+  test("filters rows by Ready / 准备中 tab", async ({ page }) => {
     const list = [
-      inferenceServiceSummary({ name: "dsv4-pro-pd", ready: true, progressing: false, routeModelName: "dsv4-pro" }),
-      inferenceServiceSummary({ name: "dsv4-flash-pd", ready: false, progressing: true, routeModelName: "dsv4-flash" }),
+      inferenceServiceSummary({ name: "dsv4-pro-pd", phase: "Ready", phaseReason: "Ready", routeModelName: "dsv4-pro" }),
+      inferenceServiceSummary({ name: "dsv4-flash-pd", phase: "Progressing", phaseReason: "Rollout", routeModelName: "dsv4-flash" }),
     ];
     await stubList(page, { items: list });
     await page.goto("/cubestack/inference-services");
@@ -103,8 +103,8 @@ test.describe("inference services landing (mocked data)", () => {
     await expect(page.locator('[data-od-id="svc-row-dsv4-pro-pd"]')).toBeVisible();
     await expect(page.locator('[data-od-id="svc-row-dsv4-flash-pd"]')).toHaveCount(0);
 
-    // 扩缩容中 (scaling, inclusive of every not-ready service) -> the other one only.
-    await tabs.filter({ hasText: "扩缩容中" }).click();
+    // 准备中 (the phases still being worked on) -> the other one only.
+    await tabs.filter({ hasText: "准备中" }).click();
     await expect(page.locator('[data-od-id="svc-row-dsv4-flash-pd"]')).toBeVisible();
     await expect(page.locator('[data-od-id="svc-row-dsv4-pro-pd"]')).toHaveCount(0);
   });

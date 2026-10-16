@@ -594,6 +594,10 @@ spec:
 ```yaml
 status:
   observedGeneration: 3                    # 已处理到的 InferenceService generation
+  phase:
+    name: Progressing                      # Pending / Progressing / Ready / Failed
+    reason: Reconciling                    # 当前 phase 的原因
+    lastTransitionTime: "2026-09-01T06:12:03Z"
   profile:
     name: metax-sglang-dsv4-pd  # 解析结果回显
     revision: a1b2c3...         # 最后一次成功应用时的 Profile spec 与 asset 内容综合 hash；同名重建检测的基线
@@ -684,6 +688,23 @@ status:
 - 如果渲染失败，新的配置不会写入已创建的资源。此时 `Progressing=False`，`Ready` 继续反映当前部署的实际状态。
 - `Rendered` 单独表示配置是否已成功渲染。渲染在一次 reconcile 中同步完成，因此不使用 `Progressing=True, reason=Rendering`。
 - 资源创建或工作负载应用的 API 级失败由 `Provisioned` / `WorkloadsApplied` 表示，`Progressing` 的 reason 不承载失败语义。
+
+**Phase**：`status.phase` 是上述 conditions 的汇总，不引入新的观察——写它的那次 reconcile 就写了它所读的 conditions，因此渲染 phase 的客户端与读 conditions 的客户端不会对同一个服务给出不同结论。消费方是 `kubectl get isvc` 的 `PHASE` / `REASON` 两列，以及门户的服务列表（状态 chip 与筛选）。
+
+判定按下表**从前往后**取第一条命中；每次 reconcile 依据该轮（或沿用上轮）的 conditions 重算，`reason` 每次重写，`lastTransitionTime` 仅在 `name` 变化时前移：
+
+| 优先级 | 判定 | `name` | `reason` |
+|---|---|---|---|
+| 1 | `Resolved` → `Rendered` → `Provisioned` → `WorkloadsApplied` 中第一个为 `False` 的 condition（`WaitingForDependencies` 除外，见下） | `Failed` | 该 condition 自己的 reason |
+| 2 | `Ready=True` | `Ready` | `Ready` |
+| 3 | `Ready=False` 且 `Progressing=True` | `Progressing` | `Progressing` 的 reason（`Reconciling` / `Rollout` / `Scaling`） |
+| 4 | `Ready=False` 且 `Progressing≠True` | `Failed` | `RolesNotReady` |
+| — | 没有 `Ready` condition：尚未得出任何结论 | 字段缺省，等同 `Pending` | — |
+
+- **优先级 1 的例外**：`WorkloadsApplied=False, reason=WaitingForDependencies`（role 在等尚未就绪的依赖）不是失败。这一轮写下的 `Progressing` 正是 `Reconciling`（§4.1 步骤 4），因此跳过它、按优先级 3 判定为 `Progressing`。少了这个例外，每个正常启动的服务都会被读作 `Failed`。
+- **为什么前四条排在 `Ready` 之前**：这四条失败路径都在聚合 `Ready` / `Progressing` 之前就结束了本轮 reconcile，两个 condition 还是上一轮的陈旧值（全新对象上则根本不存在）。只看 `Ready` 会把「首次 apply 失败」读成「尚无结论」。
+- **`EndpointReady` / `RouteReady` 不参与判定**：`publish: false` 时 `RouteReady` 本就是 `True/NotPublished`，路由未发布不构成故障；内部端点尚未可达已被 `Progressing` 覆盖。
+- **`Pending`**：枚举里的第四个取值，语义是「Controller 还没有给出结论」。当前实现中这一状态表现为 `phase` 字段缺省而不是 `name: Pending`——一次走到结尾的 reconcile 一定已经写了 `Ready`，而读失败的早退路径按设计不写 status。因此客户端应把「`phase` 缺省」与 `Pending` 等同看待（门户的「准备中」筛选即如此）。
 
 #### Controller 行为
 

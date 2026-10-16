@@ -173,6 +173,52 @@ type AssetStatus struct {
 	Hash string `json:"hash"`
 }
 
+// InferenceServicePhaseName is an observed phase of an InferenceService.
+type InferenceServicePhaseName string
+
+const (
+	// InferenceServicePhasePending is a service the controller has not
+	// reported on yet: no spec has been applied and no verdict reached, either
+	// because the first reconcile has not landed or because one of its reads
+	// keeps failing.
+	InferenceServicePhasePending InferenceServicePhaseName = "Pending"
+	// InferenceServicePhaseProgressing is a service whose desired state is
+	// being applied — first creation, a rollout, a scale, or a wait on
+	// another role's workload.
+	InferenceServicePhaseProgressing InferenceServicePhaseName = "Progressing"
+	// InferenceServicePhaseReady is a service whose every role's workload is
+	// ready and whose workloads report no new generation to apply.
+	InferenceServicePhaseReady InferenceServicePhaseName = "Ready"
+	// InferenceServicePhaseFailed is a service that needs a human: the spec
+	// could not be applied, or applying it converged on a workload that never
+	// became ready.
+	InferenceServicePhaseFailed InferenceServicePhaseName = "Failed"
+)
+
+// InferenceServicePhase describes the current phase of the service.
+//
+// It is a summary of the conditions, not a further observation: the same
+// reconcile that writes Conditions derives the phase from them, so a client
+// that renders the phase and a client that reads Conditions cannot disagree
+// about what state the service is in. The two conditions the phase is mostly
+// made of — Ready and Progressing — are written together from the same role
+// readiness, so the phase never has to choose between them.
+type InferenceServicePhase struct {
+	// Name is the current phase.
+	// +kubebuilder:validation:Enum=Pending;Progressing;Ready;Failed
+	Name InferenceServicePhaseName `json:"name"`
+
+	// LastTransitionTime is the time the current phase was reached.
+	// +optional
+	LastTransitionTime *metav1.Time `json:"lastTransitionTime,omitempty"`
+
+	// Reason explains the current phase: the failing condition's own reason on
+	// a Failed phase, and the Progressing condition's reason (Reconciling,
+	// Rollout or Scaling) on a Progressing one.
+	// +optional
+	Reason string `json:"reason,omitempty"`
+}
+
 // InferenceServiceStatus defines the observed state of InferenceService.
 type InferenceServiceStatus struct {
 	// ObservedGeneration is the generation the controller has processed; if
@@ -180,6 +226,12 @@ type InferenceServiceStatus struct {
 	// to an older spec.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// Phase is the service's state in one word, summarized from the
+	// conditions below. It is absent until the controller has reached a
+	// verdict — see InferenceServicePhasePending.
+	// +optional
+	Phase *InferenceServicePhase `json:"phase,omitempty"`
 
 	// Profile echoes the resolved InferenceRuntimeProfile.
 	// +optional
@@ -224,6 +276,8 @@ type InferenceServiceStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=".status.phase.name"
+// +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=".status.phase.reason"
 // +kubebuilder:printcolumn:name="Model",type=string,JSONPath=".spec.modelRef"
 // +kubebuilder:printcolumn:name="Profile",type=string,JSONPath=".spec.profileRef"
 

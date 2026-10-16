@@ -108,3 +108,85 @@ func setProgressingCondition(conditions *[]metav1.Condition, roles []aiv1alpha1.
 		Message: "Applying the desired configuration",
 	})
 }
+
+// reasonWaitingForDependencies is the WorkloadsApplied reason for a role whose
+// creation is gated on a not-yet-ready dependency (apply.go:
+// applyResult.WaitingDependencies, design §3.3). It is the one WorkloadsApplied
+// reason that is not a failure — see derivePhase, which has to read it back.
+const reasonWaitingForDependencies = "WaitingForDependencies"
+
+// setInferenceServicePhase derives the phase from the conditions and records
+// it, bumping LastTransitionTime only when the phase name changes.
+//
+// The phase is a summary, not a further observation: everything it reads was
+// written by the pass that calls it, so a client rendering the phase and a
+// client reading the conditions alongside it cannot disagree about what state
+// the service is in.
+//
+// Named after the service rather than merely setPhase, which is the
+// DevEnvironment's recorder and takes a different status.
+func setInferenceServicePhase(status *aiv1alpha1.InferenceServiceStatus) {
+	name, reason := derivePhase(status.Conditions)
+	if status.Phase == nil || status.Phase.Name != name {
+		now := metav1.Now()
+		status.Phase = &aiv1alpha1.InferenceServicePhase{Name: name, LastTransitionTime: &now}
+	}
+	status.Phase.Reason = reason
+}
+
+// derivePhase is the phase judgement as a pure function of the conditions.
+//
+// The four pipeline conditions come first because each of their False paths
+// returns before setReadyCondition runs, leaving Ready and Progressing at
+// whatever a previous pass wrote — or unset, on a service that has never
+// converged. Judging such a service on Ready alone would read Pending for one
+// whose first apply failed. The order Resolved → Rendered → Provisioned →
+// WorkloadsApplied is the order the pipeline applies them in, so the reason
+// names the earliest thing that went wrong (design §3.3).
+//
+// WorkloadsApplied=False is a failure only for the reasons that mean the apply
+// itself failed. WaitingForDependencies is not one of them: a role gated on a
+// not-yet-ready dependency is starting normally, and the Progressing condition
+// this same pass writes says Reconciling (aggregate.go: ProgressingReconciling).
+// Reading it as Failed would mark a healthy first deployment broken.
+//
+// EndpointReady and RouteReady are deliberately not consulted. A route that is
+// not published is not a fault — publish=false reports True/NotPublished — and
+// an endpoint that is not yet reachable is already what Progressing says.
+func derivePhase(conditions []metav1.Condition) (aiv1alpha1.InferenceServicePhaseName, string) {
+	for _, t := range []string{
+		aiv1alpha1.ConditionResolved,
+		aiv1alpha1.ConditionRendered,
+		aiv1alpha1.ConditionProvisioned,
+		aiv1alpha1.ConditionWorkloadsApplied,
+	} {
+		c := meta.FindStatusCondition(conditions, t)
+		if c == nil || c.Status != metav1.ConditionFalse {
+			continue
+		}
+		if c.Reason == reasonWaitingForDependencies {
+			continue
+		}
+		return aiv1alpha1.InferenceServicePhaseFailed, c.Reason
+	}
+
+	ready := meta.FindStatusCondition(conditions, aiv1alpha1.ConditionReady)
+	switch {
+	case ready == nil:
+		// No verdict yet: the first reconcile has not landed, or a read keeps
+		// failing and the pass returns before it reaches the aggregation.
+		return aiv1alpha1.InferenceServicePhasePending, "Pending"
+	case ready.Status == metav1.ConditionTrue:
+		return aiv1alpha1.InferenceServicePhaseReady, ready.Reason
+	}
+	// Ready is False, so Progressing is what says whether that is work in
+	// flight or a workload that converged on one that never came up. A
+	// converged service whose pod has since died keeps False/Converged
+	// (setProgressingCondition leaves the condition alone when nothing was
+	// applied), which is exactly the case that reads Failed here.
+	progressing := meta.FindStatusCondition(conditions, aiv1alpha1.ConditionProgressing)
+	if progressing != nil && progressing.Status == metav1.ConditionTrue {
+		return aiv1alpha1.InferenceServicePhaseProgressing, progressing.Reason
+	}
+	return aiv1alpha1.InferenceServicePhaseFailed, ready.Reason
+}

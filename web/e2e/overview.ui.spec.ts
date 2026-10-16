@@ -47,7 +47,7 @@ test.describe("overview landing (mocked data)", () => {
     const inf = page.locator('[data-od-id="kpi-inference"]');
     await expect(inf).toContainText("推理服务");
     await expect(inf).toContainText("12");
-    await expect(inf).toContainText("就绪 11 · 扩缩容中 1");
+    await expect(inf).toContainText("就绪 11 · 准备中 1");
 
     const dev = page.locator('[data-od-id="kpi-devenv"]');
     await expect(dev).toContainText("开发环境");

@@ -46,7 +46,7 @@ export interface OverviewSummary {
     allocated: number;
     free: number;
   };
-  inference: { total: number; ready: number; scaling: number };
+  inference: { total: number; ready: number; progressing: number };
   devenv: { total: number; running: number; stopped: number };
   /** null when Prometheus is unreachable or has no GPU metrics. */
   trend: { util: number[]; mem: number[] } | null;
@@ -62,7 +62,7 @@ interface K8sCondition {
 interface InferenceService {
   spec?: { profileRef?: string };
   status?: {
-    conditions?: K8sCondition[];
+    phase?: { name?: string };
     roles?: {
       name?: string;
       replicas?: number;
@@ -178,7 +178,7 @@ export const GET = withAuth(async () => {
 
     let inferenceGpus = 0;
     let inferenceReady = 0;
-    let inferenceScaling = 0;
+    let inferenceProgressing = 0;
     for (const isvc of isvcs) {
       // status.roles carries the resolved replicas/groupSize; only the
       // per-pod GPU needs the profile lookup.
@@ -188,8 +188,12 @@ export const GET = withAuth(async () => {
         const groupSize = role.groupSize ?? 1;
         inferenceGpus += replicas * groupSize * (roleGpu.get(role.name ?? "") ?? 0);
       }
-      if (conditionTrue(isvc.status?.conditions, "Ready")) inferenceReady += 1;
-      if (conditionTrue(isvc.status?.conditions, "Progressing")) inferenceScaling += 1;
+      // The controller's own one-word verdict, the same field the
+      // /inference-services page filters on — so the two views partition the
+      // same services the same way.
+      const phase = isvc.status?.phase?.name;
+      if (phase === "Ready") inferenceReady += 1;
+      else if (phase === "Progressing") inferenceProgressing += 1;
     }
 
     let computeGpus = 0;
@@ -220,7 +224,7 @@ export const GET = withAuth(async () => {
         allocated,
         free: Math.max(0, totalCards - allocated),
       },
-      inference: { total: isvcs.length, ready: inferenceReady, scaling: inferenceScaling },
+      inference: { total: isvcs.length, ready: inferenceReady, progressing: inferenceProgressing },
       devenv: { total: devenvs.length, running: devenvRunning, stopped: devenvStopped },
       trend: null,
     };

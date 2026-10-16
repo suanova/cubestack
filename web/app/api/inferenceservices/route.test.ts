@@ -219,9 +219,9 @@ describe("inference services route", () => {
         { name: "decodeReplicas", type: "integer", min: 1, max: 16, enum: null, current: 2 },
         { name: "groupSize", type: "integer", min: null, max: null, enum: [1, 2, 4], current: 1 },
       ],
-      // no status yet -> pending
-      ready: null,
-      progressing: false,
+      // no status yet -> no phase
+      phase: null,
+      phaseReason: null,
       conditions: [],
       roles: [],
       internalEndpoint: null,
@@ -230,6 +230,33 @@ describe("inference services route", () => {
     // Sort only; both services share the profile.
     expect(body.items).toHaveLength(2);
     expect(pro.name).toBe("dsv4-pro-pd");
+  });
+
+  it("projects the controller's phase and its reason", async () => {
+    stubCluster();
+    const { GET } = await importRoute();
+    const res = await GET(await authedGet(), undefined);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    // Both services are unreconciled in the fixture: no phase, not a guessed one.
+    expect(body.items.map((s: { phase: string | null }) => s.phase)).toEqual([null, null]);
+
+    // A reconciled service carries the operator's own one-word verdict through
+    // unchanged — no second derivation in the route.
+    listClusterCustomObject.mockImplementation(({ plural }: { plural: string }) => {
+      if (plural !== "inferenceservices") return Promise.resolve({ items: [] });
+      return Promise.resolve({
+        items: [
+          {
+            metadata: { name: "dsv4-pro-pd", namespace: "project-a", creationTimestamp: "2026-09-01T07:55:53Z" },
+            spec: { modelRef: "deepseek-v4-pro-w8a8-v1", profileRef: "metax-sglang-dsv4-pd" },
+            status: { phase: { name: "Progressing", reason: "Rollout" } },
+          },
+        ],
+      });
+    });
+    const reconciled = await (await GET(await authedGet(), undefined)).json();
+    expect(reconciled.items[0]).toMatchObject({ phase: "Progressing", phaseReason: "Rollout" });
   });
 
   it("degrades metrics to null when Prometheus has no data", async () => {

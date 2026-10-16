@@ -102,7 +102,7 @@ describe("overview landing page", () => {
 
     expect(cardText(container, "kpi-inference")).toContain("推理服务");
     expect(cardText(container, "kpi-inference")).toContain("12");
-    expect(cardText(container, "kpi-inference")).toContain("就绪 11 · 扩缩容中 1");
+    expect(cardText(container, "kpi-inference")).toContain("就绪 11 · 准备中 1");
     // The inference card links to the /dashboards landing with Inference Service
     // preselected.
     expect(container.querySelector('[data-od-id="kpi-inference"]')?.getAttribute("href")).toBe(

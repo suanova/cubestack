@@ -15,6 +15,12 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
+    - jsonPath: .status.phase.name
+      name: Phase
+      type: string
+    - jsonPath: .status.phase.reason
+      name: Reason
+      type: string
     - jsonPath: .spec.modelRef
       name: Model
       type: string
@@ -264,6 +270,34 @@ spec:
                   to an older spec.
                 format: int64
                 type: integer
+              phase:
+                description: |-
+                  Phase is the service's state in one word, summarized from the
+                  conditions below. It is absent until the controller has reached a
+                  verdict — see InferenceServicePhasePending.
+                properties:
+                  lastTransitionTime:
+                    description: LastTransitionTime is the time the current phase
+                      was reached.
+                    format: date-time
+                    type: string
+                  name:
+                    description: Name is the current phase.
+                    enum:
+                    - Pending
+                    - Progressing
+                    - Ready
+                    - Failed
+                    type: string
+                  reason:
+                    description: |-
+                      Reason explains the current phase: the failing condition's own reason on
+                      a Failed phase, and the Progressing condition's reason (Reconciling,
+                      Rollout or Scaling) on a Progressing one.
+                    type: string
+                required:
+                - name
+                type: object
               profile:
                 description: Profile echoes the resolved InferenceRuntimeProfile.
                 properties:

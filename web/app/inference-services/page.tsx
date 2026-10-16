@@ -19,10 +19,10 @@ import { copyText } from "@/lib/clipboard";
 import { useI18n } from "@/lib/i18n";
 import { platformPalette, usePlatformTheme } from "@/lib/perses/theme";
 
-// The prototype's filter set is 全部 / Ready / 扩缩容中, where "scaling" keeps
-// the prototype's inclusive predicate: every service that is not ready yet
-// (provisioning, mid-scale, or errored).
-type Filter = "all" | "ready" | "scaling";
+// The prototype's filter set is 全部 / Ready / 准备中. "准备中" is a service the
+// platform is still working on; a Failed one is not preparing, and is reached
+// through 全部. The predicate itself is at the filter below.
+type Filter = "all" | "ready" | "progressing";
 
 // Status hues derived from the platform accent, matching the semantic tokens the
 // prototype derives in public/inference-services.html. Light-theme values, used
@@ -52,16 +52,22 @@ function Sparkline({ data }: { data: number[] }) {
   );
 }
 
-type StatusClass = "ready" | "pending" | "err";
+/** Phase → chip colours, mirroring the dev-environments page. */
+function statusInfo(phase: string | null): { dot: string; bg: string } {
+  if (phase === "Ready") return { dot: STATUS_OK, bg: soft(STATUS_OK) };
+  if (phase === "Failed") return { dot: STATUS_ERR, bg: soft(STATUS_ERR, 12) };
+  return { dot: STATUS_WARN, bg: soft(STATUS_WARN) };
+}
 
-const statusInfo: Record<StatusClass, { dot: string; bg: string }> = {
-  ready: { dot: STATUS_OK, bg: soft(STATUS_OK) },
-  pending: { dot: STATUS_WARN, bg: soft(STATUS_WARN) },
-  err: { dot: STATUS_ERR, bg: soft(STATUS_ERR, 12) },
-};
-
-function StatusChip({ cls, label }: { cls: StatusClass; label: string }) {
-  const c = statusInfo[cls];
+function StatusChip({ phase }: { phase: string | null }) {
+  const { t } = useI18n();
+  const c = statusInfo(phase);
+  // A phase this console does not know yet is shown as it came rather than
+  // mapped onto one of the four, so a newer controller reads as itself.
+  const label =
+    phase === "Ready" || phase === "Progressing" || phase === "Pending" || phase === "Failed"
+      ? t(`inf.phase.${phase as "Ready"}`)
+      : phase ?? "—";
   return (
     <Box
       component="span"
@@ -71,16 +77,6 @@ function StatusChip({ cls, label }: { cls: StatusClass; label: string }) {
       {label}
     </Box>
   );
-}
-
-function serviceStatus(s: InferenceServiceSummary): StatusClass {
-  if (s.ready === true) return "ready";
-  // Not ready while the controller is still applying the desired state (first
-  // reconcile, rollout, scaling): the pods are merely starting — ContainerCreating
-  // and the like — so the row reads "Pending", not "abnormal". A service that
-  // had converged and then broke keeps Progressing=False, so it still reads err.
-  if (s.ready === false) return s.progressing ? "pending" : "err";
-  return "pending";
 }
 
 const gpuText = (s: InferenceServiceSummary): string =>
@@ -189,8 +185,13 @@ export default function InferenceServicesPage() {
   const selected = items.find((s) => svcKey(s) === selKey) ?? null;
 
   const visible = items.filter((s) => {
-    if (filter === "ready") return s.ready === true;
-    if (filter === "scaling") return s.ready !== true;
+    if (filter === "ready") return s.phase === "Ready";
+    // 准备中 is "not settled": neither ready nor given up on. A service the
+    // controller has not reached a verdict on yet carries no phase at all
+    // (the API spells Pending as an absent field, like a null ready did
+    // before), and it is certainly still preparing — so it belongs here too,
+    // and no row is ever hidden from every filtered tab.
+    if (filter === "progressing") return s.phase !== "Ready" && s.phase !== "Failed";
     return true;
   });
 
@@ -311,7 +312,7 @@ export default function InferenceServicesPage() {
                 [
                   ["all", t("inf.filter.all")],
                   ["ready", t("inf.filter.ready")],
-                  ["scaling", t("inf.filter.scaling")],
+                  ["progressing", t("inf.filter.progressing")],
                 ] as Array<[Filter, string]>
               ).map(([key, label]) => {
                 const on = filter === key;
@@ -642,7 +643,7 @@ function ServiceTable({
                     </Box>
                   </td>
                   <td style={tdSx}>
-                    <StatusChip cls={serviceStatus(s)} label={t(`inf.status.${serviceStatus(s)}`)} />
+                    <StatusChip phase={s.phase} />
                   </td>
                   <td style={tdSx}>{s.engine ?? "—"}</td>
                   <td style={{ ...tdSx, whiteSpace: "nowrap" }}>{gpuText(s)}</td>

@@ -516,7 +516,7 @@ export default function OverviewPage() {
           footKey: "ov.kpi.inf.foot",
           footParams: {
             ready: String(data.inference.ready),
-            scaling: String(data.inference.scaling),
+            progressing: String(data.inference.progressing),
           },
           href: "/dashboards?dashboard=inference-service-dashboard",
         },

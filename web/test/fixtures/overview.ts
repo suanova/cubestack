@@ -16,7 +16,7 @@ export function overviewSummary(
   return {
     nodes: { total: 16, ready: 15, version: "v1.29" },
     gpu: { vendors: 2, totalCards: 128, compute: 50, inference: 30, allocated: 80, free: 48 },
-    inference: { total: 12, ready: 11, scaling: 1 },
+    inference: { total: 12, ready: 11, progressing: 1 },
     devenv: { total: 8, running: 5, stopped: 3 },
     trend: { util, mem },
     ...overrides,

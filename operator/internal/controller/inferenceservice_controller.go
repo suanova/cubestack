@@ -181,6 +181,17 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	setProfileEcho(desired, &isvc, resolved.profile)
 	setModelEcho(desired, resolved.model)
 
+	// Every status write goes through here. The phase is a summary of the
+	// conditions, and this pass has just finished writing them wherever it is
+	// about to return from — including the early-return paths further down that
+	// set a failure condition and hand the error back. Deriving it at the write
+	// rather than at each of those exits is what keeps a failure from reading
+	// Pending on a service whose Ready condition no pass has reached yet.
+	writeStatus := func() error {
+		setInferenceServicePhase(&desired.Status)
+		return r.updateStatusIfChanged(ctx, &isvc, desired)
+	}
+
 	if !resolved.resolved() {
 		// A stale Rendered from a previous spec must not persist, and the
 		// convergence conditions whose checks need the resolved references
@@ -194,7 +205,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		meta.RemoveStatusCondition(&desired.Status.Conditions, aiv1alpha1.ConditionRouteReady)
 		// Nothing is being applied: a stale True/Rollout must not linger.
 		setProgressingCondition(&desired.Status.Conditions, nil, "")
-		return ctrl.Result{}, r.updateStatusIfChanged(ctx, &isvc, desired)
+		return ctrl.Result{}, writeStatus()
 	}
 
 	rendered := renderer.Render(&isvc, resolved.profile, resolved.model, resolved.assets)
@@ -211,7 +222,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		assetStatuses, err := r.provisionAssets(ctx, &isvc, resolved.profile, &rendered)
 		if err != nil {
 			setProvisionedCondition(&desired.Status.Conditions, "AssetConfigMapFailed", err)
-			statusErr := r.updateStatusIfChanged(ctx, &isvc, desired)
+			statusErr := writeStatus()
 			if statusErr != nil {
 				return ctrl.Result{}, statusErr
 			}
@@ -226,7 +237,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				reason = "StorageIdentityChanged"
 			}
 			setProvisionedCondition(&desired.Status.Conditions, reason, err)
-			statusErr := r.updateStatusIfChanged(ctx, &isvc, desired)
+			statusErr := writeStatus()
 			if statusErr != nil {
 				return ctrl.Result{}, statusErr
 			}
@@ -237,7 +248,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		credStatus, err := r.provisionModelCredentials(ctx, &isvc, resolved.model)
 		if err != nil {
 			setProvisionedCondition(&desired.Status.Conditions, "SecretCopyFailed", err)
-			statusErr := r.updateStatusIfChanged(ctx, &isvc, desired)
+			statusErr := writeStatus()
 			if statusErr != nil {
 				return ctrl.Result{}, statusErr
 			}
@@ -261,7 +272,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			} else {
 				setWorkloadsAppliedCondition(&desired.Status.Conditions, "WorkloadApplyFailed", err)
 			}
-			statusErr := r.updateStatusIfChanged(ctx, &isvc, desired)
+			statusErr := writeStatus()
 			if statusErr != nil {
 				return ctrl.Result{}, statusErr
 			}
@@ -269,7 +280,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 		desired.Status.Roles = rolesStatus
 		if len(applyRes.WaitingDependencies) > 0 {
-			setWorkloadsAppliedCondition(&desired.Status.Conditions, "WaitingForDependencies", fmt.Errorf("waiting for roles: %s", strings.Join(applyRes.WaitingDependencies, ", ")))
+			setWorkloadsAppliedCondition(&desired.Status.Conditions, reasonWaitingForDependencies, fmt.Errorf("waiting for roles: %s", strings.Join(applyRes.WaitingDependencies, ", ")))
 		} else {
 			// Fully applied: adopt the revision and report WorkloadsApplied.
 			desired.Status.Profile.Revision = rev
@@ -316,7 +327,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		setProgressingCondition(&desired.Status.Conditions, nil, "")
 	}
 
-	return ctrl.Result{}, r.updateStatusIfChanged(ctx, &isvc, desired)
+	return ctrl.Result{}, writeStatus()
 }
 
 // finalizeCatalogRule removes the catalog finalizer from a service that is
