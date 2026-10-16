@@ -18,6 +18,7 @@ import {
   newApproval,
   newQuestion,
   openCardIds,
+  pendingCollection,
   remainingSeconds,
   seedAnswers,
   settleCardsAbsent,
@@ -803,6 +804,22 @@ describe("carryOpenCards — a refresh keeps the reader's cards", () => {
 
   it("nothing to carry leaves the refreshed transcript alone", () => {
     expect(carryOpenCards([user, { ...newAgentMsg(1, T0), phase: "done" as const }], refreshed)).toBe(refreshed);
+  });
+});
+
+describe("pendingCollection — an unreadable answer is not an empty one", () => {
+  it("returns the collection a read answered with", () => {
+    const items = [{ approvalId: "app-1" }];
+    expect(pendingCollection({ approvals: items }, "approvals")).toBe(items);
+    expect(pendingCollection({ approvals: [] }, "approvals")).toEqual([]);
+  });
+
+  it("throws when the body carries no collection, so the sweep cannot settle on it", () => {
+    // A 200 with no `approvals` is an answer this surface cannot read: taking it
+    // as empty would retire cards the gateway is still waiting on.
+    expect(() => pendingCollection({}, "approvals")).toThrow();
+    expect(() => pendingCollection({ approvals: null }, "approvals")).toThrow();
+    expect(() => pendingCollection(null, "questions")).toThrow();
   });
 });
 

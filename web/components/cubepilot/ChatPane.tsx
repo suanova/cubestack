@@ -43,6 +43,7 @@ import {
   openApprovals,
   openCardIds,
   openQuestions,
+  pendingCollection,
   settleCardsAbsent,
   phaseText,
   waitingSeconds,
@@ -970,9 +971,9 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
         // A LIST, and an empty one is the ordinary answer for a session that is
         // not parked — the collection exists and is empty, so a read that
         // succeeded and found nothing never reaches the catch below.
-        const { approvals } = (await res.json()) as { approvals?: PendingApproval[] };
+        const approvals = pendingCollection<PendingApproval>(await res.json(), "approvals");
         const wanted = new Set<string>();
-        for (const a of approvals ?? []) {
+        for (const a of approvals) {
           if (a.approvalId) {
             wanted.add(a.approvalId);
             attachApproval(a);
@@ -1000,11 +1001,13 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
       // "idle"; an empty collection is not a failure, it is nothing pending.
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       if (res.ok && genRef.current === gen && !stale()) {
-        const { questions } = (await res.json()) as {
-          questions?: Array<{ id?: string; questions?: AgentQuestionItem[]; timeoutSeconds?: number }>;
-        };
+        const questions = pendingCollection<{
+          id?: string;
+          questions?: AgentQuestionItem[];
+          timeoutSeconds?: number;
+        }>(await res.json(), "questions");
         const wanted = new Set<string>();
-        for (const q of questions ?? []) {
+        for (const q of questions) {
           if (!q.id) continue;
           wanted.add(q.id);
           // Through the same constructor the streamed card uses: the response
@@ -1643,15 +1646,17 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
     try {
       const res = await apiFetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(agentSessionKey)}/questions`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const { questions } = (await res.json()) as {
-        questions?: Array<{ id?: string; questions?: AgentQuestionItem[]; timeoutSeconds?: number }>;
-      };
+      const questions = pendingCollection<{
+        id?: string;
+        questions?: AgentQuestionItem[];
+        timeoutSeconds?: number;
+      }>(await res.json(), "questions");
       // Membership in the collection IS the open/closed signal — the gateway's
       // own account of what is still waiting. A question that is absent is gone
       // (expired or answered), which is the same condition the endpoint's 404
       // used to report; a read that failed does not get here at all, so "gone"
       // and "could not ask" stay two different answers.
-      const still = (questions ?? []).find((q) => q.id === callId);
+      const still = questions.find((q) => q.id === callId);
       if (still) {
         patchQuestion(callId, (q) => ({
           ...q,

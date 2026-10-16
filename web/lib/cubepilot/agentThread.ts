@@ -459,6 +459,21 @@ export function carryOpenCards<T extends { role: string }>(prev: readonly T[], n
   return out ?? next;
 }
 
+/**
+ * The pending collection a read answered with, or a throw.
+ *
+ * A 200 whose body carries no collection is not "nothing is pending": it is an
+ * answer this surface cannot read, and the sweep below would take it as an empty
+ * one and settle cards that are still waiting. The distinction is the one the
+ * callers already draw for a failed status — only the server saying "empty" may
+ * retire a card — so an unreadable answer takes the same path as a failed read.
+ */
+export function pendingCollection<T>(body: unknown, key: "approvals" | "questions"): T[] {
+  const value = (body as Record<string, unknown> | null | undefined)?.[key];
+  if (!Array.isArray(value)) throw new Error(`the ${key} answer carried no list`);
+  return value as T[];
+}
+
 /** The ids of the cards a thread still has open, per kind. A pending read
  *  cannot speak for a card that arrives while it is in flight, so the caller
  *  takes this snapshot BEFORE it asks. */

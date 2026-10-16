@@ -37,6 +37,7 @@ import {
   openApprovals,
   openCardIds,
   openQuestions,
+  pendingCollection,
   settleCardsAbsent,
   turnStatus,
   waitingOnUser,
@@ -429,14 +430,14 @@ export function FloatingChat() {
       // Parsed BEFORE the check: reading the body is a suspension point, so a
       // turn that settles while it is read would otherwise slip past the
       // generation and epoch checks and attach cards to a turn already done.
-      const { approvals } = (await res.json()) as { approvals?: PendingApproval[] };
+      const approvals = pendingCollection<PendingApproval>(await res.json(), "approvals");
       if (genRef.current === gen && !stale()) {
         // A LIST, oldest first: a session can hold several pending approvals
         // at once, and the oldest is not the only one this surface offers. An
         // empty one draws nothing, which is why the read above reports its
         // failures rather than leaving this branch to say it silently.
         const wanted = new Set<string>();
-        for (const a of approvals ?? []) {
+        for (const a of approvals) {
           if (a.approvalId) {
             wanted.add(a.approvalId);
             // Through the fold's own add, so a stream event that already
@@ -468,12 +469,14 @@ export function FloatingChat() {
       // thrown so that it is reported rather than folded into "idle".
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       // Same ordering as the approval read above, for the same reason.
-      const { questions } = (await res.json()) as {
-        questions?: Array<{ id?: string; questions?: AgentQuestionItem[]; timeoutSeconds?: number }>;
-      };
+      const questions = pendingCollection<{
+        id?: string;
+        questions?: AgentQuestionItem[];
+        timeoutSeconds?: number;
+      }>(await res.json(), "questions");
       if (genRef.current === gen && !stale()) {
         const wanted = new Set<string>();
-        for (const q of questions ?? []) {
+        for (const q of questions) {
           if (!q.id) continue;
           wanted.add(q.id);
           // The response carries what is LEFT of the gateway's deadline, so a
@@ -1009,14 +1012,16 @@ export function FloatingChat() {
     try {
       const res = await apiFetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(SESSION_KEY)}/questions`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const { questions } = (await res.json()) as {
-        questions?: Array<{ id?: string; questions?: AgentQuestionItem[]; timeoutSeconds?: number }>;
-      };
+      const questions = pendingCollection<{
+        id?: string;
+        questions?: AgentQuestionItem[];
+        timeoutSeconds?: number;
+      }>(await res.json(), "questions");
       // Membership in the collection IS the open/closed signal — the gateway's
       // own account of what is still waiting. A question that is absent is gone
       // (expired or answered); a read that failed does not get here at all, so
       // "gone" and "could not ask" stay two different answers.
-      const still = (questions ?? []).find((q) => q.id === callId);
+      const still = questions.find((q) => q.id === callId);
       if (still) {
         patchQuestion(callId, (q) => ({
           ...q,
