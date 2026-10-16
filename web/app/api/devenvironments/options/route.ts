@@ -87,27 +87,38 @@ const GPU_NODE_ATTRS: Record<GpuVendor, { label: string; resource: string }> = {
 };
 
 /**
- * Whether a pod asking for this vendor's accelerator could ever land on `node`.
+ * Whether the scheduler could place a pod on `node` at all: uncordoned,
+ * untainted, and reporting for duty.
  *
- * Offered models come from nodes that can actually run one, not from every node
- * that carries a label. The operator asks the same question before it counts a
- * node at all — uncordoned and untainted in
- * operator/test/e2e/devenv/devices.go's `schedulable`, with devices to spare in
- * the caller — and this asks it too, plus readiness. A device plugin leaves its
- * label behind when its node is cordoned, is tainted out of reach, stops
- * reporting for duty, or comes back without devices; a model offered off such a
- * node is a choice whose only outcome is a development environment stuck in
- * Pending, which reports no error to explain itself.
+ * The operator asks the same question before it counts a node at all —
+ * uncordoned and untainted in operator/test/e2e/devenv/devices.go's
+ * `schedulable` — and this asks it too, plus readiness. A node that is cordoned,
+ * is tainted out of reach, or has stopped reporting for duty is still a node
+ * this route would otherwise offer, and offering it is a choice whose only
+ * outcome is a development environment stuck in Pending, which reports no error
+ * to explain itself.
  *
  * `PreferNoSchedule` is deliberately not a bar, matching the operator: it is a
  * preference the scheduler weighs against the rest of the cluster, and calling
- * it one would hide a model the cluster could have served.
+ * it one would hide a node the cluster could have served.
  */
-function hostable(node: V1Node, vendor: GpuVendor): boolean {
+function schedulable(node: V1Node): boolean {
   if (node.spec?.unschedulable) return false;
   if ((node.spec?.taints ?? []).some((t) => t.effect === "NoSchedule" || t.effect === "NoExecute")) return false;
-  if (!(node.status?.conditions ?? []).some((c) => c.type === "Ready" && c.status === "True")) return false;
-  return Number(node.status?.allocatable?.[GPU_NODE_ATTRS[vendor].resource] ?? 0) > 0;
+  return (node.status?.conditions ?? []).some((c) => c.type === "Ready" && c.status === "True");
+}
+
+/**
+ * Whether a pod asking for this vendor's accelerator could ever land on `node`:
+ * a node the scheduler could use, with a device to spare.
+ *
+ * Offered models come from nodes that can actually run one, not from every node
+ * that carries a label. A device plugin leaves its label behind when its node
+ * comes back without devices, and a model offered off such a node is a choice
+ * whose only outcome is a development environment stuck in Pending.
+ */
+function hostable(node: V1Node, vendor: GpuVendor): boolean {
+  return schedulable(node) && Number(node.status?.allocatable?.[GPU_NODE_ATTRS[vendor].resource] ?? 0) > 0;
 }
 
 /**
@@ -129,6 +140,37 @@ function advertisedModels(nodes: V1Node[]): { nvidia: string[]; metax: string[] 
   return { nvidia: [...found.nvidia].sort(), metax: [...found.metax].sort() };
 }
 
+/** One node the wizard may pin an environment to. */
+export interface DevEnvNodeOption {
+  name: string;
+  /**
+   * The accelerator vendors the node advertises, empty for a CPU-only node.
+   * Carried so the pick can be made with the environment's own accelerator in
+   * view: a CPU node picked under a GPU request is a pod no node can run, and
+   * the environment reports it as nothing but Pending.
+   */
+  vendors: Array<"nvidia" | "metax">;
+}
+
+/**
+ * The nodes the wizard may pin an environment to: every node the scheduler could
+ * use, sorted by name so the select's order does not depend on the order the API
+ * server happened to return its nodes in.
+ *
+ * A node's vendors are read off its allocatable counts rather than its product
+ * label, which is the question `hostable` asks of the same field.
+ */
+function offeredNodes(nodes: V1Node[]): DevEnvNodeOption[] {
+  return nodes
+    .filter(schedulable)
+    .map((node) => ({
+      name: node.metadata?.name ?? "",
+      vendors: GPU_VENDORS.filter((vendor) => Number(node.status?.allocatable?.[GPU_NODE_ATTRS[vendor].resource] ?? 0) > 0),
+    }))
+    .filter((node) => node.name)
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
 /** Catalog the create wizard needs, read from the live cluster. */
 export interface DevEnvOptionsResponse {
   namespaces: Array<{ name: string }>;
@@ -143,21 +185,30 @@ export interface DevEnvOptionsResponse {
    * own rather than assuming a non-empty list.
    */
   gpuModels: { nvidia: string[]; metax: string[] };
+  /**
+   * The nodes the wizard may pin an environment to, in name order. Read off the
+   * same node list as gpuModels, so it is empty for the same two reasons — a
+   * cluster with nothing to offer, and a principal that could not read the list.
+   * The select is built to show "unscheduled" on its own rather than assuming a
+   * non-empty list.
+   */
+  nodes: DevEnvNodeOption[];
 }
 
 /**
  * GET /api/devenvironments/options
  *
- * Namespaces and GPU models come from the live cluster; the image catalog is
- * static. The wizard uses these to populate its namespace select, the image
- * combobox and the model select, and to pre-fill the runtime identity the user
- * may then edit.
+ * Namespaces, GPU models and nodes come from the live cluster; the image catalog
+ * is static. The wizard uses these to populate its namespace select, the image
+ * combobox, the model select and the node select, and to pre-fill the runtime
+ * identity the user may then edit.
  *
  * The namespace list is a prerequisite — the wizard cannot open without a home
- * for the environment — so a failure there fails the request. The models are an
- * enrichment: they only narrow an accelerator request, and a principal without
- * `list nodes` can still create a CPU environment, so that read is best-effort
- * and its failure leaves the select showing "any" alone.
+ * for the environment — so a failure there fails the request. The models and the
+ * nodes are an enrichment: the models only narrow an accelerator request and the
+ * nodes only pin one, and a principal without `list nodes` can still create a CPU
+ * environment, so that single read is best-effort and its failure leaves both
+ * selects showing their open option alone.
  */
 export const GET = withAuth(async () => {
   try {
@@ -174,9 +225,9 @@ export const GET = withAuth(async () => {
     try {
       nodes = (await core.listNode()).items ?? [];
     } catch (err) {
-      // Logged rather than swallowed: an empty select is otherwise
-      // indistinguishable from "this cluster has no GPUs".
-      console.warn("Failed to read the cluster's GPU models:", err);
+      // Logged rather than swallowed: empty selects are otherwise
+      // indistinguishable from "this cluster has no GPUs and no nodes".
+      console.warn("Failed to read the cluster's nodes:", err);
     }
 
     const response: DevEnvOptionsResponse = {
@@ -184,6 +235,7 @@ export const GET = withAuth(async () => {
       defaultNamespace: defaultNamespaceOf(names),
       images: IMAGES,
       gpuModels: advertisedModels(nodes),
+      nodes: offeredNodes(nodes),
     };
 
     return Response.json(response);

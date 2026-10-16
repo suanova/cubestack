@@ -31,6 +31,12 @@ export function devEnvironmentSummary(
     ports: [{ name: "api", type: "http", containerPort: 8080 }],
     idleTimeout: 3600,
     sshEnabled: false,
+    // The two states an untouched environment carries: no pin, and the CRD's
+    // default of restricted egress. `devEnvironmentList()` states the other half
+    // of each on the first environment so both branches of the panel's rows are
+    // covered by the shared fixture.
+    nodeSelector: {},
+    egressUnrestricted: false,
     phase: "Running",
     phaseReason: null,
     endpoints: [{ name: "jupyter", address: "https://dev.cubestack.local/ws/jupyter-nlp-ln" }],
@@ -53,7 +59,12 @@ export function devEnvironmentSummary(
  */
 export function devEnvironmentList(): DevEnvironmentSummary[] {
   return [
-    devEnvironmentSummary(),
+    devEnvironmentSummary({
+      // A pinned, unrestricted environment, so the spec panel's rows for both have
+      // a value to read rather than only the defaults.
+      nodeSelector: { "kubernetes.io/hostname": "worker-01" },
+      egressUnrestricted: true,
+    }),
     devEnvironmentSummary({
       name: "ssh-dataset-prep",
       type: "ssh",

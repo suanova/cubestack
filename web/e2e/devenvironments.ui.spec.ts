@@ -23,6 +23,12 @@ const OPTIONS = {
   // What the cluster's nodes advertise, per vendor — the wizard's model select
   // is exactly this list plus "any".
   gpuModels: { nvidia: ["A100", "H200"], metax: ["MXC500", "MXC550"] },
+  // The nodes the wizard may pin to, each with the accelerators it advertises —
+  // the placement select is exactly this list plus "any".
+  nodes: [
+    { name: "worker-01", vendors: ["nvidia"] },
+    { name: "worker-02", vendors: [] },
+  ],
 };
 
 function stubList(page: Page, payload: object) {
@@ -163,6 +169,11 @@ test.describe("dev environments landing (mocked data)", () => {
     await expect(detail).toContainText("python -m jupyter lab");
     await expect(detail).toContainText("--port 8080");
     await expect(detail).toContainText("api:8080/http");
+    // Where the pod runs and what it may reach. Egress is stated for every
+    // environment, so the row names the policy this one asked for rather than
+    // leaving the reader to infer it from a missing row.
+    await expect(detail).toContainText("kubernetes.io/hostname=worker-01");
+    await expect(detail).toContainText("不受限");
     // The jupyter token is the token itself, masked until asked for: the card
     // used to hand the user a `kubectl` command to run against a cluster.
     await expect(detail).toContainText("Jupyter Token");
@@ -438,9 +449,21 @@ test.describe("dev environments landing (mocked data)", () => {
     await page.locator('[data-od-id="port-name"] input').fill("debug");
     await page.locator('[data-od-id="port-num"] input').fill("9229");
 
+    // Egress on, and a node to pin the pod to. The select lists "any" plus one
+    // entry per node the options read advertised, the GPU ones carrying the
+    // vendors they advertise beside their name.
+    await page.locator('[data-od-id="wizard-egress"] input').click();
+    await page.locator('[data-od-id="wizard-node"]').click();
+    await expect(page.locator('[role="option"]')).toHaveText(["不限(由调度器选择)", "worker-01 · nvidia", "worker-02"]);
+    await page.locator('[role="option"]').filter({ hasText: "worker-01" }).click();
+
     await page.getByRole("button", { name: "下一步" }).click();
     await expect(page.locator('[data-step="4"]')).toBeVisible();
     await expect(page.locator('[data-step="4"]')).toContainText("shared-models → /models");
+    // Both of this step's new choices are restated before the environment is
+    // created: the node by its own name, and the egress policy it asked for.
+    await expect(page.locator('[data-step="4"]')).toContainText("worker-01");
+    await expect(page.locator('[data-step="4"]')).toContainText("不受限");
 
     await page.locator('[data-od-id="wizard-create"]').click();
     await expect.poll(() => posts.length).toBe(1);
@@ -453,10 +476,14 @@ test.describe("dev environments landing (mocked data)", () => {
       command: "python -m jupyter lab",
       args: "--port 8080",
       ports: [{ name: "debug", containerPort: 9229, type: "http" }],
+      // The node's own name, not a label map: the route turns it into the
+      // kubernetes.io/hostname pin.
+      nodeName: "worker-01",
+      egressUnrestricted: true,
     });
   });
 
-  test("an untouched advanced step sends none of its five keys", async ({ page }) => {
+  test("an untouched advanced step sends none of its optional keys", async ({ page }) => {
     const posts: Record<string, unknown>[] = [];
     await stubOptions(page);
     await stubList(page, { items: devEnvironmentList() });
@@ -485,8 +512,11 @@ test.describe("dev environments landing (mocked data)", () => {
     await expect.poll(() => posts.length).toBe(1);
 
     // The mount-path box is empty, so the body must not carry a path at all —
-    // pinning one would override the home the image's entrypoint derives.
-    for (const key of ["mountPath", "volumes", "env", "command", "args", "ports"]) {
+    // pinning one would override the home the image's entrypoint derives. The
+    // node select opens on "any" and the egress switch on off, so the pin and
+    // the policy are absent too: an empty selector selects nothing, and
+    // `unrestricted: false` is what the CRD already applies.
+    for (const key of ["mountPath", "volumes", "env", "command", "args", "ports", "nodeName", "egressUnrestricted"]) {
       expect(posts[0]).not.toHaveProperty(key);
     }
   });

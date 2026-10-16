@@ -27,6 +27,14 @@ const OPTIONS = {
   // More than one model per vendor, so the list's order — not just its contents —
   // is something a case can assert.
   gpuModels: { nvidia: ["A100", "H200"], metax: ["MXC500", "MXC550"] },
+  // The nodes the wizard may pin to, with the vendors each advertises — one CPU
+  // node, one of each vendor, and one carrying both, so the option text can be
+  // asserted for every shape it takes.
+  nodes: [
+    { name: "worker-01", vendors: ["nvidia"] },
+    { name: "worker-02", vendors: [] },
+    { name: "worker-03", vendors: ["nvidia", "metax"] },
+  ],
 };
 
 describe("dev environments page", () => {
@@ -170,6 +178,10 @@ describe("dev environments page", () => {
     expect(container.textContent).toContain("python -m jupyter lab");
     expect(container.textContent).toContain("--port 8080");
     expect(container.textContent).toContain("api:8080/http");
+    // The two rows that describe where the pod runs and what it may reach: the
+    // pin as the CR states it, and the egress policy the environment asked for.
+    expect(container.textContent).toContain("kubernetes.io/hostname=worker-01");
+    expect(container.textContent).toContain("不受限");
 
     // The stopped environment carries no mount path, which is not the same as
     // mounting at /workspace — the controller derives it, and /workspace is only
@@ -180,6 +192,10 @@ describe("dev environments page", () => {
     expect(container.textContent).toContain("500Gi · 按运行身份自动派生");
     expect(container.textContent).toContain("shared-models → /models (只读)");
     expect(container.textContent).toContain("debug:9229/tcp");
+    // Egress is the one row that is always shown, because every environment is in
+    // one of the two states: an environment that never asked is restricted, and
+    // the row says so rather than leaving the reader to infer it from silence.
+    expect(container.textContent).toContain("受限(默认)");
 
     act(() => root.unmount());
   });
@@ -956,6 +972,11 @@ describe("create wizard", () => {
     return document.body.querySelector('[data-od-id="wizard-gpu-model"] [role="combobox"]') as HTMLElement;
   }
 
+  /** Step 3's node select — the placement section's only control. */
+  function nodeSelect(): HTMLElement {
+    return document.body.querySelector('[data-od-id="wizard-node"] [role="combobox"]') as HTMLElement;
+  }
+
   /** Step 2's selects in render order: accelerator, cpu, memory, idle. */
   function step2Selects(): HTMLElement[] {
     return Array.from(document.body.querySelectorAll('[data-step="2"] [role="combobox"]')) as HTMLElement[];
@@ -1639,11 +1660,23 @@ describe("create wizard", () => {
     setInput(rowInputs("port-name")[0], "debug");
     setInput(rowInputs("port-num")[0], "9229");
 
+    // Egress, and the node to pin to. The select offers "any" plus the nodes the
+    // options read advertised, each with the accelerators it carries.
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="wizard-egress"] input') as HTMLInputElement).click();
+    });
+    const offered = await selectOption(nodeSelect(), "worker-03 · nvidia / metax");
+    expect(offered).toEqual(["不限(由调度器选择)", "worker-01 · nvidia", "worker-02", "worker-03 · nvidia / metax"]);
+
     await nextStep();
     expect(document.body.querySelector('[data-step="4"]')).not.toBeNull();
     // The confirmation step restates the section, so what is read on step 4 is
     // what a user would notice before submitting.
     expect(document.body.textContent).toContain("shared-models → /models");
+    // Both of this step's new choices, restated: the pin by the node's own name,
+    // which is what the user picked.
+    expect(document.body.textContent).toContain("worker-03");
+    expect(document.body.textContent).toContain("不受限");
 
     await act(async () => {
       (document.body.querySelector('[data-od-id="wizard-create"]') as HTMLElement).click();
@@ -1659,12 +1692,16 @@ describe("create wizard", () => {
       command: 'python -m "my app"',
       args: "--port 8080",
       ports: [{ name: "debug", containerPort: 9229, type: "http" }],
+      // The node itself, not a label map: the route turns it into the
+      // kubernetes.io/hostname pin.
+      nodeName: "worker-03",
+      egressUnrestricted: true,
     });
 
     act(() => root.unmount());
   });
 
-  it("leaves the five new keys out of the body when the advanced step is untouched", async () => {
+  it("sends none of the advanced step's optional keys when it is untouched", async () => {
     const { container, root } = renderWithBoth();
     await act(async () => {});
     await toStep3(container);
@@ -1684,6 +1721,12 @@ describe("create wizard", () => {
     expect("command" in body).toBe(false);
     expect("args" in body).toBe(false);
     expect("ports" in body).toBe(false);
+    // The node select opens on "any" and the egress switch on off, so neither
+    // states anything: a pin the user did not make would be the wizard placing
+    // the pod for them, and `unrestricted: false` would state a policy the CRD
+    // already applies.
+    expect("nodeName" in body).toBe(false);
+    expect("egressUnrestricted" in body).toBe(false);
 
     act(() => root.unmount());
   });

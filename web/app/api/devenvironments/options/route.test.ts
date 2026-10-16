@@ -21,6 +21,8 @@ function stubNamespaces(names: string[]) {
  * ways a node keeps its label without being able to run anything.
  */
 interface StubNode {
+  /** The node's name, which is also what a pin to it selects. */
+  name?: string;
   labels: Record<string, string>;
   /** The Ready condition's status. Defaults to true. */
   ready?: boolean;
@@ -33,8 +35,8 @@ interface StubNode {
 
 function stubNodes(nodes: StubNode[]) {
   listNode.mockResolvedValue({
-    items: nodes.map((n) => ({
-      metadata: { labels: n.labels },
+    items: nodes.map((n, i) => ({
+      metadata: { name: n.name ?? `node-${i}`, labels: n.labels },
       spec: { unschedulable: n.unschedulable ?? false, taints: n.taints ?? [] },
       status: {
         conditions: [{ type: "Ready", status: n.ready === false ? "False" : "True" }],
@@ -67,6 +69,14 @@ async function images(): Promise<Array<{ tag: string; interface: string; vendor:
   const res = await GET(await authedGet(), undefined);
   expect(res.status).toBe(200);
   return (await res.json()).images;
+}
+
+/** The nodes the wizard may pin an environment to. */
+async function nodes(): Promise<Array<{ name: string; vendors: string[] }>> {
+  const { GET } = await import("./route");
+  const res = await GET(await authedGet(), undefined);
+  expect(res.status).toBe(200);
+  return (await res.json()).nodes;
 }
 
 describe("GET /api/devenvironments/options", () => {
@@ -226,6 +236,43 @@ describe("GET /api/devenvironments/options", () => {
     expect(await gpuModels()).toEqual({ nvidia: ["H200"], metax: [] });
   });
 
+  it("lists the nodes an environment may be pinned to, in name order", async () => {
+    stubNamespaces(["default"]);
+    stubNodes([
+      { name: "worker-b", labels: { "nvidia.com/gpu.product": "H200" }, allocatable: { "nvidia.com/gpu": "8" } },
+      // A CPU-only node, which is a pin an environment may still legitimately
+      // make — its own accelerator is what decides whether that is a good one.
+      { name: "worker-a", labels: {}, allocatable: {} },
+      // Both vendors, so the pick can be made with the environment's own
+      // accelerator in view.
+      { name: "worker-c", labels: {}, allocatable: { "nvidia.com/gpu": "4", "metax-tech.com/gpu": "4" } },
+    ]);
+
+    // Sorted, so the select's order does not depend on the order the API server
+    // happened to return its nodes in — the same reason the models are.
+    expect(await nodes()).toEqual([
+      { name: "worker-a", vendors: [] },
+      { name: "worker-b", vendors: ["nvidia"] },
+      { name: "worker-c", vendors: ["nvidia", "metax"] },
+    ]);
+  });
+
+  it("leaves out a node the scheduler could not place a pod on", async () => {
+    stubNamespaces(["default"]);
+    stubNodes([
+      { name: "worker-a", labels: {} },
+      // Cordoned, drained, or gone: still a node the API server lists, and not
+      // one a pod asking for it could land on.
+      { name: "worker-down", labels: {}, ready: false },
+      { name: "worker-cordoned", labels: {}, unschedulable: true },
+      { name: "worker-tainted", labels: {}, taints: [{ effect: "NoExecute" }] },
+      // A preference, not a bar — the same reading the models get.
+      { name: "worker-prefer", labels: {}, taints: [{ effect: "PreferNoSchedule" }] },
+    ]);
+
+    expect((await nodes()).map((n) => n.name)).toEqual(["worker-a", "worker-prefer"]);
+  });
+
   it("still serves the catalog when the nodes cannot be read", async () => {
     stubNamespaces(["default", "project-a"]);
     listNode.mockRejectedValue(new Error("forbidden"));
@@ -235,6 +282,9 @@ describe("GET /api/devenvironments/options", () => {
     // CPU environment is still creatable, and the select degrades to "any".
     expect((await options()).namespaces).toEqual([{ name: "default" }, { name: "project-a" }]);
     expect(await gpuModels()).toEqual({ nvidia: [], metax: [] });
+    // The pin comes off the same read, so it degrades the same way: "any" alone,
+    // which is the environment stating no node rather than an error.
+    expect(await nodes()).toEqual([]);
   });
 
   it("rejects an unauthenticated request", async () => {

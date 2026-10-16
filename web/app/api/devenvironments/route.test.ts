@@ -216,6 +216,10 @@ describe("GET /api/devenvironments", () => {
       ports: [],
       idleTimeout: 0,
       sshEnabled: false,
+      // The two states an object that carries neither field projects to: no
+      // pin, and the CRD's default egress of restricted.
+      nodeSelector: {},
+      egressUnrestricted: false,
       phase: null,
       phaseReason: null,
       endpoints: [],
@@ -223,6 +227,37 @@ describe("GET /api/devenvironments", () => {
       sshClientKeySecret: null,
       jupyterTokenSecret: null,
     });
+  });
+
+  it("carries the pin verbatim and resolves an absent egress block to restricted", async () => {
+    listClusterCustomObject.mockResolvedValue({
+      items: [
+        {
+          metadata: { name: "pinned", namespace: "project-a" },
+          spec: {
+            type: "ssh",
+            // Written by hand with more than the wizard's hostname pin: the panel
+            // reports where the pod will land, so it carries the selector as the
+            // environment states it rather than as the wizard would have written it.
+            nodeSelector: { "kubernetes.io/hostname": "worker-01", "node-pool": "gpu" },
+            network: { egress: { unrestricted: true } },
+          },
+        },
+        {
+          metadata: { name: "silent", namespace: "project-a" },
+          // The state most environments are in: no network block at all, because
+          // restricted is what the CRD applies to an absent field.
+          spec: { type: "ssh" },
+        },
+      ],
+    });
+    const { GET } = await importRoute();
+    const [pinned, silent] = (await (await GET(await authedGet(), undefined)).json()).items;
+
+    expect(pinned.nodeSelector).toEqual({ "kubernetes.io/hostname": "worker-01", "node-pool": "gpu" });
+    expect(pinned.egressUnrestricted).toBe(true);
+    expect(silent.nodeSelector).toEqual({});
+    expect(silent.egressUnrestricted).toBe(false);
   });
 });
 
@@ -818,11 +853,11 @@ describe("POST /api/devenvironments", () => {
     expect("ports" in spec).toBe(false);
   });
 
-  it("states spec.network only when RDMA is on, defaulting the fabric to roce", async () => {
+  it("states spec.network only for the half that was asked for, defaulting the fabric to roce", async () => {
     const withRdma = await postedSpec({ rdmaEnabled: true });
-    // The block is written only when rdmaEnabled; the fabric defaults to roce,
-    // the CRD's default, so a client that only flips the switch still states a
-    // valid fabric.
+    // The RDMA leaf is written only when rdmaEnabled; the fabric defaults to
+    // roce, the CRD's default, so a client that only flips the switch still
+    // states a valid fabric. Nothing is said about egress either way.
     expect(withRdma.network).toEqual({ rdmaEnabled: true, rdmaType: "roce" });
 
     const explicit = await postedSpec({ rdmaEnabled: true, rdmaType: "infiniband" });
@@ -835,6 +870,48 @@ describe("POST /api/devenvironments", () => {
 
   it("rejects an rdmaType outside the CRD's enum", async () => {
     expect(await rejectedPost({ rdmaEnabled: true, rdmaType: "ethernet" })).toContain("rdmaType");
+  });
+
+  it("opens egress on its own, without stating an RDMA flag the user never set", async () => {
+    const egress = await postedSpec({ egressUnrestricted: true });
+    expect(egress.network).toEqual({ egress: { unrestricted: true } });
+
+    // Both halves, each written as its own leaf rather than one implying the other.
+    const both = await postedSpec({ rdmaEnabled: true, egressUnrestricted: true });
+    expect(both.network).toEqual({ rdmaEnabled: true, rdmaType: "roce", egress: { unrestricted: true } });
+
+    // Restricted is what the CRD applies to an absent field, so the wizard
+    // saying so changes nothing — and writing it would state a policy the user
+    // never chose. Absence stays the one spelling of it.
+    const restricted = await postedSpec({ egressUnrestricted: false });
+    expect("network" in restricted).toBe(false);
+  });
+
+  it("pins the pod to the node it names, and to nothing otherwise", async () => {
+    const pinned = await postedSpec({ nodeName: "worker-01" });
+    // The caller names a node, not a label: the route writes the pin the kubelet
+    // already sets for it, so a request cannot select a label no node carries.
+    expect(pinned.nodeSelector).toEqual({ "kubernetes.io/hostname": "worker-01" });
+
+    // "Any" is the absence of the field, not an empty selector: a selector with
+    // no entries matches nothing, and an environment carrying one would never
+    // schedule at all.
+    const any = await postedSpec({});
+    expect("nodeSelector" in any).toBe(false);
+    const blank = await postedSpec({ nodeName: "  " });
+    expect("nodeSelector" in blank).toBe(false);
+  });
+
+  it("rejects a node name no label value could hold", async () => {
+    // The CRD validates neither key nor value, so a name the API server refuses
+    // at pod creation would be written, applied, and only then refused — leaving
+    // the environment with no condition that names the label.
+    expect(await rejectedPost({ nodeName: "Worker_01" })).toBe("nodeNameInvalid");
+    expect(await rejectedPost({ nodeName: "a".repeat(64) })).toBe("nodeNameInvalid");
+    // The shape of a real node name still passes.
+    expect((await postedSpec({ nodeName: "worker-01.example.com" })).nodeSelector).toEqual({
+      "kubernetes.io/hostname": "worker-01.example.com",
+    });
   });
 
   it("states spec.ssh only when SSH is on, writing pasted keys to an owned Secret", async () => {

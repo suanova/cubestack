@@ -1248,9 +1248,22 @@ function SpecCard({ e }: { e: DevEnvironmentSummary }) {
     [t("dev.spec.idle"), e.idleTimeout === 0 ? t("dev.spec.idleOff") : t("dev.spec.idleMin", { minutes: String(Math.round(e.idleTimeout / 60)) })],
     [t("dev.spec.sshKey"), e.sshClientKeySecret ?? t("dev.spec.sshKeyNone")],
     [t("dev.spec.node"), e.namespace],
+    // Always shown, unlike the rows below: every environment is in one of the two
+    // states, so a row naming only the unusual one would leave the common case
+    // looking unconfigured rather than restricted. The restricted value carries a
+    // "(default)" marker so the row never reads as a choice the user made — and it
+    // is the state that explains an install which raised nothing and failed later
+    // on a missing import.
+    [t("dev.spec.egress"), e.egressUnrestricted ? t("dev.spec.egressUnrestricted") : t("dev.spec.egressRestricted")],
   ];
   // Only what the environment actually states: four rows of "nothing configured"
   // on every environment would drown the ones that do configure something.
+  if (Object.keys(e.nodeSelector).length) {
+    // The map verbatim rather than assuming kubernetes.io/hostname: an environment
+    // pinned by hand with other labels is still pinned, and the panel's job is to
+    // say where it will land, not where the wizard would have put it.
+    rows.push([t("dev.spec.nodeSelector"), Object.entries(e.nodeSelector).map(([k, v]) => `${k}=${v}`).join(" · ")]);
+  }
   if (e.volumes.length) {
     rows.push([
       t("dev.spec.volumes"),
@@ -1403,6 +1416,12 @@ const IDLE_TIMEOUT_MAX = 2147483647;
 const ENV_NAME_RE = /^[-._a-zA-Z][-._a-zA-Z0-9]*$/;
 const PORT_TYPES = ["http", "tcp", "udp"] as const;
 type PortType = (typeof PORT_TYPES)[number];
+// spec.nodeSelector's value, which is a node's own name — mirrored from the
+// create route, which writes it as the node's kubernetes.io/hostname label. The
+// select only ever offers names the cluster advertised, so this guards a
+// hand-edited request rather than the ordinary path.
+const NODE_NAME_RE = /^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/;
+const NODE_NAME_MAX = 63;
 
 // The types the wizard offers, which is not the CRD's enum: `vscode` is a legal
 // spec.type the platform cannot serve. mainContainerPort maps it to 8080 and the
@@ -1483,12 +1502,21 @@ interface Draft {
   args: string;
   command: string;
   ports: PortRow[];
-  // spec.network: RDMA access, independent of the accelerator. rdmaEnabled gates
-  // the block; rdmaType names the fabric, defaulting to roce (the CRD default).
-  // A fabric no node advertises does not fail the write — the environment stays
-  // Pending — so the choice is offered with a hint rather than hidden.
+  // spec.network: RDMA access, and what the environment may reach on its own
+  // behalf. rdmaEnabled gates the RDMA half; rdmaType names the fabric,
+  // defaulting to roce (the CRD default). egressUnrestricted is the other half
+  // and opens on the CRD's default of restricted. A fabric no node advertises
+  // does not fail the write — the environment stays Pending — so the choice is
+  // offered with a hint rather than hidden.
   rdmaEnabled: boolean;
   rdmaType: "roce" | "infiniband";
+  egressUnrestricted: boolean;
+  // spec.nodeSelector, as the one node the wizard pins to. "" is "let the
+  // scheduler decide", which is the absence of the field rather than an empty
+  // label: the route writes the pin as the node's kubernetes.io/hostname label,
+  // and only the nodes the cluster advertised are ever offered, so the choice
+  // cannot name a node that does not exist.
+  nodeName: string;
   // spec.ssh: independent of the environment's type. sshEnabled opens the SSH
   // endpoint on any type (a jupyter + ssh environment); sshKeys holds the
   // user's own public keys, one per line — non-empty, the route writes them to
@@ -1567,6 +1595,10 @@ function CreateWizard({
     ports: [],
     rdmaEnabled: false,
     rdmaType: "roce",
+    egressUnrestricted: false,
+    // "Let the scheduler decide" — the pin is the environment stating a node, and
+    // opening on one would be the wizard placing the pod on the user's behalf.
+    nodeName: "",
     sshEnabled: false,
     sshKeys: "",
   });
@@ -1729,11 +1761,19 @@ function CreateWizard({
     // single protocol; http goes through the Gateway and may share a number.
     new Set(l4Ports.map((r) => r.port.trim())).size === l4Ports.length;
 
+  // spec.nodeSelector's value. The select only ever offers names the cluster
+  // advertised, so this guards a hand-edited draft rather than the ordinary path —
+  // an empty one is "let the scheduler decide" and states nothing to check.
+  const nodeNameValid =
+    !draft.nodeName || (draft.nodeName.length <= NODE_NAME_MAX && NODE_NAME_RE.test(draft.nodeName));
+
   const [mountPathError, setMountPathError] = useState(false);
   const [pvcError, setPvcError] = useState(false);
   const [envError, setEnvError] = useState(false);
   const [portError, setPortError] = useState(false);
-  const step3Valid = accountValid && uidGidValid && mountPathValid && pvcRowsValid && envRowsValid && portRowsValid;
+  const [nodeNameError, setNodeNameError] = useState(false);
+  const step3Valid =
+    accountValid && uidGidValid && mountPathValid && pvcRowsValid && envRowsValid && portRowsValid && nodeNameValid;
 
   // What spec.storage.mountPath would derive to if left empty, in the CRD's own
   // order (StorageSpec.MountPath): an absolute HOME in spec.runtime.env first,
@@ -1764,6 +1804,7 @@ function CreateWizard({
       setPvcError(!pvcRowsValid);
       setEnvError(!envRowsValid);
       setPortError(!portRowsValid);
+      setNodeNameError(!nodeNameValid);
       if (!step3Valid) return;
     }
     setStep((s) => Math.min(4, s + 1));
@@ -1782,6 +1823,7 @@ function CreateWizard({
     setPvcError(!pvcRowsValid);
     setEnvError(!envRowsValid);
     setPortError(!portRowsValid);
+    setNodeNameError(!nodeNameValid);
     if (!step2Valid || !step3Valid) return;
     setCreateBusy(true);
     setCreateError(null);
@@ -1835,9 +1877,14 @@ function CreateWizard({
             })),
           }
         : {}),
-      // spec.network: sent only when RDMA is on; rdmaType names the fabric the
-      // environment joins. Off, the block is absent — the one spelling of no RDMA.
+      // spec.network, both leaves independently: asking for RDMA never states an
+      // egress policy and opening egress never states RDMA. Off, each is absent —
+      // the one spelling of the CRD's own defaults.
       ...(draft.rdmaEnabled ? { rdmaEnabled: true, rdmaType: draft.rdmaType } : {}),
+      ...(draft.egressUnrestricted ? { egressUnrestricted: true } : {}),
+      // spec.nodeSelector, sent only when a node was picked: "any" is the absence
+      // of the field rather than an empty selector, which selects nothing.
+      ...(draft.nodeName ? { nodeName: draft.nodeName } : {}),
       // spec.ssh: sent only when SSH is on (independent of type). The user's own
       // public keys are included only when some are pasted; otherwise the
       // operator mints a keypair for the environment.
@@ -1888,6 +1935,12 @@ function CreateWizard({
   // Empty when it advertises none — or when the options read could not list the
   // nodes, which the select handles the same way, by offering "any" alone.
   const gpuModels = draft.accelerator === "none" ? [] : (options?.gpuModels?.[draft.accelerator] ?? []);
+
+  // The nodes the cluster advertised, in the options route's own order. Empty for
+  // the same two reasons as gpuModels — a cluster with nothing to offer, and a
+  // best-effort read that failed — and the select offers "any" alone either way,
+  // so an empty list reads as "the scheduler decides" rather than as an error.
+  const nodes = options?.nodes ?? [];
 
   // Switching the type keeps the vendor when the catalog has the pair: the two
   // images of a stack differ only in the mode baked into them, so a CUDA
@@ -1942,6 +1995,10 @@ function CreateWizard({
   if (draft.rdmaEnabled) {
     summaryRows.push([t("dev.wizard.rdma"), draft.rdmaType === "roce" ? "RoCE" : "InfiniBand"]);
   }
+  if (draft.egressUnrestricted) {
+    summaryRows.push([t("dev.wizard.egress"), t("dev.wizard.egressUnrestricted")]);
+  }
+  if (draft.nodeName) summaryRows.push([t("dev.wizard.placement"), draft.nodeName]);
   if (draft.sshEnabled) {
     summaryRows.push([
       t("dev.wizard.ssh"),
@@ -2375,6 +2432,52 @@ function CreateWizard({
                       </Select>
                     </WizField>
                   ) : null}
+                </WizSection>
+
+                <WizSection odId="sec-egress" title={t("dev.wizard.egress")} badge="network">
+                  <Box sx={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "12px", py: "8px" }}>
+                    <Box>
+                      <Box sx={{ fontSize: 12.5 }}>{t("dev.wizard.egressEnabled")}</Box>
+                      <Box sx={{ fontSize: 11, color: "text.secondary", mt: "2px" }}>{t("dev.wizard.egressHint")}</Box>
+                    </Box>
+                    <Switch
+                      size="small"
+                      checked={draft.egressUnrestricted}
+                      onChange={(e) => setField("egressUnrestricted", e.target.checked)}
+                      data-od-id="wizard-egress"
+                    />
+                  </Box>
+                </WizSection>
+
+                <WizSection odId="sec-placement" title={t("dev.wizard.placement")} badge="nodeSelector">
+                  <WizField
+                    label={t("dev.wizard.nodeSelector")}
+                    hint={t("dev.wizard.nodeSelectorHint")}
+                    error={nodeNameError}
+                    errorText={t("dev.wizard.errNodeName")}
+                  >
+                    <Select
+                      size="small"
+                      fullWidth
+                      // The "any" option's value is "", so without this MUI renders a
+                      // blank select rather than the option's own label.
+                      displayEmpty
+                      data-od-id="wizard-node"
+                      value={draft.nodeName}
+                      onChange={(e) => setField("nodeName", e.target.value)}
+                    >
+                      <MenuItem value="">{t("dev.wizard.nodeSelectorAny")}</MenuItem>
+                      {nodes.map((n) => (
+                        // The node's accelerators beside its name, so a pin can be
+                        // chosen with the environment's own accelerator in view:
+                        // pinning a CPU node under a GPU request is a pod no node
+                        // can run, and it reports nothing but Pending.
+                        <MenuItem key={n.name} value={n.name}>
+                          {n.vendors.length ? `${n.name} · ${n.vendors.join(" / ")}` : n.name}
+                        </MenuItem>
+                      ))}
+                    </Select>
+                  </WizField>
                 </WizSection>
 
                 <WizSection odId="sec-ssh" title={t("dev.wizard.ssh")} badge="ssh">

@@ -72,6 +72,16 @@ export interface DevEnvironmentSummary {
   ports: Array<{ name: string; type: "http" | "tcp" | "udp"; containerPort: number }>;
   idleTimeout: number;
   sshEnabled: boolean;
+  // spec.nodeSelector: the labels the environment pins its pod to. Empty for the
+  // environments that state none, which is most of them — the accelerator
+  // already decides where most pods can run.
+  nodeSelector: Record<string, string>;
+  // spec.network.egress.unrestricted: whether the environment may reach outside
+  // the cluster. Stated for every environment, including the ones that never
+  // asked — the CRD's default is restricted, and an absent network block reads
+  // as restricted. It is the state that explains an install which raised nothing
+  // and failed later on a missing import.
+  egressUnrestricted: boolean;
   // observed state (phase is null until the controller reports it)
   phase: string | null;
   phaseReason: string | null;
@@ -113,6 +123,8 @@ interface DevEnvSpec {
   ports?: Array<{ name?: string; type?: string; containerPort?: number }>;
   runtime?: { env?: Array<{ name?: string }>; command?: string[]; args?: string[] };
   lifecycle?: { idleTimeout?: number };
+  nodeSelector?: Record<string, string>;
+  network?: { egress?: { unrestricted?: boolean } };
   ssh?: { enabled?: boolean };
 }
 interface DevEnvStatus {
@@ -184,6 +196,13 @@ function project(env: DevEnv): DevEnvironmentSummary {
     })),
     idleTimeout: num(spec.lifecycle?.idleTimeout),
     sshEnabled: spec.ssh?.enabled ?? false,
+    // The labels verbatim: there is no CRD default to apply and nothing to
+    // derive, so an absent map stays empty rather than becoming a display value.
+    nodeSelector: spec.nodeSelector ?? {},
+    // Anything that is not true is the default the schema would have applied,
+    // including a network block an older object never carried — the same way
+    // pvcRetention resolves an absent field to the CRD's other value.
+    egressUnrestricted: spec.network?.egress?.unrestricted === true,
     phase: status.phase?.name ?? null,
     phaseReason: status.phase?.reason ?? null,
     endpoints: (status.endpoints ?? []).map((e) => ({
@@ -261,6 +280,15 @@ const ACCELERATORS = ["none", "nvidia", "metax"] as const;
 // this route's, so only the shape is checked here.
 const GPU_MODEL_RE = /^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$/;
 const GPU_MODEL_MAX = 63;
+// spec.nodeSelector's value here is a node's name, written into the
+// kubernetes.io/hostname label the kubelet already sets on it, so it is bounded
+// by what a label value may hold rather than by what a node name may. The CRD
+// validates neither key nor value, so a malformed one is written and applied and
+// only refused when the controller renders the pod — leaving the environment
+// with no condition that names the label. The shape is checked here instead;
+// which nodes exist is not, since that is the cluster's business.
+const NODE_NAME_RE = /^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/;
+const NODE_NAME_MAX = 63;
 // corev1.EnvVar.name's own validation, enforced by the API server and nothing
 // else — an invalid name would surface as an opaque 422 on the CR, not here.
 const ENV_NAME_RE = /^[-._a-zA-Z][-._a-zA-Z0-9]*$/;
@@ -358,11 +386,21 @@ interface CreateBody {
   command?: string; // → spec.runtime.command (one command line, split here)
   args?: string; // → spec.runtime.args (one command line, split here)
   ports?: Array<{ name?: string; containerPort?: number; type?: string }>; // → spec.ports[]
-  // spec.network: RDMA access. rdmaEnabled gates the block; rdmaType names the
-  // fabric the environment joins (roce is the CRD's default). Absent / false =
-  // no RDMA, so the block is omitted rather than written as a false flag.
+  // spec.network: RDMA access, and what the environment may reach on its own
+  // behalf. rdmaEnabled gates the RDMA half; rdmaType names the fabric the
+  // environment joins (roce is the CRD's default). Absent / false = no RDMA, so
+  // the block is omitted rather than written as a false flag.
   rdmaEnabled?: boolean; // → spec.network.rdmaEnabled
   rdmaType?: string; // → spec.network.rdmaType
+  // spec.network.egress.unrestricted: lifts the restriction on what the
+  // environment may reach. Absent / false = restricted, the CRD's default, so
+  // only true is ever written.
+  egressUnrestricted?: boolean; // → spec.network.egress.unrestricted
+  // spec.nodeSelector, which node to pin the pod to, named as the node itself —
+  // the wizard offers the ones the cluster advertises. The route writes it as
+  // the kubernetes.io/hostname label rather than taking the label map, so a
+  // caller cannot name a label no node carries.
+  nodeName?: string; // → spec.nodeSelector["kubernetes.io/hostname"]
   // spec.ssh: independent of the environment's type — ssh.enabled opens the SSH
   // endpoint on any type (a jupyter + ssh environment). Absent / false = no ssh
   // block (the type-ssh case is already exposed unconditionally by the operator).
@@ -593,6 +631,19 @@ export const POST = withAuth(async (req) => {
       return ValidationError("rdmaTypeInvalid", { types: RDMA_TYPES.join(" / ") });
     }
 
+    // spec.network.egress.unrestricted. Only the CRD's one non-default value is
+    // ever written, so there is nothing to validate: false is the absence of the
+    // field, exactly as it is for rdmaEnabled above.
+    const egressUnrestricted = body.egressUnrestricted === true;
+
+    // spec.nodeSelector: the node the pod is pinned to. Checked for shape, not
+    // for existence — whether the node is one of the cluster's is not something
+    // this route can be wrong about from the body alone.
+    const nodeName = body.nodeName?.trim() ?? "";
+    if (nodeName && (nodeName.length > NODE_NAME_MAX || !NODE_NAME_RE.test(nodeName))) {
+      return ValidationError("nodeNameInvalid", { name: nodeName });
+    }
+
     // spec.ssh: written only when sshEnabled (independent of type — a jupyter or
     // vscode environment can still expose SSH). Non-empty public keys are
     // written to <name>-ssh-user-keys and spec.ssh.authorizedKeysSecret points
@@ -723,9 +774,23 @@ export const POST = withAuth(async (req) => {
         ...(volumes.length ? { volumes } : {}),
         ...(ports.length ? { ports } : {}),
         lifecycle: { idleTimeout },
-        // Written only when RDMA is on: absence is the one spelling of "no
-        // RDMA", so a false flag is never sent for the operator to interpret.
-        ...(rdmaEnabled ? { network: { rdmaEnabled: true, rdmaType } } : {}),
+        // Written when the environment asks for RDMA, for unrestricted egress, or
+        // for both; each leaf independently, so asking for one never states the
+        // other. Absence is still the one spelling of "off": a false rdmaEnabled
+        // flag and an explicit egress.unrestricted=false are never sent for the
+        // operator to interpret — the CRD applies the same false, and stating it
+        // would put the platform's default in the user's mouth.
+        ...(rdmaEnabled || egressUnrestricted
+          ? {
+              network: {
+                ...(rdmaEnabled ? { rdmaEnabled: true, rdmaType } : {}),
+                ...(egressUnrestricted ? { egress: { unrestricted: true } } : {}),
+              },
+            }
+          : {}),
+        // Written only when a node was picked: an empty selector selects nothing,
+        // and the operator writes a nil nodeSelector rather than an empty one.
+        ...(nodeName ? { nodeSelector: { "kubernetes.io/hostname": nodeName } } : {}),
         // Written only when sshEnabled: absence is the one spelling of "no ssh
         // switch", so a false flag is never sent. The type-ssh case is already
         // exposed unconditionally by the operator, so this block only carries
