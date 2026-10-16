@@ -62,6 +62,7 @@ import { HitlDock, type ApprovalDecision } from "./HitlDock";
 import { Btn, CpTextArea, Icons, Pill, Spinner, monoSx, useToast } from "./ui";
 import { offerHandoffFromFloatingChat, registerFloatingThread } from "./agentHandoff";
 import { setStoredTab } from "./tabStore";
+import { useInstancePoll } from "./useInstancePoll";
 import { AGENT_CHAT_TRANSITION, withViewTransition } from "./viewTransition";
 
 // The same fixed conversation key the chat tab uses (see ChatPane): one
@@ -249,17 +250,20 @@ export function FloatingChat() {
    *  Applied even when the generation moved while it was in flight: it is
    *  global to the surface (the header line), not part of a conversation
    *  generation. */
-  /** Re-read just the instance status, which is what the poll below needs. */
-  async function refreshAgentStatus(): Promise<void> {
+  /** Re-read just the instance status, which is what the poll below needs:
+   *  whether it exists (the poll's cadence) or null when the read failed. */
+  async function refreshAgentStatus(): Promise<boolean | null> {
     const gen = ++statusGenRef.current;
     try {
       const res = await apiFetch("/api/cubepilot/agent/status");
-      if (!res.ok || statusGenRef.current !== gen) return;
+      if (!res.ok || statusGenRef.current !== gen) return null;
       const body = (await res.json()) as AgentStatus;
-      if (statusGenRef.current !== gen) return;
+      if (statusGenRef.current !== gen) return null;
       setAgentStatus(body);
+      return body.exists === true;
     } catch {
       /* the next tick asks again */
+      return null;
     }
   }
 
@@ -771,11 +775,7 @@ export function FloatingChat() {
   // Focus the composer on open, so Enter starts talking immediately.
   // Until the instance is Ready the panel can only report its absence, so it
   // asks again: the reader should not have to reopen it to be let in.
-  useEffect(() => {
-    if (!open || agentReady) return;
-    const id = setInterval(() => void refreshAgentStatus(), 5000);
-    return () => clearInterval(id);
-  }, [open, agentReady]);
+  useInstancePoll(open && !agentReady, refreshAgentStatus);
 
   useEffect(() => {
     if (!open || !agentReady) return;

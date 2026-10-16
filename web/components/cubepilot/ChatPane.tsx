@@ -72,6 +72,7 @@ import { AgentThread } from "./AgentThread";
 import { subscribeAgentHandoff, takeAgentHandoff } from "./agentHandoff";
 import { setStoredTab } from "./tabStore";
 import { setPaneObject } from "./paneObject";
+import { useInstancePoll } from "./useInstancePoll";
 import { AGENT_CHAT_TRANSITION, withViewTransition } from "./viewTransition";
 import { Btn, Card, CpTextArea, Icons, Pill, Spinner, monoSx, useToast } from "./ui";
 
@@ -549,21 +550,24 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
    * inside the calling async flow).
    */
   /** Re-read just the instance status: the poll below runs it while the pane is
-   *  waiting for an instance, and the full meta read is three requests. */
-  async function refreshAgentStatus(): Promise<void> {
+   *  waiting for an instance, and the full meta read is three requests. Answers
+   *  whether it exists (the poll's cadence) or null when the read failed. */
+  async function refreshAgentStatus(): Promise<boolean | null> {
     const gen = ++statusGenRef.current;
     try {
       const res = await apiFetch("/api/cubepilot/agent/status");
-      if (!res.ok) return;
+      if (!res.ok) return null;
       const body = (await res.json()) as AgentStatus;
       // Landing order decides, not issue order: this answer applies unless a
       // newer one already landed (a slow poll must not put an older phase back
       // on screen), and it applies even while a slower read is still out.
-      if (gen < statusAppliedRef.current) return;
+      if (gen < statusAppliedRef.current) return null;
       statusAppliedRef.current = gen;
       setAgentStatus(body);
+      return body.exists === true;
     } catch {
       /* the next tick asks again */
+      return null;
     }
   }
 
@@ -651,11 +655,7 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
 
   // Until the instance is Ready this pane can only report its absence, so it
   // asks again: a reader should not have to reload to be let in.
-  useEffect(() => {
-    if (!isAgent || agentReady) return;
-    const id = setInterval(() => void refreshAgentStatus(), 5000);
-    return () => clearInterval(id);
-  }, [isAgent, agentReady]);
+  useInstancePoll(isAgent && !agentReady, refreshAgentStatus);
 
   useEffect(() => {
     if (!isAgent || !agentReady) return;
