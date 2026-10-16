@@ -354,6 +354,37 @@ describe("cubepilot page", () => {
     act(() => root.unmount());
   });
 
+  // An instance nobody has created cannot appear on its own, so the surfaces
+  // that wait for it must not keep asking at their own base cadence: on a page
+  // left open with no assistant, that is one CR read per surface per few
+  // seconds, forever. The absence backs the cadence off instead.
+  it("backs the asks off while the caller has no instance", async () => {
+    vi.useFakeTimers();
+    stubApi(undefined, { agentStatus: { exists: false } });
+    const { root } = renderPage();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+
+    const statusCalls = () =>
+      (globalThis.fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls.filter((c) =>
+        String(c[0]).includes("/api/cubepilot/agent/status"),
+      ).length;
+    const atMount = statusCalls();
+    expect(atMount).toBeGreaterThan(0); // the mount's own reads
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    // Two surfaces ask (the chat card and the config card). Backed off — 5s then
+    // 15s — that is 5 asks each in a minute; the fixed 4s and 5s pair asked 20.
+    const asked = statusCalls() - atMount;
+    expect(asked).toBeLessThanOrEqual(15);
+
+    act(() => root.unmount());
+    vi.useRealTimers();
+  });
+
   // An install with no platform model service is a supported shape: the page
   // offers the assistant and leaves the model group out, announcing nothing. The
   // reason a catalog is missing (a gateway that was never installed, a name that

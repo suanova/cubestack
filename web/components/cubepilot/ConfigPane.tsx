@@ -28,6 +28,7 @@ import { useI18n } from "@/lib/i18n";
 import { ruleKey } from "@/lib/cubepilot/allowlist";
 
 import { fmtSeconds } from "./format";
+import { useInstancePoll } from "./useInstancePoll";
 import { Btn, Card, CardHead, CpInput, CpTextArea, Icons, Pill, Spinner, inputSx, monoSx, useToast } from "./ui";
 
 /** The policy the select shows: the override when it is one we offer, else the
@@ -168,24 +169,29 @@ export function ConfigPane() {
     return () => clearInterval(id);
   }, [status]);
 
+  /** Re-read just the instance status for the card's own waiting line: whether
+   *  the instance exists (the poll's cadence) or null when the read failed. */
+  async function refreshStatus(): Promise<boolean | null> {
+    const gen = ++statusGenRef.current;
+    try {
+      const res = await apiFetch("/api/cubepilot/agent/status");
+      if (!res.ok) return null;
+      const s = (await res.json()) as AgentStatus;
+      // Only the newest read counts: a slow one must not put an older phase back
+      // on the card after a newer one said Ready.
+      if (statusGenRef.current !== gen) return null;
+      setStatus(s);
+      return s.exists === true;
+    } catch {
+      return null;
+    }
+  }
+
   // A save leaves the instance starting (its identity is minted, then the pod
   // comes up), so the card asks again until it is Ready instead of sitting on
-  // "Creating" until a reload.
-  useEffect(() => {
-    if (!status || status.phase === "Ready") return;
-    const id = setInterval(() => {
-      // Only the newest read counts: a slow one must not put an older phase
-      // back on the card after a newer one said Ready.
-      const gen = ++statusGenRef.current;
-      void apiFetch("/api/cubepilot/agent/status")
-        .then((r) => (r.ok ? r.json() : null))
-        .then((s) => {
-          if (s && statusGenRef.current === gen) setStatus(s as AgentStatus);
-        })
-        .catch(() => undefined);
-    }, 4000);
-    return () => clearInterval(id);
-  }, [status]);
+  // "Creating" until a reload. An instance that is not there at all backs off:
+  // that absence cannot change on its own.
+  useInstancePoll(Boolean(status) && status?.phase !== "Ready", refreshStatus);
 
   async function saveConfig() {
     if (saving) return;
