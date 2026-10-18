@@ -45,6 +45,12 @@ export interface InferenceServiceSummary {
   vendor: string | null;
   gpuModel: string | null;
   gpuPerPod: number | null;
+  // Profile-derived GPU facts, one entry per GPU-carrying role: how many cards
+  // each pod requests and which accelerator model the role is pinned to. model
+  // is null when the role accepts any of the profile's declared models (a
+  // multi-model profile without a role-level pin). The list's GPU resource
+  // column sums these roles; a PD service reads "2 × 8 × MXC550".
+  gpuRoles: Array<{ name: string; gpuPerPod: number; model: string | null }>;
   modelName: string | null;
   modelVersion: string | null;
   // override knobs declared by the profile, with the effective value (the
@@ -136,7 +142,10 @@ interface ProfileOverride {
 interface ProfileRole {
   name?: string;
   workload?: { kind?: string };
-  podTemplate?: { resources?: { gpuPerPod?: number } };
+  podTemplate?: {
+    nodeSelector?: Record<string, string>;
+    resources?: { gpuPerPod?: number };
+  };
 }
 interface ProfileSpec {
   engine?: { name?: string; version?: string };
@@ -151,15 +160,40 @@ interface Profile {
 }
 
 /**
- * The serving role of a profile is the one that actually carries GPUs (the
- * prefill/decode LWS roles here). It is the source of gpuPerPod and the replica
- * overrides the scale panel edits.
+ * Vendor product node labels, matching the renderer: the role's pod template
+ * pins the accelerator model through this label, either literally or through
+ * an override reference.
  */
-function findGpuRole(profile: Profile | undefined): ProfileRole | null {
-  for (const role of profile?.spec?.roles ?? []) {
-    if ((role.podTemplate?.resources?.gpuPerPod ?? 0) > 0) return role;
+const VENDOR_PRODUCT_LABEL: Record<string, string> = {
+  metax: "metax-tech.com/gpu.product",
+  nvidia: "nvidia.com/gpu.product",
+};
+
+/** A pod template node-selector value that is exactly one override reference. */
+const OVERRIDE_REF = /^\{\{\s*overrides\.([A-Za-z0-9_]+)\s*\}\}$/;
+
+/**
+ * The accelerator model a GPU role is pinned to: the role's pod-template node
+ * selector on the vendor product label, with an override reference resolved to
+ * the service's effective value. Falls back to the profile's single declared
+ * model; a multi-model profile without a role-level pin leaves the role free to
+ * land on any declared model (null), matching the renderer's nodeAffinity.
+ */
+function roleGpuModel(
+  role: ProfileRole,
+  profile: Profile,
+  effective: Map<string, string | number | boolean | null>,
+): string | null {
+  const label = VENDOR_PRODUCT_LABEL[profile.spec?.accelerator?.vendor ?? ""];
+  const value = label ? role.podTemplate?.nodeSelector?.[label]?.trim() : undefined;
+  if (value) {
+    const ref = OVERRIDE_REF.exec(value);
+    if (!ref) return value;
+    const resolved = effective.get(ref[1]);
+    if (typeof resolved === "string" && resolved !== "") return resolved;
   }
-  return null;
+  const models = profile.spec?.accelerator?.models ?? [];
+  return models.length === 1 ? models[0] : null;
 }
 
 function num(v: unknown): number | null {
@@ -216,7 +250,6 @@ function project(
 ): InferenceServiceSummary {
   const spec = isvc.spec ?? {};
   const status = isvc.status ?? {};
-  const gpuRole = findGpuRole(profile);
 
   const overrideNums: Record<string, number> = {};
   for (const [k, v] of Object.entries(spec.overrides ?? {})) {
@@ -256,6 +289,23 @@ function project(
     groupSize: r.groupSize ?? null,
   }));
 
+  // GPU roles are profile-derived, not status-derived: the list shows the
+  // service's GPU footprint before the controller has written any status.
+  const effective = new Map(overrides.map((o) => [o.name, o.current]));
+  const gpuRoles: InferenceServiceSummary["gpuRoles"] = profile
+    ? (profile.spec?.roles ?? [])
+        .filter((r) => (r.podTemplate?.resources?.gpuPerPod ?? 0) > 0)
+        .map((r) => ({
+          name: r.name ?? "?",
+          gpuPerPod: r.podTemplate?.resources?.gpuPerPod ?? 0,
+          model: roleGpuModel(r, profile, effective),
+        }))
+    : [];
+  // The single-model fields stay as a compact summary: every concrete model a
+  // GPU role pins (joined when the roles were narrowed differently), else the
+  // first declared model when no role pins one.
+  const gpuModels = [...new Set(gpuRoles.map((r) => r.model).filter((m): m is string => m !== null))];
+
   return {
     name: isvc.metadata?.name ?? "?",
     namespace: isvc.metadata?.namespace ?? "",
@@ -269,8 +319,9 @@ function project(
     engine: profile?.spec?.engine?.name ?? null,
     engineVersion: profile?.spec?.engine?.version ?? null,
     vendor: profile?.spec?.accelerator?.vendor ?? null,
-    gpuModel: profile?.spec?.accelerator?.models?.[0] ?? null,
-    gpuPerPod: gpuRole?.podTemplate?.resources?.gpuPerPod ?? null,
+    gpuModel: gpuModels.length > 0 ? gpuModels.join(" / ") : (profile?.spec?.accelerator?.models?.[0] ?? null),
+    gpuPerPod: gpuRoles[0]?.gpuPerPod ?? null,
+    gpuRoles,
     modelName: status.model?.name ?? null,
     modelVersion: status.model?.version ?? null,
     overrideNums,

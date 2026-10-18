@@ -213,6 +213,10 @@ describe("inference services route", () => {
       vendor: "metax",
       gpuModel: "MXC500",
       gpuPerPod: 8,
+      gpuRoles: [
+        { name: "prefill", gpuPerPod: 8, model: "MXC500" },
+        { name: "decode", gpuPerPod: 8, model: "MXC500" },
+      ],
       // override knobs declared by the profile; effective value = user value, else default
       overrides: [
         { name: "prefillReplicas", type: "integer", min: 1, max: 8, enum: null, current: 1 },
@@ -230,6 +234,79 @@ describe("inference services route", () => {
     // Sort only; both services share the profile.
     expect(body.items).toHaveLength(2);
     expect(pro.name).toBe("dsv4-pro-pd");
+  });
+
+  it("projects each GPU role's effective model and card count", async () => {
+    // The PD profile pins each role's GPU model through a role-scoped override
+    // reference in its pod-template node selector. The list must report the
+    // selected models, not the profile's first declared one, and one entry per
+    // GPU role so the UI can show "prefill 8 × MXC500 · decode 8 × MXC550".
+    listClusterCustomObject.mockImplementation(({ plural }: { plural: string }) => {
+      if (plural === "inferenceservices") {
+        return Promise.resolve({
+          items: [
+            {
+              metadata: { name: "test", namespace: "default" },
+              spec: {
+                modelRef: "deepseek-v4-flash-w8a8",
+                profileRef: "metax-sglang-dsv4-pd",
+                overrides: { prefill_metax_model: "MXC500", decode_metax_model: "MXC550" },
+              },
+            },
+          ],
+        });
+      }
+      if (plural === "modelversions") {
+        return Promise.resolve({
+          items: [
+            { metadata: { name: "deepseek-v4-flash-w8a8" }, spec: { architecture: "deepseek_v4", quantization: "w8a8" } },
+          ],
+        });
+      }
+      if (plural === "inferenceruntimeprofiles") {
+        return Promise.resolve({
+          items: [
+            {
+              metadata: { name: "metax-sglang-dsv4-pd" },
+              spec: {
+                engine: { name: "sglang", version: "0.5.13" },
+                accelerator: { vendor: "metax", models: ["MXC500", "MXC550"] },
+                overrides: [
+                  { name: "prefill_metax_model", type: "string", default: "MXC550", enum: ["MXC500", "MXC550"] },
+                  { name: "decode_metax_model", type: "string", default: "MXC550", enum: ["MXC500", "MXC550"] },
+                ],
+                roles: [
+                  {
+                    name: "prefill",
+                    podTemplate: {
+                      nodeSelector: { "metax-tech.com/gpu.product": "{{ overrides.prefill_metax_model }}" },
+                      resources: { gpuPerPod: 8 },
+                    },
+                  },
+                  {
+                    name: "decode",
+                    podTemplate: {
+                      nodeSelector: { "metax-tech.com/gpu.product": "{{ overrides.decode_metax_model }}" },
+                      resources: { gpuPerPod: 8 },
+                    },
+                  },
+                  { name: "router" },
+                ],
+              },
+            },
+          ],
+        });
+      }
+      return Promise.resolve({ items: [] });
+    });
+
+    const { GET } = await importRoute();
+    const body = await (await GET(await authedGet(), undefined)).json();
+    expect(body.items[0].gpuRoles).toEqual([
+      { name: "prefill", gpuPerPod: 8, model: "MXC500" },
+      { name: "decode", gpuPerPod: 8, model: "MXC550" },
+    ]);
+    expect(body.items[0].gpuModel).toBe("MXC500 / MXC550");
   });
 
   it("projects the controller's phase and its reason", async () => {

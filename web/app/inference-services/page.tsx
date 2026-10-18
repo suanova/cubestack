@@ -79,8 +79,43 @@ function StatusChip({ phase }: { phase: string | null }) {
   );
 }
 
-const gpuText = (s: InferenceServiceSummary): string =>
-  s.gpuPerPod ? `${s.gpuPerPod} × ${s.gpuModel ?? s.vendor ?? "GPU"}` : "—";
+// GPU facts per role. The API projects them from the profile; fixtures that
+// predate the field fall back to the single gpuPerPod/gpuModel pair.
+const gpuRoleFacts = (s: InferenceServiceSummary) =>
+  s.gpuRoles.length > 0
+    ? s.gpuRoles
+    : s.gpuPerPod
+      ? [{ name: "", gpuPerPod: s.gpuPerPod, model: s.gpuModel }]
+      : [];
+
+const gpuAmountText = (gpuPerPod: number, model: string | null): string =>
+  `${gpuPerPod} × ${model ?? "GPU"}`;
+
+// The list's GPU resource column: the service's whole footprint. Roles asking
+// for the same cards on the same model collapse into one product — a PD
+// service whose prefill and decode each take 8 MXC550 reads "2 × 8 × MXC550" —
+// while roles on different models or card counts are listed per role.
+const gpuText = (s: InferenceServiceSummary): string => {
+  const roles = gpuRoleFacts(s);
+  if (roles.length === 0) return "—";
+  const [first] = roles;
+  const uniform = roles.every((r) => r.gpuPerPod === first.gpuPerPod && r.model === first.model);
+  if (!uniform) {
+    return roles.map((r) => `${roleLabel(r.name)} ${gpuAmountText(r.gpuPerPod, r.model)}`).join(" · ");
+  }
+  return roles.length > 1
+    ? `${roles.length} × ${gpuAmountText(first.gpuPerPod, first.model)}`
+    : gpuAmountText(first.gpuPerPod, first.model);
+};
+
+// The detail card's per-replica row: one entry per GPU role, since each role is
+// its own workload.
+const gpuPerRoleText = (s: InferenceServiceSummary): string => {
+  const roles = gpuRoleFacts(s);
+  if (roles.length === 0) return "—";
+  if (roles.length === 1) return gpuAmountText(roles[0].gpuPerPod, roles[0].model);
+  return roles.map((r) => `${roleLabel(r.name)} ${gpuAmountText(r.gpuPerPod, r.model)}`).join(" · ");
+};
 
 // One row per integer override the profile declares (decodeReplicas /
 // prefillReplicas / groupSize on a PD profile, whatever a standard profile
@@ -89,14 +124,14 @@ const gpuText = (s: InferenceServiceSummary): string =>
 function ReplicaRows({ s }: { s: InferenceServiceSummary }) {
   const rows = s.overrides
     .filter((o) => o.type === "integer")
-    .map((o) => [o.name, o.current !== null ? String(o.current) : "—"] as [string, string]);
+    .map((o) => [o.name, overrideDisplayName(o.name), o.current !== null ? String(o.current) : "—"] as const);
   if (rows.length === 0) {
     return <Typography sx={{ fontFamily: "var(--font-mono)", fontSize: 12.5 }}>—</Typography>;
   }
   return (
     <Box sx={{ fontFamily: "var(--font-mono)", fontSize: 12.5, lineHeight: 1.7 }}>
-      {rows.map(([label, value]) => (
-        <Box key={label} sx={{ whiteSpace: "nowrap" }}>
+      {rows.map(([name, label, value]) => (
+        <Box key={name} sx={{ whiteSpace: "nowrap" }}>
           {label} <Typography component="span" sx={{ color: "text.secondary" }}>{value}</Typography>
         </Box>
       ))}
@@ -1120,7 +1155,7 @@ function ScaleCard({
       ) : (
         <Box sx={{ px: "18px", py: "12px", display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: "12px", alignItems: "end" }}>
           {s.overrides.map((o) => (
-            <Field key={o.name} label={o.name} error={!scaleValueValid(o, effective[o.name])}>
+            <Field key={o.name} label={overrideDisplayName(o.name)} error={!scaleValueValid(o, effective[o.name])}>
               <ScaleInput o={o} value={effective[o.name]} onChange={(v) => setValues((prev) => ({ ...prev, [o.name]: v }))} />
             </Field>
           ))}
@@ -1198,7 +1233,7 @@ function ParamsCard({ s }: { s: InferenceServiceSummary }) {
         rows={[
           [t("inf.params.engine"), s.engine ? `${s.engine} · ${s.engineVersion ?? ""}`.trim() : "—"],
           [t("inf.params.accelerator"), s.vendor ? `${s.vendor}${s.gpuModel ? ` / ${s.gpuModel}` : ""}` : "—"],
-          [t("inf.params.gpuPerPod"), gpuText(s)],
+          [t("inf.params.gpuPerPod"), gpuPerRoleText(s)],
           ["modelRef", s.modelRef],
           ["profileRef", s.profileRef],
           [t("inf.params.route"), s.published ? `${t("inf.params.published")} ${s.routeModelName ?? ""}`.trim() : t("inf.params.unpublished")],
@@ -1382,6 +1417,10 @@ function DeployWizard({
   // the profile, never picked here.
   const roleVendor = (name: string): string | null =>
     profile?.roles.find((r) => r.name === name)?.vendor ?? profile?.vendor ?? null;
+  // Effective allowed models of one role: its own accelerator, else the
+  // profile-level one (the options projection already resolves this).
+  const roleModels = (name: string): string[] =>
+    profile?.roles.find((r) => r.name === name)?.models ?? profile?.models ?? [];
   // Model versions compatible with the selected profile (architecture + quant).
   const compatibleModels = (options?.modelversions ?? []).filter((mv) => {
     if (!profile) return true;
@@ -1417,6 +1456,79 @@ function DeployWizard({
     if (o.type === "integer") return o.min ?? 1;
     return "";
   };
+
+  // The GPU model the user picked: a profile pins its allowed models in
+  // spec.accelerator.models and narrows them through an override (metax_model
+  // for the metax profiles). The backend keeps the allowed models in a
+  // nodeAffinity In term and narrows a nodeSelector to this value, so the
+  // wizard shows the same choice beside the read-only vendor — otherwise
+  // picking MXC500 would still display only "metax".
+  const selectedGpuModel = profile
+    ? (profile.overrides
+        .map((o) => overrideValue(o))
+        .find((v): v is string => typeof v === "string" && profile.models.includes(v)) ?? null)
+    : null;
+
+  // A role may narrow the choice through its own override, named
+  // `<role>_<vendor>_model` (the PD profiles declare prefill_metax_model and
+  // decode_metax_model so the two roles can run on different GPU models).
+  // Fall back to the profile-wide choice when the role has no scoped override.
+  const selectedRoleGpuModel = (name: string): string | null => {
+    const models = roleModels(name);
+    if (!profile) return null;
+    const scoped = profile.overrides
+      .filter((o) => o.name.startsWith(`${name}_`) && o.name.endsWith("_model"))
+      .map((o) => overrideValue(o))
+      .find((v): v is string => typeof v === "string" && models.includes(v));
+    if (scoped !== undefined) return scoped;
+    return selectedGpuModel && models.includes(selectedGpuModel) ? selectedGpuModel : null;
+  };
+
+  // "metax / MXC500" when a model is known, otherwise just the vendor (and
+  // "—" when neither is known).
+  const gpuTypeLabel = (vendor: string | null, model: string | null): string =>
+    [vendor, model].filter(Boolean).join(" / ") || "—";
+
+  // PD profiles declare a knob once per GPU role (prefill_metax_model /
+  // decode_metax_model, prefill_nodeSelector / decode_nodeSelector). Render
+  // those as one column per role and one row per knob, so the two roles' values
+  // line up however the profile lists them; overrides outside the role
+  // prefixes keep the plain two-column grid above the role grid.
+  const roleOverrides = (() => {
+    if (!profile) return null;
+    const roles = (profile.roles ?? [])
+      .map((r) => r.name)
+      .filter((name) => profile.overrides.some((o) => o.name.startsWith(`${name}_`)));
+    if (roles.length < 2) return null;
+    const owner = (o: OverrideDecl): string | null =>
+      roles.find((name) => o.name.startsWith(`${name}_`)) ?? null;
+    const cells = new Map<string, Map<string, OverrideDecl>>();
+    const suffixes: string[] = [];
+    for (const o of profile.overrides) {
+      const role = owner(o);
+      if (!role) continue;
+      const suffix = o.name.slice(role.length + 1);
+      if (!cells.has(role)) cells.set(role, new Map());
+      cells.get(role)!.set(suffix, o);
+      if (!suffixes.includes(suffix)) suffixes.push(suffix);
+    }
+    return {
+      roles,
+      // One row per knob suffix, one cell per role; a role that does not
+      // declare the knob gets an empty cell so the columns stay aligned.
+      rows: suffixes.map((suffix) => roles.map((role) => cells.get(role)?.get(suffix) ?? null)),
+      rest: profile.overrides.filter((o) => owner(o) === null),
+    };
+  })();
+
+  const overrideInput = (o: OverrideDecl) => (
+    <OverrideInput
+      key={o.name}
+      decl={o}
+      value={overrideValue(o)}
+      onChange={(v) => setDraft((prev) => ({ ...prev, overrides: { ...prev.overrides, [o.name]: v } }))}
+    />
+  );
 
   const next = () => {
     if (step === 1) {
@@ -1464,13 +1576,16 @@ function DeployWizard({
   };
 
   // Step-3 summary line for the GPU type: one entry per GPU role in
-  // pd-separation mode, a single vendor otherwise. Values are each role's
-  // effective accelerator from the profile (read-only, see GpuTypeSelect).
+  // pd-separation mode, a single vendor otherwise. The vendor is the role's
+  // effective accelerator from the profile (read-only, see GpuTypeSelect); the
+  // model is the role-scoped accelerator-model override the user picked,
+  // falling back to the profile-wide one, when it narrows that role's allowed
+  // models.
   const gpuSummary = !profile
     ? "—"
     : profile.servingMode === "pd-separation"
-      ? `prefill: ${roleVendor("prefill") ?? "—"} / decode: ${roleVendor("decode") ?? "—"}`
-      : (profile.vendor ?? "—");
+      ? `${roleLabel("prefill")}: ${gpuTypeLabel(roleVendor("prefill"), selectedRoleGpuModel("prefill"))} / ${roleLabel("decode")}: ${gpuTypeLabel(roleVendor("decode"), selectedRoleGpuModel("decode"))}`
+      : gpuTypeLabel(profile.vendor, selectedGpuModel);
 
   const stepTitles = [
     t("inf.deploy.step.basic"),
@@ -1568,11 +1683,11 @@ function DeployWizard({
                       {t("inf.deploy.gpu")}
                     </Typography>
                     <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
-                      <WizField label="prefill">
-                        <GpuTypeSelect id="wizard-gpu-prefill" vendor={roleVendor("prefill")} />
+                      <WizField label={roleLabel("prefill")}>
+                        <GpuTypeSelect id="wizard-gpu-prefill" label={gpuTypeLabel(roleVendor("prefill"), selectedRoleGpuModel("prefill"))} />
                       </WizField>
-                      <WizField label="decode">
-                        <GpuTypeSelect id="wizard-gpu-decode" vendor={roleVendor("decode")} />
+                      <WizField label={roleLabel("decode")}>
+                        <GpuTypeSelect id="wizard-gpu-decode" label={gpuTypeLabel(roleVendor("decode"), selectedRoleGpuModel("decode"))} />
                       </WizField>
                     </Box>
                     <Typography sx={{ fontSize: 11.5, color: "text.secondary", mt: "8px" }}>
@@ -1581,7 +1696,7 @@ function DeployWizard({
                   </Box>
                 ) : profile ? (
                   <WizField label={t("inf.deploy.gpu")}>
-                    <GpuTypeSelect id="wizard-gpu" vendor={profile.vendor} />
+                    <GpuTypeSelect id="wizard-gpu" label={gpuTypeLabel(profile.vendor, selectedGpuModel)} />
                   </WizField>
                 ) : null}
 
@@ -1590,16 +1705,48 @@ function DeployWizard({
                     <Typography sx={{ fontSize: 12.5, fontWeight: 600, mb: "8px", color: "text.secondary" }}>
                       {t("inf.deploy.overrides")}
                     </Typography>
-                    <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
-                      {profile.overrides.map((o) => (
-                        <OverrideInput
-                          key={o.name}
-                          decl={o}
-                          value={overrideValue(o)}
-                          onChange={(v) => setDraft((prev) => ({ ...prev, overrides: { ...prev.overrides, [o.name]: v } }))}
-                        />
-                      ))}
-                    </Box>
+                    {roleOverrides ? (
+                      <>
+                        {roleOverrides.rest.length > 0 && (
+                          <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
+                            {roleOverrides.rest.map(overrideInput)}
+                          </Box>
+                        )}
+                        <Box
+                          data-od-id="override-role-grid"
+                          sx={{
+                            mt: roleOverrides.rest.length > 0 ? "12px" : 0,
+                            display: "grid",
+                            gridTemplateColumns: `repeat(${roleOverrides.roles.length}, minmax(0, 1fr))`,
+                            gap: "12px",
+                            alignItems: "start",
+                          }}
+                        >
+                          {roleOverrides.roles.map((role) => (
+                            <Typography
+                              key={`role-${role}`}
+                              data-od-id={`override-role-${role}`}
+                              sx={{ fontSize: 12, fontWeight: 600, color: "text.secondary" }}
+                            >
+                              {roleLabel(role)}
+                            </Typography>
+                          ))}
+                          {roleOverrides.rows.map((row, rowIdx) =>
+                            row.map((decl, i) =>
+                              decl ? (
+                                overrideInput(decl)
+                              ) : (
+                                <Box key={`override-role-empty-${rowIdx}-${i}`} />
+                              ),
+                            ),
+                          )}
+                        </Box>
+                      </>
+                    ) : (
+                      <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
+                        {profile.overrides.map(overrideInput)}
+                      </Box>
+                    )}
                   </Box>
                 )}
 
@@ -1636,7 +1783,7 @@ function DeployWizard({
                     [t("inf.deploy.gpu"), gpuSummary],
                     ["modelRef", draft.modelRef],
                     ...(profile
-                      ? profile.overrides.map((o) => [`${t("inf.deploy.override")} ${o.name}`, String(overrideValue(o))] as [string, string])
+                      ? profile.overrides.map((o) => [`${t("inf.deploy.override")} ${overrideDisplayName(o.name)}`, String(overrideValue(o))] as [string, string])
                       : []),
                     [t("inf.deploy.route"), draft.publish ? `${t("inf.params.published")} ${draft.modelName}` : t("inf.params.unpublished")],
                   ]}
@@ -1691,17 +1838,16 @@ function profileSummary(p: CreateOptionsResponse["profiles"][number]): string {
 }
 
 /**
- * GPU type select of the create wizard: read-only, fixed to the role's
- * effective accelerator as declared by the profile. Heterogeneous
- * combinations (prefill on one vendor, decode on another) are profile
- * authoring — InferenceService has no per-role accelerator input, so the
- * select stays disabled.
+ * GPU type select of the create wizard: read-only, showing the role's
+ * effective accelerator and the model the user selected through an override.
+ * Heterogeneous combinations (prefill on one vendor, decode on another) are
+ * profile authoring — InferenceService has no per-role accelerator input, so
+ * the select stays disabled.
  */
-function GpuTypeSelect({ id, vendor }: { id: string; vendor: string | null }) {
-  const value = vendor ?? "";
+function GpuTypeSelect({ id, label }: { id: string; label: string }) {
   return (
-    <Select size="small" fullWidth disabled data-od-id={id} value={value} onChange={() => {}}>
-      <MenuItem value={value}>{value || "—"}</MenuItem>
+    <Select size="small" fullWidth disabled data-od-id={id} value={label} onChange={() => {}}>
+      <MenuItem value={label}>{label}</MenuItem>
     </Select>
   );
 }
@@ -1734,6 +1880,27 @@ function WizField({
   );
 }
 
+// Role names are profile identifiers ("prefill", "decode"); the UI shows them
+// capitalized, the same way it labels override keys.
+function roleLabel(name: string): string {
+  return name.charAt(0).toUpperCase() + name.slice(1);
+}
+
+// Human-readable label for an override name. Profile declarations are keys in
+// snake_case or camelCase; the UI shows them as words so a knob reads as a
+// label instead of an identifier: "prefill_metax_model" becomes "Prefill Metax
+// Model" and "cacheDitWarmup" becomes "Cache Dit Warmup". The raw name remains
+// the override key sent to the API and the data-od-id suffix.
+function overrideDisplayName(name: string): string {
+  return name
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .split(/[^A-Za-z0-9]+/)
+    .filter(Boolean)
+    .map((word) => word[0].toUpperCase() + word.slice(1))
+    .join(" ");
+}
+
 function OverrideInput({
   decl,
   value,
@@ -1745,16 +1912,16 @@ function OverrideInput({
 }) {
   if (decl.type === "boolean") {
     return (
-      <WizField label={decl.name} hint={decl.description ?? undefined}>
-        <Switch checked={Boolean(value)} onChange={(e) => onChange(e.target.checked)} />
+      <WizField label={overrideDisplayName(decl.name)} hint={decl.description ?? undefined}>
+        <Switch checked={Boolean(value)} data-od-id={`override-${decl.name}`} onChange={(e) => onChange(e.target.checked)} />
       </WizField>
     );
   }
-  const label = `${decl.name}${decl.min !== null && decl.max !== null ? ` (${decl.min}–${decl.max})` : ""}`;
+  const label = `${overrideDisplayName(decl.name)}${decl.min !== null && decl.max !== null ? ` (${decl.min}–${decl.max})` : ""}`;
   if (decl.enum && decl.enum.length > 0) {
     return (
       <WizField label={label} hint={decl.description ?? undefined}>
-        <Select size="small" fullWidth value={value} onChange={(e) => onChange(e.target.value as number | string)}>
+        <Select size="small" fullWidth value={value} data-od-id={`override-${decl.name}`} onChange={(e) => onChange(e.target.value as number | string)}>
           {decl.enum.map((v) => (
             <MenuItem key={String(v)} value={v}>{String(v)}</MenuItem>
           ))}
@@ -1769,6 +1936,7 @@ function OverrideInput({
         fullWidth
         type={decl.type === "integer" ? "number" : "text"}
         value={value}
+        data-od-id={`override-${decl.name}`}
         onChange={(e) => onChange(decl.type === "integer" ? Number(e.target.value) : e.target.value)}
       />
     </WizField>

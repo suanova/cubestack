@@ -90,12 +90,16 @@ describe("inference services page", () => {
     expect(container.textContent).toContain("dsv4-pro-pd");
     expect(container.textContent).toContain("dsv4-flash-pd");
     expect(container.textContent).toContain("sglang");
-    expect(container.textContent).toContain("8 × MXC500");
+    // GPU 资源 is the service's whole footprint: two GPU roles, 8 cards each.
+    expect(container.textContent).toContain("2 × 8 × MXC500");
+    // The detail card breaks the same facts down per role.
+    expect(container.textContent).toContain("Prefill 8 × MXC500 · Decode 8 × MXC500");
     // Replicas render multi-line, one row per integer override the profile
-    // declares (no hardcoded knob names).
-    expect(container.textContent).toContain("decodeReplicas 2");
-    expect(container.textContent).toContain("prefillReplicas 1");
-    expect(container.textContent).toContain("groupSize 1");
+    // declares (no hardcoded knob names), labelled as words rather than by the
+    // raw override key.
+    expect(container.textContent).toContain("Decode Replicas 2");
+    expect(container.textContent).toContain("Prefill Replicas 1");
+    expect(container.textContent).toContain("Group Size 1");
     // No status from the controller yet -> no phase, so the status chip shows
     // its placeholder rather than inventing one.
     expect((container.querySelector('[data-od-id="svc-row-dsv4-flash-pd"]') as HTMLElement).textContent).toContain("—");
@@ -732,10 +736,12 @@ describe("deploy wizard", () => {
     });
     await act(async () => {});
 
-    // Step 2: override fields rendered from the profile.
+    // Step 2: override fields rendered from the profile, each labelled as
+    // words rather than by its raw key.
     expect(document.body.textContent).toContain("引擎与资源");
-    expect(document.body.textContent).toContain("decodeReplicas");
-    expect(document.body.textContent).toContain("prefillReplicas");
+    expect(document.body.textContent).toContain("Decode Replicas");
+    expect(document.body.textContent).toContain("Prefill Replicas");
+    expect(document.body.textContent).not.toContain("decodeReplicas");
 
     act(() => root.unmount());
   });
@@ -818,6 +824,171 @@ describe("deploy wizard", () => {
     expect(selectText(prefillGpu)).toBe("metax");
     expect(selectText(decodeGpu)).toBe("nvidia");
     expect(step2.textContent).toContain("不可更改");
+
+    act(() => root.unmount());
+  });
+
+  it("shows the accelerator model chosen through an override beside the GPU type", async () => {
+    // A profile allows several accelerator models and narrows the choice
+    // through an override (metax_model): the backend turns the allowed models
+    // into a nodeAffinity and pins the nodeSelector to the chosen one, so the
+    // wizard must show the same choice, not just the vendor.
+    const optionsWithModel = {
+      ...OPTIONS,
+      profiles: [
+        {
+          ...OPTIONS.profiles[0],
+          models: ["MXC500", "MXC550"],
+          roles: [
+            { name: "prefill", vendor: "metax", models: ["MXC500", "MXC550"], gpuPerPod: 8 },
+            { name: "decode", vendor: "metax", models: ["MXC500", "MXC550"], gpuPerPod: 8 },
+          ],
+          overrides: [
+            { name: "metax_model", type: "string", min: null, max: null, enum: ["MXC500", "MXC550"], default: "MXC550", description: null },
+          ],
+        },
+      ],
+    };
+    const { container, root } = renderWithBoth(optionsWithModel);
+    await act(async () => {});
+    const deployBtn = container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement;
+    await act(async () => {
+      deployBtn.click();
+    });
+    await act(async () => {});
+    await fillNameAndGoToStep2();
+
+    const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
+    expect(selectText(step2.querySelector('[data-od-id="wizard-gpu-prefill"]'))).toBe("metax / MXC550");
+    expect(selectText(step2.querySelector('[data-od-id="wizard-gpu-decode"]'))).toBe("metax / MXC550");
+    // A profile-wide model override is not role-scoped, so it keeps the plain
+    // override grid.
+    expect(step2.querySelector('[data-od-id="override-role-grid"]')).toBeNull();
+
+    // Choosing another allowed model moves both GPU type selects with it.
+    await act(async () => {
+      (step2.querySelector('[data-od-id="override-metax_model"] [role="combobox"]') as HTMLElement).dispatchEvent(
+        new MouseEvent("mousedown", { bubbles: true }),
+      );
+    });
+    const mxc500 = Array.from(document.body.querySelectorAll('[role="option"]')).find((o) => o.textContent === "MXC500");
+    await act(async () => {
+      (mxc500 as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    expect(selectText(step2.querySelector('[data-od-id="wizard-gpu-prefill"]'))).toBe("metax / MXC500");
+    expect(selectText(step2.querySelector('[data-od-id="wizard-gpu-decode"]'))).toBe("metax / MXC500");
+
+    act(() => root.unmount());
+  });
+
+  it("shows each PD role's own accelerator model and nodeSelector overrides", async () => {
+    // The PD profiles declare prefill_/decode_ scoped model and nodeSelector
+    // overrides so the two roles can run on different GPU models and node
+    // pools. The provider must render all four knobs and reflect each role's
+    // own model, not one shared choice on both GPU type selects.
+    const optionsWithRoleOverrides = {
+      ...OPTIONS,
+      profiles: [
+        {
+          ...OPTIONS.profiles[0],
+          models: ["MXC500", "MXC550"],
+          roles: [
+            { name: "prefill", vendor: "metax", models: ["MXC500", "MXC550"], gpuPerPod: 8 },
+            { name: "decode", vendor: "metax", models: ["MXC500", "MXC550"], gpuPerPod: 8 },
+          ],
+          overrides: [
+            { name: "replicaPlacement", type: "string", min: null, max: null, enum: ["preferred", "required", "none"], default: "preferred", description: null },
+            { name: "prefill_metax_model", type: "string", min: null, max: null, enum: ["MXC500", "MXC550"], default: "MXC550", description: null },
+            { name: "prefill_nodeSelector", type: "string", min: null, max: null, enum: null, default: "", description: null },
+            { name: "decode_metax_model", type: "string", min: null, max: null, enum: ["MXC500", "MXC550"], default: "MXC550", description: null },
+            { name: "decode_nodeSelector", type: "string", min: null, max: null, enum: null, default: "", description: null },
+          ],
+        },
+      ],
+    };
+    const { container, root } = renderWithBoth(optionsWithRoleOverrides);
+    await act(async () => {});
+    const deployBtn = container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement;
+    await act(async () => {
+      deployBtn.click();
+    });
+    await act(async () => {});
+    await fillNameAndGoToStep2();
+
+    const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
+    // The knobs are labelled as words, not by their raw override keys.
+    expect(step2.textContent).toContain("Prefill Node Selector");
+    expect(step2.textContent).toContain("Decode Node Selector");
+    expect(selectText(step2.querySelector('[data-od-id="wizard-gpu-prefill"]'))).toBe("metax / MXC550");
+    expect(selectText(step2.querySelector('[data-od-id="wizard-gpu-decode"]'))).toBe("metax / MXC550");
+
+    // Role-scoped overrides line up as one column per role and one row per
+    // knob, even though the profile declares the two roles' knobs apart.
+    const roleGrid = step2.querySelector('[data-od-id="override-role-grid"]') as HTMLElement;
+    expect(roleGrid).not.toBeNull();
+    expect(roleGrid.querySelector('[data-od-id="override-role-prefill"]')?.textContent?.trim()).toBe("Prefill");
+    expect(roleGrid.querySelector('[data-od-id="override-role-decode"]')?.textContent?.trim()).toBe("Decode");
+    const gridText = roleGrid.textContent ?? "";
+    const positions = ["Prefill Metax Model", "Decode Metax Model", "Prefill Node Selector", "Decode Node Selector"].map(
+      (name) => gridText.indexOf(name),
+    );
+    expect(positions.every((p) => p >= 0)).toBe(true);
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
+    const placement = step2.querySelector('[data-od-id="override-replicaPlacement"]');
+    expect(placement).not.toBeNull();
+    expect(roleGrid.contains(placement)).toBe(false);
+
+    // Narrowing prefill's model leaves decode's choice alone.
+    await act(async () => {
+      (step2.querySelector('[data-od-id="override-prefill_metax_model"] [role="combobox"]') as HTMLElement).dispatchEvent(
+        new MouseEvent("mousedown", { bubbles: true }),
+      );
+    });
+    const mxc500 = Array.from(document.body.querySelectorAll('[role="option"]')).find((o) => o.textContent === "MXC500");
+    await act(async () => {
+      (mxc500 as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    expect(selectText(step2.querySelector('[data-od-id="wizard-gpu-prefill"]'))).toBe("metax / MXC500");
+    expect(selectText(step2.querySelector('[data-od-id="wizard-gpu-decode"]'))).toBe("metax / MXC550");
+
+    act(() => root.unmount());
+  });
+
+  it("shows an override key as words instead of its identifier", async () => {
+    // Override declarations are keys like prefill_metax_model or
+    // cacheDitWarmup; the form labels them as words while the raw key stays
+    // the identifier sent to the API and carried by data-od-id.
+    const optionsWithKeys = {
+      ...OPTIONS,
+      profiles: [
+        {
+          ...OPTIONS.profiles[0],
+          overrides: [
+            { name: "cacheDitWarmup", type: "boolean", min: null, max: null, enum: null, default: true, description: null },
+            { name: "prefill_metax_model", type: "string", min: null, max: null, enum: ["MXC500", "MXC550"], default: "MXC550", description: null },
+          ],
+        },
+      ],
+    };
+    const { container, root } = renderWithBoth(optionsWithKeys);
+    await act(async () => {});
+    const deployBtn = container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement;
+    await act(async () => {
+      deployBtn.click();
+    });
+    await act(async () => {});
+    await fillNameAndGoToStep2();
+
+    const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
+    expect(step2.textContent).toContain("Cache Dit Warmup");
+    expect(step2.textContent).toContain("Prefill Metax Model");
+    expect(step2.textContent).not.toContain("cacheDitWarmup");
+    expect(step2.textContent).not.toContain("prefill_metax_model");
+    expect(step2.querySelector('[data-od-id="override-cacheDitWarmup"]')).not.toBeNull();
 
     act(() => root.unmount());
   });
