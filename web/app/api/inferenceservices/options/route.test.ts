@@ -3,13 +3,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { authedGet } from "@/test/auth";
 
-const { listNamespace, listClusterCustomObject } = vi.hoisted(() => ({
+const { listNamespace, listClusterCustomObject, listNode } = vi.hoisted(() => ({
   listNamespace: vi.fn(),
   listClusterCustomObject: vi.fn(),
+  listNode: vi.fn(),
 }));
 
 vi.mock("@/lib/kubernetes", () => ({
-  getCoreClient: () => ({ listNamespace }),
+  getCoreClient: () => ({ listNamespace, listNode }),
   getCustomObjectsClient: () => ({ listClusterCustomObject }),
 }));
 
@@ -17,6 +18,24 @@ vi.mock("@/lib/kubernetes", () => ({
 function stubCluster() {
   listNamespace.mockResolvedValue({
     items: [{ metadata: { name: "default" } }, { metadata: { name: "project-a" } }, { metadata: { name: "project-llm" } }],
+  });
+  // One node per reason the wizard must leave out: cordoned, a hard taint, and
+  // not Ready. The two Ready, untainted nodes sort by name in the response and
+  // carry the product label their vendor's device plugin writes.
+  listNode.mockResolvedValue({
+    items: [
+      {
+        metadata: { name: "worker-b", labels: { "metax-tech.com/gpu.product": "MXC550" } },
+        status: { conditions: [{ type: "Ready", status: "True" }] },
+      },
+      {
+        metadata: { name: "worker-a", labels: { "metax-tech.com/gpu.product": "MXC500" } },
+        status: { conditions: [{ type: "Ready", status: "True" }] },
+      },
+      { metadata: { name: "cordoned" }, spec: { unschedulable: true }, status: { conditions: [{ type: "Ready", status: "True" }] } },
+      { metadata: { name: "tainted" }, spec: { taints: [{ effect: "NoSchedule" }] }, status: { conditions: [{ type: "Ready", status: "True" }] } },
+      { metadata: { name: "not-ready" }, status: { conditions: [{ type: "Ready", status: "False" }] } },
+    ],
   });
   listClusterCustomObject.mockImplementation(({ plural }: { plural: string }) => {
     if (plural === "inferenceruntimeprofiles") {
@@ -35,6 +54,13 @@ function stubCluster() {
                 { name: "prefillReplicas", type: "integer", default: 1, min: 1, max: 8, description: "prefill LWS array" },
                 { name: "decodeReplicas", type: "integer", default: 1, min: 1, max: 16 },
                 { name: "groupSize", type: "integer", default: 1, enum: [1, 2, 4] },
+                {
+                  name: "prefill_nodeSelector",
+                  type: "stringList",
+                  default: ["kubernetes.io/hostname=worker-a"],
+                  enum: ["kubernetes.io/hostname=worker-a", "kubernetes.io/hostname=worker-b"],
+                  description: "prefill node pin",
+                },
               ],
               roles: [
                 { name: "prefill", podTemplate: { resources: { gpuPerPod: 8 } } },
@@ -64,6 +90,7 @@ describe("inference services create options route", () => {
   afterEach(() => {
     listNamespace.mockReset();
     listClusterCustomObject.mockReset();
+    listNode.mockReset();
   });
 
   it("returns namespaces, resolved profiles (with override decls) and model versions", async () => {
@@ -77,6 +104,13 @@ describe("inference services create options route", () => {
     // ("default" sorts after "project-a" here, so this is a choice) and not on a
     // name the route has no business preferring.
     expect(body.defaultNamespace).toBe("default");
+    // The wizard pins a service through this list; only the nodes the
+    // scheduler could actually use are offered, in name order, each with the
+    // product label the wizard filters by when a model is chosen.
+    expect(body.nodes).toEqual([
+      { name: "worker-a", gpuModels: { metax: "MXC500" } },
+      { name: "worker-b", gpuModels: { metax: "MXC550" } },
+    ]);
 
     expect(body.profiles).toHaveLength(1);
     const profile = body.profiles[0];
@@ -99,6 +133,15 @@ describe("inference services create options route", () => {
       { name: "prefillReplicas", type: "integer", min: 1, max: 8, enum: null, default: 1, description: "prefill LWS array" },
       { name: "decodeReplicas", type: "integer", min: 1, max: 16, enum: null, default: 1, description: null },
       { name: "groupSize", type: "integer", min: null, max: null, enum: [1, 2, 4], default: 1, description: null },
+      {
+        name: "prefill_nodeSelector",
+        type: "stringList",
+        min: null,
+        max: null,
+        enum: ["kubernetes.io/hostname=worker-a", "kubernetes.io/hostname=worker-b"],
+        default: ["kubernetes.io/hostname=worker-a"],
+        description: "prefill node pin",
+      },
     ]);
 
     expect(body.modelversions).toHaveLength(1);
@@ -128,6 +171,22 @@ describe("inference services create options route", () => {
     const res = await GET(await authedGet(), undefined);
     // project-a sorts first, and `default` does not exist to be preferred.
     expect((await res.json()).defaultNamespace).toBe("project-a");
+  });
+
+  it("still serves the catalog when the node read is forbidden", async () => {
+    // Pinning a node is optional, so a principal without `list nodes` must
+    // still be able to create a service and let the scheduler choose.
+    listNode.mockRejectedValue(new Error("nodes is forbidden"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { GET } = await import("./route");
+      const res = await GET(await authedGet(), undefined);
+      expect(res.status).toBe(200);
+      expect((await res.json()).nodes).toEqual([]);
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("returns 500 when the cluster read fails", async () => {

@@ -217,6 +217,19 @@ export default function InferenceServicesPage() {
     };
   }, [reloadKey, load]);
 
+  // The detail panel's node pickers list the same schedulable nodes as the
+  // deploy wizard: the value a pin carries is kubernetes.io/hostname=<node>,
+  // so users pick a node rather than composing the label pair. Best-effort —
+  // when the read fails (or the principal may not list nodes) the picker
+  // keeps its free-text input, which still accepts the pair by hand.
+  const [nodes, setNodes] = useState<CreateOptionsResponse["nodes"]>([]);
+  useEffect(() => {
+    apiFetch("/api/inferenceservices/options")
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
+      .then((d: CreateOptionsResponse) => setNodes(d.nodes ?? []))
+      .catch(() => setNodes([]));
+  }, [reloadKey]);
+
   const selected = items.find((s) => svcKey(s) === selKey) ?? null;
 
   const visible = items.filter((s) => {
@@ -231,7 +244,7 @@ export default function InferenceServicesPage() {
   });
 
   const handleApply = useCallback(
-    (overrides: Record<string, number | string | boolean>) => {
+    (overrides: Record<string, OverrideValue>) => {
       if (!selected) return;
       setScaleMsg(null);
       setScaleErr(null);
@@ -404,6 +417,7 @@ export default function InferenceServicesPage() {
             // asks. Deleting cannot be taken back, so the request waits for its
             // answer rather than firing under the click.
             onDelete={setPendingDelete}
+            nodes={nodes}
             busy={scaleBusy}
             msg={scaleMsg}
             err={scaleErr}
@@ -584,6 +598,7 @@ function ServiceTable({
   selectedKey,
   onSelect,
   onDelete,
+  nodes,
   busy,
   msg,
   err,
@@ -594,12 +609,14 @@ function ServiceTable({
   selectedKey: string | null;
   onSelect: (key: string) => void;
   onDelete: (s: InferenceServiceSummary) => void;
+  // The schedulable nodes the detail panel's node pickers offer.
+  nodes: CreateOptionsResponse["nodes"];
   // The detail panel's own state, threaded straight through: the table is what
   // renders the panel, inside the row it belongs to.
   busy: boolean;
   msg: string | null;
   err: string | null;
-  onApply: (overrides: Record<string, number | string | boolean>) => void;
+  onApply: (overrides: Record<string, OverrideValue>) => void;
 }) {
   const { t } = useI18n();
   const thSx = {
@@ -709,7 +726,7 @@ function ServiceTable({
                     style={{ padding: 0, background: "var(--surface)", borderBottom: "1px solid var(--border)" }}
                   >
                     <Box sx={{ p: "18px 20px 20px" }}>
-                      <DetailPanel s={s} busy={busy} msg={msg} err={err} onApply={onApply} />
+                      <DetailPanel s={s} nodes={nodes} busy={busy} msg={msg} err={err} onApply={onApply} />
                     </Box>
                   </td>
                 </tr>,
@@ -812,16 +829,18 @@ const tdSx = {
 
 function DetailPanel({
   s,
+  nodes,
   busy,
   msg,
   err,
   onApply,
 }: {
   s: InferenceServiceSummary;
+  nodes: CreateOptionsResponse["nodes"];
   busy: boolean;
   msg: string | null;
   err: string | null;
-  onApply: (overrides: Record<string, number | string | boolean>) => void;
+  onApply: (overrides: Record<string, OverrideValue>) => void;
 }) {
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: "14px", minWidth: 0 }}>
@@ -841,7 +860,7 @@ function DetailPanel({
       >
         <EndpointsCard s={s} />
         <MetricsCard s={s} />
-        <ScaleCard s={s} busy={busy} msg={msg} err={err} onApply={onApply} />
+        <ScaleCard s={s} nodes={nodes} busy={busy} msg={msg} err={err} onApply={onApply} />
       </Box>
       <ParamsCard s={s} />
       <ConditionsCard s={s} />
@@ -1019,20 +1038,100 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
+// OverrideValue is what an override input edits; stringList knobs (such as a
+// per-role nodeSelector) carry an array rather than a scalar.
+type OverrideValue = number | string | boolean | string[];
+
+/** Splits a comma-joined stringList input into its entries. */
+function splitList(value: string): string[] {
+  return value
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 // One row of the scale panel: renders the input matching the override type
 // declared by the profile (integer number, integer enum select, string text,
-// boolean switch).
+// stringList comma-separated text or enum multi-select, boolean switch). A
+// nodeSelector stringList renders the shared node picker instead of free text.
 function ScaleInput({
   o,
   value,
+  nodes,
   onChange,
 }: {
   o: InferenceServiceSummary["overrides"][number];
-  value: number | string | boolean;
-  onChange: (v: number | string | boolean) => void;
+  value: OverrideValue;
+  /** The schedulable nodes a nodeSelector pin may name, as the wizard offers them. */
+  nodes: CreateOptionsResponse["nodes"];
+  onChange: (v: OverrideValue) => void;
 }) {
+  const { t } = useI18n();
   if (o.type === "boolean") {
     return <Switch checked={value === true} onChange={(e) => onChange(e.target.checked)} size="small" />;
+  }
+  if (o.type === "stringList") {
+    const list = Array.isArray(value) ? value : [];
+    const pinned = isNodeSelectorOverride(o) && nodes.length > 0 ? pinnedNodes(value) : null;
+    if (pinned !== null) {
+      // Keep a pinned node visible even when the cluster no longer offers it:
+      // it is the service's current choice, and hiding it would render the
+      // Select blank instead of letting the user change it.
+      const offered = new Set(nodes.map((n) => n.name));
+      const menu = [...pinned.filter((name) => !offered.has(name)), ...nodes.map((n) => n.name)];
+      return (
+        <Select
+          multiple
+          size="small"
+          displayEmpty
+          value={pinned}
+          data-od-id={`scale-${o.name}`}
+          onChange={(e) => onChange((e.target.value as string[]).map((name) => `${NODE_SELECTOR_KEY}=${name}`))}
+          renderValue={(names) => (names.length > 0 ? names.join(", ") : t("inf.deploy.nodeAny"))}
+          sx={{ width: "100%", fontSize: 13, fontFamily: "var(--font-mono)" }}
+        >
+          {menu.map((name) => (
+            <MenuItem key={name} value={name}>
+              {name}
+            </MenuItem>
+          ))}
+        </Select>
+      );
+    }
+    if (o.enum !== null && o.enum.length > 0) {
+      return (
+        <Select
+          multiple
+          size="small"
+          value={list}
+          onChange={(e) => onChange(e.target.value as string[])}
+          sx={{ width: "100%", fontSize: 13, fontFamily: "var(--font-mono)" }}
+        >
+          {o.enum.map((n) => (
+            <MenuItem key={String(n)} value={String(n)}>
+              {String(n)}
+            </MenuItem>
+          ))}
+        </Select>
+      );
+    }
+    return (
+      <input
+        value={list.join(",")}
+        onChange={(e) => onChange(splitList(e.target.value))}
+        style={{
+          width: "100%",
+          border: "1px solid var(--border)",
+          borderRadius: "var(--radius)",
+          padding: "8px 10px",
+          font: "inherit",
+          fontSize: 13,
+          background: "var(--bg)",
+          color: "var(--fg)",
+          outline: "none",
+        }}
+      />
+    );
   }
   // A declared enum is a closed set whatever its type, so it renders as a
   // select — checked before the string/integer branches.
@@ -1072,9 +1171,13 @@ function ScaleInput({
 // Type/range/enum validity of a scale value against the profile declaration.
 // A declared enum is closed for string overrides too, otherwise a string enum
 // would accept any non-empty text and only be rejected by the API.
-function scaleValueValid(o: InferenceServiceSummary["overrides"][number], v: number | string | boolean | undefined): boolean {
+function scaleValueValid(o: InferenceServiceSummary["overrides"][number], v: OverrideValue | undefined): boolean {
   if (v === undefined || v === null) return false;
   if (o.type === "boolean") return typeof v === "boolean";
+  if (o.type === "stringList") {
+    if (!Array.isArray(v) || !v.every((e) => typeof e === "string")) return false;
+    return o.enum === null || v.every((e) => o.enum!.some((allowed) => allowed === e));
+  }
   if (o.type === "string") {
     if (typeof v !== "string") return false;
     // An empty box is empty input — unless the profile declares "" as a value,
@@ -1094,8 +1197,9 @@ function scaleValueValid(o: InferenceServiceSummary["overrides"][number], v: num
 // Starting value for a scale input: the effective value, falling back to a
 // declared enum entry (an enum select needs a value inside the set), then to a
 // per-type default (mirrors the wizard's overrideValue).
-function scaleInitial(o: InferenceServiceSummary["overrides"][number]): number | string | boolean {
+function scaleInitial(o: InferenceServiceSummary["overrides"][number]): OverrideValue {
   if (o.current !== null) return o.current;
+  if (o.type === "stringList") return [];
   if (o.enum !== null && o.enum.length > 0) return o.enum[0];
   if (o.type === "boolean") return true;
   if (o.type === "string") return "";
@@ -1106,19 +1210,21 @@ function scaleInitial(o: InferenceServiceSummary["overrides"][number]): number |
 // input per knob) and submits them as a PATCH; nothing is hardcoded.
 function ScaleCard({
   s,
+  nodes,
   busy,
   msg,
   err,
   onApply,
 }: {
   s: InferenceServiceSummary;
+  nodes: CreateOptionsResponse["nodes"];
   busy: boolean;
   msg: string | null;
   err: string | null;
-  onApply: (overrides: Record<string, number | string | boolean>) => void;
+  onApply: (overrides: Record<string, OverrideValue>) => void;
 }) {
   const { t } = useI18n();
-  const [values, setValues] = useState<Record<string, number | string | boolean>>(() =>
+  const [values, setValues] = useState<Record<string, OverrideValue>>(() =>
     Object.fromEntries(s.overrides.map((o) => [o.name, scaleInitial(o)])),
   );
 
@@ -1142,7 +1248,7 @@ function ScaleCard({
   // Effective value per declared knob: the local edit when present, else the
   // service's value or declared default (values can lag one render behind a
   // poll that changed the declared override set).
-  const effective: Record<string, number | string | boolean> = Object.fromEntries(
+  const effective: Record<string, OverrideValue> = Object.fromEntries(
     s.overrides.map((o) => [o.name, values[o.name] ?? scaleInitial(o)]),
   );
   const invalid = s.overrides.some((o) => !scaleValueValid(o, effective[o.name]));
@@ -1156,7 +1262,7 @@ function ScaleCard({
         <Box sx={{ px: "18px", py: "12px", display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: "12px", alignItems: "end" }}>
           {s.overrides.map((o) => (
             <Field key={o.name} label={overrideDisplayName(o.name)} error={!scaleValueValid(o, effective[o.name])}>
-              <ScaleInput o={o} value={effective[o.name]} onChange={(v) => setValues((prev) => ({ ...prev, [o.name]: v }))} />
+              <ScaleInput o={o} value={effective[o.name]} nodes={nodes} onChange={(v) => setValues((prev) => ({ ...prev, [o.name]: v }))} />
             </Field>
           ))}
         </Box>
@@ -1339,7 +1445,7 @@ interface DeployDraft {
   namespace: string;
   profileRef: string;
   modelRef: string;
-  overrides: Record<string, number | string | boolean>;
+  overrides: Record<string, OverrideValue>;
   publish: boolean;
   modelName: string;
   timeout: string; // keep as string until parse for a friendlier error path
@@ -1445,12 +1551,14 @@ function DeployWizard({
   const step2Valid = !!draft.modelRef;
 
   // Default override value, or the declared default.
-  const overrideValue = (o: OverrideDecl): number | string | boolean => {
+  const overrideValue = (o: OverrideDecl): OverrideValue => {
     const held = draft.overrides[o.name];
     if (held !== undefined) return held;
+    if (Array.isArray(o.default)) return o.default;
     if (o.default !== null && o.default !== undefined) return o.default;
     // An enum select needs a value inside the declared set, otherwise MUI
     // reports an out-of-range value ("") on first render.
+    if (o.type === "stringList") return [];
     if (o.enum !== null && o.enum.length > 0) return o.enum[0];
     if (o.type === "boolean") return true;
     if (o.type === "integer") return o.min ?? 1;
@@ -1521,11 +1629,39 @@ function DeployWizard({
     };
   })();
 
+  // The node picker offers only nodes that can run the GPU model chosen for
+  // the role the selector applies to: the operator schedules by both the
+  // hostname pin and the model constraint, so a pin to a node labelled with
+  // another model is a Pod that can only stay Pending. A service-level
+  // selector applies to every role, so its node must satisfy all of them.
+  const nodeMatchesSelectedModel = (
+    decl: OverrideDecl,
+    node: CreateOptionsResponse["nodes"][number],
+  ): boolean => {
+    if (!profile) return true;
+    const scopedRole = decl.name.endsWith("_nodeSelector")
+      ? decl.name.slice(0, -"_nodeSelector".length)
+      : null;
+    const roles = scopedRole ? [scopedRole] : (profile.roles ?? []).map((r) => r.name);
+    if (roles.length === 0) {
+      return !selectedGpuModel || !profile.vendor || node.gpuModels?.[profile.vendor] === selectedGpuModel;
+    }
+    return roles.every((name) => {
+      const model = selectedRoleGpuModel(name);
+      if (!model) return true;
+      const vendor = roleVendor(name);
+      return !vendor || node.gpuModels?.[vendor] === model;
+    });
+  };
+
+  const allNodes = options?.nodes ?? [];
   const overrideInput = (o: OverrideDecl) => (
     <OverrideInput
       key={o.name}
       decl={o}
       value={overrideValue(o)}
+      nodes={allNodes.filter((n) => nodeMatchesSelectedModel(o, n))}
+      anyNodes={allNodes.length > 0}
       onChange={(v) => setDraft((prev) => ({ ...prev, overrides: { ...prev.overrides, [o.name]: v } }))}
     />
   );
@@ -1783,7 +1919,10 @@ function DeployWizard({
                     [t("inf.deploy.gpu"), gpuSummary],
                     ["modelRef", draft.modelRef],
                     ...(profile
-                      ? profile.overrides.map((o) => [`${t("inf.deploy.override")} ${overrideDisplayName(o.name)}`, String(overrideValue(o))] as [string, string])
+                      ? profile.overrides.map((o) => {
+                          const v = overrideValue(o);
+                          return [`${t("inf.deploy.override")} ${overrideDisplayName(o.name)}`, Array.isArray(v) ? v.join(", ") : String(v)] as [string, string];
+                        })
                       : []),
                     [t("inf.deploy.route"), draft.publish ? `${t("inf.params.published")} ${draft.modelName}` : t("inf.params.unpublished")],
                   ]}
@@ -1901,15 +2040,65 @@ function overrideDisplayName(name: string): string {
     .join(" ");
 }
 
+// A nodeSelector override pins one node. The wizard lists the cluster's
+// schedulable nodes and injects kubernetes.io/hostname=<node> for the user's
+// pick, so the user selects a node rather than composing a key=value pair. A
+// value naming another label pair stays free text, so a profile's own pool
+// default is never silently replaced.
+const NODE_SELECTOR_KEY = "kubernetes.io/hostname";
+
+function isNodeSelectorOverride(decl: Pick<OverrideDecl, "name" | "type">): boolean {
+  return (
+    (decl.type === "string" || decl.type === "stringList") &&
+    (decl.name === "nodeSelector" || decl.name.endsWith("_nodeSelector"))
+  );
+}
+
+/** The node a string nodeSelector value pins: "" for none, null for another label pair. */
+function pinnedNode(value: unknown): string | null {
+  const v = String(value ?? "");
+  if (v === "") return "";
+  const eq = v.indexOf("=");
+  if (eq < 0) return null;
+  return v.slice(0, eq) === NODE_SELECTOR_KEY ? v.slice(eq + 1) : null;
+}
+
+/**
+ * The nodes a stringList nodeSelector value pins; null when any entry names
+ * another label, in which case the generic list input takes over.
+ */
+function pinnedNodes(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const prefix = `${NODE_SELECTOR_KEY}=`;
+  const names: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string" || !entry.startsWith(prefix)) return null;
+    names.push(entry.slice(prefix.length));
+  }
+  return names;
+}
+
 function OverrideInput({
   decl,
   value,
   onChange,
+  nodes,
+  anyNodes,
 }: {
   decl: OverrideDecl;
-  value: number | string | boolean;
-  onChange: (v: number | string | boolean) => void;
+  value: OverrideValue;
+  onChange: (v: OverrideValue) => void;
+  nodes: Array<{ name: string }>;
+  /** Whether the cluster offered any node at all; `nodes` may be filtered to none. */
+  anyNodes: boolean;
 }) {
+  const { t } = useI18n();
+  // The picker is filtered to the role's selected GPU model; when that leaves
+  // no node, say so instead of showing a list with only "any" and no reason.
+  const nodeHint =
+    isNodeSelectorOverride(decl) && anyNodes && nodes.length === 0
+      ? t("inf.deploy.nodeNoMatch")
+      : decl.description ?? undefined;
   if (decl.type === "boolean") {
     return (
       <WizField label={overrideDisplayName(decl.name)} hint={decl.description ?? undefined}>
@@ -1918,6 +2107,96 @@ function OverrideInput({
     );
   }
   const label = `${overrideDisplayName(decl.name)}${decl.min !== null && decl.max !== null ? ` (${decl.min}–${decl.max})` : ""}`;
+  if (decl.type === "stringList") {
+    const list = Array.isArray(value) ? value : [];
+    const nodeNames = isNodeSelectorOverride(decl) ? pinnedNodes(value) : null;
+    if (nodeNames !== null && anyNodes) {
+      // A pinned node stays listed even when the selected model no longer
+      // matches it: it is the user's current choice, and hiding it would
+      // render the Select blank instead of letting them change it.
+      const offered = new Set(nodes.map((n) => n.name));
+      const menu = [
+        ...nodeNames.filter((name) => !offered.has(name)).map((name) => ({ name })),
+        ...nodes,
+      ];
+      return (
+        <WizField label={label} hint={nodeHint}>
+          <Select
+            multiple
+            size="small"
+            fullWidth
+            displayEmpty
+            value={nodeNames}
+            data-od-id={`override-${decl.name}`}
+            renderValue={(names) => (names.length > 0 ? names.join(", ") : t("inf.deploy.nodeAny"))}
+            onChange={(e) => {
+              const names = e.target.value as string[];
+              onChange(names.map((name) => `${NODE_SELECTOR_KEY}=${name}`));
+            }}
+          >
+            {menu.map((n) => (
+              <MenuItem key={n.name} value={n.name}>{n.name}</MenuItem>
+            ))}
+          </Select>
+        </WizField>
+      );
+    }
+    if (decl.enum && decl.enum.length > 0) {
+      return (
+        <WizField label={label} hint={decl.description ?? undefined}>
+          <Select
+            multiple
+            size="small"
+            fullWidth
+            value={list}
+            data-od-id={`override-${decl.name}`}
+            onChange={(e) => onChange((e.target.value as Array<number | string>).map(String))}
+          >
+            {decl.enum.map((v) => (
+              <MenuItem key={String(v)} value={String(v)}>{String(v)}</MenuItem>
+            ))}
+          </Select>
+        </WizField>
+      );
+    }
+    return (
+      <WizField label={label} hint={decl.description ?? undefined}>
+        <TextField
+          size="small"
+          fullWidth
+          value={list.join(",")}
+          data-od-id={`override-${decl.name}`}
+          onChange={(e) => onChange(splitList(e.target.value))}
+        />
+      </WizField>
+    );
+  }
+  const pinned = isNodeSelectorOverride(decl) ? pinnedNode(value) : null;
+  if (pinned !== null && anyNodes) {
+    // See the stringList branch: keep a pinned node selectable.
+    const menu =
+      pinned && !nodes.some((n) => n.name === pinned) ? [{ name: pinned }, ...nodes] : nodes;
+    return (
+      <WizField label={label} hint={nodeHint}>
+        <Select
+          size="small"
+          fullWidth
+          displayEmpty
+          value={pinned}
+          data-od-id={`override-${decl.name}`}
+          onChange={(e) => {
+            const name = e.target.value as string;
+            onChange(name ? `${NODE_SELECTOR_KEY}=${name}` : "");
+          }}
+        >
+          <MenuItem value="">{t("inf.deploy.nodeAny")}</MenuItem>
+          {menu.map((n) => (
+            <MenuItem key={n.name} value={n.name}>{n.name}</MenuItem>
+          ))}
+        </Select>
+      </WizField>
+    );
+  }
   if (decl.enum && decl.enum.length > 0) {
     return (
       <WizField label={label} hint={decl.description ?? undefined}>

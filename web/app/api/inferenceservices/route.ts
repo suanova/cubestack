@@ -59,14 +59,14 @@ export interface InferenceServiceSummary {
   overrideNums: Record<string, number>;
   overrides: Array<{
     name: string;
-    type: "integer" | "string" | "boolean";
+    type: "integer" | "string" | "stringList" | "boolean";
     min: number | null;
     max: number | null;
     enum: Array<number | string> | null;
-    current: number | string | boolean | null;
+    current: number | string | string[] | boolean | null;
     // the profile's declared default, which current falls back to; an empty
     // string here is a declared value ("off"), not a missing one
-    default: number | string | boolean | null;
+    default: number | string | string[] | boolean | null;
   }>;
   // observed state (phase is null until the controller reports it)
   phase: string | null;
@@ -226,6 +226,16 @@ function overrideError(
   for (const [key, value] of Object.entries(overrides)) {
     const o = declared.get(key);
     if (!o) return { code: "overrideUnknown", params: { key } };
+    if (o.type === "stringList") {
+      if (!Array.isArray(value) || !value.every((e) => typeof e === "string")) {
+        return { code: "overrideNotStringList", params: { key } };
+      }
+      // A declared enum constrains every entry of the list.
+      if (o.enum && value.some((e) => !o.enum!.some((allowed) => allowed === e))) {
+        return { code: "overrideNotAllowed", params: { key } };
+      }
+      continue;
+    }
     const kind = { integer: 1, string: 2, boolean: 3 }[o.type ?? "integer"] ?? 1;
     if (kind === 1 && !Number.isInteger(value)) return { code: "overrideNotInteger", params: { key } };
     if (o.enum && !o.enum.some((e) => e === value)) return { code: "overrideNotAllowed", params: { key } };
@@ -260,8 +270,11 @@ function project(
   // Effective value of every knob the profile declares: the service's user
   // value wins, else the profile default, else null. Drives the page's
   // replicas column and scale panel, so no knob name is hardcoded.
-  const isPrim = (v: unknown): v is number | string | boolean =>
-    typeof v === "number" || typeof v === "string" || typeof v === "boolean";
+  const isPrim = (v: unknown): v is number | string | string[] | boolean =>
+    typeof v === "number" ||
+    typeof v === "string" ||
+    typeof v === "boolean" ||
+    (Array.isArray(v) && v.every((e) => typeof e === "string"));
   const specOverrides = spec.overrides ?? {};
   const overrides = (profile?.spec?.overrides ?? []).map((o) => {
     const name = o.name ?? "";
@@ -269,9 +282,10 @@ function project(
     const current = isPrim(raw) ? raw : (isPrim(o.default) ? o.default : null);
     return {
       name,
-      type: (o.type === "string" || o.type === "boolean" ? o.type : "integer") as
+      type: (o.type === "string" || o.type === "stringList" || o.type === "boolean" ? o.type : "integer") as
         | "integer"
         | "string"
+        | "stringList"
         | "boolean",
       min: num(o.min),
       max: num(o.max),
@@ -291,7 +305,12 @@ function project(
 
   // GPU roles are profile-derived, not status-derived: the list shows the
   // service's GPU footprint before the controller has written any status.
-  const effective = new Map(overrides.map((o) => [o.name, o.current]));
+  // Only scalar knobs can name a GPU model, so stringList values are skipped.
+  const effective = new Map<string, string | number | boolean | null>(
+    overrides
+      .filter((o) => !Array.isArray(o.current))
+      .map((o) => [o.name, o.current as string | number | boolean | null]),
+  );
   const gpuRoles: InferenceServiceSummary["gpuRoles"] = profile
     ? (profile.spec?.roles ?? [])
         .filter((r) => (r.podTemplate?.resources?.gpuPerPod ?? 0) > 0)
@@ -411,11 +430,12 @@ export const PATCH = withAuth(async (req) => {
     if (!body.namespace || !body.name || !body.overrides) {
       return Response.json({ error: "namespace, name and overrides are required" }, { status: 400 });
     }
-    // Only numeric/boolean/string override values are meaningful; reject the
-    // rest so a bad payload cannot be persisted.
+    // Only numeric/boolean/string override values and string lists are
+    // meaningful; reject the rest so a bad payload cannot be persisted.
     for (const [k, v] of Object.entries(body.overrides)) {
-      if (typeof v !== "number" && typeof v !== "string" && typeof v !== "boolean") {
-        return Response.json({ error: `override '${k}' must be a number, string or boolean` }, { status: 400 });
+      const isStringList = Array.isArray(v) && v.every((e) => typeof e === "string");
+      if (typeof v !== "number" && typeof v !== "string" && typeof v !== "boolean" && !isStringList) {
+        return Response.json({ error: `override '${k}' must be a number, string, string list or boolean` }, { status: 400 });
       }
     }
 

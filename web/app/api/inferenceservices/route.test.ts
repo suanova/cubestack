@@ -98,6 +98,8 @@ function stubCluster() {
               { name: "prefillReplicas", type: "integer", default: 1, min: 1, max: 8 },
               { name: "decodeReplicas", type: "integer", default: 1, min: 1, max: 16 },
               { name: "groupSize", type: "integer", default: 1, enum: [1, 2, 4] },
+              { name: "prefill_nodeSelector", type: "stringList", default: [] },
+              { name: "decode_nodeSelector", type: "stringList", default: [], enum: ["kubernetes.io/hostname=worker-a", "kubernetes.io/hostname=worker-b"] },
             ],
             roles: [
               { name: "router", workload: { kind: "Deployment" } },
@@ -222,6 +224,8 @@ describe("inference services route", () => {
         { name: "prefillReplicas", type: "integer", min: 1, max: 8, enum: null, current: 1 },
         { name: "decodeReplicas", type: "integer", min: 1, max: 16, enum: null, current: 2 },
         { name: "groupSize", type: "integer", min: null, max: null, enum: [1, 2, 4], current: 1 },
+        { name: "prefill_nodeSelector", type: "stringList", current: [], default: [] },
+        { name: "decode_nodeSelector", type: "stringList", current: [], default: [] },
       ],
       // no status yet -> no phase
       phase: null,
@@ -497,6 +501,56 @@ describe("inference services route", () => {
     });
   });
 
+  it("patches a stringList override as a JSON array", async () => {
+    patchNamespacedCustomObject.mockResolvedValue({});
+    const { PATCH } = await importRoute();
+    const req = await authedRequest(
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          namespace: "project-a",
+          name: "dsv4-flash-pd",
+          overrides: {
+            decode_nodeSelector: ["kubernetes.io/hostname=worker-a", "kubernetes.io/hostname=worker-b"],
+          },
+        }),
+      },
+      "http://localhost/api/inferenceservices",
+    );
+    const res = await PATCH(req, undefined);
+    expect(res.status).toBe(200);
+    expect(patchNamespacedCustomObject).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: [
+          {
+            op: "add",
+            path: "/spec/overrides/decode_nodeSelector",
+            value: ["kubernetes.io/hostname=worker-a", "kubernetes.io/hostname=worker-b"],
+          },
+        ],
+      }),
+    );
+  });
+
+  it("rejects a PATCH with a scalar for a stringList override", async () => {
+    const { PATCH } = await importRoute();
+    const req = await authedRequest(
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          namespace: "project-a",
+          name: "dsv4-flash-pd",
+          overrides: { prefill_nodeSelector: "kubernetes.io/hostname=worker-a" },
+        }),
+      },
+      "http://localhost/api/inferenceservices",
+    );
+    const res = await PATCH(req, undefined);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "overrideNotStringList" });
+    expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
   it("rejects a PATCH with a non-primitive override value", async () => {
     const { PATCH } = await importRoute();
     const req = await authedRequest(
@@ -658,6 +712,64 @@ describe("inference services create (POST)", () => {
         overrides: { decodeReplicas: 4, prefillReplicas: 2, groupSize: 2 },
       },
     });
+  });
+
+  it("creates a service with a stringList override", async () => {
+    const { POST } = await importRoute();
+    const res = await POST(
+      await buildPost({
+        namespace: "project-a",
+        name: "new-serve",
+        profileRef: "metax-sglang-dsv4-pd",
+        modelRef: "deepseek-v4-flash-w8a8-v1",
+        overrides: {
+          decode_nodeSelector: ["kubernetes.io/hostname=worker-a", "kubernetes.io/hostname=worker-b"],
+        },
+      }),
+      undefined,
+    );
+    expect(res.status).toBe(201);
+    expect(createNamespacedCustomObject.mock.calls[0][0].body).toMatchObject({
+      spec: {
+        overrides: {
+          decode_nodeSelector: ["kubernetes.io/hostname=worker-a", "kubernetes.io/hostname=worker-b"],
+        },
+      },
+    });
+  });
+
+  it("rejects a scalar for a stringList override", async () => {
+    const { POST } = await importRoute();
+    const res = await POST(
+      await buildPost({
+        namespace: "project-a",
+        name: "new-serve",
+        profileRef: "metax-sglang-dsv4-pd",
+        modelRef: "deepseek-v4-flash-w8a8-v1",
+        overrides: { prefill_nodeSelector: "kubernetes.io/hostname=worker-a" },
+      }),
+      undefined,
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "overrideNotStringList" });
+    expect(createNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
+  it("rejects a stringList entry outside the declared enum", async () => {
+    const { POST } = await importRoute();
+    const res = await POST(
+      await buildPost({
+        namespace: "project-a",
+        name: "new-serve",
+        profileRef: "metax-sglang-dsv4-pd",
+        modelRef: "deepseek-v4-flash-w8a8-v1",
+        overrides: { decode_nodeSelector: ["kubernetes.io/hostname=worker-c"] },
+      }),
+      undefined,
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "overrideNotAllowed" });
+    expect(createNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
   it("rejects an invalid (non-DNS) name", async () => {
