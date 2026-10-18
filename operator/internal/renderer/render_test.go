@@ -468,6 +468,33 @@ var _ = Describe("Render", func() {
 		Expect(res.Roles[1].PodTemplate.NodeSelector).To(Equal(map[string]string{hostnameLabel: "worker-c", metaxProductLabel: metaxModelC500}))
 	})
 
+	It("drops a podTemplate entry shadowed by a multi-value selection", func() {
+		p := renderProfile()
+		gpuPrefill(p)
+		p.Spec.Accelerator = aiv1alpha1.Accelerator{Vendor: aiv1alpha1.AcceleratorVendorMetax, Models: []string{metaxModelC500}}
+		p.Spec.Roles[1].PodTemplate.NodeSelector = map[string]string{nodePoolLabel: "cpu"}
+		isvc := renderISVC()
+		stringListNodeSelector(p, isvc, `["node-pool=gpu-a","node-pool=gpu-b"]`)
+		res := Render(isvc, p, renderModel(), nil)
+		Expect(res.Errors).To(BeEmpty())
+		// The fixed equality would AND with the In term and match no node.
+		Expect(res.Roles[1].PodTemplate.NodeSelector).To(Equal(map[string]string{metaxProductLabel: metaxModelC500}))
+		Expect(res.Roles[1].NodeAffinityRequirements).To(Equal([]NodeAffinityRequirement{{Label: nodePoolLabel, Values: []string{"gpu-a", "gpu-b"}}}))
+	})
+
+	It("keeps the single-model pin when a multi-value selection covers the product label", func() {
+		p := renderProfile()
+		gpuPrefill(p)
+		p.Spec.Accelerator = aiv1alpha1.Accelerator{Vendor: aiv1alpha1.AcceleratorVendorMetax, Models: []string{metaxModelC500}}
+		isvc := renderISVC()
+		stringListNodeSelector(p, isvc, `["`+metaxProductLabel+`=`+metaxModelC500+`","`+metaxProductLabel+`=`+metaxModelC550+`"]`)
+		res := Render(isvc, p, renderModel(), nil)
+		Expect(res.Errors).To(BeEmpty())
+		// Dropping the pin would let the role land on the other selected model.
+		Expect(res.Roles[1].PodTemplate.NodeSelector).To(Equal(map[string]string{metaxProductLabel: metaxModelC500}))
+		Expect(res.Roles[1].NodeAffinityRequirements).To(Equal([]NodeAffinityRequirement{{Label: metaxProductLabel, Values: []string{metaxModelC500, metaxModelC550}}}))
+	})
+
 	It("reports a multi-value product-label selection that excludes every model", func() {
 		p := renderProfile()
 		gpuPrefill(p)

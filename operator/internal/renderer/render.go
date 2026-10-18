@@ -177,7 +177,23 @@ func Render(isvc *aiv1alpha1.InferenceService, profile *aiv1alpha1.InferenceRunt
 		var roleSelector nodeSelection
 		roleSelector, res.Errors = resolveNodeSelector(ctx, role.Name, role.NodeSelector, res.Errors)
 		selector := mergeNodeSelections(serviceSelector, roleSelector)
-		res.Errors = injectModelSelector(&rr, role.EffectiveAccelerator(profile.Spec.Accelerator), selector, res.Errors)
+		accel := role.EffectiveAccelerator(profile.Spec.Accelerator)
+		res.Errors = injectModelSelector(&rr, accel, selector, res.Errors)
+		// A multi-value selection replaces any podTemplate entry for the same
+		// key: keeping it would AND an equality with the In term, which no node
+		// can satisfy. The accelerator pin is the exception — it is what keeps a
+		// single-model role on its model when the selection spans several.
+		modelPinLabel := ""
+		if rr.PodTemplate.Resources != nil &&
+			rr.PodTemplate.Resources.GPUPerPod != nil &&
+			len(accel.Models) == 1 {
+			modelPinLabel = productLabel(accel.Vendor)
+		}
+		for label, values := range selector {
+			if len(values) > 1 && label != modelPinLabel {
+				delete(rr.PodTemplate.NodeSelector, label)
+			}
+		}
 		finalizeNodeSelector(&rr, selector)
 		// A role that will receive the injected S3 credentials volume must not
 		// declare a podTemplate volume of the same name: the pod template would
@@ -319,6 +335,15 @@ func finalizeNodeSelector(rr *RenderedRole, sel nodeSelection) {
 	}
 }
 
+// productLabel is the node label the accelerator vendor's device plugin writes
+// the GPU model to (design §3.2); the model constraint is injected through it.
+func productLabel(vendor aiv1alpha1.AcceleratorVendor) string {
+	if vendor == aiv1alpha1.AcceleratorVendorNvidia {
+		return nvidiaProductLabel
+	}
+	return metaxProductLabel
+}
+
 // injectModelSelector constrains the role's scheduling to its effective
 // accelerator models (design §3.2: the role's own accelerator when declared,
 // the profile-level value otherwise): one model merges into the pod template
@@ -340,10 +365,7 @@ func injectModelSelector(rr *RenderedRole, accel aiv1alpha1.Accelerator, sel nod
 	if rr.PodTemplate.Resources == nil || rr.PodTemplate.Resources.GPUPerPod == nil {
 		return errs
 	}
-	label := metaxProductLabel
-	if accel.Vendor == aiv1alpha1.AcceleratorVendorNvidia {
-		label = nvidiaProductLabel
-	}
+	label := productLabel(accel.Vendor)
 
 	if pinned, ok := rr.PodTemplate.NodeSelector[label]; ok {
 		if !slices.Contains(accel.Models, pinned) {
