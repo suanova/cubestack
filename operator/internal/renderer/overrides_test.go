@@ -16,6 +16,7 @@ const (
 	overrideMode     = "mode"
 	overrideCache    = "cache"
 	overrideSize     = "size"
+	overrideHosts    = "hosts"
 )
 
 func ptrTo[T any](v T) *T { return &v }
@@ -27,6 +28,7 @@ func declaredOverrides() []aiv1alpha1.Override {
 		{Name: overrideReplicas, Type: aiv1alpha1.OverrideTypeInteger, Min: ptrTo[int64](1), Max: ptrTo[int64](8)},
 		{Name: overrideMode, Type: aiv1alpha1.OverrideTypeString, Enum: []apiextensionsv1.JSON{jsonValue(`"pd"`), jsonValue(`"normal"`)}},
 		{Name: overrideCache, Type: aiv1alpha1.OverrideTypeBoolean, Default: &apiextensionsv1.JSON{Raw: []byte("true")}},
+		{Name: overrideHosts, Type: aiv1alpha1.OverrideTypeStringList, Enum: []apiextensionsv1.JSON{jsonValue(`"worker-a"`), jsonValue(`"worker-b"`)}},
 	}
 }
 
@@ -68,6 +70,45 @@ var _ = Describe("ResolveOverrides", func() {
 		_, errs := ResolveOverrides(declaredOverrides(), map[string]apiextensionsv1.JSON{overrideMode: jsonValue(`"fast"`)})
 		Expect(errs).To(HaveLen(1))
 		Expect(errs[0].Reason).To(Equal(ReasonInvalidOverride))
+	})
+
+	It("joins a stringList override's entries into canonical form", func() {
+		got, errs := ResolveOverrides(declaredOverrides(), map[string]apiextensionsv1.JSON{overrideHosts: jsonValue(`["worker-a","worker-b"]`)})
+		Expect(errs).To(BeEmpty())
+		Expect(got[overrideHosts]).To(Equal("worker-a,worker-b"))
+	})
+
+	It("accepts an empty stringList", func() {
+		got, errs := ResolveOverrides(declaredOverrides(), map[string]apiextensionsv1.JSON{overrideHosts: jsonValue(`[]`)})
+		Expect(errs).To(BeEmpty())
+		Expect(got[overrideHosts]).To(Equal(""))
+	})
+
+	It("rejects a scalar for a stringList override", func() {
+		_, errs := ResolveOverrides(declaredOverrides(), map[string]apiextensionsv1.JSON{overrideHosts: jsonValue(`"worker-a"`)})
+		Expect(errs).To(HaveLen(1))
+		Expect(errs[0].Reason).To(Equal(ReasonInvalidOverride))
+		Expect(errs[0].Msg).To(ContainSubstring("list of strings"))
+	})
+
+	It("rejects a non-string stringList entry", func() {
+		_, errs := ResolveOverrides(declaredOverrides(), map[string]apiextensionsv1.JSON{overrideHosts: jsonValue(`["worker-a",1]`)})
+		Expect(errs).To(HaveLen(1))
+		Expect(errs[0].Reason).To(Equal(ReasonInvalidOverride))
+	})
+
+	It("rejects a stringList entry containing a comma", func() {
+		_, errs := ResolveOverrides(declaredOverrides(), map[string]apiextensionsv1.JSON{overrideHosts: jsonValue(`["worker-a,worker-b"]`)})
+		Expect(errs).To(HaveLen(1))
+		Expect(errs[0].Reason).To(Equal(ReasonInvalidOverride))
+		Expect(errs[0].Msg).To(ContainSubstring("comma"))
+	})
+
+	It("checks every stringList entry against the enum", func() {
+		_, errs := ResolveOverrides(declaredOverrides(), map[string]apiextensionsv1.JSON{overrideHosts: jsonValue(`["worker-a","worker-c"]`)})
+		Expect(errs).To(HaveLen(1))
+		Expect(errs[0].Reason).To(Equal(ReasonInvalidOverride))
+		Expect(errs[0].Msg).To(ContainSubstring("worker-c"))
 	})
 
 	It("rejects integer values outside min and max", func() {

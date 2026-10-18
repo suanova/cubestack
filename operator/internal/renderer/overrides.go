@@ -49,9 +49,9 @@ type Error struct {
 
 // ResolveOverrides validates the user override values against the profile
 // declarations and resolves them into canonical string form (integer → decimal,
-// boolean → "true"/"false", string → verbatim). Declared overrides without a
-// user value and without a Default are omitted; a template referencing one
-// fails at render time.
+// boolean → "true"/"false", string → verbatim, stringList → entries joined with
+// commas). Declared overrides without a user value and without a Default are
+// omitted; a template referencing one fails at render time.
 func ResolveOverrides(declared []aiv1alpha1.Override, user map[string]apiextensionsv1.JSON) (map[string]string, []Error) {
 	resolved := make(map[string]string)
 	var errs []Error
@@ -132,6 +132,25 @@ func validateValue(ov aiv1alpha1.Override, raw apiextensionsv1.JSON) (string, *E
 			return fail(fmt.Sprintf("override %q must be a string", ov.Name))
 		}
 		canonical = s
+	case aiv1alpha1.OverrideTypeStringList:
+		items, ok := v.([]any)
+		if !ok {
+			return fail(fmt.Sprintf("override %q must be a list of strings", ov.Name))
+		}
+		parts := make([]string, 0, len(items))
+		for _, item := range items {
+			s, ok := item.(string)
+			if !ok {
+				return fail(fmt.Sprintf("override %q must be a list of strings", ov.Name))
+			}
+			// The canonical form is comma-joined, so an entry containing a
+			// comma could not be split back apart.
+			if strings.Contains(s, ",") {
+				return fail(fmt.Sprintf("override %q element %q must not contain a comma", ov.Name, s))
+			}
+			parts = append(parts, s)
+		}
+		canonical = strings.Join(parts, ",")
 	case aiv1alpha1.OverrideTypeBoolean:
 		b, ok := v.(bool)
 		if !ok {
@@ -141,7 +160,15 @@ func validateValue(ov aiv1alpha1.Override, raw apiextensionsv1.JSON) (string, *E
 	}
 
 	if len(ov.Enum) > 0 {
-		if !enumContains(ov.Enum, v) {
+		// A list parameter constrains each entry, not the list as a whole:
+		// enumContains compares one JSON value and an array would never match.
+		if ov.Type == aiv1alpha1.OverrideTypeStringList {
+			for _, item := range v.([]any) {
+				if !enumContains(ov.Enum, item) {
+					return fail(fmt.Sprintf("override %q value %v is not in the allowed enum", ov.Name, item))
+				}
+			}
+		} else if !enumContains(ov.Enum, v) {
 			return fail(fmt.Sprintf("override %q value %v is not in the allowed enum", ov.Name, v))
 		}
 	}

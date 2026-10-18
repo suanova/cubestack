@@ -234,19 +234,20 @@ func attachServiceAntiAffinity(spec *corev1.PodSpec, isvcName, topologyKey strin
 	)
 }
 
-// attachModelNodeAffinity constrains scheduling to nodes offering one of the
-// declared accelerator models when the profile declares several (design §3.2):
-// a required nodeAffinity In term on the vendor product label, AND-combined
-// with any existing affinity. Single-model profiles are injected as a
-// nodeSelector instead and never reach this helper.
-func attachModelNodeAffinity(spec *corev1.PodSpec, label string, models []string) {
+// attachNodeAffinity adds a required nodeAffinity In term for one node label,
+// AND-combined with any existing affinity. It carries the multi-model
+// accelerator constraint (design §3.2) and the multi-value node selectors
+// resolved from stringList overrides; both need "one of" semantics a
+// nodeSelector map cannot express. A single value never reaches this helper —
+// that case is a plain nodeSelector entry.
+func attachNodeAffinity(spec *corev1.PodSpec, label string, values []string) {
 	if spec.Affinity == nil {
 		spec.Affinity = &corev1.Affinity{}
 	}
 	if spec.Affinity.NodeAffinity == nil {
 		spec.Affinity.NodeAffinity = &corev1.NodeAffinity{}
 	}
-	requirement := corev1.NodeSelectorRequirement{Key: label, Operator: corev1.NodeSelectorOpIn, Values: models}
+	requirement := corev1.NodeSelectorRequirement{Key: label, Operator: corev1.NodeSelectorOpIn, Values: values}
 	required := spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
 	if required == nil {
 		spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution = &corev1.NodeSelector{
@@ -254,9 +255,9 @@ func attachModelNodeAffinity(spec *corev1.PodSpec, label string, models []string
 		}
 		return
 	}
-	// NodeSelectorTerms are OR-combined, so the model constraint must be merged
-	// into every existing term: a new alternative term would let a node that
-	// matches another term schedule without the model label.
+	// NodeSelectorTerms are OR-combined, so the constraint must be merged into
+	// every existing term: a new alternative term would let a node that matches
+	// another term schedule without satisfying this requirement.
 	for i := range required.NodeSelectorTerms {
 		required.NodeSelectorTerms[i].MatchExpressions = append(required.NodeSelectorTerms[i].MatchExpressions, requirement)
 	}

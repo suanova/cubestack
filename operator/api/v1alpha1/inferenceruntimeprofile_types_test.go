@@ -252,7 +252,11 @@ var _ = Describe("InferenceRuntimeProfile", func() {
 			// CREATE — which is why they are Pattern-validated here and the resolved
 			// value is checked by the renderer: a placement token, a label pair.
 			for _, policy := range []PodAntiAffinityPolicy{"preferred", "{{ overrides.replicaPlacement }}"} {
-				for _, selector := range []string{"node-pool=inference", "{{ overrides.nodeSelector }}"} {
+				for _, selector := range []string{
+					"node-pool=inference",
+					"node-pool=inference,kubernetes.io/hostname=worker-a,kubernetes.io/hostname=worker-b",
+					"{{ overrides.nodeSelector }}",
+				} {
 					irp := validInferenceRuntimeProfile("irp-antiaffinity")
 					irp.Spec.PodAntiAffinity = &PodAntiAffinity{Policy: policy, TopologyKey: testHostnameTopologyKey}
 					irp.Spec.NodeSelector = selector
@@ -492,7 +496,7 @@ var _ = Describe("InferenceRuntimeProfile", func() {
 					s.NodeSelector = "node-pool"
 				},
 				"spec.nodeSelector"),
-			Entry("nodeSelector with two pairs",
+			Entry("nodeSelector with two pairs but no comma",
 				"irp-invalid-nodeselector-two-pairs",
 				func(s *InferenceRuntimeProfileSpec) {
 					s.NodeSelector = "node-pool=inference gpu=yes"

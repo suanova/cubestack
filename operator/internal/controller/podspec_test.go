@@ -262,7 +262,7 @@ var _ = Describe("buildPodSpec", func() {
 
 	It("attaches a required nodeAffinity In term for multi-model accelerators", func() {
 		spec := &corev1.PodSpec{}
-		attachModelNodeAffinity(spec, testProductLabelMetax, []string{testGPUModelMXC500, testGPUModelMXC550})
+		attachNodeAffinity(spec, testProductLabelMetax, []string{testGPUModelMXC500, testGPUModelMXC550})
 		Expect(spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution).To(Equal(&corev1.NodeSelector{
 			NodeSelectorTerms: []corev1.NodeSelectorTerm{{
 				MatchExpressions: []corev1.NodeSelectorRequirement{{
@@ -277,8 +277,8 @@ var _ = Describe("buildPodSpec", func() {
 		// node matching another term alone would otherwise schedule without the
 		// model label.
 		spec2 := &corev1.PodSpec{}
-		attachModelNodeAffinity(spec2, testProductLabelMetax, []string{testGPUModelMXC500})
-		attachModelNodeAffinity(spec2, "example.com/extra", []string{"a"})
+		attachNodeAffinity(spec2, testProductLabelMetax, []string{testGPUModelMXC500})
+		attachNodeAffinity(spec2, "example.com/extra", []string{"a"})
 		Expect(spec2.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution).To(Equal(&corev1.NodeSelector{
 			NodeSelectorTerms: []corev1.NodeSelectorTerm{{
 				MatchExpressions: []corev1.NodeSelectorRequirement{

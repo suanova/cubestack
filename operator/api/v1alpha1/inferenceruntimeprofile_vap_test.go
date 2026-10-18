@@ -263,6 +263,38 @@ var _ = Describe("InferenceRuntimeProfile L1 admission", func() {
 			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid error, got: %v", err)
 			Expect(err.Error()).To(ContainSubstring("default must be one of the enum values"))
 		})
+
+		It("accepts a stringList default whose entries are all in enum", func() {
+			setupIRPVAP()
+			defer cleanupIRPVAP()
+
+			irp := validIRPWithMatchingName()
+			irp.Spec.Overrides = append(irp.Spec.Overrides, Override{
+				Name:    "workerPool",
+				Type:    OverrideTypeStringList,
+				Enum:    []apiextensionsv1.JSON{{Raw: []byte(`"worker-a"`)}, {Raw: []byte(`"worker-b"`)}},
+				Default: &apiextensionsv1.JSON{Raw: []byte(`["worker-a","worker-b"]`)},
+			})
+			Expect(k8sClient.Create(ctx, irp)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, irp)).To(Succeed())
+		})
+
+		It("rejects a stringList default with an entry outside enum", func() {
+			setupIRPVAP()
+			defer cleanupIRPVAP()
+
+			irp := validIRPWithMatchingName()
+			irp.Spec.Overrides = append(irp.Spec.Overrides, Override{
+				Name:    "workerPool",
+				Type:    OverrideTypeStringList,
+				Enum:    []apiextensionsv1.JSON{{Raw: []byte(`"worker-a"`)}, {Raw: []byte(`"worker-b"`)}},
+				Default: &apiextensionsv1.JSON{Raw: []byte(`["worker-a","worker-c"]`)},
+			})
+			err := k8sClient.Create(ctx, irp)
+			Expect(err).To(HaveOccurred())
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid error, got: %v", err)
+			Expect(err.Error()).To(ContainSubstring("default must be one of the enum values"))
+		})
 	})
 
 	Context("roles", func() {

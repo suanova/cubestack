@@ -36,6 +36,7 @@ const (
 	nvidiaModelH20  = "H20"
 	// metaxModelC900 is a model outside the declared model lists of the specs.
 	metaxModelC900 = "MXC900"
+	hostnameLabel  = "kubernetes.io/hostname"
 )
 
 func envValue(name, value string) aiv1alpha1.EnvVar {
@@ -60,7 +61,7 @@ func renderProfile() *aiv1alpha1.InferenceRuntimeProfile {
 			},
 			// The templated declaration the shipped bundles use, so the fixture
 			// exercises a policy that comes from an override rather than a literal.
-			PodAntiAffinity: &aiv1alpha1.PodAntiAffinity{Policy: "{{ overrides.replicaPlacement }}", TopologyKey: "kubernetes.io/hostname"},
+			PodAntiAffinity: &aiv1alpha1.PodAntiAffinity{Policy: "{{ overrides.replicaPlacement }}", TopologyKey: hostnameLabel},
 			// Likewise the shipped nodeSelector declaration, whose empty default
 			// adds no selector to any role.
 			NodeSelector: "{{ overrides.nodeSelector }}",
@@ -417,12 +418,66 @@ var _ = Describe("Render", func() {
 		Entry("a missing key is rejected", userNodeSelector("=inference"), nil, ReasonInvalidOverride),
 		Entry("a value that is not a label value is rejected", userNodeSelector("node-pool=in ference"), nil, ReasonInvalidOverride),
 		Entry("a key that is not a label key is rejected", userNodeSelector("node pool=inference"), nil, ReasonInvalidOverride),
-		Entry("two pairs are one label value that no node carries", userNodeSelector("node-pool=inference,gpu"), nil, ReasonInvalidOverride),
+		Entry("an item without a value is rejected", userNodeSelector("node-pool=inference,gpu"), nil, ReasonInvalidOverride),
 		Entry("a template resolving to a bare key is rejected", nodeSelectorTemplate("{{ overrides.mode }}"), nil, ReasonInvalidOverride),
 		Entry("a namespace outside overrides is rejected", nodeSelectorTemplate("{{ service.name }}"), nil, ReasonPhaseViolation),
 		Entry("an undeclared override is rejected", nodeSelectorTemplate("{{ overrides.undeclared }}"), nil, ReasonUnknownPlaceholder),
 		Entry("a pair contradicting the declared model is reported", userNodeSelector(metaxProductLabel+"="+metaxModelC550), nil, ReasonModelSchedulingConflict),
 	)
+
+	// stringListNodeSelector declares the fixture's nodeSelector override as a
+	// stringList and sets the user's value to the given JSON array.
+	stringListNodeSelector := func(p *aiv1alpha1.InferenceRuntimeProfile, isvc *aiv1alpha1.InferenceService, value string) {
+		for i := range p.Spec.Overrides {
+			if p.Spec.Overrides[i].Name == overrideNodeSelector {
+				p.Spec.Overrides[i].Type = aiv1alpha1.OverrideTypeStringList
+				p.Spec.Overrides[i].Default = &apiextensionsv1.JSON{Raw: []byte(`[]`)}
+			}
+		}
+		isvc.Spec.Overrides[overrideNodeSelector] = apiextensionsv1.JSON{Raw: []byte(value)}
+	}
+
+	It("renders a stringList nodeSelector as a required nodeAffinity In term", func() {
+		p := renderProfile()
+		gpuPrefill(p)
+		p.Spec.Accelerator = aiv1alpha1.Accelerator{Vendor: aiv1alpha1.AcceleratorVendorMetax, Models: []string{metaxModelC500}}
+		isvc := renderISVC()
+		stringListNodeSelector(p, isvc, `["kubernetes.io/hostname=worker-a","kubernetes.io/hostname=worker-b"]`)
+		res := Render(isvc, p, renderModel(), nil)
+		Expect(res.Errors).To(BeEmpty())
+		want := []NodeAffinityRequirement{{Label: hostnameLabel, Values: []string{"worker-a", "worker-b"}}}
+		Expect(res.Roles[0].NodeAffinityRequirements).To(Equal(want))
+		Expect(res.Roles[1].NodeAffinityRequirements).To(Equal(want))
+		Expect(res.Roles[0].PodTemplate.NodeSelector).To(BeEmpty(), "several values cannot be a nodeSelector entry")
+		Expect(res.Roles[1].PodTemplate.NodeSelector).To(Equal(map[string]string{metaxProductLabel: metaxModelC500}))
+	})
+
+	It("lets a role's stringList node selector win a shared key", func() {
+		p := renderProfile()
+		gpuPrefill(p)
+		p.Spec.Accelerator = aiv1alpha1.Accelerator{Vendor: aiv1alpha1.AcceleratorVendorMetax, Models: []string{metaxModelC500}}
+		p.Spec.NodeSelector = "kubernetes.io/hostname=worker-a,kubernetes.io/hostname=worker-b"
+		p.Spec.Roles[1].NodeSelector = "{{ overrides.nodeSelector }}"
+		isvc := renderISVC()
+		stringListNodeSelector(p, isvc, `["kubernetes.io/hostname=worker-c"]`)
+		res := Render(isvc, p, renderModel(), nil)
+		Expect(res.Errors).To(BeEmpty())
+		Expect(res.Roles[0].NodeAffinityRequirements).To(Equal([]NodeAffinityRequirement{{Label: hostnameLabel, Values: []string{"worker-a", "worker-b"}}}))
+		Expect(res.Roles[0].PodTemplate.NodeSelector).To(BeEmpty())
+		Expect(res.Roles[1].NodeAffinityRequirements).To(BeEmpty(), "the role replaces the key with a single value")
+		Expect(res.Roles[1].PodTemplate.NodeSelector).To(Equal(map[string]string{hostnameLabel: "worker-c", metaxProductLabel: metaxModelC500}))
+	})
+
+	It("reports a multi-value product-label selection that excludes every model", func() {
+		p := renderProfile()
+		gpuPrefill(p)
+		p.Spec.Accelerator = aiv1alpha1.Accelerator{Vendor: aiv1alpha1.AcceleratorVendorMetax, Models: []string{metaxModelC500}}
+		isvc := renderISVC()
+		stringListNodeSelector(p, isvc, `["`+metaxProductLabel+`=`+metaxModelC550+`","`+metaxProductLabel+`=`+metaxModelC900+`"]`)
+		res := Render(isvc, p, renderModel(), nil)
+		Expect(res.Errors).To(HaveLen(1))
+		Expect(res.Errors[0].Reason).To(Equal(ReasonModelSchedulingConflict))
+	})
 
 	It("merges no selector when the profile declares no nodeSelector", func() {
 		p := renderProfile()
