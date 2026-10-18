@@ -62,9 +62,10 @@ export interface DevEnvironmentSummary {
   storage: { size: string; mountPath: string | null; pvcRetention: "retain" | "delete" } | null;
   // spec.volumes: extra PVCs mounted alongside the workspace.
   volumes: Array<{ name: string; pvcName: string; mountPath: string; readOnly: boolean }>;
-  // Variable *names* only — a value can be a registry token (HF_TOKEN), and the
-  // names alone answer what the environment was configured with.
-  envNames: string[];
+  // spec.runtime.env, as the container is configured with it. A plain value is
+  // carried with its variable; a valueFrom (secretKeyRef/keyRef) is carried as
+  // its source, because the value itself lives outside the CR.
+  env: Array<{ name: string; value: string | null; valueFrom: string | null }>;
   // spec.runtime.command and .args, as the argv they are. Both are projected in
   // full: neither can carry a credential the way an env value can.
   command: string[];
@@ -113,6 +114,12 @@ interface DevEnvResources {
   cpu?: string;
   memory?: string;
 }
+interface EnvVarSource {
+  secretKeyRef?: { name?: string; key?: string };
+  configMapKeyRef?: { name?: string; key?: string };
+  fieldRef?: { fieldPath?: string };
+  resourceFieldRef?: { resource?: string };
+}
 interface DevEnvSpec {
   type?: string;
   image?: string;
@@ -121,7 +128,11 @@ interface DevEnvSpec {
   storage?: { size?: string; mountPath?: string; pvcRetention?: string };
   volumes?: Array<{ name?: string; pvcName?: string; mountPath?: string; readOnly?: boolean }>;
   ports?: Array<{ name?: string; type?: string; containerPort?: number }>;
-  runtime?: { env?: Array<{ name?: string }>; command?: string[]; args?: string[] };
+  runtime?: {
+    env?: Array<{ name?: string; value?: string; valueFrom?: EnvVarSource }>;
+    command?: string[];
+    args?: string[];
+  };
   lifecycle?: { idleTimeout?: number };
   nodeSelector?: Record<string, string>;
   network?: { egress?: { unrestricted?: boolean } };
@@ -142,6 +153,17 @@ interface DevEnv {
 
 function num(v: unknown): number {
   return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+
+/** Where a valueFrom env entry reads its value from, as one readable line. */
+function envSource(v: EnvVarSource): string {
+  const ref = (kind: string, r?: { name?: string; key?: string }) =>
+    `${kind} ${r?.name ?? "?"}/${r?.key ?? "?"}`;
+  if (v.secretKeyRef) return ref("secretKeyRef", v.secretKeyRef);
+  if (v.configMapKeyRef) return ref("configMapKeyRef", v.configMapKeyRef);
+  if (v.fieldRef) return `fieldRef ${v.fieldRef.fieldPath ?? "?"}`;
+  if (v.resourceFieldRef) return `resourceFieldRef ${v.resourceFieldRef.resource ?? "?"}`;
+  return "valueFrom";
 }
 
 /** Project one DevEnvironment CR into a page-ready record. */
@@ -185,7 +207,13 @@ function project(env: DevEnv): DevEnvironmentSummary {
       mountPath: v.mountPath ?? "",
       readOnly: v.readOnly ?? false,
     })),
-    envNames: (spec.runtime?.env ?? []).map((e) => e.name ?? "").filter(Boolean),
+    env: (spec.runtime?.env ?? [])
+      .map((e) => ({
+        name: e.name ?? "",
+        value: typeof e.value === "string" ? e.value : null,
+        valueFrom: e.valueFrom ? envSource(e.valueFrom) : null,
+      }))
+      .filter((e) => e.name),
     command: spec.runtime?.command ?? [],
     args: spec.runtime?.args ?? [],
     ports: (spec.ports ?? []).map((p) => ({

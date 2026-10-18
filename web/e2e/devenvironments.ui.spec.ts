@@ -165,7 +165,9 @@ test.describe("dev environments landing (mocked data)", () => {
     // the mount path the CR states rather than one the panel invents.
     await expect(detail).toContainText("200Gi · /home/ubuntu");
     await expect(detail).toContainText("data-cache → /data");
-    await expect(detail).toContainText("HF_HOME · HF_TOKEN");
+    // One environment variable per line.
+    await expect(detail).toContainText("HF_HOME=/home/ubuntu/.cache/huggingface");
+    await expect(detail).toContainText("HF_TOKEN=hf_example");
     await expect(detail).toContainText("python -m jupyter lab");
     await expect(detail).toContainText("--port 8080");
     await expect(detail).toContainText("api:8080/http");

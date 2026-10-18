@@ -546,6 +546,29 @@ describe("inference services page", () => {
     act(() => root.unmount());
   });
 
+  it("paints Progressing False as the settled state, not a failure", async () => {
+    stubData([
+      inferenceServiceSummary({
+        name: "settled-svc",
+        conditions: [
+          { type: "Ready", status: "True", reason: "Ready", message: "", transitionTime: null },
+          { type: "Progressing", status: "False", reason: "Converged", message: "Nothing in flight", transitionTime: null },
+          { type: "ReplicasReady", status: "False", reason: "PodNotReady", message: "0/2 decode replicas ready", transitionTime: null },
+        ],
+      }),
+    ]);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    const pill = (type: string) => container.querySelector(`[data-od-id="cond-${type}"]`);
+    // A settled Progressing (False) wears the same success tint as a True
+    // condition; a False condition of the usual polarity stays the error tint.
+    expect(pill("Progressing")?.className).toBe(pill("Ready")?.className);
+    expect(pill("ReplicasReady")?.className).not.toBe(pill("Ready")?.className);
+
+    act(() => root.unmount());
+  });
+
   it("lays the row's actions out in an open row and keeps them behind the kebab when closed", async () => {
     stubData(inferenceServiceList());
     const { container, root } = renderPage();
@@ -757,6 +780,47 @@ describe("deploy wizard", () => {
     });
     await act(async () => {});
   }
+
+  it("defaults the catalog model name to the service name when publish is enabled", async () => {
+    const { container, root } = renderWithBoth();
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await fillNameAndGoToStep2();
+
+    const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
+    const publish = step2.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    await act(async () => {
+      publish.click();
+    });
+    await act(async () => {});
+
+    // The service name is a valid catalog name, so enabling publish fills the
+    // empty field with it rather than making the user retype it.
+    const modelName = () =>
+      document.body.querySelector('[data-od-id="deploy-model-name"] input') as HTMLInputElement;
+    expect(modelName().value).toBe("my-serve");
+
+    // A catalog name the user typed is theirs: cycling publish cannot clobber it.
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
+      setter.call(modelName(), "custom-model");
+      modelName().dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {});
+    await act(async () => {
+      publish.click();
+    });
+    await act(async () => {
+      publish.click();
+    });
+    await act(async () => {});
+    expect(modelName().value).toBe("custom-model");
+
+    act(() => root.unmount());
+  });
 
   it("opens on the namespace the API names, and refuses a name taken there", async () => {
     // The wizard opens on `default` — not on whichever namespace sorts first —

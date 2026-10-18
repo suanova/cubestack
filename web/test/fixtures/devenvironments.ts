@@ -22,10 +22,12 @@ export function devEnvironmentSummary(
     resources: { gpu: { vendor: "nvidia", count: 1, model: "H200" }, cpu: "16", memory: "64Gi" },
     storage: { size: "200Gi", mountPath: "/home/ubuntu", pvcRetention: "delete" },
     // One of each step-3 field, so the spec panel's rows for them have
-    // something to read. The env value is deliberately absent from the
-    // projection — only the name is carried — so there is nothing to put here.
+    // something to read.
     volumes: [{ name: "data-cache", pvcName: "data-cache", mountPath: "/data", readOnly: false }],
-    envNames: ["HF_HOME", "HF_TOKEN"],
+    env: [
+      { name: "HF_HOME", value: "/home/ubuntu/.cache/huggingface", valueFrom: null },
+      { name: "HF_TOKEN", value: "hf_example", valueFrom: null },
+    ],
     command: ["python", "-m", "jupyter", "lab"],
     args: ["--port", "8080"],
     ports: [{ name: "api", type: "http", containerPort: 8080 }],
@@ -77,7 +79,7 @@ export function devEnvironmentList(): DevEnvironmentSummary[] {
       // A read-only PVC and a tcp port, so the two branches the first
       // environment does not exercise are covered.
       volumes: [{ name: "models", pvcName: "shared-models", mountPath: "/models", readOnly: true }],
-      envNames: [],
+      env: [],
       command: [],
       args: [],
       ports: [{ name: "debug", type: "tcp", containerPort: 9229 }],

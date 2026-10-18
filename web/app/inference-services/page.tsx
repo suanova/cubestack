@@ -1229,7 +1229,16 @@ function ConditionsCard({ s }: { s: InferenceServiceSummary }) {
           s.conditions.map((c) => {
             // Green only for an observed True condition; False (a real failure)
             // and Unknown (pending) get distinct non-success styling.
-            const cls = c.status === "True" ? "ok" : c.status === "Unknown" ? "pending" : "err";
+            // Progressing is inverted: False means the controller has nothing
+            // in flight — the settled, healthy state — so it reads as success.
+            const cls =
+              c.type === "Progressing" && c.status === "False"
+                ? "ok"
+                : c.status === "True"
+                  ? "ok"
+                  : c.status === "Unknown"
+                    ? "pending"
+                    : "err";
             const [chip, dot] =
               cls === "ok"
                 ? [STATUS_OK, STATUS_OK]
@@ -1606,12 +1615,28 @@ function DeployWizard({
                 <Box sx={{ mt: 3, border: 1, borderColor: "divider", borderRadius: "var(--radius)", p: "14px" }}>
                   <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                     <Typography sx={{ fontSize: 12.5, fontWeight: 600 }}>{t("inf.deploy.route")}</Typography>
-                    <Switch checked={draft.publish} onChange={(e) => setField("publish", e.target.checked)} />
+                    <Switch
+                      checked={draft.publish}
+                      onChange={(e) => {
+                        const publish = e.target.checked;
+                        setDraft((prev) => ({
+                          ...prev,
+                          publish,
+                          // Publishing joins the model catalog, which needs a
+                          // model name. The service name is the natural default:
+                          // it already satisfies the catalog name contract (a
+                          // DNS label) and names this service's model. A name
+                          // the user typed is never overwritten.
+                          modelName:
+                            publish && prev.modelName.trim() === "" ? prev.name.trim() : prev.modelName,
+                        }));
+                      }}
+                    />
                   </Box>
                   {draft.publish && (
                     <Box sx={{ mt: "12px", display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
                       <WizField label={t("inf.deploy.modelName")} hint={t("inf.deploy.modelNameHint")}>
-                        <TextField size="small" fullWidth value={draft.modelName} onChange={(e) => setField("modelName", e.target.value)} />
+                        <TextField data-od-id="deploy-model-name" size="small" fullWidth value={draft.modelName} onChange={(e) => setField("modelName", e.target.value)} />
                       </WizField>
                       <WizField label={t("inf.deploy.timeout")} hint="0–86400 s">
                         <TextField size="small" fullWidth type="number" value={draft.timeout} onChange={(e) => setField("timeout", e.target.value)} />

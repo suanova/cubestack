@@ -54,6 +54,11 @@ describe("dev environments page", () => {
   // made for it (see stubData).
   const JUPYTER_TOKEN = "fa4040c1b2e34d5f8091aa2b3c5d5e6f";
   const tokenRequests: string[] = [];
+  // The key the stubbed ssh-key endpoint hands back, and the requests made for
+  // it: the login command embeds the key, so it is fetched as lazily as the token.
+  const SSH_KEY =
+    "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZWQyNTUxOQ\n-----END OPENSSH PRIVATE KEY-----\n";
+  const keyRequests: string[] = [];
 
   function renderPage() {
     const container = document.createElement("div");
@@ -67,6 +72,7 @@ describe("dev environments page", () => {
 
   function stubData(items: unknown[], ok = true) {
     tokenRequests.length = 0;
+    keyRequests.length = 0;
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: unknown) => {
@@ -76,6 +82,13 @@ describe("dev environments page", () => {
           const q = new URL(String(url), "http://localhost").searchParams;
           tokenRequests.push(`${q.get("namespace")}/${q.get("name")}`);
           return { ok: true, status: 200, json: async () => ({ token: JUPYTER_TOKEN, secret: { name: "jupyter-nlp-ln-jupyter-token", namespace: "project-a" } }) };
+        }
+        // The private key is handed out the same way, and is read as text: the
+        // route serves it as a file, not as JSON.
+        if (String(url).includes("/api/devenvironments/ssh-key")) {
+          const q = new URL(String(url), "http://localhost").searchParams;
+          keyRequests.push(`${q.get("namespace")}/${q.get("name")}`);
+          return { ok: true, status: 200, text: async () => SSH_KEY, json: async () => ({}) };
         }
         return { ok, status: ok ? 200 : 500, json: async () => (ok ? { items } : { error: "boom" }) };
       }),
@@ -174,7 +187,10 @@ describe("dev environments page", () => {
     // the CR carries, and each new section gets a row of its own.
     expect(container.textContent).toContain("200Gi · /home/ubuntu");
     expect(container.textContent).toContain("data-cache → /data");
-    expect(container.textContent).toContain("HF_HOME · HF_TOKEN");
+    // One environment variable per line, not one " · " run.
+    expect(container.textContent).toContain(
+      "HF_HOME=/home/ubuntu/.cache/huggingface\nHF_TOKEN=hf_example",
+    );
     expect(container.textContent).toContain("python -m jupyter lab");
     expect(container.textContent).toContain("--port 8080");
     expect(container.textContent).toContain("api:8080/http");
@@ -260,6 +276,29 @@ describe("dev environments page", () => {
     const dot = container.querySelector('[data-od-id="cond-Ready"] span');
     expect(dot?.getAttribute("aria-hidden")).toBe("true");
     expect(dot?.getAttribute("aria-label")).toBeNull();
+
+    act(() => root.unmount());
+  });
+
+  it("paints Progressing False as the settled state, not a failure", async () => {
+    stubData([
+      devEnvironmentSummary({
+        name: "settled-env",
+        conditions: [
+          { type: "Ready", status: "True", reason: "Running", message: "" },
+          { type: "Progressing", status: "False", reason: "Converged", message: "Nothing in flight" },
+          { type: "PodScheduled", status: "False", reason: "Unschedulable", message: "" },
+        ],
+      }),
+    ]);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    const pill = (type: string) => container.querySelector(`[data-od-id="cond-${type}"]`);
+    // A settled Progressing (False) wears the same success tint as a True
+    // condition; a False condition of the usual polarity stays the error tint.
+    expect(pill("Progressing")?.className).toBe(pill("Ready")?.className);
+    expect(pill("PodScheduled")?.className).not.toBe(pill("Ready")?.className);
 
     act(() => root.unmount());
   });
@@ -413,7 +452,7 @@ describe("dev environments page", () => {
     act(() => root.unmount());
   });
 
-  it("hands out the minted private key as a download with the login command", async () => {
+  it("hands out the private key as a download and as a masked, self-contained command", async () => {
     stubData([
       devEnvironmentSummary({
         endpoints: [
@@ -425,15 +464,48 @@ describe("dev environments page", () => {
     const { container, root } = renderPage();
     await act(async () => {});
 
-    // The card carries the download — a plain link the session cookie
-    // authorizes — at the deployment's base path, and states the login command
-    // from the ssh endpoint the operator published.
+    // The card carries the login command and the download together in one row —
+    // the generic endpoint row stands aside — so the key is named once.
+    const endpoint = container.querySelector('[data-od-id="ssh-endpoint"]') as HTMLElement;
+    expect(endpoint.textContent).toBe("ssh -i ./id_ed25519 ubuntu@203.0.113.7 -p 2200");
     const link = container.querySelector('[data-od-id="ssh-key-download"]') as HTMLAnchorElement;
     expect(link).not.toBeNull();
     expect(link.getAttribute("href")).toBe("/cubestack/api/devenvironments/ssh-key?namespace=project-a&name=jupyter-nlp-ln");
-    expect(container.querySelector('[data-od-id="ssh-key-hint"]')?.textContent).toContain(
-      "ssh -i id_ed25519 ubuntu@203.0.113.7 -p 2200",
+    expect(link.parentElement).toBe(endpoint.parentElement);
+    // The download path states its follow-up: ssh refuses a key that is group-
+    // or world-readable, so the hint chmods it before the login command runs.
+    expect(container.querySelector('[data-od-id="ssh-key-hint"]')?.textContent).toBe(
+      "下载后使用:chmod -R 600 ./id_ed25519",
     );
+
+    // The second shape is one paste-ready command that embeds the key, writes
+    // it to a private temp file, and removes it after the session. It is masked
+    // on arrival and nothing has been fetched: the key waits to be asked for.
+    const command = () => container.querySelector('[data-od-id="ssh-command-value"]') as HTMLElement;
+    const toggle = () => container.querySelector('[data-od-id="ssh-command-toggle"]') as HTMLElement;
+    expect(command().textContent).toBe("•".repeat(12));
+    expect(keyRequests).toEqual([]);
+
+    await act(async () => {
+      toggle().click();
+    });
+    expect(keyRequests).toEqual(["project-a/jupyter-nlp-ln"]);
+    const shown = command().textContent ?? "";
+    expect(shown).toContain('tmp=$(mktemp) && chmod 600 "$tmp"');
+    // The key is carried verbatim, so it needs no file on disk before the paste.
+    expect(shown).toContain(SSH_KEY);
+    expect(shown).toContain('ssh -i "$tmp" -p 2200 \'ubuntu@203.0.113.7\'');
+    expect(shown).toContain('rc=$?; rm -f "$tmp"; exit "$rc"');
+    expect(toggle().getAttribute("aria-pressed")).toBe("true");
+    expect(toggle().getAttribute("aria-label")).toBe("隐藏登录命令");
+
+    // Hiding it again is local: the key is already here, so nothing is re-read.
+    await act(async () => {
+      toggle().click();
+    });
+    expect(command().textContent).toBe("•".repeat(12));
+    expect(toggle().getAttribute("aria-label")).toBe("显示登录命令");
+    expect(keyRequests).toHaveLength(1);
 
     act(() => root.unmount());
   });

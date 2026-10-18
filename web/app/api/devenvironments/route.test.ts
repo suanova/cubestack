@@ -150,7 +150,15 @@ describe("GET /api/devenvironments", () => {
             storage: { size: "100Gi", mountPath: "/data", pvcRetention: "retain" },
             volumes: [{ name: "data-cache", pvcName: "data-cache", mountPath: "/cache", readOnly: true }],
             ports: [{ name: "api", containerPort: 8080 }],
-            runtime: { env: [{ name: "HF_TOKEN" }, { name: "HF_HOME" }], command: ["python", "-m", "jupyter", "lab"], args: ["--port", "8080"] },
+            runtime: {
+              env: [
+                { name: "HF_TOKEN", value: "hf_xxx" },
+                { name: "HF_HOME", value: "/cache" },
+                { name: "OPS_KEY", valueFrom: { secretKeyRef: { name: "ops", key: "key" } } },
+              ],
+              command: ["python", "-m", "jupyter", "lab"],
+              args: ["--port", "8080"],
+            },
           },
         },
         {
@@ -171,11 +179,14 @@ describe("GET /api/devenvironments", () => {
 
     expect(pinned.storage).toEqual({ size: "100Gi", mountPath: "/data", pvcRetention: "retain" });
     expect(pinned.volumes).toEqual([{ name: "data-cache", pvcName: "data-cache", mountPath: "/cache", readOnly: true }]);
-    // The type is defaulted the way the CRD does; the env value is not
-    // projected at all — a value can be a registry token, and the names are
-    // what say which variables the environment carries.
+    // The type is defaulted the way the CRD does; a plain env value is carried
+    // with its variable, and a valueFrom is carried as the source it reads from.
     expect(pinned.ports).toEqual([{ name: "api", type: "http", containerPort: 8080 }]);
-    expect(pinned.envNames).toEqual(["HF_TOKEN", "HF_HOME"]);
+    expect(pinned.env).toEqual([
+      { name: "HF_TOKEN", value: "hf_xxx", valueFrom: null },
+      { name: "HF_HOME", value: "/cache", valueFrom: null },
+      { name: "OPS_KEY", value: null, valueFrom: "secretKeyRef ops/key" },
+    ]);
     expect(pinned.command).toEqual(["python", "-m", "jupyter", "lab"]);
     expect(pinned.args).toEqual(["--port", "8080"]);
     expect(pinned.jupyterTokenSecret).toBeNull();
@@ -210,7 +221,7 @@ describe("GET /api/devenvironments", () => {
       resources: { gpu: null, cpu: "—", memory: "—" },
       storage: null,
       volumes: [],
-      envNames: [],
+      env: [],
       command: [],
       args: [],
       ports: [],
