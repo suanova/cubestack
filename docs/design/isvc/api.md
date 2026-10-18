@@ -503,6 +503,17 @@ Controller 将此模板按 `workload.kind` 写入对应位置：`LeaderWorkerSet
 
 同 vendor、不同型号的逐 role 钉定（如 prefill 限 MXC500、decode 限 MXC550）是同一机制的合法用法，不需要额外规则。
 
+##### roles[].nodeSelector
+
+`roles[].nodeSelector`（可选，string）为该 role 追加一个节点选择标签对，用于 PD 分离等逐 role 调度场景，例如 prefill 与 decode 位于不同节点池，或同一 vendor 的不同型号分别钉定到不同 role。
+
+| 规则 | 内容 |
+|---|---|
+| 语法 | 与 Profile 级 `spec.nodeSelector` 相同：单个 `key=value` 字面量或单个 `{{ overrides.* }}` 占位符；其它模板命名空间仍被拒绝。L2 渲染后须解析为合法 K8s label 键值对，否则 `InvalidOverride`（错误信息带 role 名）；空值不注入任何选择器，因此可以安全地把它绑定到一个默认为空的 override。 |
+| 合并顺序 | 在 `podTemplate.nodeSelector` 与 Profile 级 `spec.nodeSelector` 之后并入，同一 key 冲突时以本字段为准；随后与 `accelerator.models` 的型号注入一并做冲突检查（`ModelSchedulingConflict`）。 |
+| 作用范围 | 只作用于声明它的 role；服务级 `spec.nodeSelector` 仍作用于全部 role，本字段只能在它的基础上追加或覆盖单个 key，不能移除它。 |
+| 典型用法 | PD 分离 Bundle 声明 `prefill_metax_model` / `decode_metax_model`（型号）与 `prefill_nodeSelector` / `decode_nodeSelector`（节点池）四个 override，分别由 prefill 与 decode role 的 `nodeSelector` 模板引用，使用户能独立选择两个 role 的 GPU 型号与调度位置。 |
+
 ##### 其他字段
 
 这些字段作用于整个 Profile，而不是单个 role。
@@ -513,7 +524,7 @@ Controller 将此模板按 `workload.kind` 写入对应位置：`LeaderWorkerSet
 | `endpoint.role` | string | L0：必填；L1：必须存在于 `roles`，且该 role 须定义 `service` | 作为服务对外端点的 role 名称。Controller 以该 role 的 Service 作为内部端点（InferenceService 的 `status.endpoint.internal`）；`publish: true` 时，它同时是模型目录条目的后端（目录对象的 endpoints 指向该 Service）。渲染后 Service 的可解析性由 `EndpointReady` 校验（见 §3.3）。 |
 | `endpoint.portName` | string | L0：可选，默认 `http`；L2：渲染后须存在于端点 Service 的端口中（`EndpointReady`） | 对外端点使用的 Service 端口名，与 `endpoint.role` 一起确定目录条目后端的端口。 |
 | `readinessPolicy.requireAllRoles` | bool | L0：v1alpha1 固定 `true` | 服务就绪条件的聚合方式：所有 role 的工作负载和 Pod 都就绪后，InferenceService 才会标记为 Ready。 |
-| `nodeSelector` | string | L0：可选；只能是一个 `key=value` 字面量或单个 `{{ ... }}` 占位符（同 `podAntiAffinity.policy`，用 pattern 而非 `enum`：精确匹配会在 CREATE 时拒绝占位符）；L2：渲染后须解析为一个合法 K8s label 键值对，否则 `InvalidOverride` 且 Rendered=False；若该键是厂商型号 label 而值不在 `accelerator.models` 中，则 `ModelSchedulingConflict` | 服务级节点选择：一个 `key=value` 标签对，声明一次即并入**全部 role** 的 PodSpec `nodeSelector`。之所以是 string 而不是 map，是因为标签的**键属于集群、不属于 Profile**——站点把 GPU 节点分成若干资源池，池名是站点的事实，Profile 作者无从预知，且 Profile 的 `spec` 一经创建不可修改；而 `podTemplate.nodeSelector` 的键由 Profile 作者写死，map 的 key 也不参与模板渲染（§3.2）。取值从集群自身读取（`kubectl get nodes --show-labels`），**默认为空 = 不注入任何选择器**，与本字段引入前的调度行为完全一致；因此它只能收窄可选节点集。与 `podTemplate.nodeSelector`、`accelerator.models` 的型号约束按 K8s AND 语义合并（§3.2）。一个服务只有一个该值，没有按 role 区分的手段。 |
+| `nodeSelector` | string | L0：可选；只能是一个 `key=value` 字面量或单个 `{{ ... }}` 占位符（同 `podAntiAffinity.policy`，用 pattern 而非 `enum`：精确匹配会在 CREATE 时拒绝占位符）；L2：渲染后须解析为一个合法 K8s label 键值对，否则 `InvalidOverride` 且 Rendered=False；若该键是厂商型号 label 而值不在 `accelerator.models` 中，则 `ModelSchedulingConflict` | 服务级节点选择：一个 `key=value` 标签对，声明一次即并入**全部 role** 的 PodSpec `nodeSelector`。之所以是 string 而不是 map，是因为标签的**键属于集群、不属于 Profile**——站点把 GPU 节点分成若干资源池，池名是站点的事实，Profile 作者无从预知，且 Profile 的 `spec` 一经创建不可修改；而 `podTemplate.nodeSelector` 的键由 Profile 作者写死，map 的 key 也不参与模板渲染（§3.2）。取值从集群自身读取（`kubectl get nodes --show-labels`），**默认为空 = 不注入任何选择器**，与本字段引入前的调度行为完全一致；因此它只能收窄可选节点集。与 `podTemplate.nodeSelector`、`accelerator.models` 的型号约束按 K8s AND 语义合并（§3.2）。一个服务只有一个该值；需要按 role 区分时使用 `roles[].nodeSelector`（见上）。 |
 | `podAntiAffinity` | object | L0：可选；`topologyKey` 必填且为合法 K8s label key；`policy` 可选，只能取 `required`/`preferred`/`none` 之一或单个 `{{ ... }}` 占位符（不能是 `enum`——精确匹配会在 CREATE 时拒绝占位符，故用 pattern 校验）；L2：`policy` 渲染后须解析为三者之一，否则 `InvalidOverride` 且 Rendered=False（不回退为 `required`） | 同服务 Pod 反亲和：`{policy, topologyKey}`。`policy` 选择强度：`required`（硬约束，`requiredDuringSchedulingIgnoredDuringExecution`，**默认值**，也是本字段引入前的行为）要求本服务**全部 role** 的 Pod（leader/worker、跨组、跨 role）在声明的拓扑域内互不共置；`preferred`（软约束，权重 100）在拓扑域足够时同样分散，域不足时允许共置，不会为等空闲节点而 Pending；`none` 不注入任何反亲和项。声明一次，Controller 将其注入每个 role 的 PodSpec。labelSelector 由平台固定为本服务（`ai.cubestack.io/inference-service`），不可自定义——用于多副本组异机/异域散布；单副本无效果。与 `accelerator.models` 的 nodeSelector/nodeAffinity（§3.2）按 K8s AND 语义叠加：`none` 只移除反亲和项，不影响 nodeAffinity。`policy` 可写模板（如 `{{ overrides.replicaPlacement }}`）交由 override 控制。`topologyKey` 在 `none` 下必填但不起作用。 |
 
 #### Status

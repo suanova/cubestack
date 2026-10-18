@@ -607,6 +607,19 @@ type Role struct {
 	// PodTemplate is the Pod template of the role.
 	PodTemplate PodTemplate `json:"podTemplate"`
 
+	// NodeSelector additionally constrains this role's pods to the nodes
+	// carrying one declared label. The value is a single Kubernetes label pair,
+	// "key=value", and may be a template referencing overrides, e.g.
+	// '{{ overrides.prefill_nodeSelector }}'; a resolved value that is not a
+	// valid pair fails the render with InvalidOverride. It is merged into the
+	// role's podTemplate.nodeSelector after the profile-level spec.nodeSelector,
+	// so it wins on a key conflict, and an empty value adds no selector at all.
+	// Unlike spec.nodeSelector it applies to this role only — the per-role knob
+	// of a profile whose roles may live in different node pools.
+	// +optional
+	// +kubebuilder:validation:Pattern="^([^{}=]+=[^{}=]+|[{]{2}[^{}]*[}]{2})$"
+	NodeSelector string `json:"nodeSelector,omitempty"`
+
 	// Accelerator overrides the profile-level accelerator for this role: a
 	// complete {vendor, models} replacement for heterogeneous profiles (design
 	// §3.2 roles[].accelerator). A role declaring it must declare
@@ -691,7 +704,8 @@ type InferenceRuntimeProfileSpec struct {
 	// profile author. The pair is merged into every role's nodeSelector — a
 	// plain AND with the accelerator model pin, which it must not contradict —
 	// and an empty value adds no selector at all, which is what every profile
-	// that leaves the field unset does.
+	// that leaves the field unset does. A role's own nodeSelector merges after
+	// this one, so it wins on a shared key.
 	// +optional
 	// +kubebuilder:validation:Pattern="^([^{}=]+=[^{}=]+|[{]{2}[^{}]*[}]{2})$"
 	NodeSelector string `json:"nodeSelector,omitempty"`

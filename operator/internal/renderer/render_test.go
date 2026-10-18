@@ -437,6 +437,43 @@ var _ = Describe("Render", func() {
 		Expect(res.Roles[1].PodTemplate.NodeSelector).To(Equal(map[string]string{metaxProductLabel: metaxModelC500}))
 	})
 
+	// The service-level selector is the fixture's templated pair, so every
+	// entry states the role's own contribution against what the role would
+	// carry without it: the service pair, plus the model pin on the GPU role.
+	DescribeTable("merges a role's own node selector",
+		func(rolePair string, wantPrefill map[string]string, wantReason ErrorReason) {
+			p := renderProfile()
+			gpuPrefill(p)
+			p.Spec.Accelerator = aiv1alpha1.Accelerator{Vendor: aiv1alpha1.AcceleratorVendorMetax, Models: []string{metaxModelC500}}
+			p.Spec.NodeSelector = "node-pool=inference"
+			p.Spec.Roles[1].NodeSelector = rolePair
+			res := Render(renderISVC(), p, renderModel(), nil)
+			if wantReason != noError {
+				Expect(res.Errors).To(HaveLen(1))
+				Expect(res.Errors[0].Reason).To(Equal(wantReason))
+				return
+			}
+			Expect(res.Errors).To(BeEmpty())
+			Expect(res.Roles[0].PodTemplate.NodeSelector).To(Equal(map[string]string{nodePoolLabel: nodePoolValue}), "a role's selector applies to that role alone")
+			Expect(res.Roles[1].PodTemplate.NodeSelector).To(Equal(wantPrefill))
+		},
+		Entry("a role's pair merges with the service-level one", "gpu-pool=decode", map[string]string{nodePoolLabel: nodePoolValue, "gpu-pool": "decode", metaxProductLabel: metaxModelC500}, noError),
+		Entry("a role's pair wins a shared key", "node-pool=decode", map[string]string{nodePoolLabel: "decode", metaxProductLabel: metaxModelC500}, noError),
+		Entry("an empty role pair adds nothing", "", map[string]string{nodePoolLabel: nodePoolValue, metaxProductLabel: metaxModelC500}, noError),
+		Entry("a role's pair repeating the model pin is consistent", metaxProductLabel+"="+metaxModelC500, map[string]string{nodePoolLabel: nodePoolValue, metaxProductLabel: metaxModelC500}, noError),
+		Entry("a role's pair contradicting the declared model is reported", metaxProductLabel+"="+metaxModelC550, nil, ReasonModelSchedulingConflict),
+		Entry("a role's bare key is rejected", "{{ overrides.mode }}", nil, ReasonInvalidOverride),
+		Entry("a role's template outside overrides is rejected", "{{ service.name }}", nil, ReasonPhaseViolation),
+	)
+
+	It("names the role in a role-level node selector error", func() {
+		p := renderProfile()
+		p.Spec.Roles[1].NodeSelector = "{{ overrides.mode }}"
+		res := Render(renderISVC(), p, renderModel(), nil)
+		Expect(res.Errors).To(HaveLen(1))
+		Expect(res.Errors[0].Msg).To(ContainSubstring(`role "prefill" nodeSelector`))
+	})
+
 	It("fails with UnknownPlaceholder for unknown variables", func() {
 		p := renderProfile()
 		p.Spec.Roles[0].PodTemplate.Env = append(p.Spec.Roles[0].PodTemplate.Env, envValue("BAD", "{{ bogus.x }}"))

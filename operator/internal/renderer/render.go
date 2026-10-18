@@ -125,7 +125,7 @@ func Render(isvc *aiv1alpha1.InferenceService, profile *aiv1alpha1.InferenceRunt
 	// rather than per role.
 	res.PodAntiAffinityPolicy, res.Errors = resolvePodAntiAffinity(ctx, profile.Spec.PodAntiAffinity, res.Errors)
 	var nodeSelector map[string]string
-	nodeSelector, res.Errors = resolveNodeSelector(ctx, profile.Spec.NodeSelector, res.Errors)
+	nodeSelector, res.Errors = resolveNodeSelector(ctx, "", profile.Spec.NodeSelector, res.Errors)
 
 	// Roles: structure first, then pod template. Errors accumulate; later
 	// fields are still rendered so the message aggregates all failures.
@@ -157,7 +157,12 @@ func Render(isvc *aiv1alpha1.InferenceService, profile *aiv1alpha1.InferenceRunt
 		rr.UsesCredentials = roleV.usesCredentials
 		// The service-level selector merges before the model pin so that a pair
 		// naming the vendor product label goes through the conflict rule below.
+		// The role-level pair merges after it — the more specific declaration
+		// wins on a shared key — and before the same check.
 		mergeNodeSelector(&rr, nodeSelector)
+		var roleSelector map[string]string
+		roleSelector, res.Errors = resolveNodeSelector(ctx, role.Name, role.NodeSelector, res.Errors)
+		mergeNodeSelector(&rr, roleSelector)
 		res.Errors = injectModelSelector(&rr, role.EffectiveAccelerator(profile.Spec.Accelerator), res.Errors)
 		// A role that will receive the injected S3 credentials volume must not
 		// declare a podTemplate volume of the same name: the pod template would
@@ -256,14 +261,16 @@ type renderContext struct {
 	role *roleVars
 }
 
-// mergeNodeSelector merges the service-level node selector pair into the role's
-// pod template nodeSelector, for every role: which nodes the service runs on is a
-// property of the service, and a CPU-only role quietly left off the pool the
-// service was pinned to would be a surprise rather than a feature. The merge is a
-// plain map assignment — a pod's nodeSelector is one flat map the apiserver ANDs
-// — and it happens before injectModelSelector so that a pair naming the vendor
-// product label is caught by that conflict rule instead of silently overriding
-// the model pin. The map is safe to write: renderPodTemplate has already replaced
+// mergeNodeSelector merges a resolved node selector pair into the role's pod
+// template nodeSelector. The service-level pair is merged into every role:
+// which nodes the service runs on is a property of the service, and a CPU-only
+// role quietly left off the pool the service was pinned to would be a surprise
+// rather than a feature. A role's own pair is merged on that role alone, after
+// the service-level one, so it wins a shared key. The merge is a plain map
+// assignment — a pod's nodeSelector is one flat map the apiserver ANDs — and it
+// happens before injectModelSelector so that a pair naming the vendor product
+// label is caught by that conflict rule instead of silently overriding the
+// model pin. The map is safe to write: renderPodTemplate has already replaced
 // it with its own freshly built copy.
 func mergeNodeSelector(rr *RenderedRole, sel map[string]string) {
 	if len(sel) == 0 {
@@ -581,11 +588,13 @@ func resolvePodAntiAffinity(ctx *renderContext, aa *aiv1alpha1.PodAntiAffinity, 
 	}
 }
 
-// resolveNodeSelector renders the profile's nodeSelector template and parses the
-// resolved pair (design §3.2). Only overrides.* is allowed in this field, like
-// the workload structure fields and the placement policy: which nodes a service
-// runs on is the fact the site brings to the profile, not something derived from
-// the service or from the model. An empty resolved value — what a profile whose
+// resolveNodeSelector renders a nodeSelector template and parses the resolved
+// pair (design §3.2). It serves both the profile-level spec.nodeSelector
+// (roleName == "") and a role's own nodeSelector (roleName != "", used in the
+// error message). Only overrides.* is allowed in this field, like the workload
+// structure fields and the placement policy: which nodes a service runs on is
+// the fact the site brings to the profile, not something derived from the
+// service or from the model. An empty resolved value — what a profile whose
 // nodeSelector override carries the empty default gets — adds no selector at all,
 // and so does an absent field. The value is one Kubernetes label pair key=value,
 // checked with the same rules the apiserver applies to a pod's nodeSelector —
@@ -597,7 +606,7 @@ func resolvePodAntiAffinity(ctx *renderContext, aa *aiv1alpha1.PodAntiAffinity, 
 // exists on some node is not checked here or anywhere else — the profile's
 // accelerator.models constraint is matched by the scheduler too, not by the
 // operator, which reads no Node.
-func resolveNodeSelector(ctx *renderContext, field string, errs []Error) (map[string]string, []Error) {
+func resolveNodeSelector(ctx *renderContext, roleName, field string, errs []Error) (map[string]string, []Error) {
 	if field == "" {
 		return nil, errs
 	}
@@ -610,23 +619,27 @@ func resolveNodeSelector(ctx *renderContext, field string, errs []Error) (map[st
 	if pair == "" {
 		return nil, errs
 	}
+	subject := "nodeSelector"
+	if roleName != "" {
+		subject = fmt.Sprintf("role %q nodeSelector", roleName)
+	}
 	key, value, ok := strings.Cut(pair, "=")
 	if !ok || key == "" || value == "" {
 		return nil, append(errs, Error{
 			Reason: ReasonInvalidOverride,
-			Msg:    fmt.Sprintf("nodeSelector does not resolve to a key=value label pair: %q", rendered),
+			Msg:    fmt.Sprintf("%s does not resolve to a key=value label pair: %q", subject, rendered),
 		})
 	}
 	if problems := content.IsLabelKey(key); len(problems) > 0 {
 		return nil, append(errs, Error{
 			Reason: ReasonInvalidOverride,
-			Msg:    fmt.Sprintf("nodeSelector key %q is not a valid Kubernetes label key: %s", key, problems[0]),
+			Msg:    fmt.Sprintf("%s key %q is not a valid Kubernetes label key: %s", subject, key, problems[0]),
 		})
 	}
 	if problems := content.IsLabelValue(value); len(problems) > 0 {
 		return nil, append(errs, Error{
 			Reason: ReasonInvalidOverride,
-			Msg:    fmt.Sprintf("nodeSelector value %q is not a valid Kubernetes label value: %s", value, problems[0]),
+			Msg:    fmt.Sprintf("%s value %q is not a valid Kubernetes label value: %s", subject, value, problems[0]),
 		})
 	}
 	return map[string]string{key: value}, errs
