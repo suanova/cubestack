@@ -2058,6 +2058,8 @@ function isNodeSelectorOverride(decl: Pick<OverrideDecl, "name" | "type">): bool
 function pinnedNode(value: unknown): string | null {
   const v = String(value ?? "");
   if (v === "") return "";
+  // Several pairs are not a single-node pin; keep the free-text input.
+  if (v.includes(",")) return null;
   const eq = v.indexOf("=");
   if (eq < 0) return null;
   return v.slice(0, eq) === NODE_SELECTOR_KEY ? v.slice(eq + 1) : null;

@@ -58,6 +58,9 @@ async function pinLocale(page: Page) {
 test.beforeEach(async ({ context, page }) => {
   await pinLocale(page);
   await seedSession(context);
+  // The landing page reads the options for the detail panel's node pickers;
+  // stub it for every spec so the real route never reaches the CI cluster.
+  await stubOptions(page);
 });
 
 test.describe("inference services landing (mocked data)", () => {
@@ -74,10 +77,11 @@ test.describe("inference services landing (mocked data)", () => {
     await expect(pro).toContainText("—");
     await expect(pro).toContainText("sglang");
     await expect(pro).toContainText("8 × MXC500");
-    // Replicas render multi-line, one row per integer override the profile declares.
-    await expect(pro).toContainText("decodeReplicas 2");
-    await expect(pro).toContainText("prefillReplicas 1");
-    await expect(pro).toContainText("groupSize 1");
+    // Replicas render multi-line, one row per integer override the profile
+    // declares, under the human-readable name the UI gives the knob.
+    await expect(pro).toContainText("Prefill Replicas 1");
+    await expect(pro).toContainText("Decode Replicas 2");
+    await expect(pro).toContainText("Group Size 1");
     // No engine metrics -> QPS and P95 columns fall back to a dash.
     await expect(pro).toContainText("—");
     await expect(pro).toContainText("deepseek-v4-pro-w8a8-v1");
@@ -120,8 +124,8 @@ test.describe("inference services landing (mocked data)", () => {
     await expect(detail).toContainText("https://ai.cubestack.dev");
     await expect(detail).toContainText("运行指标");
     await expect(page.locator('[data-od-id="metrics-empty"]')).toContainText("暂无监控数据");
-    await expect(detail).toContainText("扩缩容");
-    await expect(detail).toContainText("decodeReplicas");
+    await expect(detail).toContainText("可调参数");
+    await expect(detail).toContainText("Decode Replicas");
     await expect(detail).toContainText("引擎参数");
     await expect(detail).toContainText("profileRef");
     await expect(detail).toContainText("metax-sglang-dsv4-pd");
@@ -236,7 +240,6 @@ test.describe("inference services landing (mocked data)", () => {
   });
 
   test("deploys a service through the wizard and selects it", async ({ page }) => {
-    await stubOptions(page);
     let created: { name: string } | null = null;
     await page.route("**/api/inferenceservices?*", (route) =>
       route.fulfill({
@@ -281,7 +284,7 @@ test.describe("inference services landing (mocked data)", () => {
     await page.getByRole("button", { name: "下一步" }).click();
     await expect(page.locator('[data-step="3"]')).toBeVisible();
     // Step 3: the summary spells out both roles' declared accelerators.
-    await expect(page.locator('[data-step="3"]')).toContainText("prefill: metax / decode: nvidia");
+    await expect(page.locator('[data-step="3"]')).toContainText("Prefill: metax / Decode: nvidia");
 
     // Step 3: create and expect the new service to appear and be selected.
     await page.locator('[data-od-id="wizard-create"]').click();

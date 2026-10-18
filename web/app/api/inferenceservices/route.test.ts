@@ -313,6 +313,68 @@ describe("inference services route", () => {
     expect(body.items[0].gpuModel).toBe("MXC500 / MXC550");
   });
 
+  it("uses a role's own accelerator for its GPU model", async () => {
+    // A heterogeneous PD profile: decode runs on NVIDIA, so its label and its
+    // fallback model come from the role, not from the profile-level metax one.
+    listClusterCustomObject.mockImplementation(({ plural }: { plural: string }) => {
+      if (plural === "inferenceservices") {
+        return Promise.resolve({
+          items: [
+            {
+              metadata: { name: "test", namespace: "default" },
+              spec: { modelRef: "deepseek-v4-flash-w8a8", profileRef: "heterogeneous" },
+            },
+          ],
+        });
+      }
+      if (plural === "modelversions") {
+        return Promise.resolve({
+          items: [
+            { metadata: { name: "deepseek-v4-flash-w8a8" }, spec: { architecture: "deepseek_v4", quantization: "w8a8" } },
+          ],
+        });
+      }
+      if (plural === "inferenceruntimeprofiles") {
+        return Promise.resolve({
+          items: [
+            {
+              metadata: { name: "heterogeneous" },
+              spec: {
+                engine: { name: "sglang", version: "0.5.13" },
+                accelerator: { vendor: "metax", models: ["MXC500"] },
+                roles: [
+                  { name: "prefill", podTemplate: { resources: { gpuPerPod: 8 } } },
+                  {
+                    name: "decode",
+                    accelerator: { vendor: "nvidia", models: ["H200"] },
+                    podTemplate: {
+                      nodeSelector: { "nvidia.com/gpu.product": "H200" },
+                      resources: { gpuPerPod: 8 },
+                    },
+                  },
+                  {
+                    name: "decode-unpinned",
+                    accelerator: { vendor: "nvidia", models: ["H200"] },
+                    podTemplate: { resources: { gpuPerPod: 8 } },
+                  },
+                ],
+              },
+            },
+          ],
+        });
+      }
+      return Promise.resolve({ items: [] });
+    });
+
+    const { GET } = await importRoute();
+    const body = await (await GET(await authedGet(), undefined)).json();
+    expect(body.items[0].gpuRoles).toEqual([
+      { name: "prefill", gpuPerPod: 8, model: "MXC500" },
+      { name: "decode", gpuPerPod: 8, model: "H200" },
+      { name: "decode-unpinned", gpuPerPod: 8, model: "H200" },
+    ]);
+  });
+
   it("projects the controller's phase and its reason", async () => {
     stubCluster();
     const { GET } = await importRoute();
@@ -764,6 +826,25 @@ describe("inference services create (POST)", () => {
         profileRef: "metax-sglang-dsv4-pd",
         modelRef: "deepseek-v4-flash-w8a8-v1",
         overrides: { decode_nodeSelector: ["kubernetes.io/hostname=worker-c"] },
+      }),
+      undefined,
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "overrideNotAllowed" });
+    expect(createNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
+  it("rejects a stringList entry containing a comma", async () => {
+    const { POST } = await importRoute();
+    const res = await POST(
+      await buildPost({
+        namespace: "project-a",
+        name: "new-serve",
+        profileRef: "metax-sglang-dsv4-pd",
+        modelRef: "deepseek-v4-flash-w8a8-v1",
+        // prefill_nodeSelector declares no enum, so this guards the comma
+        // rule itself rather than the enum check.
+        overrides: { prefill_nodeSelector: ["node-pool=a,node-pool=b"] },
       }),
       undefined,
     );

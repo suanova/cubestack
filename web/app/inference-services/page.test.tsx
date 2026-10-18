@@ -923,6 +923,38 @@ describe("deploy wizard", () => {
     act(() => root.unmount());
   });
 
+  it("keeps a multi-pair nodeSelector in the free-text input", async () => {
+    // A scalar nodeSelector may hold several label pairs. That is not a
+    // single-node pin, so the picker must not claim the first pair's value as
+    // a node name (or the second pair would be silently dropped on a pick).
+    const value = "kubernetes.io/hostname=worker-a,node-pool=inference";
+    const opts = {
+      ...OPTIONS,
+      profiles: [
+        {
+          ...OPTIONS.profiles[0],
+          overrides: OPTIONS.profiles[0].overrides.map((o) =>
+            o.name === "nodeSelector" ? { ...o, default: value } : o,
+          ),
+        },
+      ],
+    };
+    const { container, root } = renderWithBoth(opts);
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await fillNameAndGoToStep2();
+
+    const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
+    const field = step2.querySelector('[data-od-id="override-nodeSelector"]') as HTMLElement;
+    expect(field.querySelector('[role="combobox"]')).toBeNull();
+    expect((field.querySelector("input") as HTMLInputElement).value).toBe(value);
+
+    act(() => root.unmount());
+  });
+
   it("offers only nodes whose GPU model matches the model chosen for the role", async () => {
     // The operator pins the model label and the hostname together. Offering a
     // node labelled with another model is a choice whose only outcome is a

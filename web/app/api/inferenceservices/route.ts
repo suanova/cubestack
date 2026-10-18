@@ -142,6 +142,9 @@ interface ProfileOverride {
 interface ProfileRole {
   name?: string;
   workload?: { kind?: string };
+  // Effective accelerator (design §3.2): the role's own declaration replaces
+  // the profile-level one wholesale.
+  accelerator?: { vendor?: string; models?: string[] };
   podTemplate?: {
     nodeSelector?: Record<string, string>;
     resources?: { gpuPerPod?: number };
@@ -174,17 +177,19 @@ const OVERRIDE_REF = /^\{\{\s*overrides\.([A-Za-z0-9_]+)\s*\}\}$/;
 
 /**
  * The accelerator model a GPU role is pinned to: the role's pod-template node
- * selector on the vendor product label, with an override reference resolved to
- * the service's effective value. Falls back to the profile's single declared
- * model; a multi-model profile without a role-level pin leaves the role free to
- * land on any declared model (null), matching the renderer's nodeAffinity.
+ * selector on the effective vendor's product label, with an override reference
+ * resolved to the service's effective value. Falls back to the role's single
+ * effective declared model; a multi-model accelerator without a role-level pin
+ * leaves the role free to land on any declared model (null), matching the
+ * renderer's nodeAffinity.
  */
 function roleGpuModel(
   role: ProfileRole,
   profile: Profile,
   effective: Map<string, string | number | boolean | null>,
 ): string | null {
-  const label = VENDOR_PRODUCT_LABEL[profile.spec?.accelerator?.vendor ?? ""];
+  const accel = role.accelerator ?? profile.spec?.accelerator;
+  const label = VENDOR_PRODUCT_LABEL[accel?.vendor ?? ""];
   const value = label ? role.podTemplate?.nodeSelector?.[label]?.trim() : undefined;
   if (value) {
     const ref = OVERRIDE_REF.exec(value);
@@ -192,7 +197,7 @@ function roleGpuModel(
     const resolved = effective.get(ref[1]);
     if (typeof resolved === "string" && resolved !== "") return resolved;
   }
-  const models = profile.spec?.accelerator?.models ?? [];
+  const models = accel?.models ?? [];
   return models.length === 1 ? models[0] : null;
 }
 
@@ -229,6 +234,12 @@ function overrideError(
     if (o.type === "stringList") {
       if (!Array.isArray(value) || !value.every((e) => typeof e === "string")) {
         return { code: "overrideNotStringList", params: { key } };
+      }
+      // The operator joins the list into text; a comma inside an entry would
+      // silently become a separator there, so reject it here instead of
+      // persisting a value the renderer later fails on.
+      if (value.some((e) => e.includes(","))) {
+        return { code: "overrideNotAllowed", params: { key } };
       }
       // A declared enum constrains every entry of the list.
       if (o.enum && value.some((e) => !o.enum!.some((allowed) => allowed === e))) {
