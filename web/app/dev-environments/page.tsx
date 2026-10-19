@@ -32,7 +32,7 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
 import type { DevEnvironmentSummary } from "@/app/api/devenvironments/route";
 import type { DevEnvImageOption, DevEnvOptionsResponse } from "@/app/api/devenvironments/options/route";
@@ -857,7 +857,7 @@ function Card({ title, meta, children }: { title: string; meta?: string; childre
   );
 }
 
-function Kvs({ rows }: { rows: Array<[string, string]> }) {
+function Kvs({ rows }: { rows: Array<[string, ReactNode]> }) {
   return (
     // Two columns of rows, filled left to right: with the card this wide a single
     // column would set every value the width of the table away from its label.
@@ -1119,11 +1119,14 @@ const shQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 // temporary file, logs in with it, and removes the file on the way out, so the
 // key never has to be saved first. `printf '%s\n'` rather than echo: the key is
 // carried verbatim, and echo's handling of backslashes varies between shells.
+// The whole sequence runs in a subshell: the pasted line lands in the user's
+// interactive shell, and a bare `exit` would close it — on a failed login too,
+// before the error could be read — and would leave `tmp`/`rc` set.
 function sshCommand(key: string, parts: { user: string; host: string; port: string }): string {
   return (
-    `tmp=$(mktemp) && chmod 600 "$tmp" && printf '%s\\n' ${shQuote(key)} > "$tmp" && ` +
+    `(tmp=$(mktemp) && chmod 600 "$tmp" && printf '%s\\n' ${shQuote(key)} > "$tmp" && ` +
     `ssh -i "$tmp" -p ${parts.port} ${shQuote(`${parts.user}@${parts.host}`)}; ` +
-    `rc=$?; rm -f "$tmp"; exit "$rc"`
+    `rc=$?; rm -f "$tmp"; exit "$rc")`
   );
 }
 
@@ -1372,7 +1375,7 @@ function ConnectionCard({ e, onAct }: { e: DevEnvironmentSummary; onAct: (e: Dev
 function SpecCard({ e }: { e: DevEnvironmentSummary }) {
   const { t } = useI18n();
   const gpu = e.resources.gpu;
-  const rows: Array<[string, string]> = [
+  const rows: Array<[string, ReactNode]> = [
     [t("dev.spec.type"), e.type],
     [t("dev.spec.image"), e.image],
     [t("dev.spec.gpu"), gpu ? `${gpu.count} × ${gpu.vendor}${gpu.model ? ` · ${gpu.model}` : ""}` : t("dev.gpu.none")],
@@ -1418,16 +1421,10 @@ function SpecCard({ e }: { e: DevEnvironmentSummary }) {
     ]);
   }
   if (e.env.length) {
-    // Name=value for a declared value; a valueFrom is shown by its source,
-    // since the value itself lives in a Secret/ConfigMap rather than the CR.
-    // One variable per line: a long list read as a single " · " run is a wall
-    // of names, and this row is where the user checks them one by one.
-    rows.push([
-      t("dev.spec.env"),
-      e.env
-        .map((v) => (v.value !== null ? `${v.name}=${v.value}` : `${v.name} → ${v.valueFrom ?? ""}`))
-        .join("\n"),
-    ]);
+    // The variables themselves are one block per environment: the literal
+    // values are masked behind one reveal, because the list that produced this
+    // panel deliberately does not carry them.
+    rows.push([t("dev.spec.env"), <EnvValues key="env" e={e} />]);
   }
   if (e.command.length) rows.push([t("dev.spec.command"), e.command.join(" ")]);
   if (e.args.length) rows.push([t("dev.spec.args"), e.args.join(" ")]);
@@ -1440,6 +1437,89 @@ function SpecCard({ e }: { e: DevEnvironmentSummary }) {
     <Card title={t("dev.spec.title")} meta={t("dev.spec.meta")}>
       <Kvs rows={rows} />
     </Card>
+  );
+}
+
+/**
+ * spec.runtime.env, one variable per line, with literal values masked until the
+ * user asks for them.
+ *
+ * The environment list is cluster-wide and carries only names (and valueFrom
+ * sources): a literal value can be a credential, so it is fetched for this one
+ * environment on demand. A valueFrom is shown by its source — the value itself
+ * lives in a Secret or ConfigMap, not in the CR.
+ */
+function EnvValues({ e }: { e: DevEnvironmentSummary }) {
+  const { t } = useI18n();
+  const [values, setValues] = useState<Record<string, string> | null>(null);
+  const [revealed, setRevealed] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  // Nothing to fetch when every entry is a reference: there are no literals.
+  const hasLiteral = e.env.some((v) => v.hasValue);
+
+  const load = async (): Promise<boolean> => {
+    if (values !== null) return true;
+    setBusy(true);
+    try {
+      const res = await apiFetch(
+        `/api/devenvironments/env-values?namespace=${encodeURIComponent(e.namespace)}&name=${encodeURIComponent(e.name)}`,
+      );
+      const body = (await res.json().catch(() => ({}))) as ValidationErrorBody & { values?: Record<string, string> };
+      if (!res.ok || !body.values) {
+        setError(validationMessage(t, body, res.status, "dev"));
+        return false;
+      }
+      setValues(body.values);
+      setError(null);
+      return true;
+    } catch {
+      setError(t("dev.err.envUnreadable"));
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Box sx={{ display: "flex", alignItems: "flex-start", justifyContent: "flex-end", gap: "8px", minWidth: 0 }}>
+      <Box sx={{ display: "grid", justifyItems: "end", gap: "2px", minWidth: 0 }}>
+        {error ? (
+          <Box component="span" data-od-id="env-values-error" sx={{ color: STATUS_ERR }}>{error}</Box>
+        ) : null}
+        <Box component="span" data-od-id="env-values" sx={{ whiteSpace: "pre-line", overflowWrap: "anywhere", textAlign: "right" }}>
+          {e.env
+            .map((v) => {
+              if (v.valueFrom) return `${v.name} → ${v.valueFrom}`;
+              // A literal is masked until asked for; an entry with no value and
+              // no source is an empty value, not a dangling arrow.
+              const value = revealed && values ? values[v.name] : undefined;
+              return `${v.name}=${value ?? (v.hasValue ? SECRET_MASK : "")}`;
+            })
+            .join("\n")}
+        </Box>
+      </Box>
+      {hasLiteral ? (
+        <IconButton
+          data-od-id="env-values-toggle"
+          aria-label={revealed ? t("dev.spec.envHide") : t("dev.spec.envReveal")}
+          aria-pressed={revealed}
+          disabled={busy}
+          onClick={async () => {
+            if (revealed) {
+              setRevealed(false);
+              return;
+            }
+            // The mask stays if the values could not be read: the row says why.
+            if (values === null && !(await load())) return;
+            setRevealed(true);
+          }}
+          sx={{ p: 0, width: 20, height: 20, color: "var(--accent-strong)", "&:hover": { background: "transparent" } }}
+        >
+          <EyeIcon open={revealed} />
+        </IconButton>
+      ) : null}
+    </Box>
   );
 }
 

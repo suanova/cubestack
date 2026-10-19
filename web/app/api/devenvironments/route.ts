@@ -62,10 +62,13 @@ export interface DevEnvironmentSummary {
   storage: { size: string; mountPath: string | null; pvcRetention: "retain" | "delete" } | null;
   // spec.volumes: extra PVCs mounted alongside the workspace.
   volumes: Array<{ name: string; pvcName: string; mountPath: string; readOnly: boolean }>;
-  // spec.runtime.env, as the container is configured with it. A plain value is
-  // carried with its variable; a valueFrom (secretKeyRef/keyRef) is carried as
-  // its source, because the value itself lives outside the CR.
-  env: Array<{ name: string; value: string | null; valueFrom: string | null }>;
+  // spec.runtime.env: the variable's name and, when it comes from a Secret or
+  // ConfigMap, the source it reads. A literal value is not carried here — this
+  // list spans every namespace and any authenticated caller can read it, and an
+  // env value can be a credential. `hasValue` says one exists; the value itself
+  // is fetched for one environment at a time (see env-values/route.ts) and stays
+  // masked until asked for.
+  env: Array<{ name: string; hasValue: boolean; valueFrom: string | null }>;
   // spec.runtime.command and .args, as the argv they are. Both are projected in
   // full: neither can carry a credential the way an env value can.
   command: string[];
@@ -210,7 +213,7 @@ function project(env: DevEnv): DevEnvironmentSummary {
     env: (spec.runtime?.env ?? [])
       .map((e) => ({
         name: e.name ?? "",
-        value: typeof e.value === "string" ? e.value : null,
+        hasValue: typeof e.value === "string",
         valueFrom: e.valueFrom ? envSource(e.valueFrom) : null,
       }))
       .filter((e) => e.name),

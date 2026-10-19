@@ -25,8 +25,8 @@ export function devEnvironmentSummary(
     // something to read.
     volumes: [{ name: "data-cache", pvcName: "data-cache", mountPath: "/data", readOnly: false }],
     env: [
-      { name: "HF_HOME", value: "/home/ubuntu/.cache/huggingface", valueFrom: null },
-      { name: "HF_TOKEN", value: "hf_example", valueFrom: null },
+      { name: "HF_HOME", hasValue: true, valueFrom: null },
+      { name: "HF_TOKEN", hasValue: true, valueFrom: null },
     ],
     command: ["python", "-m", "jupyter", "lab"],
     args: ["--port", "8080"],

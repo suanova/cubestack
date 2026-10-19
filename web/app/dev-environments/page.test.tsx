@@ -59,6 +59,14 @@ describe("dev environments page", () => {
   const SSH_KEY =
     "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZWQyNTUxOQ\n-----END OPENSSH PRIVATE KEY-----\n";
   const keyRequests: string[] = [];
+  // The literal env values the on-demand endpoint hands back, and the requests
+  // made for them: the list carries names only, so the spec panel fetches the
+  // values for one environment when the user reveals them.
+  const ENV_VALUES: Record<string, string> = {
+    HF_HOME: "/home/ubuntu/.cache/huggingface",
+    HF_TOKEN: "hf_example",
+  };
+  const envRequests: string[] = [];
 
   function renderPage() {
     const container = document.createElement("div");
@@ -73,6 +81,7 @@ describe("dev environments page", () => {
   function stubData(items: unknown[], ok = true) {
     tokenRequests.length = 0;
     keyRequests.length = 0;
+    envRequests.length = 0;
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: unknown) => {
@@ -89,6 +98,11 @@ describe("dev environments page", () => {
           const q = new URL(String(url), "http://localhost").searchParams;
           keyRequests.push(`${q.get("namespace")}/${q.get("name")}`);
           return { ok: true, status: 200, text: async () => SSH_KEY, json: async () => ({}) };
+        }
+        if (String(url).includes("/api/devenvironments/env-values")) {
+          const q = new URL(String(url), "http://localhost").searchParams;
+          envRequests.push(`${q.get("namespace")}/${q.get("name")}`);
+          return { ok: true, status: 200, json: async () => ({ values: ENV_VALUES }) };
         }
         return { ok, status: ok ? 200 : 500, json: async () => (ok ? { items } : { error: "boom" }) };
       }),
@@ -187,10 +201,18 @@ describe("dev environments page", () => {
     // the CR carries, and each new section gets a row of its own.
     expect(container.textContent).toContain("200Gi · /home/ubuntu");
     expect(container.textContent).toContain("data-cache → /data");
-    // One environment variable per line, not one " · " run.
-    expect(container.textContent).toContain(
-      "HF_HOME=/home/ubuntu/.cache/huggingface\nHF_TOKEN=hf_example",
-    );
+    // One environment variable per line, not one " · " run — and the literal
+    // values are masked, because the list response does not carry them.
+    expect(container.textContent).toContain(`HF_HOME=${"•".repeat(12)}\nHF_TOKEN=${"•".repeat(12)}`);
+    expect(envRequests).toEqual([]);
+    const envToggle = container.querySelector('[data-od-id="env-values-toggle"]') as HTMLElement;
+    expect(envToggle.getAttribute("aria-label")).toBe("显示环境变量值");
+    await act(async () => {
+      envToggle.click();
+    });
+    expect(envRequests).toEqual(["project-a/jupyter-nlp-ln"]);
+    expect(container.textContent).toContain("HF_HOME=/home/ubuntu/.cache/huggingface\nHF_TOKEN=hf_example");
+    expect(envToggle.getAttribute("aria-pressed")).toBe("true");
     expect(container.textContent).toContain("python -m jupyter lab");
     expect(container.textContent).toContain("--port 8080");
     expect(container.textContent).toContain("api:8080/http");
@@ -491,7 +513,9 @@ describe("dev environments page", () => {
     });
     expect(keyRequests).toEqual(["project-a/jupyter-nlp-ln"]);
     const shown = command().textContent ?? "";
-    expect(shown).toContain('tmp=$(mktemp) && chmod 600 "$tmp"');
+    // A subshell: the pasted line must not close the user's interactive shell.
+    expect(shown.startsWith('(tmp=$(mktemp) && chmod 600 "$tmp"')).toBe(true);
+    expect(shown.endsWith('exit "$rc")')).toBe(true);
     // The key is carried verbatim, so it needs no file on disk before the paste.
     expect(shown).toContain(SSH_KEY);
     expect(shown).toContain('ssh -i "$tmp" -p 2200 \'ubuntu@203.0.113.7\'');

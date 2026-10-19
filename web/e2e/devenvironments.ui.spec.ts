@@ -53,6 +53,18 @@ function stubToken(page: Page, token = "itest-jupyter-token-0f3a"): string[] {
   return requests;
 }
 
+// The environment's literal env values, served the way the route serves them:
+// on demand, for one environment. Returns the request log so a test can prove
+// the list alone does not carry them.
+function stubEnvValues(page: Page, values: Record<string, string>): string[] {
+  const requests: string[] = [];
+  page.route("**/api/devenvironments/env-values?*", (route) => {
+    requests.push(route.request().url());
+    return route.fulfill({ json: { values } });
+  });
+  return requests;
+}
+
 /**
  * Step 3's account, uid and gid boxes, in render order (the root toggle is a
  * checkbox). Scoped to the security section: the other three sections of the
@@ -128,6 +140,10 @@ test.describe("dev environments landing (mocked data)", () => {
   test("selecting an environment opens its connection + spec detail", async ({ page }) => {
     await stubList(page, { items: devEnvironmentList() });
     const requests = stubToken(page);
+    const envRequests = stubEnvValues(page, {
+      HF_HOME: "/home/ubuntu/.cache/huggingface",
+      HF_TOKEN: "hf_example",
+    });
     await page.goto("/cubestack/dev-environments");
 
     // The detail sits under the row it belongs to, so the row is a disclosure:
@@ -165,9 +181,16 @@ test.describe("dev environments landing (mocked data)", () => {
     // the mount path the CR states rather than one the panel invents.
     await expect(detail).toContainText("200Gi · /home/ubuntu");
     await expect(detail).toContainText("data-cache → /data");
-    // One environment variable per line.
+    // One environment variable per line, masked until asked for: the list
+    // response carries names only, so the values are fetched on reveal.
+    await expect(detail).toContainText(`HF_HOME=${"•".repeat(12)}`);
+    await expect(detail).toContainText(`HF_TOKEN=${"•".repeat(12)}`);
+    await expect(detail).not.toContainText("HF_TOKEN=hf_example");
+    expect(envRequests).toHaveLength(0);
+    await page.locator('[data-od-id="env-values-toggle"]').click();
     await expect(detail).toContainText("HF_HOME=/home/ubuntu/.cache/huggingface");
     await expect(detail).toContainText("HF_TOKEN=hf_example");
+    expect(envRequests).toHaveLength(1);
     await expect(detail).toContainText("python -m jupyter lab");
     await expect(detail).toContainText("--port 8080");
     await expect(detail).toContainText("api:8080/http");

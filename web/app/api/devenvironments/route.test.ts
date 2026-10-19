@@ -179,13 +179,14 @@ describe("GET /api/devenvironments", () => {
 
     expect(pinned.storage).toEqual({ size: "100Gi", mountPath: "/data", pvcRetention: "retain" });
     expect(pinned.volumes).toEqual([{ name: "data-cache", pvcName: "data-cache", mountPath: "/cache", readOnly: true }]);
-    // The type is defaulted the way the CRD does; a plain env value is carried
-    // with its variable, and a valueFrom is carried as the source it reads from.
+    // The type is defaulted the way the CRD does; a literal value is reduced to
+    // "there is one" — the list never carries it — and a valueFrom is carried
+    // as the source it reads from.
     expect(pinned.ports).toEqual([{ name: "api", type: "http", containerPort: 8080 }]);
     expect(pinned.env).toEqual([
-      { name: "HF_TOKEN", value: "hf_xxx", valueFrom: null },
-      { name: "HF_HOME", value: "/cache", valueFrom: null },
-      { name: "OPS_KEY", value: null, valueFrom: "secretKeyRef ops/key" },
+      { name: "HF_TOKEN", hasValue: true, valueFrom: null },
+      { name: "HF_HOME", hasValue: true, valueFrom: null },
+      { name: "OPS_KEY", hasValue: false, valueFrom: "secretKeyRef ops/key" },
     ]);
     expect(pinned.command).toEqual(["python", "-m", "jupyter", "lab"]);
     expect(pinned.args).toEqual(["--port", "8080"]);
