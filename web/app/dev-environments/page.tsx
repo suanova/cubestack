@@ -1454,26 +1454,38 @@ function EnvValues({ e }: { e: DevEnvironmentSummary }) {
   const [error, setError] = useState<string | null>(null);
   // Nothing to fetch when every entry is a reference: there are no literals.
   const hasLiteral = e.env.some((v) => v.hasValue);
+  // One request per mounted row. React's development StrictMode runs every
+  // effect twice (mount, simulated unmount, mount); sharing the in-flight
+  // promise keeps the second run from issuing another read — and lets the
+  // second run still apply the first one's answer, which a per-run
+  // cancellation flag alone would discard.
+  const requestRef = useRef<Promise<{ values: Record<string, string> } | { error: string }> | null>(null);
 
   useEffect(() => {
     if (!hasLiteral) return;
+    if (requestRef.current === null) {
+      requestRef.current = apiFetch(
+        `/api/devenvironments/env-values?namespace=${encodeURIComponent(e.namespace)}&name=${encodeURIComponent(e.name)}`,
+      )
+        .then(async (res) => {
+          const body = (await res.json().catch(() => ({}))) as ValidationErrorBody & { values?: Record<string, string> };
+          if (!res.ok || !body.values) {
+            return { error: validationMessage(t, body, res.status, "dev") };
+          }
+          return { values: body.values };
+        })
+        .catch(() => ({ error: t("dev.err.envUnreadable") }));
+    }
     let cancelled = false;
-    apiFetch(
-      `/api/devenvironments/env-values?namespace=${encodeURIComponent(e.namespace)}&name=${encodeURIComponent(e.name)}`,
-    )
-      .then(async (res) => {
-        const body = (await res.json().catch(() => ({}))) as ValidationErrorBody & { values?: Record<string, string> };
-        if (cancelled) return;
-        if (!res.ok || !body.values) {
-          setError(validationMessage(t, body, res.status, "dev"));
-          return;
-        }
-        setValues(body.values);
+    void requestRef.current.then((result) => {
+      if (cancelled) return;
+      if ("values" in result) {
+        setValues(result.values);
         setError(null);
-      })
-      .catch(() => {
-        if (!cancelled) setError(t("dev.err.envUnreadable"));
-      });
+      } else {
+        setError(result.error);
+      }
+    });
     return () => {
       cancelled = true;
     };
