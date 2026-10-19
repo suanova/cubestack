@@ -19,6 +19,7 @@ import { Readable } from "node:stream";
 
 import { getCoreClient, getKubeConfig } from "@/lib/kubernetes";
 import { logger } from "@/lib/log";
+import { isChatModel } from "./llm";
 import type { GatewayModel } from "./types";
 
 /** Namespace the AI Gateway Service is expected to live in
@@ -155,10 +156,13 @@ export async function resolveGatewayBase(): Promise<GatewayBase | null> {
 }
 
 /**
- * The AI Gateway's model catalog, memoized so neither a slow gateway nor a burst
- * of reads pays for the same call repeatedly. Null when the gateway could not be
- * reached or did not answer a list — the caller decides what that means (the
- * chat tab reads it as "no platform models", the playground answers 502).
+ * The AI Gateway's chat model catalogue, memoized so neither a slow gateway
+ * nor a burst of reads pays for the same call repeatedly. Models served for
+ * another modality are dropped: every caller (the chat tab, the assistant's
+ * model picker, the platform provider a save writes) speaks chat completions.
+ * Null when the gateway could not be reached or did not answer a list — the
+ * caller decides what that means (the chat tab reads it as "no platform
+ * models", the playground answers 502).
  */
 export async function gatewayCatalog(timeoutMs = 2500): Promise<GatewayModel[] | null> {
   const cached = catalogCache;
@@ -173,7 +177,12 @@ export async function gatewayCatalog(timeoutMs = 2500): Promise<GatewayModel[] |
         if (Array.isArray(body.data)) {
           models = body.data
             .filter((m): m is { id: string; owned_by?: unknown } => typeof m?.id === "string" && m.id.length > 0)
-            .map((m) => ({ id: m.id, ownedBy: typeof m.owned_by === "string" ? m.owned_by : "" }));
+            .map((m) => ({ id: m.id, ownedBy: typeof m.owned_by === "string" ? m.owned_by : "" }))
+            // The catalogue mixes modalities (the gateway serves image and
+            // embedding models beside chat ones), and every caller of this
+            // function is a chat surface: the chat tab, the assistant's model
+            // picker, and the platform provider the save writes.
+            .filter((m) => isChatModel(m.id));
         }
       } else {
         logger("gateway").warn("model catalog unavailable: the gateway answered an error", { status: res.status });

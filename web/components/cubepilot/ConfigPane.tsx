@@ -12,7 +12,7 @@ import { ReactNode, useCallback, useEffect, useRef, useState } from "react";
 
 import { apiFetch } from "@/lib/base-path";
 import { phaseText, waitingSeconds } from "@/lib/cubepilot/agentThread";
-import { MAX_PROVIDER_MODELS, modelIdError, modelKey } from "@/lib/cubepilot/llm";
+import { MAX_PROVIDER_MODELS, isChatModel, modelIdError, modelKey } from "@/lib/cubepilot/llm";
 import { providerNameNotice } from "@/lib/cubepilot/provider-names";
 import {
   PLATFORM_MODEL_NAME,
@@ -58,8 +58,21 @@ export function ConfigPane() {
   const [policySel, setPolicySel] = useState("");
   const providers: TemplateProviderOption[] = config.providers ?? [];
   const gatewayModels = config.gatewayModels ?? [];
-  /** The platform's own provider — the builtin entry pointing at the gateway. */
-  const platformProvider = providers.find((p) => p.name === PLATFORM_MODEL_NAME);
+  /** The platform's own provider — the builtin entry pointing at the gateway.
+   *  A template written before that entry existed declares none, and the
+   *  select used to be unusable until a save wrote one — but the save is
+   *  driven BY the selection, so the page had no way in. The gateway's served
+   *  chat models stand in until the first save writes the entry. */
+  const declaredPlatformProvider = providers.find((p) => p.name === PLATFORM_MODEL_NAME);
+  const platformProvider: TemplateProviderOption | undefined = declaredPlatformProvider?.models?.length
+    ? declaredPlatformProvider
+    : gatewayModels.length > 0
+      ? { name: PLATFORM_MODEL_NAME, models: gatewayModels, keyed: false, origin: "system" }
+      : declaredPlatformProvider;
+  /** The providers the select reads models from: the template's, plus the
+   *  platform's stand-in when the template declares no usable entry. */
+  const catalogProviders: TemplateProviderOption[] =
+    platformProvider && platformProvider !== declaredPlatformProvider ? [platformProvider, ...providers] : providers;
   /** Every selectable model, grouped by the provider it belongs to: the ref is
    *  what the CR stores, and the template's providers are the catalog — the
    *  reference says as much in its own hint ("models come from the template's
@@ -69,11 +82,17 @@ export function ConfigPane() {
    *  The gateway's served list is NOT the catalog: it is the ids the PLATFORM
    *  provider's entry gets written with, and they are already in here as that
    *  provider's models. Reading the catalog from it instead is what hid every
-   *  provider the user added. */
-  const modelGroups = providers
+   *  provider the user added. It is the fallback only when the template has no
+   *  platform entry at all (see platformProvider).
+   *
+   *  Non-chat ids are dropped: the assistant can only run a chat model, and a
+   *  provider's list may carry one the platform serves for another modality. */
+  const modelGroups = catalogProviders
     .map((p) => ({
       name: p.name,
-      options: (p.models ?? []).map((id) => ({ ref: modelKey(p.name, id), id })),
+      options: (p.models ?? [])
+        .filter((id) => isChatModel(id))
+        .map((id) => ({ ref: modelKey(p.name, id), id })),
     }))
     .filter((g) => g.options.length > 0)
     .map((g) => ({ ...g, options: g.options.filter((o, i, all) => all.findIndex((x) => x.ref === o.ref) === i) }));
@@ -85,12 +104,13 @@ export function ConfigPane() {
     : (modelOptions[0]?.ref ?? "");
   /** The provider the current selection belongs to, for the note under the
    *  select: an external model does not run through the platform endpoint. */
-  const selectedProvider = providers.find((p) => modelValue.startsWith(`${p.name}/`)) ?? platformProvider;
+  const selectedProvider = catalogProviders.find((p) => modelValue.startsWith(`${p.name}/`)) ?? platformProvider;
   /** The platform provider's ids: what the gateway serves, as the template's
    *  platform entry holds them. This is the card's "platform" list — the select
    *  above no longer reads it as the catalog, because that is what hid every
-   *  provider the user added. */
-  const systemModels: string[] = platformProvider?.models?.length ? platformProvider.models : gatewayModels;
+   *  provider the user added. Non-chat ids are dropped here too: the entry may
+   *  have been written before the chat filter existed. */
+  const systemModels: string[] = (platformProvider?.models?.length ? platformProvider.models : gatewayModels).filter(isChatModel);
   const selectedId = displayModelName(config.selectedModel);
   const externalProviders = providers.filter((p) => p.origin !== "system");
   const [confirmBusy, setConfirmBusy] = useState(false);
@@ -528,8 +548,11 @@ export function ConfigPane() {
                 </Box>
                 {/* Only after a read that SUCCEEDED: a failed read leaves the
                     catalog empty too, and "the template declares no provider" is a
-                    statement about the template, not about this page's luck. */}
-                {loaded && !loadError && providers.length === 0 ? (
+                    statement about the template, not about this page's luck. And
+                    only while there is nothing to pick: the gateway's served
+                    models stand in for a missing platform entry, so the warning
+                    would be contradicted by a usable select beside it. */}
+                {loaded && !loadError && providers.length === 0 && modelOptions.length === 0 ? (
                   <Box sx={{ fontSize: 12, color: "#e15c5c" }} data-od-id="cp-config-model-empty">
                     {t("cubepilot.config.noModels")}
                   </Box>

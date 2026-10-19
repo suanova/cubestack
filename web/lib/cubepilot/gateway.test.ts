@@ -229,7 +229,16 @@ describe("lib/cubepilot/gateway", () => {
     const fetchMock = vi.fn(
       async () =>
         new Response(
-          JSON.stringify({ object: "list", data: [{ id: "qwen38-27b-fp16", owned_by: "cubestack" }, { id: "dsv4" }] }),
+          JSON.stringify({
+            object: "list",
+            data: [
+              { id: "qwen38-27b-fp16", owned_by: "cubestack" },
+              { id: "dsv4" },
+              // The gateway serves it, but it cannot answer a chat completion:
+              // every reader of this catalog is a chat surface.
+              { id: "qwen-image21", owned_by: "cubestack" },
+            ],
+          }),
           { status: 200, headers: { "content-type": "application/json" } },
         ),
     );

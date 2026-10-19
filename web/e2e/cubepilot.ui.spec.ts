@@ -1767,4 +1767,31 @@ test.describe("cubepilot config (AgentInstance CR + AgentTemplate catalog)", () 
     await expect(page.locator('[data-od-id="cp-config-prompt-input"]')).toHaveValue("巡检优先,写操作全部走审批");
     await expect(page.locator('[data-od-id="cp-config-status"]')).toContainText("admin-cubepilot");
   });
+
+  test("offers the gateway's chat models when the template declares no provider", async ({ page }) => {
+    // A template written before the platform provider existed declares none,
+    // and the select used to be unusable until a save wrote one — but the save
+    // is driven BY the selection, so the page had no way in. The gateway's
+    // catalogue stands in until the first save writes the entry, and the
+    // non-chat ids in it stay out.
+    await stubAgent(page, {
+      config: { ...CONFIG_READY, selectedModel: "", providers: [], gatewayModels: ["qwen38-27b", "qwen-image21"] },
+    });
+    await page.goto("/cubestack/cubepilot");
+    await page.locator('[data-od-id="cp-tab-config"]').click();
+
+    const pane = page.locator('[data-od-id="cp-config-pane"]');
+    const modelSelect = page.locator('[data-od-id="cp-config-model-select"]');
+    await expect(modelSelect).toBeEnabled();
+    await expect(modelSelect).toHaveValue("cubestack/qwen38-27b");
+    await expect(modelSelect.locator("option")).toHaveCount(1);
+    await expect(modelSelect).not.toContainText("qwen-image21");
+    // The platform list beside the select drops the image model too.
+    const systemList = page.locator('[data-od-id="cp-config-llm-system"]');
+    await expect(systemList).toContainText("qwen38-27b");
+    await expect(systemList).not.toContainText("qwen-image21");
+    // …and the page does not claim the template declares no provider while a
+    // usable select sits beside that claim.
+    await expect(pane).not.toContainText("模板未声明 provider");
+  });
 });

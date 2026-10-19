@@ -100,6 +100,27 @@ export function modelIdError(id: string): string {
   return "";
 }
 
+/**
+ * Model-id tokens naming a non-chat modality. The gateway's /v1/models answer
+ * carries no modality field (only id and owned_by), so the id the platform
+ * registered is the signal there is. These cover the non-chat families a
+ * gateway publishes — image, embedding, rerank, speech, video, moderation —
+ * matched on a token boundary so a chat id that merely contains one of the
+ * words is kept.
+ */
+const NON_CHAT_MODEL_ID =
+  /(?:^|[^a-z0-9])(?:image\d*|img|dall-?e|diffusion|sdxl|flux|midjourney|embed(?:ding)?s?|rerank(?:er)?|whisper|tts|audio|speech|video|veo|sora|moderation)(?:$|[^a-z0-9])/i;
+
+/**
+ * Whether a model id names a chat model — the only kind the chat tab and the
+ * assistant can use. Models the platform serves for another modality (an
+ * image generator, an embedding model) are in the same gateway catalogue but
+ * cannot answer a chat completion, so they must not be offered as ones.
+ */
+export function isChatModel(id: string): boolean {
+  return !NON_CHAT_MODEL_ID.test(id.trim());
+}
+
 /** The message for a provider's model list, or "" when the CRD accepts it. */
 export function modelIdsError(ids: string[]): string {
   if (ids.length === 0) return "the provider needs at least one model id: list the ids the endpoint serves";

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   credentialChoiceError,
+  isChatModel,
   llmCredentialName,
   modelIdError,
   modelIdsError,
@@ -84,6 +85,41 @@ describe("modelKey", () => {
 
   it("keeps an id that merely contains the provider name intact", () => {
     expect(modelKey("vllm", "other/vllm/x")).toBe("vllm/other/vllm/x");
+  });
+});
+
+describe("isChatModel", () => {
+  it("keeps chat and vision ids", () => {
+    for (const id of [
+      "qwen38-27b",
+      "qwen38-27b-fp16",
+      "dsv4-flash",
+      "glm-5.2-chat",
+      "qwen-vl-plus",
+      "llama-3.1-70b-instruct",
+      "fluxion-chat",
+    ]) {
+      expect(isChatModel(id), id).toBe(true);
+    }
+  });
+
+  it("drops the other modalities the gateway serves", () => {
+    for (const id of [
+      "qwen-image21",
+      "qwen-image-edit-2511",
+      "stable-diffusion-xl",
+      "sdxl-turbo",
+      "dall-e-3",
+      "text-embedding-3-large",
+      "bge-reranker-v2",
+      "whisper-1",
+      "tts-1",
+      "gpt-4o-audio",
+      "veo-3",
+      "sora-2",
+    ]) {
+      expect(isChatModel(id), id).toBe(false);
+    }
   });
 });
 
