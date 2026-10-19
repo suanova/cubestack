@@ -11,7 +11,7 @@
 import { getCoreClient, getCustomObjectsClient } from "@/lib/kubernetes";
 import { logger } from "@/lib/log";
 
-import { k8sErrorCode, k8sErrorResponse, tasksNamespace } from "./taskcrd";
+import { k8sErrorCode, k8sErrorDetails, k8sErrorResponse, tasksNamespace } from "./taskcrd";
 import type { TemplateProviderCr } from "./llm";
 import { modelKey } from "./llm";
 import { PLATFORM_MODEL_NAME, type TemplateProviderOption } from "./types";
@@ -171,10 +171,11 @@ async function getCr<T>(plural: string, name: string): Promise<T | null> {
     return out;
   } catch (e) {
     if (k8sErrorCode(e) === 404) {
-      // Treated as "absent": log it, because a 404 here is usually a missing
-      // namespace, a CRD that is not installed, or the operator not having
-      // created the object — the three causes of an empty page.
-      logger("agent").warn("get 404 (treated as absent)", { plural, namespace: ns, name, error: e });
+      // An object-level 404 is the ordinary answer for a CR nobody has created
+      // yet — the poll of an unconfigured box must not read as a fault. A 404
+      // with no details means the API group is gone: that one empties the page.
+      const log = k8sErrorDetails(e) ? logger("agent").debug : logger("agent").warn;
+      log("get 404 (treated as absent)", { plural, namespace: ns, name, error: e });
       return null;
     }
     throw e;

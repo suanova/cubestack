@@ -114,7 +114,7 @@ type Asset struct {
 }
 
 // OverrideType is the parameter type of an override.
-// +kubebuilder:validation:Enum=integer;string;boolean
+// +kubebuilder:validation:Enum=integer;string;stringList;boolean
 type OverrideType string
 
 const (
@@ -123,6 +123,11 @@ const (
 
 	// OverrideTypeString is a string parameter.
 	OverrideTypeString OverrideType = "string"
+
+	// OverrideTypeStringList is a list-of-strings parameter. It resolves to the
+	// list's entries joined with commas, which is how templates embed it; the
+	// entries therefore must not contain commas themselves.
+	OverrideTypeStringList OverrideType = "stringList"
 
 	// OverrideTypeBoolean is a boolean parameter.
 	OverrideTypeBoolean OverrideType = "boolean"
@@ -138,7 +143,8 @@ type Override struct {
 	// Type is the parameter type, deciding how override values are parsed.
 	Type OverrideType `json:"type"`
 
-	// Enum lists the acceptable values.
+	// Enum lists the acceptable values. For a stringList parameter every
+	// element of the list must be one of the values.
 	// +optional
 	// +kubebuilder:validation:items:Schemaless
 	Enum []apiextensionsv1.JSON `json:"enum,omitempty"`
@@ -607,6 +613,25 @@ type Role struct {
 	// PodTemplate is the Pod template of the role.
 	PodTemplate PodTemplate `json:"podTemplate"`
 
+	// NodeSelector additionally constrains this role's pods to the nodes
+	// carrying the declared labels. The value is a comma-separated list of
+	// Kubernetes label pairs, "key=value[,key=value...]", and may be a template
+	// referencing overrides, e.g. '{{ overrides.prefill_nodeSelector }}'. The
+	// console renders such a template as a single- or multi-select node picker
+	// and writes kubernetes.io/hostname=<node> for each selected node, so end
+	// users choose nodes rather than composing pairs. A resolved entry that is
+	// not a valid pair fails the render with InvalidOverride. When a key has
+	// several values the selection becomes a required nodeAffinity In term,
+	// since a nodeSelector map cannot express "either node". It is merged into
+	// the role's podTemplate.nodeSelector after the profile-level
+	// spec.nodeSelector, so it wins on a key conflict, and an empty value adds
+	// no selector at all. Unlike spec.nodeSelector it applies to this role
+	// only — the per-role knob of a profile whose roles may live in different
+	// node pools.
+	// +optional
+	// +kubebuilder:validation:Pattern="^([^{}=]+=[^{}=]+(,[^{}=]+=[^{}=]+)*|[{]{2}[^{}]*[}]{2})$"
+	NodeSelector string `json:"nodeSelector,omitempty"`
+
 	// Accelerator overrides the profile-level accelerator for this role: a
 	// complete {vendor, models} replacement for heterogeneous profiles (design
 	// §3.2 roles[].accelerator). A role declaring it must declare
@@ -681,19 +706,26 @@ type InferenceRuntimeProfileSpec struct {
 	Endpoint EndpointSpec `json:"endpoint"`
 
 	// NodeSelector additionally constrains every pod of this service (of every
-	// role) to the nodes carrying one declared label. The value is a single
-	// Kubernetes label pair, "key=value", and may be a template referencing
-	// overrides, e.g. '{{ overrides.nodeSelector }}'; a resolved value that is
-	// not a valid pair fails the render with InvalidOverride. It is a string
-	// rather than a map because the label's key belongs to the cluster and not
-	// to the profile: a site that splits its nodes into pools names the pool
-	// itself, whereas the keys of podTemplate.nodeSelector are fixed by the
-	// profile author. The pair is merged into every role's nodeSelector — a
-	// plain AND with the accelerator model pin, which it must not contradict —
-	// and an empty value adds no selector at all, which is what every profile
-	// that leaves the field unset does.
+	// role) to the nodes carrying the declared labels. The value is a
+	// comma-separated list of Kubernetes label pairs, "key=value[,key=value...]",
+	// and may be a template referencing overrides, e.g.
+	// '{{ overrides.nodeSelector }}'; the console renders such a template as a
+	// single- or multi-select node picker and writes
+	// kubernetes.io/hostname=<node> for each selected node, so end users choose
+	// nodes rather than composing pairs. A resolved entry that is not a valid
+	// pair fails the render with InvalidOverride. When a key has several values
+	// the selection becomes a required nodeAffinity In term, since a
+	// nodeSelector map cannot express "either node". It is a string rather than
+	// a map because the label's key belongs to the cluster and not to the
+	// profile: a site that splits its nodes into pools names the pool itself,
+	// whereas the keys of podTemplate.nodeSelector are fixed by the profile
+	// author. The pairs are merged into every role's nodeSelector — a plain AND
+	// with the accelerator model pin, which they must not contradict — and an
+	// empty value adds no selector at all, which is what every profile that
+	// leaves the field unset does. A role's own nodeSelector merges after this
+	// one, so it wins on a shared key.
 	// +optional
-	// +kubebuilder:validation:Pattern="^([^{}=]+=[^{}=]+|[{]{2}[^{}]*[}]{2})$"
+	// +kubebuilder:validation:Pattern="^([^{}=]+=[^{}=]+(,[^{}=]+=[^{}=]+)*|[{]{2}[^{}]*[}]{2})$"
 	NodeSelector string `json:"nodeSelector,omitempty"`
 
 	// PodAntiAffinity places this service's pods (of every role) across the

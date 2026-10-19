@@ -185,18 +185,25 @@ spec:
               nodeSelector:
                 description: |-
                   NodeSelector additionally constrains every pod of this service (of every
-                  role) to the nodes carrying one declared label. The value is a single
-                  Kubernetes label pair, "key=value", and may be a template referencing
-                  overrides, e.g. '{{ overrides.nodeSelector }}'; a resolved value that is
-                  not a valid pair fails the render with InvalidOverride. It is a string
-                  rather than a map because the label's key belongs to the cluster and not
-                  to the profile: a site that splits its nodes into pools names the pool
-                  itself, whereas the keys of podTemplate.nodeSelector are fixed by the
-                  profile author. The pair is merged into every role's nodeSelector — a
-                  plain AND with the accelerator model pin, which it must not contradict —
-                  and an empty value adds no selector at all, which is what every profile
-                  that leaves the field unset does.
-                pattern: ^([^{}=]+=[^{}=]+|[{]{2}[^{}]*[}]{2})$
+                  role) to the nodes carrying the declared labels. The value is a
+                  comma-separated list of Kubernetes label pairs, "key=value[,key=value...]",
+                  and may be a template referencing overrides, e.g.
+                  '{{ overrides.nodeSelector }}'; the console renders such a template as a
+                  single- or multi-select node picker and writes
+                  kubernetes.io/hostname=<node> for each selected node, so end users choose
+                  nodes rather than composing pairs. A resolved entry that is not a valid
+                  pair fails the render with InvalidOverride. When a key has several values
+                  the selection becomes a required nodeAffinity In term, since a
+                  nodeSelector map cannot express "either node". It is a string rather than
+                  a map because the label's key belongs to the cluster and not to the
+                  profile: a site that splits its nodes into pools names the pool itself,
+                  whereas the keys of podTemplate.nodeSelector are fixed by the profile
+                  author. The pairs are merged into every role's nodeSelector — a plain AND
+                  with the accelerator model pin, which they must not contradict — and an
+                  empty value adds no selector at all, which is what every profile that
+                  leaves the field unset does. A role's own nodeSelector merges after this
+                  one, so it wins on a shared key.
+                pattern: ^([^{}=]+=[^{}=]+(,[^{}=]+=[^{}=]+)*|[{]{2}[^{}]*[}]{2})$
                 type: string
               overrides:
                 description: Overrides declares the user-adjustable parameters.
@@ -214,7 +221,9 @@ spec:
                         users.
                       type: string
                     enum:
-                      description: Enum lists the acceptable values.
+                      description: |-
+                        Enum lists the acceptable values. For a stringList parameter every
+                        element of the list must be one of the values.
                       items:
                         x-kubernetes-preserve-unknown-fields: true
                       type: array
@@ -237,6 +246,7 @@ spec:
                       enum:
                       - integer
                       - string
+                      - stringList
                       - boolean
                       type: string
                   required:
@@ -335,6 +345,25 @@ spec:
                     name:
                       description: Name is the role name, unique within the profile.
                       minLength: 1
+                      type: string
+                    nodeSelector:
+                      description: |-
+                        NodeSelector additionally constrains this role's pods to the nodes
+                        carrying the declared labels. The value is a comma-separated list of
+                        Kubernetes label pairs, "key=value[,key=value...]", and may be a template
+                        referencing overrides, e.g. '{{ overrides.prefill_nodeSelector }}'. The
+                        console renders such a template as a single- or multi-select node picker
+                        and writes kubernetes.io/hostname=<node> for each selected node, so end
+                        users choose nodes rather than composing pairs. A resolved entry that is
+                        not a valid pair fails the render with InvalidOverride. When a key has
+                        several values the selection becomes a required nodeAffinity In term,
+                        since a nodeSelector map cannot express "either node". It is merged into
+                        the role's podTemplate.nodeSelector after the profile-level
+                        spec.nodeSelector, so it wins on a key conflict, and an empty value adds
+                        no selector at all. Unlike spec.nodeSelector it applies to this role
+                        only — the per-role knob of a profile whose roles may live in different
+                        node pools.
+                      pattern: ^([^{}=]+=[^{}=]+(,[^{}=]+=[^{}=]+)*|[{]{2}[^{}]*[}]{2})$
                       type: string
                     podTemplate:
                       description: PodTemplate is the Pod template of the role.

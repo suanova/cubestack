@@ -17,8 +17,11 @@ import {
   newAgentMsg,
   newApproval,
   newQuestion,
+  openCardIds,
+  pendingCollection,
   remainingSeconds,
   seedAnswers,
+  settleCardsAbsent,
   TOOL_SUMMARY_CHARS,
   toolSummary,
   turnStatus,
@@ -801,6 +804,79 @@ describe("carryOpenCards — a refresh keeps the reader's cards", () => {
 
   it("nothing to carry leaves the refreshed transcript alone", () => {
     expect(carryOpenCards([user, { ...newAgentMsg(1, T0), phase: "done" as const }], refreshed)).toBe(refreshed);
+  });
+});
+
+describe("pendingCollection — an unreadable answer is not an empty one", () => {
+  it("returns the collection a read answered with", () => {
+    const items = [{ approvalId: "app-1" }];
+    expect(pendingCollection({ approvals: items }, "approvals")).toBe(items);
+    expect(pendingCollection({ approvals: [] }, "approvals")).toEqual([]);
+  });
+
+  it("throws when the body carries no collection, so the sweep cannot settle on it", () => {
+    // A 200 with no `approvals` is an answer this surface cannot read: taking it
+    // as empty would retire cards the gateway is still waiting on.
+    expect(() => pendingCollection({}, "approvals")).toThrow();
+    expect(() => pendingCollection({ approvals: null }, "approvals")).toThrow();
+    expect(() => pendingCollection(null, "questions")).toThrow();
+  });
+});
+
+describe("openCardIds — what a read's sweep may speak for", () => {
+  it("collects the open cards of every turn, and settled ones are not open", () => {
+    const open = newApproval({ approvalId: "app-1", name: "shell" });
+    const settled = { ...newApproval({ approvalId: "app-2", name: "shell" }), state: "approved" as const };
+    const q = newQuestion("q-1", [], 600, T0);
+    const user = { id: 0, role: "user" as const, text: "清理掉那个开发环境" };
+    const ids = openCardIds([user, { ...newAgentMsg(1, T0), approvals: [open, settled], questions: [q] }]);
+    expect([...ids.approvals]).toEqual(["app-1"]);
+    expect([...ids.questions]).toEqual(["q-1"]);
+  });
+});
+
+describe("settleCardsAbsent — a card decided in another window stops waiting", () => {
+  const card = (id: string): AgentApproval =>
+    newApproval({ approvalId: id, name: "shell", command: "kubectl delete pod x", level: "write" });
+  const withCards = (...cards: AgentApproval[]): AgentMsg[] => [
+    { ...newAgentMsg(1, T0), phase: "done" as const, approvals: cards },
+  ];
+  const withQuestion = (q: AgentQuestion): AgentMsg[] => [
+    { ...newAgentMsg(1, T0), phase: "done" as const, questions: [q] },
+  ];
+
+  it("settles an open approval the answer no longer carries", () => {
+    const out = settleCardsAbsent(withCards(card("app-1")), "approvals", new Set(), new Set(["app-1"]));
+    expect(out[0].approvals[0].state).toBe("stopped");
+  });
+
+  it("a card the answer still carries is left alone — the array with it", () => {
+    const msgs = withCards(card("app-1"));
+    expect(settleCardsAbsent(msgs, "approvals", new Set(["app-1"]), new Set(["app-1"]))).toBe(msgs);
+  });
+
+  it("a card that arrived while the read was in flight is left alone", () => {
+    // Not in `before`: the answer was taken before it existed, so its silence
+    // about this card says nothing.
+    const out = settleCardsAbsent(withCards(card("app-1")), "approvals", new Set(), new Set());
+    expect(out[0].approvals[0].state).toBe("pending");
+  });
+
+  it("a card this surface is mid-decision on is left alone", () => {
+    const deciding = { ...card("app-1"), state: "deciding" as const };
+    const out = settleCardsAbsent([{ ...newAgentMsg(1, T0), phase: "done" as const, approvals: [deciding] }], "approvals", new Set(), new Set(["app-1"]));
+    expect(out[0].approvals[0].state).toBe("deciding");
+  });
+
+  it("settles a question the answer no longer carries as expired", () => {
+    const q = newQuestion("q-1", [{ questionId: "a", header: "pick", question: "which one?" }], 600, T0);
+    const out = settleCardsAbsent(withQuestion(q), "questions", new Set(), new Set(["q-1"]));
+    expect(out[0].questions[0].state).toBe("expired");
+  });
+
+  it("one kind's sweep never touches the other kind's cards", () => {
+    const out = settleCardsAbsent(withCards(card("app-1")), "questions", new Set(), new Set(["app-1"]));
+    expect(out[0].approvals[0].state).toBe("pending");
   });
 });
 

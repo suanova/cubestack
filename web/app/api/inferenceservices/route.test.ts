@@ -98,6 +98,8 @@ function stubCluster() {
               { name: "prefillReplicas", type: "integer", default: 1, min: 1, max: 8 },
               { name: "decodeReplicas", type: "integer", default: 1, min: 1, max: 16 },
               { name: "groupSize", type: "integer", default: 1, enum: [1, 2, 4] },
+              { name: "prefill_nodeSelector", type: "stringList", default: [] },
+              { name: "decode_nodeSelector", type: "stringList", default: [], enum: ["kubernetes.io/hostname=worker-a", "kubernetes.io/hostname=worker-b"] },
             ],
             roles: [
               { name: "router", workload: { kind: "Deployment" } },
@@ -213,11 +215,17 @@ describe("inference services route", () => {
       vendor: "metax",
       gpuModel: "MXC500",
       gpuPerPod: 8,
+      gpuRoles: [
+        { name: "prefill", gpuPerPod: 8, model: "MXC500" },
+        { name: "decode", gpuPerPod: 8, model: "MXC500" },
+      ],
       // override knobs declared by the profile; effective value = user value, else default
       overrides: [
         { name: "prefillReplicas", type: "integer", min: 1, max: 8, enum: null, current: 1 },
         { name: "decodeReplicas", type: "integer", min: 1, max: 16, enum: null, current: 2 },
         { name: "groupSize", type: "integer", min: null, max: null, enum: [1, 2, 4], current: 1 },
+        { name: "prefill_nodeSelector", type: "stringList", current: [], default: [] },
+        { name: "decode_nodeSelector", type: "stringList", current: [], default: [] },
       ],
       // no status yet -> no phase
       phase: null,
@@ -230,6 +238,141 @@ describe("inference services route", () => {
     // Sort only; both services share the profile.
     expect(body.items).toHaveLength(2);
     expect(pro.name).toBe("dsv4-pro-pd");
+  });
+
+  it("projects each GPU role's effective model and card count", async () => {
+    // The PD profile pins each role's GPU model through a role-scoped override
+    // reference in its pod-template node selector. The list must report the
+    // selected models, not the profile's first declared one, and one entry per
+    // GPU role so the UI can show "prefill 8 × MXC500 · decode 8 × MXC550".
+    listClusterCustomObject.mockImplementation(({ plural }: { plural: string }) => {
+      if (plural === "inferenceservices") {
+        return Promise.resolve({
+          items: [
+            {
+              metadata: { name: "test", namespace: "default" },
+              spec: {
+                modelRef: "deepseek-v4-flash-w8a8",
+                profileRef: "metax-sglang-dsv4-pd",
+                overrides: { prefill_metax_model: "MXC500", decode_metax_model: "MXC550" },
+              },
+            },
+          ],
+        });
+      }
+      if (plural === "modelversions") {
+        return Promise.resolve({
+          items: [
+            { metadata: { name: "deepseek-v4-flash-w8a8" }, spec: { architecture: "deepseek_v4", quantization: "w8a8" } },
+          ],
+        });
+      }
+      if (plural === "inferenceruntimeprofiles") {
+        return Promise.resolve({
+          items: [
+            {
+              metadata: { name: "metax-sglang-dsv4-pd" },
+              spec: {
+                engine: { name: "sglang", version: "0.5.13" },
+                accelerator: { vendor: "metax", models: ["MXC500", "MXC550"] },
+                overrides: [
+                  { name: "prefill_metax_model", type: "string", default: "MXC550", enum: ["MXC500", "MXC550"] },
+                  { name: "decode_metax_model", type: "string", default: "MXC550", enum: ["MXC500", "MXC550"] },
+                ],
+                roles: [
+                  {
+                    name: "prefill",
+                    podTemplate: {
+                      nodeSelector: { "metax-tech.com/gpu.product": "{{ overrides.prefill_metax_model }}" },
+                      resources: { gpuPerPod: 8 },
+                    },
+                  },
+                  {
+                    name: "decode",
+                    podTemplate: {
+                      nodeSelector: { "metax-tech.com/gpu.product": "{{ overrides.decode_metax_model }}" },
+                      resources: { gpuPerPod: 8 },
+                    },
+                  },
+                  { name: "router" },
+                ],
+              },
+            },
+          ],
+        });
+      }
+      return Promise.resolve({ items: [] });
+    });
+
+    const { GET } = await importRoute();
+    const body = await (await GET(await authedGet(), undefined)).json();
+    expect(body.items[0].gpuRoles).toEqual([
+      { name: "prefill", gpuPerPod: 8, model: "MXC500" },
+      { name: "decode", gpuPerPod: 8, model: "MXC550" },
+    ]);
+    expect(body.items[0].gpuModel).toBe("MXC500 / MXC550");
+  });
+
+  it("uses a role's own accelerator for its GPU model", async () => {
+    // A heterogeneous PD profile: decode runs on NVIDIA, so its label and its
+    // fallback model come from the role, not from the profile-level metax one.
+    listClusterCustomObject.mockImplementation(({ plural }: { plural: string }) => {
+      if (plural === "inferenceservices") {
+        return Promise.resolve({
+          items: [
+            {
+              metadata: { name: "test", namespace: "default" },
+              spec: { modelRef: "deepseek-v4-flash-w8a8", profileRef: "heterogeneous" },
+            },
+          ],
+        });
+      }
+      if (plural === "modelversions") {
+        return Promise.resolve({
+          items: [
+            { metadata: { name: "deepseek-v4-flash-w8a8" }, spec: { architecture: "deepseek_v4", quantization: "w8a8" } },
+          ],
+        });
+      }
+      if (plural === "inferenceruntimeprofiles") {
+        return Promise.resolve({
+          items: [
+            {
+              metadata: { name: "heterogeneous" },
+              spec: {
+                engine: { name: "sglang", version: "0.5.13" },
+                accelerator: { vendor: "metax", models: ["MXC500"] },
+                roles: [
+                  { name: "prefill", podTemplate: { resources: { gpuPerPod: 8 } } },
+                  {
+                    name: "decode",
+                    accelerator: { vendor: "nvidia", models: ["H200"] },
+                    podTemplate: {
+                      nodeSelector: { "nvidia.com/gpu.product": "H200" },
+                      resources: { gpuPerPod: 8 },
+                    },
+                  },
+                  {
+                    name: "decode-unpinned",
+                    accelerator: { vendor: "nvidia", models: ["H200"] },
+                    podTemplate: { resources: { gpuPerPod: 8 } },
+                  },
+                ],
+              },
+            },
+          ],
+        });
+      }
+      return Promise.resolve({ items: [] });
+    });
+
+    const { GET } = await importRoute();
+    const body = await (await GET(await authedGet(), undefined)).json();
+    expect(body.items[0].gpuRoles).toEqual([
+      { name: "prefill", gpuPerPod: 8, model: "MXC500" },
+      { name: "decode", gpuPerPod: 8, model: "H200" },
+      { name: "decode-unpinned", gpuPerPod: 8, model: "H200" },
+    ]);
   });
 
   it("projects the controller's phase and its reason", async () => {
@@ -420,6 +563,56 @@ describe("inference services route", () => {
     });
   });
 
+  it("patches a stringList override as a JSON array", async () => {
+    patchNamespacedCustomObject.mockResolvedValue({});
+    const { PATCH } = await importRoute();
+    const req = await authedRequest(
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          namespace: "project-a",
+          name: "dsv4-flash-pd",
+          overrides: {
+            decode_nodeSelector: ["kubernetes.io/hostname=worker-a", "kubernetes.io/hostname=worker-b"],
+          },
+        }),
+      },
+      "http://localhost/api/inferenceservices",
+    );
+    const res = await PATCH(req, undefined);
+    expect(res.status).toBe(200);
+    expect(patchNamespacedCustomObject).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: [
+          {
+            op: "add",
+            path: "/spec/overrides/decode_nodeSelector",
+            value: ["kubernetes.io/hostname=worker-a", "kubernetes.io/hostname=worker-b"],
+          },
+        ],
+      }),
+    );
+  });
+
+  it("rejects a PATCH with a scalar for a stringList override", async () => {
+    const { PATCH } = await importRoute();
+    const req = await authedRequest(
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          namespace: "project-a",
+          name: "dsv4-flash-pd",
+          overrides: { prefill_nodeSelector: "kubernetes.io/hostname=worker-a" },
+        }),
+      },
+      "http://localhost/api/inferenceservices",
+    );
+    const res = await PATCH(req, undefined);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "overrideNotStringList" });
+    expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
   it("rejects a PATCH with a non-primitive override value", async () => {
     const { PATCH } = await importRoute();
     const req = await authedRequest(
@@ -581,6 +774,83 @@ describe("inference services create (POST)", () => {
         overrides: { decodeReplicas: 4, prefillReplicas: 2, groupSize: 2 },
       },
     });
+  });
+
+  it("creates a service with a stringList override", async () => {
+    const { POST } = await importRoute();
+    const res = await POST(
+      await buildPost({
+        namespace: "project-a",
+        name: "new-serve",
+        profileRef: "metax-sglang-dsv4-pd",
+        modelRef: "deepseek-v4-flash-w8a8-v1",
+        overrides: {
+          decode_nodeSelector: ["kubernetes.io/hostname=worker-a", "kubernetes.io/hostname=worker-b"],
+        },
+      }),
+      undefined,
+    );
+    expect(res.status).toBe(201);
+    expect(createNamespacedCustomObject.mock.calls[0][0].body).toMatchObject({
+      spec: {
+        overrides: {
+          decode_nodeSelector: ["kubernetes.io/hostname=worker-a", "kubernetes.io/hostname=worker-b"],
+        },
+      },
+    });
+  });
+
+  it("rejects a scalar for a stringList override", async () => {
+    const { POST } = await importRoute();
+    const res = await POST(
+      await buildPost({
+        namespace: "project-a",
+        name: "new-serve",
+        profileRef: "metax-sglang-dsv4-pd",
+        modelRef: "deepseek-v4-flash-w8a8-v1",
+        overrides: { prefill_nodeSelector: "kubernetes.io/hostname=worker-a" },
+      }),
+      undefined,
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "overrideNotStringList" });
+    expect(createNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
+  it("rejects a stringList entry outside the declared enum", async () => {
+    const { POST } = await importRoute();
+    const res = await POST(
+      await buildPost({
+        namespace: "project-a",
+        name: "new-serve",
+        profileRef: "metax-sglang-dsv4-pd",
+        modelRef: "deepseek-v4-flash-w8a8-v1",
+        overrides: { decode_nodeSelector: ["kubernetes.io/hostname=worker-c"] },
+      }),
+      undefined,
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "overrideNotAllowed" });
+    expect(createNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
+  it("rejects a stringList entry containing a comma", async () => {
+    const { POST } = await importRoute();
+    const res = await POST(
+      await buildPost({
+        namespace: "project-a",
+        name: "new-serve",
+        profileRef: "metax-sglang-dsv4-pd",
+        modelRef: "deepseek-v4-flash-w8a8-v1",
+        // prefill_nodeSelector declares no enum, so this guards the comma
+        // rule itself rather than the enum check.
+        overrides: { prefill_nodeSelector: ["node-pool=a,node-pool=b"] },
+      }),
+      undefined,
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "overrideNotAllowed" });
+    expect(createNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
   it("rejects an invalid (non-DNS) name", async () => {

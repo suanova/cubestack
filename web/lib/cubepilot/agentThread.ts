@@ -459,6 +459,92 @@ export function carryOpenCards<T extends { role: string }>(prev: readonly T[], n
   return out ?? next;
 }
 
+/**
+ * The pending collection a read answered with, or a throw.
+ *
+ * A 200 whose body carries no collection is not "nothing is pending": it is an
+ * answer this surface cannot read, and the sweep below would take it as an empty
+ * one and settle cards that are still waiting. The distinction is the one the
+ * callers already draw for a failed status — only the server saying "empty" may
+ * retire a card — so an unreadable answer takes the same path as a failed read.
+ */
+export function pendingCollection<T>(body: unknown, key: "approvals" | "questions"): T[] {
+  const value = (body as Record<string, unknown> | null | undefined)?.[key];
+  if (!Array.isArray(value)) throw new Error(`the ${key} answer carried no list`);
+  return value as T[];
+}
+
+/** The ids of the cards a thread still has open, per kind. A pending read
+ *  cannot speak for a card that arrives while it is in flight, so the caller
+ *  takes this snapshot BEFORE it asks. */
+export function openCardIds<T extends { role: string }>(
+  msgs: readonly T[],
+): { approvals: Set<string>; questions: Set<string> } {
+  const approvals = new Set<string>();
+  const questions = new Set<string>();
+  for (const m of msgs) {
+    if (m.role !== "agent") continue;
+    for (const a of openApprovals(m as unknown as AgentMsg)) approvals.add(a.callId);
+    for (const q of openQuestions(m as unknown as AgentMsg)) questions.add(q.callId);
+  }
+  return { approvals, questions };
+}
+
+/**
+ * Settle the cards a pending read no longer carries.
+ *
+ * Membership in the read IS the open/closed signal — the gateway's own account
+ * of what is still waiting, the rule `reopenOrExpireQuestion` applies after a
+ * refused answer — so a card that was open when the read was issued and is
+ * absent from the answer is not waiting on this surface any more: another
+ * window decided it, or the gateway closed it. Nothing else retires one: the
+ * transcript carries no cards, `carryOpenCards` keeps the open ones alive
+ * across a refresh by design, and `approval_resolved` reaches only the stream
+ * of the surface that decided (or still holds the run). Without this, a card
+ * decided in another window stays a live control here forever.
+ *
+ * `before` bounds the sweep to the ids that were open BEFORE the request went
+ * out, because an answer cannot know about a card a stream added while it was
+ * in flight. A sweep that still gets it wrong costs one tick: the next read
+ * re-adds a card that really is waiting.
+ *
+ * The landing states are the ones the refused-answer paths already use — an
+ * approval nobody decided HERE is `stopped`, a question that is gone is
+ * `expired` — and a card this surface is mid-answer on (`deciding`/
+ * `submitting`) is left alone, since the answer may predate that click.
+ */
+export function settleCardsAbsent<T extends { role: string }>(
+  msgs: readonly T[],
+  kind: "approvals" | "questions",
+  pending: ReadonlySet<string>,
+  before: ReadonlySet<string>,
+): T[] {
+  const gone = (state: string, id: string): boolean =>
+    state === "pending" && before.has(id) && !pending.has(id);
+  let out: T[] | null = null;
+  msgs.forEach((m, i) => {
+    if (m.role !== "agent") return;
+    const from = m as unknown as AgentMsg;
+    if (kind === "approvals") {
+      const approvals = from.approvals.map((a) =>
+        gone(a.state, a.callId) ? { ...a, state: "stopped" as const } : a,
+      );
+      if (approvals.every((a, j) => a === from.approvals[j])) return;
+      out ??= [...msgs];
+      out[i] = { ...from, approvals } as unknown as T;
+      return;
+    }
+    const questions = from.questions.map((q) =>
+      gone(q.state, q.callId) ? { ...q, state: "expired" as const } : q,
+    );
+    if (questions.every((q, j) => q === from.questions[j])) return;
+    out ??= [...msgs];
+    out[i] = { ...from, questions } as unknown as T;
+  });
+  // Nothing settled: the caller's own array, so no render is triggered.
+  return out ?? (msgs as T[]);
+}
+
 /** Seconds left before the gateway expires the question, or undefined if it
  *  carries no deadline. */
 export function remainingSeconds(q: AgentQuestion, now: number): number | undefined {

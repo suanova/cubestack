@@ -22,6 +22,10 @@ export function inferenceServiceSummary(
     vendor: "metax",
     gpuModel: "MXC500",
     gpuPerPod: 8,
+    gpuRoles: [
+      { name: "prefill", gpuPerPod: 8, model: "MXC500" },
+      { name: "decode", gpuPerPod: 8, model: "MXC500" },
+    ],
     modelName: null,
     modelVersion: null,
     overrideNums: { decodeReplicas: 2, prefillReplicas: 1, maxModelLen: 131072 },

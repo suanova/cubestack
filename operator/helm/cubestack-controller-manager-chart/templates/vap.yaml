@@ -96,7 +96,10 @@ spec:
   - expression: "!has(object.spec.overrides) || object.spec.overrides.all(o, !has(o.enum) || (!has(o.min) && !has(o.max)))"
     message: "enum must not be combined with min or max"
     reason: Invalid
-  - expression: "!has(object.spec.overrides) || object.spec.overrides.all(o, !has(o.default) || !has(o.enum) || o.enum.exists(e, e == o.default))"
+  # For a stringList the default is itself a list: every entry must be in the
+  # enum. The type() guard keeps .all() from being called on a wrongly typed
+  # default, whose type is checked at L2 instead.
+  - expression: "!has(object.spec.overrides) || object.spec.overrides.all(o, !has(o.default) || !has(o.enum) || (o.type == 'stringList' ? (type(o.default) == list && o.default.all(d, o.enum.exists(e, e == d))) : o.enum.exists(e, e == o.default)))"
     message: "default must be one of the enum values"
     reason: Invalid
   - expression: "object.spec.roles.all(r, object.spec.roles.exists_one(x, x.name == r.name))"

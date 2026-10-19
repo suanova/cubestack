@@ -1,3 +1,5 @@
+import type { V1Node } from "@kubernetes/client-node";
+
 import { getCoreClient, getCustomObjectsClient } from "@/lib/kubernetes";
 import { withAuth } from "@/lib/auth/guard";
 import { defaultNamespaceOf } from "@/lib/namespaces";
@@ -10,6 +12,30 @@ export const dynamic = "force-dynamic";
 
 const GROUP = "ai.cubestack.io";
 const VERSION = "v1alpha1";
+
+/**
+ * The GPU product label each vendor's device plugin writes. The operator pins
+ * the same label when it enforces a profile's accelerator models
+ * (operator/internal/renderer/render.go), so a node matches a selected model
+ * exactly when this label carries it. A divergence would offer a node the
+ * operator can never schedule onto.
+ */
+const GPU_MODEL_LABELS: Record<string, string> = {
+  metax: "metax-tech.com/gpu.product",
+  nvidia: "nvidia.com/gpu.product",
+};
+
+/** One node the wizard may pin a service to. */
+export interface NodeOption {
+  name: string;
+  /**
+   * The GPU model each vendor advertises on this node, keyed by vendor. The
+   * wizard filters the picker by the model selected for the role, so a pin to
+   * a node labelled with another model — a Pod that can only stay Pending —
+   * is not offered. A vendor whose label the node does not carry is absent.
+   */
+  gpuModels: Record<string, string>;
+}
 
 /**
  * Catalog the create-wizard needs, read from the live cluster in one snapshot:
@@ -27,6 +53,14 @@ export interface CreateOptionsResponse {
    * sorted first, which is a platform namespace on a real install.
    */
   defaultNamespace: string | null;
+  /**
+   * The nodes the service may be pinned to, in name order, each carrying the
+   * GPU model its vendor's product label advertises. Empty when the cluster
+   * has nothing schedulable and when the best-effort node read fails; the
+   * wizard then keeps its free-text node selector rather than pretending the
+   * cluster offers no nodes.
+   */
+  nodes: NodeOption[];
   profiles: Array<{
     name: string;
     engine: string | null;
@@ -41,11 +75,11 @@ export interface CreateOptionsResponse {
     roles: Array<{ name: string; vendor: string | null; models: string[]; gpuPerPod: number | null }>;
     overrides: Array<{
       name: string;
-      type: "integer" | "string" | "boolean";
+      type: "integer" | "string" | "stringList" | "boolean";
       min: number | null;
       max: number | null;
       enum: Array<number | string> | null;
-      default: number | string | boolean | null;
+      default: number | string | string[] | boolean | null;
       description: string | null;
     }>;
   }>;
@@ -60,11 +94,11 @@ export interface CreateOptionsResponse {
 
 interface ProfileOverride {
   name?: string;
-  type?: "integer" | "string" | "boolean";
+  type?: "integer" | "string" | "stringList" | "boolean";
   min?: number;
   max?: number;
   enum?: Array<number | string>;
-  default?: number | string | boolean;
+  default?: number | string | string[] | boolean;
   description?: string;
 }
 interface ProfileRole {
@@ -101,6 +135,34 @@ function num(v: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
 }
 
+/**
+ * Whether the scheduler could use the node, matching the dev-environment
+ * wizard's own rule: a cordoned node or one with a hard taint is not somewhere
+ * a service should be pinned to, and a node that is not Ready cannot run it.
+ */
+function schedulable(node: V1Node): boolean {
+  if (node.spec?.unschedulable) return false;
+  if ((node.spec?.taints ?? []).some((t) => t.effect === "NoSchedule" || t.effect === "NoExecute")) return false;
+  return (node.status?.conditions ?? []).some((c) => c.type === "Ready" && c.status === "True");
+}
+
+/** The schedulable nodes with their advertised GPU models, in name order. */
+function offeredNodes(nodes: V1Node[]): NodeOption[] {
+  return nodes
+    .filter(schedulable)
+    .map((node) => {
+      const labels = node.metadata?.labels ?? {};
+      const gpuModels: Record<string, string> = {};
+      for (const [vendor, label] of Object.entries(GPU_MODEL_LABELS)) {
+        const model = labels[label];
+        if (model) gpuModels[vendor] = model;
+      }
+      return { name: node.metadata?.name ?? "", gpuModels };
+    })
+    .filter((node) => node.name)
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
 export const GET = withAuth(async () => {
   try {
     const core = getCoreClient();
@@ -111,6 +173,18 @@ export const GET = withAuth(async () => {
       co.listClusterCustomObject({ group: GROUP, version: VERSION, plural: "inferenceruntimeprofiles" }),
       co.listClusterCustomObject({ group: GROUP, version: VERSION, plural: "modelversions" }),
     ]);
+
+    // The node list only feeds the wizard's optional node picker, so it is
+    // best-effort: a principal without `list nodes` can still create a service
+    // that lets the scheduler choose.
+    let nodes: V1Node[] = [];
+    try {
+      nodes = (await core.listNode()).items ?? [];
+    } catch (err) {
+      // Logged rather than swallowed: an empty picker is otherwise
+      // indistinguishable from a cluster with no schedulable nodes.
+      console.warn("Failed to read the cluster's nodes:", err);
+    }
 
     const profiles: Profile[] = profileRes.items ?? [];
     const modelversions: ModelVersion[] = mvRes.items ?? [];
@@ -123,6 +197,7 @@ export const GET = withAuth(async () => {
     const response: CreateOptionsResponse = {
       namespaces: names.map((name) => ({ name })),
       defaultNamespace: defaultNamespaceOf(names),
+      nodes: offeredNodes(nodes),
       profiles: profiles.map((p) => {
         const spec = p.spec ?? {};
         const gpuPerPod = spec.roles?.reduce(
@@ -155,7 +230,7 @@ export const GET = withAuth(async () => {
             enum: o.enum ?? null,
             default:
               o.default !== undefined
-                ? (o.default as number | string | boolean)
+                ? (o.default as number | string | string[] | boolean)
                 : null,
             description: o.description ?? null,
           })),

@@ -36,6 +36,7 @@ const (
 	nvidiaModelH20  = "H20"
 	// metaxModelC900 is a model outside the declared model lists of the specs.
 	metaxModelC900 = "MXC900"
+	hostnameLabel  = "kubernetes.io/hostname"
 )
 
 func envValue(name, value string) aiv1alpha1.EnvVar {
@@ -60,7 +61,7 @@ func renderProfile() *aiv1alpha1.InferenceRuntimeProfile {
 			},
 			// The templated declaration the shipped bundles use, so the fixture
 			// exercises a policy that comes from an override rather than a literal.
-			PodAntiAffinity: &aiv1alpha1.PodAntiAffinity{Policy: "{{ overrides.replicaPlacement }}", TopologyKey: "kubernetes.io/hostname"},
+			PodAntiAffinity: &aiv1alpha1.PodAntiAffinity{Policy: "{{ overrides.replicaPlacement }}", TopologyKey: hostnameLabel},
 			// Likewise the shipped nodeSelector declaration, whose empty default
 			// adds no selector to any role.
 			NodeSelector: "{{ overrides.nodeSelector }}",
@@ -417,12 +418,93 @@ var _ = Describe("Render", func() {
 		Entry("a missing key is rejected", userNodeSelector("=inference"), nil, ReasonInvalidOverride),
 		Entry("a value that is not a label value is rejected", userNodeSelector("node-pool=in ference"), nil, ReasonInvalidOverride),
 		Entry("a key that is not a label key is rejected", userNodeSelector("node pool=inference"), nil, ReasonInvalidOverride),
-		Entry("two pairs are one label value that no node carries", userNodeSelector("node-pool=inference,gpu"), nil, ReasonInvalidOverride),
+		Entry("an item without a value is rejected", userNodeSelector("node-pool=inference,gpu"), nil, ReasonInvalidOverride),
 		Entry("a template resolving to a bare key is rejected", nodeSelectorTemplate("{{ overrides.mode }}"), nil, ReasonInvalidOverride),
 		Entry("a namespace outside overrides is rejected", nodeSelectorTemplate("{{ service.name }}"), nil, ReasonPhaseViolation),
 		Entry("an undeclared override is rejected", nodeSelectorTemplate("{{ overrides.undeclared }}"), nil, ReasonUnknownPlaceholder),
 		Entry("a pair contradicting the declared model is reported", userNodeSelector(metaxProductLabel+"="+metaxModelC550), nil, ReasonModelSchedulingConflict),
 	)
+
+	// stringListNodeSelector declares the fixture's nodeSelector override as a
+	// stringList and sets the user's value to the given JSON array.
+	stringListNodeSelector := func(p *aiv1alpha1.InferenceRuntimeProfile, isvc *aiv1alpha1.InferenceService, value string) {
+		for i := range p.Spec.Overrides {
+			if p.Spec.Overrides[i].Name == overrideNodeSelector {
+				p.Spec.Overrides[i].Type = aiv1alpha1.OverrideTypeStringList
+				p.Spec.Overrides[i].Default = &apiextensionsv1.JSON{Raw: []byte(`[]`)}
+			}
+		}
+		isvc.Spec.Overrides[overrideNodeSelector] = apiextensionsv1.JSON{Raw: []byte(value)}
+	}
+
+	It("renders a stringList nodeSelector as a required nodeAffinity In term", func() {
+		p := renderProfile()
+		gpuPrefill(p)
+		p.Spec.Accelerator = aiv1alpha1.Accelerator{Vendor: aiv1alpha1.AcceleratorVendorMetax, Models: []string{metaxModelC500}}
+		isvc := renderISVC()
+		stringListNodeSelector(p, isvc, `["kubernetes.io/hostname=worker-a","kubernetes.io/hostname=worker-b"]`)
+		res := Render(isvc, p, renderModel(), nil)
+		Expect(res.Errors).To(BeEmpty())
+		want := []NodeAffinityRequirement{{Label: hostnameLabel, Values: []string{"worker-a", "worker-b"}}}
+		Expect(res.Roles[0].NodeAffinityRequirements).To(Equal(want))
+		Expect(res.Roles[1].NodeAffinityRequirements).To(Equal(want))
+		Expect(res.Roles[0].PodTemplate.NodeSelector).To(BeEmpty(), "several values cannot be a nodeSelector entry")
+		Expect(res.Roles[1].PodTemplate.NodeSelector).To(Equal(map[string]string{metaxProductLabel: metaxModelC500}))
+	})
+
+	It("lets a role's stringList node selector win a shared key", func() {
+		p := renderProfile()
+		gpuPrefill(p)
+		p.Spec.Accelerator = aiv1alpha1.Accelerator{Vendor: aiv1alpha1.AcceleratorVendorMetax, Models: []string{metaxModelC500}}
+		p.Spec.NodeSelector = "kubernetes.io/hostname=worker-a,kubernetes.io/hostname=worker-b"
+		p.Spec.Roles[1].NodeSelector = "{{ overrides.nodeSelector }}"
+		isvc := renderISVC()
+		stringListNodeSelector(p, isvc, `["kubernetes.io/hostname=worker-c"]`)
+		res := Render(isvc, p, renderModel(), nil)
+		Expect(res.Errors).To(BeEmpty())
+		Expect(res.Roles[0].NodeAffinityRequirements).To(Equal([]NodeAffinityRequirement{{Label: hostnameLabel, Values: []string{"worker-a", "worker-b"}}}))
+		Expect(res.Roles[0].PodTemplate.NodeSelector).To(BeEmpty())
+		Expect(res.Roles[1].NodeAffinityRequirements).To(BeEmpty(), "the role replaces the key with a single value")
+		Expect(res.Roles[1].PodTemplate.NodeSelector).To(Equal(map[string]string{hostnameLabel: "worker-c", metaxProductLabel: metaxModelC500}))
+	})
+
+	It("drops a podTemplate entry shadowed by a multi-value selection", func() {
+		p := renderProfile()
+		gpuPrefill(p)
+		p.Spec.Accelerator = aiv1alpha1.Accelerator{Vendor: aiv1alpha1.AcceleratorVendorMetax, Models: []string{metaxModelC500}}
+		p.Spec.Roles[1].PodTemplate.NodeSelector = map[string]string{nodePoolLabel: "cpu"}
+		isvc := renderISVC()
+		stringListNodeSelector(p, isvc, `["node-pool=gpu-a","node-pool=gpu-b"]`)
+		res := Render(isvc, p, renderModel(), nil)
+		Expect(res.Errors).To(BeEmpty())
+		// The fixed equality would AND with the In term and match no node.
+		Expect(res.Roles[1].PodTemplate.NodeSelector).To(Equal(map[string]string{metaxProductLabel: metaxModelC500}))
+		Expect(res.Roles[1].NodeAffinityRequirements).To(Equal([]NodeAffinityRequirement{{Label: nodePoolLabel, Values: []string{"gpu-a", "gpu-b"}}}))
+	})
+
+	It("keeps the single-model pin when a multi-value selection covers the product label", func() {
+		p := renderProfile()
+		gpuPrefill(p)
+		p.Spec.Accelerator = aiv1alpha1.Accelerator{Vendor: aiv1alpha1.AcceleratorVendorMetax, Models: []string{metaxModelC500}}
+		isvc := renderISVC()
+		stringListNodeSelector(p, isvc, `["`+metaxProductLabel+`=`+metaxModelC500+`","`+metaxProductLabel+`=`+metaxModelC550+`"]`)
+		res := Render(isvc, p, renderModel(), nil)
+		Expect(res.Errors).To(BeEmpty())
+		// Dropping the pin would let the role land on the other selected model.
+		Expect(res.Roles[1].PodTemplate.NodeSelector).To(Equal(map[string]string{metaxProductLabel: metaxModelC500}))
+		Expect(res.Roles[1].NodeAffinityRequirements).To(Equal([]NodeAffinityRequirement{{Label: metaxProductLabel, Values: []string{metaxModelC500, metaxModelC550}}}))
+	})
+
+	It("reports a multi-value product-label selection that excludes every model", func() {
+		p := renderProfile()
+		gpuPrefill(p)
+		p.Spec.Accelerator = aiv1alpha1.Accelerator{Vendor: aiv1alpha1.AcceleratorVendorMetax, Models: []string{metaxModelC500}}
+		isvc := renderISVC()
+		stringListNodeSelector(p, isvc, `["`+metaxProductLabel+`=`+metaxModelC550+`","`+metaxProductLabel+`=`+metaxModelC900+`"]`)
+		res := Render(isvc, p, renderModel(), nil)
+		Expect(res.Errors).To(HaveLen(1))
+		Expect(res.Errors[0].Reason).To(Equal(ReasonModelSchedulingConflict))
+	})
 
 	It("merges no selector when the profile declares no nodeSelector", func() {
 		p := renderProfile()
@@ -435,6 +517,43 @@ var _ = Describe("Render", func() {
 		Expect(res.Errors).To(BeEmpty())
 		Expect(res.Roles[0].PodTemplate.NodeSelector).To(BeEmpty(), "a profile that declares no nodeSelector merges nothing, whatever the user sets")
 		Expect(res.Roles[1].PodTemplate.NodeSelector).To(Equal(map[string]string{metaxProductLabel: metaxModelC500}))
+	})
+
+	// The service-level selector is the fixture's templated pair, so every
+	// entry states the role's own contribution against what the role would
+	// carry without it: the service pair, plus the model pin on the GPU role.
+	DescribeTable("merges a role's own node selector",
+		func(rolePair string, wantPrefill map[string]string, wantReason ErrorReason) {
+			p := renderProfile()
+			gpuPrefill(p)
+			p.Spec.Accelerator = aiv1alpha1.Accelerator{Vendor: aiv1alpha1.AcceleratorVendorMetax, Models: []string{metaxModelC500}}
+			p.Spec.NodeSelector = "node-pool=inference"
+			p.Spec.Roles[1].NodeSelector = rolePair
+			res := Render(renderISVC(), p, renderModel(), nil)
+			if wantReason != noError {
+				Expect(res.Errors).To(HaveLen(1))
+				Expect(res.Errors[0].Reason).To(Equal(wantReason))
+				return
+			}
+			Expect(res.Errors).To(BeEmpty())
+			Expect(res.Roles[0].PodTemplate.NodeSelector).To(Equal(map[string]string{nodePoolLabel: nodePoolValue}), "a role's selector applies to that role alone")
+			Expect(res.Roles[1].PodTemplate.NodeSelector).To(Equal(wantPrefill))
+		},
+		Entry("a role's pair merges with the service-level one", "gpu-pool=decode", map[string]string{nodePoolLabel: nodePoolValue, "gpu-pool": "decode", metaxProductLabel: metaxModelC500}, noError),
+		Entry("a role's pair wins a shared key", "node-pool=decode", map[string]string{nodePoolLabel: "decode", metaxProductLabel: metaxModelC500}, noError),
+		Entry("an empty role pair adds nothing", "", map[string]string{nodePoolLabel: nodePoolValue, metaxProductLabel: metaxModelC500}, noError),
+		Entry("a role's pair repeating the model pin is consistent", metaxProductLabel+"="+metaxModelC500, map[string]string{nodePoolLabel: nodePoolValue, metaxProductLabel: metaxModelC500}, noError),
+		Entry("a role's pair contradicting the declared model is reported", metaxProductLabel+"="+metaxModelC550, nil, ReasonModelSchedulingConflict),
+		Entry("a role's bare key is rejected", "{{ overrides.mode }}", nil, ReasonInvalidOverride),
+		Entry("a role's template outside overrides is rejected", "{{ service.name }}", nil, ReasonPhaseViolation),
+	)
+
+	It("names the role in a role-level node selector error", func() {
+		p := renderProfile()
+		p.Spec.Roles[1].NodeSelector = "{{ overrides.mode }}"
+		res := Render(renderISVC(), p, renderModel(), nil)
+		Expect(res.Errors).To(HaveLen(1))
+		Expect(res.Errors[0].Msg).To(ContainSubstring(`role "prefill" nodeSelector`))
 	})
 
 	It("fails with UnknownPlaceholder for unknown variables", func() {

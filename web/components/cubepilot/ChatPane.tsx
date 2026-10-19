@@ -41,7 +41,10 @@ import {
   newApproval,
   newQuestion,
   openApprovals,
+  openCardIds,
   openQuestions,
+  pendingCollection,
+  settleCardsAbsent,
   phaseText,
   waitingSeconds,
   turnStatus,
@@ -72,6 +75,7 @@ import { AgentThread } from "./AgentThread";
 import { subscribeAgentHandoff, takeAgentHandoff } from "./agentHandoff";
 import { setStoredTab } from "./tabStore";
 import { setPaneObject } from "./paneObject";
+import { useInstancePoll } from "./useInstancePoll";
 import { AGENT_CHAT_TRANSITION, withViewTransition } from "./viewTransition";
 import { Btn, Card, CpTextArea, Icons, Pill, Spinner, monoSx, useToast } from "./ui";
 
@@ -271,6 +275,14 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
   const [objKind, setObjKind] = useState<"model" | "agent" | null>(null);
   const [svcId, setSvcId] = useState<string | null>(null);
   const [msgs, setMsgs] = useState<ChatMsg[]>([]);
+  /** The newest thread, for the reads a long-lived loop takes: `startFollowing`
+   *  holds the closure of the render it was started in, so a read that compared
+   *  a pending answer against that render's `msgs` would be comparing it
+   *  against a thread minutes old. */
+  const msgsRef = useRef<ChatMsg[]>([]);
+  useEffect(() => {
+    msgsRef.current = msgs;
+  }, [msgs]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [thinkingText, setThinkingText] = useState<string | null>(null);
@@ -549,21 +561,24 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
    * inside the calling async flow).
    */
   /** Re-read just the instance status: the poll below runs it while the pane is
-   *  waiting for an instance, and the full meta read is three requests. */
-  async function refreshAgentStatus(): Promise<void> {
+   *  waiting for an instance, and the full meta read is three requests. Answers
+   *  whether it exists (the poll's cadence) or null when the read failed. */
+  async function refreshAgentStatus(): Promise<boolean | null> {
     const gen = ++statusGenRef.current;
     try {
       const res = await apiFetch("/api/cubepilot/agent/status");
-      if (!res.ok) return;
+      if (!res.ok) return null;
       const body = (await res.json()) as AgentStatus;
       // Landing order decides, not issue order: this answer applies unless a
       // newer one already landed (a slow poll must not put an older phase back
       // on screen), and it applies even while a slower read is still out.
-      if (gen < statusAppliedRef.current) return;
+      if (gen < statusAppliedRef.current) return null;
       statusAppliedRef.current = gen;
       setAgentStatus(body);
+      return body.exists === true;
     } catch {
       /* the next tick asks again */
+      return null;
     }
   }
 
@@ -651,11 +666,7 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
 
   // Until the instance is Ready this pane can only report its absence, so it
   // asks again: a reader should not have to reload to be let in.
-  useEffect(() => {
-    if (!isAgent || agentReady) return;
-    const id = setInterval(() => void refreshAgentStatus(), 5000);
-    return () => clearInterval(id);
-  }, [isAgent, agentReady]);
+  useInstancePoll(isAgent && !agentReady, refreshAgentStatus);
 
   useEffect(() => {
     if (!isAgent || !agentReady) return;
@@ -924,6 +935,11 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
     // turn ends first, the cards it describes are already settled.
     const epoch = turnEpochRef.current;
     const stale = (): boolean => turnEpochRef.current !== epoch;
+    // The cards open when this pass starts. The reads below settle whatever is
+    // missing from them, so the sweep has to know what a card that arrived
+    // while a read was in flight would look like: it is not in here, and an
+    // answer taken before it existed cannot speak for it.
+    const before = openCardIds(msgsRef.current);
     /** A card with no turn in the thread to hang it on gets its own bubble. The
      *  phase is `done`, never the constructor's `thinking`: this turn is PARKED,
      *  not running, and a live phase would start the 1 Hz ticker and paint a
@@ -951,14 +967,24 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
       // session that is not parked, and a read that could not be made is not
       // that answer.
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      // Parsed BEFORE the check: reading the body is a suspension point, so a
+      // turn that settles while it is read would otherwise slip past the
+      // generation and epoch checks and settle cards on a turn already done.
+      const approvals = pendingCollection<PendingApproval>(await res.json(), "approvals");
       if (genRef.current === gen && !stale()) {
         // A LIST, and an empty one is the ordinary answer for a session that is
         // not parked — the collection exists and is empty, so a read that
         // succeeded and found nothing never reaches the catch below.
-        const { approvals } = (await res.json()) as { approvals?: PendingApproval[] };
-        for (const a of approvals ?? []) {
-          if (a.approvalId) attachApproval(a);
+        const wanted = new Set<string>();
+        for (const a of approvals) {
+          if (a.approvalId) {
+            wanted.add(a.approvalId);
+            attachApproval(a);
+          }
         }
+        // The answer is the whole pending set, so an open card it does not
+        // carry was decided in another window: retire it here too.
+        setMsgs((list) => settleCardsAbsent(list, "approvals", wanted, before.approvals));
       }
     } catch (e) {
       // The read failed, so whether a write is parked is simply unknown. Staying
@@ -977,12 +1003,17 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
       // A failed read is thrown so that it is reported rather than folded into
       // "idle"; an empty collection is not a failure, it is nothing pending.
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      if (res.ok && genRef.current === gen && !stale()) {
-        const { questions } = (await res.json()) as {
-          questions?: Array<{ id?: string; questions?: AgentQuestionItem[]; timeoutSeconds?: number }>;
-        };
-        for (const q of questions ?? []) {
+      // Same ordering as the approval read above, for the same reason.
+      const questions = pendingCollection<{
+        id?: string;
+        questions?: AgentQuestionItem[];
+        timeoutSeconds?: number;
+      }>(await res.json(), "questions");
+      if (genRef.current === gen && !stale()) {
+        const wanted = new Set<string>();
+        for (const q of questions) {
           if (!q.id) continue;
+          wanted.add(q.id);
           // Through the same constructor the streamed card uses: the response
           // carries what is LEFT of the gateway's deadline, and dropping it left
           // a reloaded question with no countdown and its controls live past the
@@ -993,6 +1024,9 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
             x.questions.some((old) => old.callId === card.callId) ? x : { ...x, questions: [...x.questions, card] },
           );
         }
+        // Same as the approval read above: a question this answer does not
+        // carry is gone (answered in another window, or expired).
+        setMsgs((list) => settleCardsAbsent(list, "questions", wanted, before.questions));
       }
     } catch (e) {
       // The read failed, so whether the agent is parked on a question is simply
@@ -1616,15 +1650,17 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
     try {
       const res = await apiFetch(`/api/cubepilot/pilot/api/v1/sessions/${enc(agentSessionKey)}/questions`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const { questions } = (await res.json()) as {
-        questions?: Array<{ id?: string; questions?: AgentQuestionItem[]; timeoutSeconds?: number }>;
-      };
+      const questions = pendingCollection<{
+        id?: string;
+        questions?: AgentQuestionItem[];
+        timeoutSeconds?: number;
+      }>(await res.json(), "questions");
       // Membership in the collection IS the open/closed signal — the gateway's
       // own account of what is still waiting. A question that is absent is gone
       // (expired or answered), which is the same condition the endpoint's 404
       // used to report; a read that failed does not get here at all, so "gone"
       // and "could not ask" stay two different answers.
-      const still = (questions ?? []).find((q) => q.id === callId);
+      const still = questions.find((q) => q.id === callId);
       if (still) {
         patchQuestion(callId, (q) => ({
           ...q,

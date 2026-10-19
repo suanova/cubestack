@@ -107,6 +107,20 @@ export function k8sErrorCode(e: unknown): number | undefined {
   return typeof v === "number" ? v : undefined;
 }
 
+/** `Status.details` of a failed call, from the apiserver body client-node keeps
+ *  in `e.body`: an object-level 404 names the object, one for an API group the
+ *  server does not serve has none — the only thing that tells them apart. */
+export function k8sErrorDetails(e: unknown): { name?: string; kind?: string; group?: string } | null {
+  const raw = (e as { body?: unknown } | null)?.body;
+  if (typeof raw !== "string") return null;
+  try {
+    const parsed = JSON.parse(raw) as { details?: { name?: string; kind?: string; group?: string } };
+    return parsed.details ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** Response for k8s API failures (404 → CRDs probably not installed). */
 export function k8sErrorResponse(e: unknown): Response {
   const message = e instanceof Error ? e.message : String(e);
@@ -214,7 +228,11 @@ async function getCr<T>(plural: string, name: string): Promise<T | null> {
     })) as T;
   } catch (e) {
     if (k8sErrorCode(e) === 404) {
-      logger("k8s").warn("get 404 (treated as absent)", { plural, namespace: ns, name, error: e });
+      // Same rule as the agent CRs: an object-level 404 is the ordinary answer
+      // for something that is not there (the UI asks by id), only a nameless one
+      // means the CRD or the whole API group is gone.
+      const log = k8sErrorDetails(e) ? logger("k8s").debug : logger("k8s").warn;
+      log("get 404 (treated as absent)", { plural, namespace: ns, name, error: e });
       return null;
     }
     throw e;

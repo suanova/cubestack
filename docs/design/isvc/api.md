@@ -352,13 +352,13 @@ GPU 扩展资源通常只区分厂商，不区分具体 GPU 型号。例如，�
 
 - `accelerator.models` 负责限制 GPU 型号；
 - 管理员在 `podTemplate.nodeSelector` 中声明其他节点约束，例如机架、机房或其它基础设施属性；
-- 站点在**服务级** `spec.nodeSelector` 中声明集群侧的标签（如 `node-pool=inference`）。它是一个 string 而非 map，值来自 override（如 `{{ overrides.nodeSelector }}`），**默认为空表示不注入任何约束**；声明后并入**全部 role**（含 CPU-only 辅助 role——服务只有一处调度归属，把辅助 role 悄悄留在池外会是意外而非特性）。它与 `podTemplate.nodeSelector` 是普通 map 合并，同名键以 `spec.nodeSelector` 为准。
+- 站点在**服务级** `spec.nodeSelector` 中声明集群侧的标签（如 `node-pool=inference`）。它是一个 string 而非 map，值来自 override（如 `{{ overrides.nodeSelector }}`，通常声明为 `stringList`），**默认为空表示不注入任何约束**；声明后并入**全部 role**（含 CPU-only 辅助 role——服务只有一处调度归属，把辅助 role 悄悄留在池外会是意外而非特性）。解析时按逗号拆成若干 `key=value`：同一个 key 只有一个值时并入 `nodeSelector` map，同名键以 `spec.nodeSelector` 为准；同一个 key 有多个值（如 `kubernetes.io/hostname=a,kubernetes.io/hostname=b`）时 `nodeSelector` 无法表达这种“或”关系，改为追加一条 required `nodeAffinity` 的 `In` 表达式。
 
 不需要定义额外的字段合并规则。最终只有同时满足所有约束的节点才能被调度。
 
-唯一的实现注意点：多型号的 `nodeAffinity` 以 `In` 表达式形式并入 `nodeAffinity` 的**每一个**已有 `NodeSelectorTerm`（terms 之间是 Kubernetes OR 语义）——不能作为新的替代 term 追加，否则仅匹配旧 term 的节点会绕过型号约束。未来若平台自身需要 AND 型 term（而非替代型），也按此规则与型号约束同 term 合并。
+唯一的实现注意点：多型号的 `nodeAffinity` 和多值节点选择产生的 required `nodeAffinity` 都以 `In` 表达式形式并入 `nodeAffinity` 的**每一个**已有 `NodeSelectorTerm`（terms 之间是 Kubernetes OR 语义）——不能作为新的替代 term 追加，否则仅匹配旧 term 的节点会绕过型号约束。未来若平台自身需要 AND 型 term（而非替代型），也按此规则与型号约束同 term 合并。
 
-唯一需要显式处理的冲突：管理员把注入用的厂商型号 label key 写进了 `podTemplate.nodeSelector`，或服务级 `spec.nodeSelector` 经 override 渲染成了同一个 key，但值不在 `accelerator.models` 中——这种声明无论怎么调度都永不满足（同 key 不同值，K8s 对 nodeSelector 的 key 不做合并）。Controller 在渲染阶段将其判为 `Rendered=False, reason=ModelSchedulingConflict`（Profile spec 不可变，不能等部署后才发现）。值属于 `models` 的等价声明（如 `metax-tech.com/gpu.product: MXC500`）则与注入一致，不报错。服务级 `spec.nodeSelector` 的合并发生在型号注入之前，正是为了让这条规则一并覆盖它，而不是让 override 静默盖掉型号约束。
+唯一需要显式处理的冲突：管理员把注入用的厂商型号 label key 写进了 `podTemplate.nodeSelector`，或服务级 `spec.nodeSelector` 经 override 渲染成了同一个 key，但该值不在 `accelerator.models` 中（多值选择时为其**全部**值都不在 `accelerator.models` 中，即两者没有任何交集）——这种声明无论怎么调度都永不满足（同 key 不同值，K8s 对 nodeSelector 的 key 不做合并，多值时的 `In` 表达式与型号约束也取交集）。Controller 在渲染阶段将其判为 `Rendered=False, reason=ModelSchedulingConflict`（Profile spec 不可变，不能等部署后才发现）。值属于 `models` 的等价声明（如 `metax-tech.com/gpu.product: MXC500`）则与注入一致，不报错；多值选择只要有一个值与 `models` 相交即可调度，Pod 实际只会落在交集内的型号上。服务级 `spec.nodeSelector` 的合并发生在型号注入之前，正是为了让这条规则一并覆盖它，而不是让 override 静默盖掉型号约束。
 
 服务级 `spec.nodeSelector` 的取值是**语法**校验，不是**存在性**校验：渲染时按 apiserver 对 `nodeSelector` 的同一套规则校验键值（`IsLabelKey`/`IsLabelValue`），非法即 `InvalidOverride`；该标签是否真的存在于某个节点上则不由 Controller 检查——与 `accelerator.models` 一致，型号 label 也是由调度器匹配的，Operator 不读 Node。
 
@@ -408,15 +408,15 @@ GPU 扩展资源通常只区分厂商，不区分具体 GPU 型号。例如，�
 | 字段 | 类型 | 校验规则 | 说明 |
 |---|---|---|---|
 | `name` | string | L0：必填；L1：同一 Profile 内唯一 | 参数名称，也是用户在 `spec.overrides` 中使用的 key。 |
-| `type` | enum | L0：必填、枚举（`integer` \| `string` \| `boolean`） | 参数类型，决定 override 值的解析方式。 |
-| `enum` | list | L0：可选；L1：不能与 `min`、`max` 同时使用 | 可接受的值列表。 |
+| `type` | enum | L0：必填、枚举（`integer` \| `string` \| `stringList` \| `boolean`） | 参数类型，决定 override 值的解析方式。`stringList` 的取值为字符串数组，解析后按原顺序以逗号连接成一个字符串（模板中直接通过 `{{ overrides.<name> }}` 引用），因此元素本身不能包含逗号；设置 `enum` 时按元素逐一校验。 |
+| `enum` | list | L0：可选；L1：不能与 `min`、`max` 同时使用 | 可接受的值列表。`stringList` 为每个元素的可接受值。 |
 | `min` / `max` | number | L0：可选；L1：与 `enum` 互斥 | 数值参数的最小值和最大值。 |
-| `default` | scalar | L0：可选；L1：设置 `enum` 时 `default` 必须属于 `enum`（VAP 校验）；`type` 符合性与 `min` / `max` 边界在 L2 解析时校验 | 用户未提供该参数时使用的值。 |
+| `default` | scalar \| list | L0：可选；L1：设置 `enum` 时 `default` 必须属于 `enum`（`stringList` 为每个元素都属于 `enum`，VAP 校验）；`type` 符合性与 `min` / `max` 边界在 L2 解析时校验 | 用户未提供该参数时使用的值。 |
 | `description` | string | L0：可选 | 向用户说明参数的用途和推荐取值。 |
 
 **使用规则**
 
-用户只能填写 Profile 中已声明的参数。Controller 会拒绝未知参数、类型不匹配的值，以及超出 `enum` 或数值范围的值；校验通过后，解析出的值可通过 `{{ overrides.<name> }}` 在 Profile 模板中引用。
+用户只能填写 Profile 中已声明的参数。Controller 会拒绝未知参数、类型不匹配的值，以及超出 `enum` 或数值范围的值；校验通过后，解析出的值可通过 `{{ overrides.<name> }}` 在 Profile 模板中引用。`stringList` 参数由此可以把多个值送入同一个模板字段（例如服务级 `spec.nodeSelector` 中用逗号分隔的多个 `key=value`）。
 
 ##### roles[] 公共字段
 
@@ -503,6 +503,17 @@ Controller 将此模板按 `workload.kind` 写入对应位置：`LeaderWorkerSet
 
 同 vendor、不同型号的逐 role 钉定（如 prefill 限 MXC500、decode 限 MXC550）是同一机制的合法用法，不需要额外规则。
 
+##### roles[].nodeSelector
+
+`roles[].nodeSelector`（可选，string）为该 role 追加节点选择标签对，用于 PD 分离等逐 role 调度场景，例如 prefill 与 decode 位于不同节点池，或同一 vendor 的不同型号分别钉定到不同 role。
+
+| 规则 | 内容 |
+|---|---|
+| 语法 | 与 Profile 级 `spec.nodeSelector` 相同：逗号分隔的 `key=value` 字面量列表或单个 `{{ overrides.* }}` 占位符；其它模板命名空间仍被拒绝。L2 渲染后每一项都须解析为合法 K8s label 键值对，否则 `InvalidOverride`（错误信息带 role 名）；空值不注入任何选择器，因此可以安全地把它绑定到一个默认为空的 override（`stringList` 的默认空列表同样如此）。 |
+| 合并顺序 | 在 `podTemplate.nodeSelector` 与 Profile 级 `spec.nodeSelector` 之后并入，同一 key 冲突时以本字段为准；同一个 key 有多个值时追加 required `nodeAffinity` 的 `In` 表达式；随后与 `accelerator.models` 的型号注入一并做冲突检查（`ModelSchedulingConflict`）。 |
+| 作用范围 | 只作用于声明它的 role；服务级 `spec.nodeSelector` 仍作用于全部 role，本字段只能在它的基础上追加或覆盖单个 key，不能移除它。 |
+| 典型用法 | PD 分离 Bundle 声明 `prefill_metax_model` / `decode_metax_model`（型号）与 `prefill_nodeSelector` / `decode_nodeSelector`（节点池）四个 override，分别由 prefill 与 decode role 的 `nodeSelector` 模板引用，使用户能独立选择两个 role 的 GPU 型号与调度位置。门户把 scalar 的 `*_nodeSelector` 渲染为节点下拉、把 `stringList` 的渲染为节点多选，用户只需选择节点，由门户自动写入 `kubernetes.io/hostname=<node>`。 |
+
 ##### 其他字段
 
 这些字段作用于整个 Profile，而不是单个 role。
@@ -513,7 +524,7 @@ Controller 将此模板按 `workload.kind` 写入对应位置：`LeaderWorkerSet
 | `endpoint.role` | string | L0：必填；L1：必须存在于 `roles`，且该 role 须定义 `service` | 作为服务对外端点的 role 名称。Controller 以该 role 的 Service 作为内部端点（InferenceService 的 `status.endpoint.internal`）；`publish: true` 时，它同时是模型目录条目的后端（目录对象的 endpoints 指向该 Service）。渲染后 Service 的可解析性由 `EndpointReady` 校验（见 §3.3）。 |
 | `endpoint.portName` | string | L0：可选，默认 `http`；L2：渲染后须存在于端点 Service 的端口中（`EndpointReady`） | 对外端点使用的 Service 端口名，与 `endpoint.role` 一起确定目录条目后端的端口。 |
 | `readinessPolicy.requireAllRoles` | bool | L0：v1alpha1 固定 `true` | 服务就绪条件的聚合方式：所有 role 的工作负载和 Pod 都就绪后，InferenceService 才会标记为 Ready。 |
-| `nodeSelector` | string | L0：可选；只能是一个 `key=value` 字面量或单个 `{{ ... }}` 占位符（同 `podAntiAffinity.policy`，用 pattern 而非 `enum`：精确匹配会在 CREATE 时拒绝占位符）；L2：渲染后须解析为一个合法 K8s label 键值对，否则 `InvalidOverride` 且 Rendered=False；若该键是厂商型号 label 而值不在 `accelerator.models` 中，则 `ModelSchedulingConflict` | 服务级节点选择：一个 `key=value` 标签对，声明一次即并入**全部 role** 的 PodSpec `nodeSelector`。之所以是 string 而不是 map，是因为标签的**键属于集群、不属于 Profile**——站点把 GPU 节点分成若干资源池，池名是站点的事实，Profile 作者无从预知，且 Profile 的 `spec` 一经创建不可修改；而 `podTemplate.nodeSelector` 的键由 Profile 作者写死，map 的 key 也不参与模板渲染（§3.2）。取值从集群自身读取（`kubectl get nodes --show-labels`），**默认为空 = 不注入任何选择器**，与本字段引入前的调度行为完全一致；因此它只能收窄可选节点集。与 `podTemplate.nodeSelector`、`accelerator.models` 的型号约束按 K8s AND 语义合并（§3.2）。一个服务只有一个该值，没有按 role 区分的手段。 |
+| `nodeSelector` | string | L0：可选；只能是逗号分隔的 `key=value` 字面量列表或单个 `{{ ... }}` 占位符（同 `podAntiAffinity.policy`，用 pattern 而非 `enum`：精确匹配会在 CREATE 时拒绝占位符）；L2：渲染后每一项都须解析为一个合法 K8s label 键值对，否则 `InvalidOverride` 且 Rendered=False；若该键是厂商型号 label 而值不在 `accelerator.models` 中（多值时为全部值都不在，即无交集），则 `ModelSchedulingConflict` | 服务级节点选择：若干 `key=value` 标签对，声明一次即并入**全部 role**。之所以是 string 而不是 map，是因为标签的**键属于集群、不属于 Profile**——站点把 GPU 节点分成若干资源池，池名是站点的事实，Profile 作者无从预知，且 Profile 的 `spec` 一经创建不可修改；而 `podTemplate.nodeSelector` 的键由 Profile 作者写死，map 的 key 也不参与模板渲染（§3.2）。同一个 key 只有一个值时写入 PodSpec `nodeSelector`；同一个 key 有多个值时写入 required `nodeAffinity` 的 `In` 表达式（`nodeSelector` 的 map 无法表达“或”）。取值从集群自身读取（`kubectl get nodes --show-labels`），**默认为空 = 不注入任何选择器**，与本字段引入前的调度行为完全一致；因此它只能收窄可选节点集。门户把绑定到该 override 的 `nodeSelector`（scalar）渲染为节点下拉、`stringList` 渲染为节点多选：用户只需选择节点，由门户自动写入 `kubernetes.io/hostname=<node>`，无需手工填写标签对。与 `podTemplate.nodeSelector`、`accelerator.models` 的型号约束按 K8s AND 语义合并（§3.2）。一个服务只有一个该值；需要按 role 区分时使用 `roles[].nodeSelector`（见上）。 |
 | `podAntiAffinity` | object | L0：可选；`topologyKey` 必填且为合法 K8s label key；`policy` 可选，只能取 `required`/`preferred`/`none` 之一或单个 `{{ ... }}` 占位符（不能是 `enum`——精确匹配会在 CREATE 时拒绝占位符，故用 pattern 校验）；L2：`policy` 渲染后须解析为三者之一，否则 `InvalidOverride` 且 Rendered=False（不回退为 `required`） | 同服务 Pod 反亲和：`{policy, topologyKey}`。`policy` 选择强度：`required`（硬约束，`requiredDuringSchedulingIgnoredDuringExecution`，**默认值**，也是本字段引入前的行为）要求本服务**全部 role** 的 Pod（leader/worker、跨组、跨 role）在声明的拓扑域内互不共置；`preferred`（软约束，权重 100）在拓扑域足够时同样分散，域不足时允许共置，不会为等空闲节点而 Pending；`none` 不注入任何反亲和项。声明一次，Controller 将其注入每个 role 的 PodSpec。labelSelector 由平台固定为本服务（`ai.cubestack.io/inference-service`），不可自定义——用于多副本组异机/异域散布；单副本无效果。与 `accelerator.models` 的 nodeSelector/nodeAffinity（§3.2）按 K8s AND 语义叠加：`none` 只移除反亲和项，不影响 nodeAffinity。`policy` 可写模板（如 `{{ overrides.replicaPlacement }}`）交由 override 控制。`topologyKey` 在 `none` 下必填但不起作用。 |
 
 #### Status
@@ -815,7 +826,7 @@ env:
 | —（固定值） | `restartPolicy: RecreateGroupOnPodRestart` | 引擎进程组语义：组内一进程死全组重建 |
 | —（固定值） | `networkConfig.subdomainPolicy: UniquePerReplica` | 稳定主机名（分布式发现） |
 | —（固定值，不开放） | `rolloutStrategy: RollingUpdate{maxSurge: 0, maxUnavailable: 1}` | GPU 集群 surge 不现实；replicas=1 时等价 Recreate |
-| 调度约束 | `podTemplate.nodeSelector`（Profile 手写）、`spec.nodeSelector`（服务级，值来自 override）与 `accelerator.models` 推导（§3.2）三者合并 | K8s 原生 AND：nodeSelector 与 nodeAffinity 交集。服务级值默认为空则不注入；L2 冲突即 Rendered=False：渲染结果非法为 `InvalidOverride`，把型号 label 钉到 `accelerator.models` 之外为 `ModelSchedulingConflict` |
+| 调度约束 | `podTemplate.nodeSelector`（Profile 手写）、`spec.nodeSelector`（服务级，值来自 override）与 `accelerator.models` 推导（§3.2）三者合并 | K8s 原生 AND：nodeSelector 与 nodeAffinity 交集。服务级值默认为空则不注入；同一 key 的多个值转换成 required `nodeAffinity` 的 `In`；L2 冲突即 Rendered=False：渲染结果非法为 `InvalidOverride`，把型号 label 钉到 `accelerator.models` 之外为 `ModelSchedulingConflict` |
 
 **Deployment(`kind: Deployment`)**
 

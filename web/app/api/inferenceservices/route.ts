@@ -45,6 +45,12 @@ export interface InferenceServiceSummary {
   vendor: string | null;
   gpuModel: string | null;
   gpuPerPod: number | null;
+  // Profile-derived GPU facts, one entry per GPU-carrying role: how many cards
+  // each pod requests and which accelerator model the role is pinned to. model
+  // is null when the role accepts any of the profile's declared models (a
+  // multi-model profile without a role-level pin). The list's GPU resource
+  // column sums these roles; a PD service reads "2 × 8 × MXC550".
+  gpuRoles: Array<{ name: string; gpuPerPod: number; model: string | null }>;
   modelName: string | null;
   modelVersion: string | null;
   // override knobs declared by the profile, with the effective value (the
@@ -53,14 +59,14 @@ export interface InferenceServiceSummary {
   overrideNums: Record<string, number>;
   overrides: Array<{
     name: string;
-    type: "integer" | "string" | "boolean";
+    type: "integer" | "string" | "stringList" | "boolean";
     min: number | null;
     max: number | null;
     enum: Array<number | string> | null;
-    current: number | string | boolean | null;
+    current: number | string | string[] | boolean | null;
     // the profile's declared default, which current falls back to; an empty
     // string here is a declared value ("off"), not a missing one
-    default: number | string | boolean | null;
+    default: number | string | string[] | boolean | null;
   }>;
   // observed state (phase is null until the controller reports it)
   phase: string | null;
@@ -136,7 +142,13 @@ interface ProfileOverride {
 interface ProfileRole {
   name?: string;
   workload?: { kind?: string };
-  podTemplate?: { resources?: { gpuPerPod?: number } };
+  // Effective accelerator (design §3.2): the role's own declaration replaces
+  // the profile-level one wholesale.
+  accelerator?: { vendor?: string; models?: string[] };
+  podTemplate?: {
+    nodeSelector?: Record<string, string>;
+    resources?: { gpuPerPod?: number };
+  };
 }
 interface ProfileSpec {
   engine?: { name?: string; version?: string };
@@ -151,15 +163,42 @@ interface Profile {
 }
 
 /**
- * The serving role of a profile is the one that actually carries GPUs (the
- * prefill/decode LWS roles here). It is the source of gpuPerPod and the replica
- * overrides the scale panel edits.
+ * Vendor product node labels, matching the renderer: the role's pod template
+ * pins the accelerator model through this label, either literally or through
+ * an override reference.
  */
-function findGpuRole(profile: Profile | undefined): ProfileRole | null {
-  for (const role of profile?.spec?.roles ?? []) {
-    if ((role.podTemplate?.resources?.gpuPerPod ?? 0) > 0) return role;
+const VENDOR_PRODUCT_LABEL: Record<string, string> = {
+  metax: "metax-tech.com/gpu.product",
+  nvidia: "nvidia.com/gpu.product",
+};
+
+/** A pod template node-selector value that is exactly one override reference. */
+const OVERRIDE_REF = /^\{\{\s*overrides\.([A-Za-z0-9_]+)\s*\}\}$/;
+
+/**
+ * The accelerator model a GPU role is pinned to: the role's pod-template node
+ * selector on the effective vendor's product label, with an override reference
+ * resolved to the service's effective value. Falls back to the role's single
+ * effective declared model; a multi-model accelerator without a role-level pin
+ * leaves the role free to land on any declared model (null), matching the
+ * renderer's nodeAffinity.
+ */
+function roleGpuModel(
+  role: ProfileRole,
+  profile: Profile,
+  effective: Map<string, string | number | boolean | null>,
+): string | null {
+  const accel = role.accelerator ?? profile.spec?.accelerator;
+  const label = VENDOR_PRODUCT_LABEL[accel?.vendor ?? ""];
+  const value = label ? role.podTemplate?.nodeSelector?.[label]?.trim() : undefined;
+  if (value) {
+    const ref = OVERRIDE_REF.exec(value);
+    if (!ref) return value;
+    const resolved = effective.get(ref[1]);
+    if (typeof resolved === "string" && resolved !== "") return resolved;
   }
-  return null;
+  const models = accel?.models ?? [];
+  return models.length === 1 ? models[0] : null;
 }
 
 function num(v: unknown): number | null {
@@ -192,6 +231,22 @@ function overrideError(
   for (const [key, value] of Object.entries(overrides)) {
     const o = declared.get(key);
     if (!o) return { code: "overrideUnknown", params: { key } };
+    if (o.type === "stringList") {
+      if (!Array.isArray(value) || !value.every((e) => typeof e === "string")) {
+        return { code: "overrideNotStringList", params: { key } };
+      }
+      // The operator joins the list into text; a comma inside an entry would
+      // silently become a separator there, so reject it here instead of
+      // persisting a value the renderer later fails on.
+      if (value.some((e) => e.includes(","))) {
+        return { code: "overrideNotAllowed", params: { key } };
+      }
+      // A declared enum constrains every entry of the list.
+      if (o.enum && value.some((e) => !o.enum!.some((allowed) => allowed === e))) {
+        return { code: "overrideNotAllowed", params: { key } };
+      }
+      continue;
+    }
     const kind = { integer: 1, string: 2, boolean: 3 }[o.type ?? "integer"] ?? 1;
     if (kind === 1 && !Number.isInteger(value)) return { code: "overrideNotInteger", params: { key } };
     if (o.enum && !o.enum.some((e) => e === value)) return { code: "overrideNotAllowed", params: { key } };
@@ -216,7 +271,6 @@ function project(
 ): InferenceServiceSummary {
   const spec = isvc.spec ?? {};
   const status = isvc.status ?? {};
-  const gpuRole = findGpuRole(profile);
 
   const overrideNums: Record<string, number> = {};
   for (const [k, v] of Object.entries(spec.overrides ?? {})) {
@@ -227,8 +281,11 @@ function project(
   // Effective value of every knob the profile declares: the service's user
   // value wins, else the profile default, else null. Drives the page's
   // replicas column and scale panel, so no knob name is hardcoded.
-  const isPrim = (v: unknown): v is number | string | boolean =>
-    typeof v === "number" || typeof v === "string" || typeof v === "boolean";
+  const isPrim = (v: unknown): v is number | string | string[] | boolean =>
+    typeof v === "number" ||
+    typeof v === "string" ||
+    typeof v === "boolean" ||
+    (Array.isArray(v) && v.every((e) => typeof e === "string"));
   const specOverrides = spec.overrides ?? {};
   const overrides = (profile?.spec?.overrides ?? []).map((o) => {
     const name = o.name ?? "";
@@ -236,9 +293,10 @@ function project(
     const current = isPrim(raw) ? raw : (isPrim(o.default) ? o.default : null);
     return {
       name,
-      type: (o.type === "string" || o.type === "boolean" ? o.type : "integer") as
+      type: (o.type === "string" || o.type === "stringList" || o.type === "boolean" ? o.type : "integer") as
         | "integer"
         | "string"
+        | "stringList"
         | "boolean",
       min: num(o.min),
       max: num(o.max),
@@ -256,6 +314,28 @@ function project(
     groupSize: r.groupSize ?? null,
   }));
 
+  // GPU roles are profile-derived, not status-derived: the list shows the
+  // service's GPU footprint before the controller has written any status.
+  // Only scalar knobs can name a GPU model, so stringList values are skipped.
+  const effective = new Map<string, string | number | boolean | null>(
+    overrides
+      .filter((o) => !Array.isArray(o.current))
+      .map((o) => [o.name, o.current as string | number | boolean | null]),
+  );
+  const gpuRoles: InferenceServiceSummary["gpuRoles"] = profile
+    ? (profile.spec?.roles ?? [])
+        .filter((r) => (r.podTemplate?.resources?.gpuPerPod ?? 0) > 0)
+        .map((r) => ({
+          name: r.name ?? "?",
+          gpuPerPod: r.podTemplate?.resources?.gpuPerPod ?? 0,
+          model: roleGpuModel(r, profile, effective),
+        }))
+    : [];
+  // The single-model fields stay as a compact summary: every concrete model a
+  // GPU role pins (joined when the roles were narrowed differently), else the
+  // first declared model when no role pins one.
+  const gpuModels = [...new Set(gpuRoles.map((r) => r.model).filter((m): m is string => m !== null))];
+
   return {
     name: isvc.metadata?.name ?? "?",
     namespace: isvc.metadata?.namespace ?? "",
@@ -269,8 +349,9 @@ function project(
     engine: profile?.spec?.engine?.name ?? null,
     engineVersion: profile?.spec?.engine?.version ?? null,
     vendor: profile?.spec?.accelerator?.vendor ?? null,
-    gpuModel: profile?.spec?.accelerator?.models?.[0] ?? null,
-    gpuPerPod: gpuRole?.podTemplate?.resources?.gpuPerPod ?? null,
+    gpuModel: gpuModels.length > 0 ? gpuModels.join(" / ") : (profile?.spec?.accelerator?.models?.[0] ?? null),
+    gpuPerPod: gpuRoles[0]?.gpuPerPod ?? null,
+    gpuRoles,
     modelName: status.model?.name ?? null,
     modelVersion: status.model?.version ?? null,
     overrideNums,
@@ -360,11 +441,12 @@ export const PATCH = withAuth(async (req) => {
     if (!body.namespace || !body.name || !body.overrides) {
       return Response.json({ error: "namespace, name and overrides are required" }, { status: 400 });
     }
-    // Only numeric/boolean/string override values are meaningful; reject the
-    // rest so a bad payload cannot be persisted.
+    // Only numeric/boolean/string override values and string lists are
+    // meaningful; reject the rest so a bad payload cannot be persisted.
     for (const [k, v] of Object.entries(body.overrides)) {
-      if (typeof v !== "number" && typeof v !== "string" && typeof v !== "boolean") {
-        return Response.json({ error: `override '${k}' must be a number, string or boolean` }, { status: 400 });
+      const isStringList = Array.isArray(v) && v.every((e) => typeof e === "string");
+      if (typeof v !== "number" && typeof v !== "string" && typeof v !== "boolean" && !isStringList) {
+        return Response.json({ error: `override '${k}' must be a number, string, string list or boolean` }, { status: 400 });
       }
     }
 

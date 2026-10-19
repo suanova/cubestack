@@ -79,8 +79,43 @@ function StatusChip({ phase }: { phase: string | null }) {
   );
 }
 
-const gpuText = (s: InferenceServiceSummary): string =>
-  s.gpuPerPod ? `${s.gpuPerPod} × ${s.gpuModel ?? s.vendor ?? "GPU"}` : "—";
+// GPU facts per role. The API projects them from the profile; fixtures that
+// predate the field fall back to the single gpuPerPod/gpuModel pair.
+const gpuRoleFacts = (s: InferenceServiceSummary) =>
+  s.gpuRoles.length > 0
+    ? s.gpuRoles
+    : s.gpuPerPod
+      ? [{ name: "", gpuPerPod: s.gpuPerPod, model: s.gpuModel }]
+      : [];
+
+const gpuAmountText = (gpuPerPod: number, model: string | null): string =>
+  `${gpuPerPod} × ${model ?? "GPU"}`;
+
+// The list's GPU resource column: the service's whole footprint. Roles asking
+// for the same cards on the same model collapse into one product — a PD
+// service whose prefill and decode each take 8 MXC550 reads "2 × 8 × MXC550" —
+// while roles on different models or card counts are listed per role.
+const gpuText = (s: InferenceServiceSummary): string => {
+  const roles = gpuRoleFacts(s);
+  if (roles.length === 0) return "—";
+  const [first] = roles;
+  const uniform = roles.every((r) => r.gpuPerPod === first.gpuPerPod && r.model === first.model);
+  if (!uniform) {
+    return roles.map((r) => `${roleLabel(r.name)} ${gpuAmountText(r.gpuPerPod, r.model)}`).join(" · ");
+  }
+  return roles.length > 1
+    ? `${roles.length} × ${gpuAmountText(first.gpuPerPod, first.model)}`
+    : gpuAmountText(first.gpuPerPod, first.model);
+};
+
+// The detail card's per-replica row: one entry per GPU role, since each role is
+// its own workload.
+const gpuPerRoleText = (s: InferenceServiceSummary): string => {
+  const roles = gpuRoleFacts(s);
+  if (roles.length === 0) return "—";
+  if (roles.length === 1) return gpuAmountText(roles[0].gpuPerPod, roles[0].model);
+  return roles.map((r) => `${roleLabel(r.name)} ${gpuAmountText(r.gpuPerPod, r.model)}`).join(" · ");
+};
 
 // One row per integer override the profile declares (decodeReplicas /
 // prefillReplicas / groupSize on a PD profile, whatever a standard profile
@@ -89,14 +124,14 @@ const gpuText = (s: InferenceServiceSummary): string =>
 function ReplicaRows({ s }: { s: InferenceServiceSummary }) {
   const rows = s.overrides
     .filter((o) => o.type === "integer")
-    .map((o) => [o.name, o.current !== null ? String(o.current) : "—"] as [string, string]);
+    .map((o) => [o.name, overrideDisplayName(o.name), o.current !== null ? String(o.current) : "—"] as const);
   if (rows.length === 0) {
     return <Typography sx={{ fontFamily: "var(--font-mono)", fontSize: 12.5 }}>—</Typography>;
   }
   return (
     <Box sx={{ fontFamily: "var(--font-mono)", fontSize: 12.5, lineHeight: 1.7 }}>
-      {rows.map(([label, value]) => (
-        <Box key={label} sx={{ whiteSpace: "nowrap" }}>
+      {rows.map(([name, label, value]) => (
+        <Box key={name} sx={{ whiteSpace: "nowrap" }}>
           {label} <Typography component="span" sx={{ color: "text.secondary" }}>{value}</Typography>
         </Box>
       ))}
@@ -182,6 +217,19 @@ export default function InferenceServicesPage() {
     };
   }, [reloadKey, load]);
 
+  // The detail panel's node pickers list the same schedulable nodes as the
+  // deploy wizard: the value a pin carries is kubernetes.io/hostname=<node>,
+  // so users pick a node rather than composing the label pair. Best-effort —
+  // when the read fails (or the principal may not list nodes) the picker
+  // keeps its free-text input, which still accepts the pair by hand.
+  const [nodes, setNodes] = useState<CreateOptionsResponse["nodes"]>([]);
+  useEffect(() => {
+    apiFetch("/api/inferenceservices/options")
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
+      .then((d: CreateOptionsResponse) => setNodes(d.nodes ?? []))
+      .catch(() => setNodes([]));
+  }, [reloadKey]);
+
   const selected = items.find((s) => svcKey(s) === selKey) ?? null;
 
   const visible = items.filter((s) => {
@@ -196,7 +244,7 @@ export default function InferenceServicesPage() {
   });
 
   const handleApply = useCallback(
-    (overrides: Record<string, number | string | boolean>) => {
+    (overrides: Record<string, OverrideValue>) => {
       if (!selected) return;
       setScaleMsg(null);
       setScaleErr(null);
@@ -369,6 +417,7 @@ export default function InferenceServicesPage() {
             // asks. Deleting cannot be taken back, so the request waits for its
             // answer rather than firing under the click.
             onDelete={setPendingDelete}
+            nodes={nodes}
             busy={scaleBusy}
             msg={scaleMsg}
             err={scaleErr}
@@ -549,6 +598,7 @@ function ServiceTable({
   selectedKey,
   onSelect,
   onDelete,
+  nodes,
   busy,
   msg,
   err,
@@ -559,12 +609,14 @@ function ServiceTable({
   selectedKey: string | null;
   onSelect: (key: string) => void;
   onDelete: (s: InferenceServiceSummary) => void;
+  // The schedulable nodes the detail panel's node pickers offer.
+  nodes: CreateOptionsResponse["nodes"];
   // The detail panel's own state, threaded straight through: the table is what
   // renders the panel, inside the row it belongs to.
   busy: boolean;
   msg: string | null;
   err: string | null;
-  onApply: (overrides: Record<string, number | string | boolean>) => void;
+  onApply: (overrides: Record<string, OverrideValue>) => void;
 }) {
   const { t } = useI18n();
   const thSx = {
@@ -674,7 +726,7 @@ function ServiceTable({
                     style={{ padding: 0, background: "var(--surface)", borderBottom: "1px solid var(--border)" }}
                   >
                     <Box sx={{ p: "18px 20px 20px" }}>
-                      <DetailPanel s={s} busy={busy} msg={msg} err={err} onApply={onApply} />
+                      <DetailPanel s={s} nodes={nodes} busy={busy} msg={msg} err={err} onApply={onApply} />
                     </Box>
                   </td>
                 </tr>,
@@ -777,16 +829,18 @@ const tdSx = {
 
 function DetailPanel({
   s,
+  nodes,
   busy,
   msg,
   err,
   onApply,
 }: {
   s: InferenceServiceSummary;
+  nodes: CreateOptionsResponse["nodes"];
   busy: boolean;
   msg: string | null;
   err: string | null;
-  onApply: (overrides: Record<string, number | string | boolean>) => void;
+  onApply: (overrides: Record<string, OverrideValue>) => void;
 }) {
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: "14px", minWidth: 0 }}>
@@ -806,7 +860,7 @@ function DetailPanel({
       >
         <EndpointsCard s={s} />
         <MetricsCard s={s} />
-        <ScaleCard s={s} busy={busy} msg={msg} err={err} onApply={onApply} />
+        <ScaleCard s={s} nodes={nodes} busy={busy} msg={msg} err={err} onApply={onApply} />
       </Box>
       <ParamsCard s={s} />
       <ConditionsCard s={s} />
@@ -984,20 +1038,100 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
+// OverrideValue is what an override input edits; stringList knobs (such as a
+// per-role nodeSelector) carry an array rather than a scalar.
+type OverrideValue = number | string | boolean | string[];
+
+/** Splits a comma-joined stringList input into its entries. */
+function splitList(value: string): string[] {
+  return value
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 // One row of the scale panel: renders the input matching the override type
 // declared by the profile (integer number, integer enum select, string text,
-// boolean switch).
+// stringList comma-separated text or enum multi-select, boolean switch). A
+// nodeSelector stringList renders the shared node picker instead of free text.
 function ScaleInput({
   o,
   value,
+  nodes,
   onChange,
 }: {
   o: InferenceServiceSummary["overrides"][number];
-  value: number | string | boolean;
-  onChange: (v: number | string | boolean) => void;
+  value: OverrideValue;
+  /** The schedulable nodes a nodeSelector pin may name, as the wizard offers them. */
+  nodes: CreateOptionsResponse["nodes"];
+  onChange: (v: OverrideValue) => void;
 }) {
+  const { t } = useI18n();
   if (o.type === "boolean") {
     return <Switch checked={value === true} onChange={(e) => onChange(e.target.checked)} size="small" />;
+  }
+  if (o.type === "stringList") {
+    const list = Array.isArray(value) ? value : [];
+    const pinned = isNodeSelectorOverride(o) && nodes.length > 0 ? pinnedNodes(value) : null;
+    if (pinned !== null) {
+      // Keep a pinned node visible even when the cluster no longer offers it:
+      // it is the service's current choice, and hiding it would render the
+      // Select blank instead of letting the user change it.
+      const offered = new Set(nodes.map((n) => n.name));
+      const menu = [...pinned.filter((name) => !offered.has(name)), ...nodes.map((n) => n.name)];
+      return (
+        <Select
+          multiple
+          size="small"
+          displayEmpty
+          value={pinned}
+          data-od-id={`scale-${o.name}`}
+          onChange={(e) => onChange((e.target.value as string[]).map((name) => `${NODE_SELECTOR_KEY}=${name}`))}
+          renderValue={(names) => (names.length > 0 ? names.join(", ") : t("inf.deploy.nodeAny"))}
+          sx={{ width: "100%", fontSize: 13, fontFamily: "var(--font-mono)" }}
+        >
+          {menu.map((name) => (
+            <MenuItem key={name} value={name}>
+              {name}
+            </MenuItem>
+          ))}
+        </Select>
+      );
+    }
+    if (o.enum !== null && o.enum.length > 0) {
+      return (
+        <Select
+          multiple
+          size="small"
+          value={list}
+          onChange={(e) => onChange(e.target.value as string[])}
+          sx={{ width: "100%", fontSize: 13, fontFamily: "var(--font-mono)" }}
+        >
+          {o.enum.map((n) => (
+            <MenuItem key={String(n)} value={String(n)}>
+              {String(n)}
+            </MenuItem>
+          ))}
+        </Select>
+      );
+    }
+    return (
+      <input
+        value={list.join(",")}
+        onChange={(e) => onChange(splitList(e.target.value))}
+        style={{
+          width: "100%",
+          border: "1px solid var(--border)",
+          borderRadius: "var(--radius)",
+          padding: "8px 10px",
+          font: "inherit",
+          fontSize: 13,
+          background: "var(--bg)",
+          color: "var(--fg)",
+          outline: "none",
+        }}
+      />
+    );
   }
   // A declared enum is a closed set whatever its type, so it renders as a
   // select — checked before the string/integer branches.
@@ -1037,9 +1171,13 @@ function ScaleInput({
 // Type/range/enum validity of a scale value against the profile declaration.
 // A declared enum is closed for string overrides too, otherwise a string enum
 // would accept any non-empty text and only be rejected by the API.
-function scaleValueValid(o: InferenceServiceSummary["overrides"][number], v: number | string | boolean | undefined): boolean {
+function scaleValueValid(o: InferenceServiceSummary["overrides"][number], v: OverrideValue | undefined): boolean {
   if (v === undefined || v === null) return false;
   if (o.type === "boolean") return typeof v === "boolean";
+  if (o.type === "stringList") {
+    if (!Array.isArray(v) || !v.every((e) => typeof e === "string")) return false;
+    return o.enum === null || v.every((e) => o.enum!.some((allowed) => allowed === e));
+  }
   if (o.type === "string") {
     if (typeof v !== "string") return false;
     // An empty box is empty input — unless the profile declares "" as a value,
@@ -1059,8 +1197,9 @@ function scaleValueValid(o: InferenceServiceSummary["overrides"][number], v: num
 // Starting value for a scale input: the effective value, falling back to a
 // declared enum entry (an enum select needs a value inside the set), then to a
 // per-type default (mirrors the wizard's overrideValue).
-function scaleInitial(o: InferenceServiceSummary["overrides"][number]): number | string | boolean {
+function scaleInitial(o: InferenceServiceSummary["overrides"][number]): OverrideValue {
   if (o.current !== null) return o.current;
+  if (o.type === "stringList") return [];
   if (o.enum !== null && o.enum.length > 0) return o.enum[0];
   if (o.type === "boolean") return true;
   if (o.type === "string") return "";
@@ -1071,19 +1210,21 @@ function scaleInitial(o: InferenceServiceSummary["overrides"][number]): number |
 // input per knob) and submits them as a PATCH; nothing is hardcoded.
 function ScaleCard({
   s,
+  nodes,
   busy,
   msg,
   err,
   onApply,
 }: {
   s: InferenceServiceSummary;
+  nodes: CreateOptionsResponse["nodes"];
   busy: boolean;
   msg: string | null;
   err: string | null;
-  onApply: (overrides: Record<string, number | string | boolean>) => void;
+  onApply: (overrides: Record<string, OverrideValue>) => void;
 }) {
   const { t } = useI18n();
-  const [values, setValues] = useState<Record<string, number | string | boolean>>(() =>
+  const [values, setValues] = useState<Record<string, OverrideValue>>(() =>
     Object.fromEntries(s.overrides.map((o) => [o.name, scaleInitial(o)])),
   );
 
@@ -1107,7 +1248,7 @@ function ScaleCard({
   // Effective value per declared knob: the local edit when present, else the
   // service's value or declared default (values can lag one render behind a
   // poll that changed the declared override set).
-  const effective: Record<string, number | string | boolean> = Object.fromEntries(
+  const effective: Record<string, OverrideValue> = Object.fromEntries(
     s.overrides.map((o) => [o.name, values[o.name] ?? scaleInitial(o)]),
   );
   const invalid = s.overrides.some((o) => !scaleValueValid(o, effective[o.name]));
@@ -1120,8 +1261,8 @@ function ScaleCard({
       ) : (
         <Box sx={{ px: "18px", py: "12px", display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: "12px", alignItems: "end" }}>
           {s.overrides.map((o) => (
-            <Field key={o.name} label={o.name} error={!scaleValueValid(o, effective[o.name])}>
-              <ScaleInput o={o} value={effective[o.name]} onChange={(v) => setValues((prev) => ({ ...prev, [o.name]: v }))} />
+            <Field key={o.name} label={overrideDisplayName(o.name)} error={!scaleValueValid(o, effective[o.name])}>
+              <ScaleInput o={o} value={effective[o.name]} nodes={nodes} onChange={(v) => setValues((prev) => ({ ...prev, [o.name]: v }))} />
             </Field>
           ))}
         </Box>
@@ -1198,7 +1339,7 @@ function ParamsCard({ s }: { s: InferenceServiceSummary }) {
         rows={[
           [t("inf.params.engine"), s.engine ? `${s.engine} · ${s.engineVersion ?? ""}`.trim() : "—"],
           [t("inf.params.accelerator"), s.vendor ? `${s.vendor}${s.gpuModel ? ` / ${s.gpuModel}` : ""}` : "—"],
-          [t("inf.params.gpuPerPod"), gpuText(s)],
+          [t("inf.params.gpuPerPod"), gpuPerRoleText(s)],
           ["modelRef", s.modelRef],
           ["profileRef", s.profileRef],
           [t("inf.params.route"), s.published ? `${t("inf.params.published")} ${s.routeModelName ?? ""}`.trim() : t("inf.params.unpublished")],
@@ -1313,7 +1454,7 @@ interface DeployDraft {
   namespace: string;
   profileRef: string;
   modelRef: string;
-  overrides: Record<string, number | string | boolean>;
+  overrides: Record<string, OverrideValue>;
   publish: boolean;
   modelName: string;
   timeout: string; // keep as string until parse for a friendlier error path
@@ -1391,6 +1532,10 @@ function DeployWizard({
   // the profile, never picked here.
   const roleVendor = (name: string): string | null =>
     profile?.roles.find((r) => r.name === name)?.vendor ?? profile?.vendor ?? null;
+  // Effective allowed models of one role: its own accelerator, else the
+  // profile-level one (the options projection already resolves this).
+  const roleModels = (name: string): string[] =>
+    profile?.roles.find((r) => r.name === name)?.models ?? profile?.models ?? [];
   // Model versions compatible with the selected profile (architecture + quant).
   const compatibleModels = (options?.modelversions ?? []).filter((mv) => {
     if (!profile) return true;
@@ -1415,17 +1560,120 @@ function DeployWizard({
   const step2Valid = !!draft.modelRef;
 
   // Default override value, or the declared default.
-  const overrideValue = (o: OverrideDecl): number | string | boolean => {
+  const overrideValue = (o: OverrideDecl): OverrideValue => {
     const held = draft.overrides[o.name];
     if (held !== undefined) return held;
+    if (Array.isArray(o.default)) return o.default;
     if (o.default !== null && o.default !== undefined) return o.default;
     // An enum select needs a value inside the declared set, otherwise MUI
     // reports an out-of-range value ("") on first render.
+    if (o.type === "stringList") return [];
     if (o.enum !== null && o.enum.length > 0) return o.enum[0];
     if (o.type === "boolean") return true;
     if (o.type === "integer") return o.min ?? 1;
     return "";
   };
+
+  // The GPU model the user picked: a profile pins its allowed models in
+  // spec.accelerator.models and narrows them through an override (metax_model
+  // for the metax profiles). The backend keeps the allowed models in a
+  // nodeAffinity In term and narrows a nodeSelector to this value, so the
+  // wizard shows the same choice beside the read-only vendor — otherwise
+  // picking MXC500 would still display only "metax".
+  const selectedGpuModel = profile
+    ? (profile.overrides
+        .map((o) => overrideValue(o))
+        .find((v): v is string => typeof v === "string" && profile.models.includes(v)) ?? null)
+    : null;
+
+  // A role may narrow the choice through its own override, named
+  // `<role>_<vendor>_model` (the PD profiles declare prefill_metax_model and
+  // decode_metax_model so the two roles can run on different GPU models).
+  // Fall back to the profile-wide choice when the role has no scoped override.
+  const selectedRoleGpuModel = (name: string): string | null => {
+    const models = roleModels(name);
+    if (!profile) return null;
+    const scoped = profile.overrides
+      .filter((o) => o.name.startsWith(`${name}_`) && o.name.endsWith("_model"))
+      .map((o) => overrideValue(o))
+      .find((v): v is string => typeof v === "string" && models.includes(v));
+    if (scoped !== undefined) return scoped;
+    return selectedGpuModel && models.includes(selectedGpuModel) ? selectedGpuModel : null;
+  };
+
+  // "metax / MXC500" when a model is known, otherwise just the vendor (and
+  // "—" when neither is known).
+  const gpuTypeLabel = (vendor: string | null, model: string | null): string =>
+    [vendor, model].filter(Boolean).join(" / ") || "—";
+
+  // PD profiles declare a knob once per GPU role (prefill_metax_model /
+  // decode_metax_model, prefill_nodeSelector / decode_nodeSelector). Render
+  // those as one column per role and one row per knob, so the two roles' values
+  // line up however the profile lists them; overrides outside the role
+  // prefixes keep the plain two-column grid above the role grid.
+  const roleOverrides = (() => {
+    if (!profile) return null;
+    const roles = (profile.roles ?? [])
+      .map((r) => r.name)
+      .filter((name) => profile.overrides.some((o) => o.name.startsWith(`${name}_`)));
+    if (roles.length < 2) return null;
+    const owner = (o: OverrideDecl): string | null =>
+      roles.find((name) => o.name.startsWith(`${name}_`)) ?? null;
+    const cells = new Map<string, Map<string, OverrideDecl>>();
+    const suffixes: string[] = [];
+    for (const o of profile.overrides) {
+      const role = owner(o);
+      if (!role) continue;
+      const suffix = o.name.slice(role.length + 1);
+      if (!cells.has(role)) cells.set(role, new Map());
+      cells.get(role)!.set(suffix, o);
+      if (!suffixes.includes(suffix)) suffixes.push(suffix);
+    }
+    return {
+      roles,
+      // One row per knob suffix, one cell per role; a role that does not
+      // declare the knob gets an empty cell so the columns stay aligned.
+      rows: suffixes.map((suffix) => roles.map((role) => cells.get(role)?.get(suffix) ?? null)),
+      rest: profile.overrides.filter((o) => owner(o) === null),
+    };
+  })();
+
+  // The node picker offers only nodes that can run the GPU model chosen for
+  // the role the selector applies to: the operator schedules by both the
+  // hostname pin and the model constraint, so a pin to a node labelled with
+  // another model is a Pod that can only stay Pending. A service-level
+  // selector applies to every role, so its node must satisfy all of them.
+  const nodeMatchesSelectedModel = (
+    decl: OverrideDecl,
+    node: CreateOptionsResponse["nodes"][number],
+  ): boolean => {
+    if (!profile) return true;
+    const scopedRole = decl.name.endsWith("_nodeSelector")
+      ? decl.name.slice(0, -"_nodeSelector".length)
+      : null;
+    const roles = scopedRole ? [scopedRole] : (profile.roles ?? []).map((r) => r.name);
+    if (roles.length === 0) {
+      return !selectedGpuModel || !profile.vendor || node.gpuModels?.[profile.vendor] === selectedGpuModel;
+    }
+    return roles.every((name) => {
+      const model = selectedRoleGpuModel(name);
+      if (!model) return true;
+      const vendor = roleVendor(name);
+      return !vendor || node.gpuModels?.[vendor] === model;
+    });
+  };
+
+  const allNodes = options?.nodes ?? [];
+  const overrideInput = (o: OverrideDecl) => (
+    <OverrideInput
+      key={o.name}
+      decl={o}
+      value={overrideValue(o)}
+      nodes={allNodes.filter((n) => nodeMatchesSelectedModel(o, n))}
+      anyNodes={allNodes.length > 0}
+      onChange={(v) => setDraft((prev) => ({ ...prev, overrides: { ...prev.overrides, [o.name]: v } }))}
+    />
+  );
 
   const next = () => {
     if (step === 1) {
@@ -1473,13 +1721,16 @@ function DeployWizard({
   };
 
   // Step-3 summary line for the GPU type: one entry per GPU role in
-  // pd-separation mode, a single vendor otherwise. Values are each role's
-  // effective accelerator from the profile (read-only, see GpuTypeSelect).
+  // pd-separation mode, a single vendor otherwise. The vendor is the role's
+  // effective accelerator from the profile (read-only, see GpuTypeSelect); the
+  // model is the role-scoped accelerator-model override the user picked,
+  // falling back to the profile-wide one, when it narrows that role's allowed
+  // models.
   const gpuSummary = !profile
     ? "—"
     : profile.servingMode === "pd-separation"
-      ? `prefill: ${roleVendor("prefill") ?? "—"} / decode: ${roleVendor("decode") ?? "—"}`
-      : (profile.vendor ?? "—");
+      ? `${roleLabel("prefill")}: ${gpuTypeLabel(roleVendor("prefill"), selectedRoleGpuModel("prefill"))} / ${roleLabel("decode")}: ${gpuTypeLabel(roleVendor("decode"), selectedRoleGpuModel("decode"))}`
+      : gpuTypeLabel(profile.vendor, selectedGpuModel);
 
   const stepTitles = [
     t("inf.deploy.step.basic"),
@@ -1577,11 +1828,11 @@ function DeployWizard({
                       {t("inf.deploy.gpu")}
                     </Typography>
                     <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
-                      <WizField label="prefill">
-                        <GpuTypeSelect id="wizard-gpu-prefill" vendor={roleVendor("prefill")} />
+                      <WizField label={roleLabel("prefill")}>
+                        <GpuTypeSelect id="wizard-gpu-prefill" label={gpuTypeLabel(roleVendor("prefill"), selectedRoleGpuModel("prefill"))} />
                       </WizField>
-                      <WizField label="decode">
-                        <GpuTypeSelect id="wizard-gpu-decode" vendor={roleVendor("decode")} />
+                      <WizField label={roleLabel("decode")}>
+                        <GpuTypeSelect id="wizard-gpu-decode" label={gpuTypeLabel(roleVendor("decode"), selectedRoleGpuModel("decode"))} />
                       </WizField>
                     </Box>
                     <Typography sx={{ fontSize: 11.5, color: "text.secondary", mt: "8px" }}>
@@ -1590,7 +1841,7 @@ function DeployWizard({
                   </Box>
                 ) : profile ? (
                   <WizField label={t("inf.deploy.gpu")}>
-                    <GpuTypeSelect id="wizard-gpu" vendor={profile.vendor} />
+                    <GpuTypeSelect id="wizard-gpu" label={gpuTypeLabel(profile.vendor, selectedGpuModel)} />
                   </WizField>
                 ) : null}
 
@@ -1599,16 +1850,48 @@ function DeployWizard({
                     <Typography sx={{ fontSize: 12.5, fontWeight: 600, mb: "8px", color: "text.secondary" }}>
                       {t("inf.deploy.overrides")}
                     </Typography>
-                    <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
-                      {profile.overrides.map((o) => (
-                        <OverrideInput
-                          key={o.name}
-                          decl={o}
-                          value={overrideValue(o)}
-                          onChange={(v) => setDraft((prev) => ({ ...prev, overrides: { ...prev.overrides, [o.name]: v } }))}
-                        />
-                      ))}
-                    </Box>
+                    {roleOverrides ? (
+                      <>
+                        {roleOverrides.rest.length > 0 && (
+                          <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
+                            {roleOverrides.rest.map(overrideInput)}
+                          </Box>
+                        )}
+                        <Box
+                          data-od-id="override-role-grid"
+                          sx={{
+                            mt: roleOverrides.rest.length > 0 ? "12px" : 0,
+                            display: "grid",
+                            gridTemplateColumns: `repeat(${roleOverrides.roles.length}, minmax(0, 1fr))`,
+                            gap: "12px",
+                            alignItems: "start",
+                          }}
+                        >
+                          {roleOverrides.roles.map((role) => (
+                            <Typography
+                              key={`role-${role}`}
+                              data-od-id={`override-role-${role}`}
+                              sx={{ fontSize: 12, fontWeight: 600, color: "text.secondary" }}
+                            >
+                              {roleLabel(role)}
+                            </Typography>
+                          ))}
+                          {roleOverrides.rows.map((row, rowIdx) =>
+                            row.map((decl, i) =>
+                              decl ? (
+                                overrideInput(decl)
+                              ) : (
+                                <Box key={`override-role-empty-${rowIdx}-${i}`} />
+                              ),
+                            ),
+                          )}
+                        </Box>
+                      </>
+                    ) : (
+                      <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
+                        {profile.overrides.map(overrideInput)}
+                      </Box>
+                    )}
                   </Box>
                 )}
 
@@ -1661,7 +1944,10 @@ function DeployWizard({
                     [t("inf.deploy.gpu"), gpuSummary],
                     ["modelRef", draft.modelRef],
                     ...(profile
-                      ? profile.overrides.map((o) => [`${t("inf.deploy.override")} ${o.name}`, String(overrideValue(o))] as [string, string])
+                      ? profile.overrides.map((o) => {
+                          const v = overrideValue(o);
+                          return [`${t("inf.deploy.override")} ${overrideDisplayName(o.name)}`, Array.isArray(v) ? v.join(", ") : String(v)] as [string, string];
+                        })
                       : []),
                     [t("inf.deploy.route"), draft.publish ? `${t("inf.params.published")} ${draft.modelName}` : t("inf.params.unpublished")],
                   ]}
@@ -1716,17 +2002,16 @@ function profileSummary(p: CreateOptionsResponse["profiles"][number]): string {
 }
 
 /**
- * GPU type select of the create wizard: read-only, fixed to the role's
- * effective accelerator as declared by the profile. Heterogeneous
- * combinations (prefill on one vendor, decode on another) are profile
- * authoring — InferenceService has no per-role accelerator input, so the
- * select stays disabled.
+ * GPU type select of the create wizard: read-only, showing the role's
+ * effective accelerator and the model the user selected through an override.
+ * Heterogeneous combinations (prefill on one vendor, decode on another) are
+ * profile authoring — InferenceService has no per-role accelerator input, so
+ * the select stays disabled.
  */
-function GpuTypeSelect({ id, vendor }: { id: string; vendor: string | null }) {
-  const value = vendor ?? "";
+function GpuTypeSelect({ id, label }: { id: string; label: string }) {
   return (
-    <Select size="small" fullWidth disabled data-od-id={id} value={value} onChange={() => {}}>
-      <MenuItem value={value}>{value || "—"}</MenuItem>
+    <Select size="small" fullWidth disabled data-od-id={id} value={label} onChange={() => {}}>
+      <MenuItem value={label}>{label}</MenuItem>
     </Select>
   );
 }
@@ -1759,27 +2044,190 @@ function WizField({
   );
 }
 
+// Role names are profile identifiers ("prefill", "decode"); the UI shows them
+// capitalized, the same way it labels override keys.
+function roleLabel(name: string): string {
+  return name.charAt(0).toUpperCase() + name.slice(1);
+}
+
+// Human-readable label for an override name. Profile declarations are keys in
+// snake_case or camelCase; the UI shows them as words so a knob reads as a
+// label instead of an identifier: "prefill_metax_model" becomes "Prefill Metax
+// Model" and "cacheDitWarmup" becomes "Cache Dit Warmup". The raw name remains
+// the override key sent to the API and the data-od-id suffix.
+function overrideDisplayName(name: string): string {
+  return name
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .split(/[^A-Za-z0-9]+/)
+    .filter(Boolean)
+    .map((word) => word[0].toUpperCase() + word.slice(1))
+    .join(" ");
+}
+
+// A nodeSelector override pins one node. The wizard lists the cluster's
+// schedulable nodes and injects kubernetes.io/hostname=<node> for the user's
+// pick, so the user selects a node rather than composing a key=value pair. A
+// value naming another label pair stays free text, so a profile's own pool
+// default is never silently replaced.
+const NODE_SELECTOR_KEY = "kubernetes.io/hostname";
+
+function isNodeSelectorOverride(decl: Pick<OverrideDecl, "name" | "type">): boolean {
+  return (
+    (decl.type === "string" || decl.type === "stringList") &&
+    (decl.name === "nodeSelector" || decl.name.endsWith("_nodeSelector"))
+  );
+}
+
+/** The node a string nodeSelector value pins: "" for none, null for another label pair. */
+function pinnedNode(value: unknown): string | null {
+  const v = String(value ?? "");
+  if (v === "") return "";
+  // Several pairs are not a single-node pin; keep the free-text input.
+  if (v.includes(",")) return null;
+  const eq = v.indexOf("=");
+  if (eq < 0) return null;
+  return v.slice(0, eq) === NODE_SELECTOR_KEY ? v.slice(eq + 1) : null;
+}
+
+/**
+ * The nodes a stringList nodeSelector value pins; null when any entry names
+ * another label, in which case the generic list input takes over.
+ */
+function pinnedNodes(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const prefix = `${NODE_SELECTOR_KEY}=`;
+  const names: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string" || !entry.startsWith(prefix)) return null;
+    names.push(entry.slice(prefix.length));
+  }
+  return names;
+}
+
 function OverrideInput({
   decl,
   value,
   onChange,
+  nodes,
+  anyNodes,
 }: {
   decl: OverrideDecl;
-  value: number | string | boolean;
-  onChange: (v: number | string | boolean) => void;
+  value: OverrideValue;
+  onChange: (v: OverrideValue) => void;
+  nodes: Array<{ name: string }>;
+  /** Whether the cluster offered any node at all; `nodes` may be filtered to none. */
+  anyNodes: boolean;
 }) {
+  const { t } = useI18n();
+  // The picker is filtered to the role's selected GPU model; when that leaves
+  // no node, say so instead of showing a list with only "any" and no reason.
+  const nodeHint =
+    isNodeSelectorOverride(decl) && anyNodes && nodes.length === 0
+      ? t("inf.deploy.nodeNoMatch")
+      : decl.description ?? undefined;
   if (decl.type === "boolean") {
     return (
-      <WizField label={decl.name} hint={decl.description ?? undefined}>
-        <Switch checked={Boolean(value)} onChange={(e) => onChange(e.target.checked)} />
+      <WizField label={overrideDisplayName(decl.name)} hint={decl.description ?? undefined}>
+        <Switch checked={Boolean(value)} data-od-id={`override-${decl.name}`} onChange={(e) => onChange(e.target.checked)} />
       </WizField>
     );
   }
-  const label = `${decl.name}${decl.min !== null && decl.max !== null ? ` (${decl.min}–${decl.max})` : ""}`;
+  const label = `${overrideDisplayName(decl.name)}${decl.min !== null && decl.max !== null ? ` (${decl.min}–${decl.max})` : ""}`;
+  if (decl.type === "stringList") {
+    const list = Array.isArray(value) ? value : [];
+    const nodeNames = isNodeSelectorOverride(decl) ? pinnedNodes(value) : null;
+    if (nodeNames !== null && anyNodes) {
+      // A pinned node stays listed even when the selected model no longer
+      // matches it: it is the user's current choice, and hiding it would
+      // render the Select blank instead of letting them change it.
+      const offered = new Set(nodes.map((n) => n.name));
+      const menu = [
+        ...nodeNames.filter((name) => !offered.has(name)).map((name) => ({ name })),
+        ...nodes,
+      ];
+      return (
+        <WizField label={label} hint={nodeHint}>
+          <Select
+            multiple
+            size="small"
+            fullWidth
+            displayEmpty
+            value={nodeNames}
+            data-od-id={`override-${decl.name}`}
+            renderValue={(names) => (names.length > 0 ? names.join(", ") : t("inf.deploy.nodeAny"))}
+            onChange={(e) => {
+              const names = e.target.value as string[];
+              onChange(names.map((name) => `${NODE_SELECTOR_KEY}=${name}`));
+            }}
+          >
+            {menu.map((n) => (
+              <MenuItem key={n.name} value={n.name}>{n.name}</MenuItem>
+            ))}
+          </Select>
+        </WizField>
+      );
+    }
+    if (decl.enum && decl.enum.length > 0) {
+      return (
+        <WizField label={label} hint={decl.description ?? undefined}>
+          <Select
+            multiple
+            size="small"
+            fullWidth
+            value={list}
+            data-od-id={`override-${decl.name}`}
+            onChange={(e) => onChange((e.target.value as Array<number | string>).map(String))}
+          >
+            {decl.enum.map((v) => (
+              <MenuItem key={String(v)} value={String(v)}>{String(v)}</MenuItem>
+            ))}
+          </Select>
+        </WizField>
+      );
+    }
+    return (
+      <WizField label={label} hint={decl.description ?? undefined}>
+        <TextField
+          size="small"
+          fullWidth
+          value={list.join(",")}
+          data-od-id={`override-${decl.name}`}
+          onChange={(e) => onChange(splitList(e.target.value))}
+        />
+      </WizField>
+    );
+  }
+  const pinned = isNodeSelectorOverride(decl) ? pinnedNode(value) : null;
+  if (pinned !== null && anyNodes) {
+    // See the stringList branch: keep a pinned node selectable.
+    const menu =
+      pinned && !nodes.some((n) => n.name === pinned) ? [{ name: pinned }, ...nodes] : nodes;
+    return (
+      <WizField label={label} hint={nodeHint}>
+        <Select
+          size="small"
+          fullWidth
+          displayEmpty
+          value={pinned}
+          data-od-id={`override-${decl.name}`}
+          onChange={(e) => {
+            const name = e.target.value as string;
+            onChange(name ? `${NODE_SELECTOR_KEY}=${name}` : "");
+          }}
+        >
+          <MenuItem value="">{t("inf.deploy.nodeAny")}</MenuItem>
+          {menu.map((n) => (
+            <MenuItem key={n.name} value={n.name}>{n.name}</MenuItem>
+          ))}
+        </Select>
+      </WizField>
+    );
+  }
   if (decl.enum && decl.enum.length > 0) {
     return (
       <WizField label={label} hint={decl.description ?? undefined}>
-        <Select size="small" fullWidth value={value} onChange={(e) => onChange(e.target.value as number | string)}>
+        <Select size="small" fullWidth value={value} data-od-id={`override-${decl.name}`} onChange={(e) => onChange(e.target.value as number | string)}>
           {decl.enum.map((v) => (
             <MenuItem key={String(v)} value={v}>{String(v)}</MenuItem>
           ))}
@@ -1794,6 +2242,7 @@ function OverrideInput({
         fullWidth
         type={decl.type === "integer" ? "number" : "text"}
         value={value}
+        data-od-id={`override-${decl.name}`}
         onChange={(e) => onChange(decl.type === "integer" ? Number(e.target.value) : e.target.value)}
       />
     </WizField>
