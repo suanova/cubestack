@@ -59,9 +59,9 @@ describe("dev environments page", () => {
   const SSH_KEY =
     "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZWQyNTUxOQ\n-----END OPENSSH PRIVATE KEY-----\n";
   const keyRequests: string[] = [];
-  // The literal env values the on-demand endpoint hands back, and the requests
-  // made for them: the list carries names only, so the spec panel fetches the
-  // values for one environment when the user reveals them.
+  // The literal env values the endpoint hands back, and the requests made for
+  // them: the list carries names only, so the spec panel fetches the values for
+  // one environment when its detail opens.
   const ENV_VALUES: Record<string, string> = {
     HF_HOME: "/home/ubuntu/.cache/huggingface",
     HF_TOKEN: "hf_example",
@@ -196,23 +196,19 @@ describe("dev environments page", () => {
     stubData(devEnvironmentList());
     const { container, root } = renderPage();
     await act(async () => {});
+    // The detail's env-values fetch resolves a tick after the list's.
+    await act(async () => {});
 
     // The selected environment states everything: storage shows the mount path
     // the CR carries, and each new section gets a row of its own.
     expect(container.textContent).toContain("200Gi · /home/ubuntu");
     expect(container.textContent).toContain("data-cache → /data");
-    // One environment variable per line, not one " · " run — and the literal
-    // values are masked, because the list response does not carry them.
-    expect(container.textContent).toContain(`HF_HOME=${"•".repeat(12)}\nHF_TOKEN=${"•".repeat(12)}`);
-    expect(envRequests).toEqual([]);
-    const envToggle = container.querySelector('[data-od-id="env-values-toggle"]') as HTMLElement;
-    expect(envToggle.getAttribute("aria-label")).toBe("显示环境变量值");
-    await act(async () => {
-      envToggle.click();
-    });
-    expect(envRequests).toEqual(["project-a/jupyter-nlp-ln"]);
+    // One environment variable per line: the list response does not carry the
+    // literal values, so the panel fetches them when its detail opens — and
+    // shows them as they are, with no reveal toggle.
     expect(container.textContent).toContain("HF_HOME=/home/ubuntu/.cache/huggingface\nHF_TOKEN=hf_example");
-    expect(envToggle.getAttribute("aria-pressed")).toBe("true");
+    expect(container.querySelector('[data-od-id="env-values-toggle"]')).toBeNull();
+    expect(envRequests).toEqual(["project-a/jupyter-nlp-ln"]);
     expect(container.textContent).toContain("python -m jupyter lab");
     expect(container.textContent).toContain("--port 8080");
     expect(container.textContent).toContain("api:8080/http");
@@ -1769,6 +1765,8 @@ describe("create wizard", () => {
     // The confirmation step restates the section, so what is read on step 4 is
     // what a user would notice before submitting.
     expect(document.body.textContent).toContain("shared-models → /models");
+    // The environment variable is restated with its value, not by name alone.
+    expect(document.body.textContent).toContain("HF_HOME=/data/hf");
     // Both of this step's new choices, restated: the pin by the node's own name,
     // which is what the user picked.
     expect(document.body.textContent).toContain("worker-03");

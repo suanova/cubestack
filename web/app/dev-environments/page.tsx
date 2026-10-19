@@ -1421,9 +1421,9 @@ function SpecCard({ e }: { e: DevEnvironmentSummary }) {
     ]);
   }
   if (e.env.length) {
-    // The variables themselves are one block per environment: the literal
-    // values are masked behind one reveal, because the list that produced this
-    // panel deliberately does not carry them.
+    // The variables themselves are one block per environment: the list that
+    // produced this panel deliberately does not carry literal values, so the
+    // block fetches them for this environment when it opens.
     rows.push([t("dev.spec.env"), <EnvValues key="env" e={e} />]);
   }
   if (e.command.length) rows.push([t("dev.spec.command"), e.command.join(" ")]);
@@ -1441,84 +1441,63 @@ function SpecCard({ e }: { e: DevEnvironmentSummary }) {
 }
 
 /**
- * spec.runtime.env, one variable per line, with literal values masked until the
- * user asks for them.
+ * spec.runtime.env, one variable per line, with literal values shown as they are.
  *
  * The environment list is cluster-wide and carries only names (and valueFrom
  * sources): a literal value can be a credential, so it is fetched for this one
- * environment on demand. A valueFrom is shown by its source — the value itself
- * lives in a Secret or ConfigMap, not in the CR.
+ * environment when its detail opens. A valueFrom is shown by its source — the
+ * value itself lives in a Secret or ConfigMap, not in the CR.
  */
 function EnvValues({ e }: { e: DevEnvironmentSummary }) {
   const { t } = useI18n();
   const [values, setValues] = useState<Record<string, string> | null>(null);
-  const [revealed, setRevealed] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
   // Nothing to fetch when every entry is a reference: there are no literals.
   const hasLiteral = e.env.some((v) => v.hasValue);
 
-  const load = async (): Promise<boolean> => {
-    if (values !== null) return true;
-    setBusy(true);
-    try {
-      const res = await apiFetch(
-        `/api/devenvironments/env-values?namespace=${encodeURIComponent(e.namespace)}&name=${encodeURIComponent(e.name)}`,
-      );
-      const body = (await res.json().catch(() => ({}))) as ValidationErrorBody & { values?: Record<string, string> };
-      if (!res.ok || !body.values) {
-        setError(validationMessage(t, body, res.status, "dev"));
-        return false;
-      }
-      setValues(body.values);
-      setError(null);
-      return true;
-    } catch {
-      setError(t("dev.err.envUnreadable"));
-      return false;
-    } finally {
-      setBusy(false);
-    }
-  };
+  useEffect(() => {
+    if (!hasLiteral) return;
+    let cancelled = false;
+    apiFetch(
+      `/api/devenvironments/env-values?namespace=${encodeURIComponent(e.namespace)}&name=${encodeURIComponent(e.name)}`,
+    )
+      .then(async (res) => {
+        const body = (await res.json().catch(() => ({}))) as ValidationErrorBody & { values?: Record<string, string> };
+        if (cancelled) return;
+        if (!res.ok || !body.values) {
+          setError(validationMessage(t, body, res.status, "dev"));
+          return;
+        }
+        setValues(body.values);
+        setError(null);
+      })
+      .catch(() => {
+        if (!cancelled) setError(t("dev.err.envUnreadable"));
+      });
+    return () => {
+      cancelled = true;
+    };
+    // `t` is rebuilt on every render by useI18n; the fetch is keyed to the
+    // environment alone.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasLiteral, e.namespace, e.name]);
 
   return (
-    <Box sx={{ display: "flex", alignItems: "flex-start", justifyContent: "flex-end", gap: "8px", minWidth: 0 }}>
-      <Box sx={{ display: "grid", justifyItems: "end", gap: "2px", minWidth: 0 }}>
-        {error ? (
-          <Box component="span" data-od-id="env-values-error" sx={{ color: STATUS_ERR }}>{error}</Box>
-        ) : null}
-        <Box component="span" data-od-id="env-values" sx={{ whiteSpace: "pre-line", overflowWrap: "anywhere", textAlign: "right" }}>
-          {e.env
-            .map((v) => {
-              if (v.valueFrom) return `${v.name} → ${v.valueFrom}`;
-              // A literal is masked until asked for; an entry with no value and
-              // no source is an empty value, not a dangling arrow.
-              const value = revealed && values ? values[v.name] : undefined;
-              return `${v.name}=${value ?? (v.hasValue ? SECRET_MASK : "")}`;
-            })
-            .join("\n")}
-        </Box>
-      </Box>
-      {hasLiteral ? (
-        <IconButton
-          data-od-id="env-values-toggle"
-          aria-label={revealed ? t("dev.spec.envHide") : t("dev.spec.envReveal")}
-          aria-pressed={revealed}
-          disabled={busy}
-          onClick={async () => {
-            if (revealed) {
-              setRevealed(false);
-              return;
-            }
-            // The mask stays if the values could not be read: the row says why.
-            if (values === null && !(await load())) return;
-            setRevealed(true);
-          }}
-          sx={{ p: 0, width: 20, height: 20, color: "var(--accent-strong)", "&:hover": { background: "transparent" } }}
-        >
-          <EyeIcon open={revealed} />
-        </IconButton>
+    <Box sx={{ display: "grid", justifyItems: "end", gap: "2px", minWidth: 0 }}>
+      {error ? (
+        <Box component="span" data-od-id="env-values-error" sx={{ color: STATUS_ERR }}>{error}</Box>
       ) : null}
+      <Box component="span" data-od-id="env-values" sx={{ whiteSpace: "pre-line", overflowWrap: "anywhere", textAlign: "right" }}>
+        {e.env
+          .map((v) => {
+            if (v.valueFrom) return `${v.name} → ${v.valueFrom}`;
+            // A literal's value arrives with the fetch above; until it lands,
+            // name the variable alone rather than pretending it is empty.
+            const value = values?.[v.name];
+            return value === undefined ? v.name : `${v.name}=${value}`;
+          })
+          .join("\n")}
+      </Box>
     </Box>
   );
 }
@@ -2231,7 +2210,11 @@ function CreateWizard({
   if (filledPvcs.length) {
     summaryRows.push([t("dev.wizard.pvcs"), filledPvcs.map((r) => `${r.pvcName.trim()} → ${r.mountPath.trim()}`).join(" · ")]);
   }
-  if (filledEnvs.length) summaryRows.push([t("dev.wizard.envs"), filledEnvs.map((r) => r.name.trim()).join(" · ")]);
+  // Name and value, the same pair the user typed in the runtime section — a
+  // bare name would not say enough to confirm what is about to be created.
+  if (filledEnvs.length) {
+    summaryRows.push([t("dev.wizard.envs"), filledEnvs.map((r) => `${r.name.trim()}=${r.value}`).join(" · ")]);
+  }
   if (draft.command.trim()) summaryRows.push([t("dev.wizard.command"), draft.command.trim()]);
   if (draft.args.trim()) summaryRows.push([t("dev.wizard.args"), draft.args.trim()]);
   if (filledPorts.length) {

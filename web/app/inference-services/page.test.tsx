@@ -591,6 +591,20 @@ describe("inference services page", () => {
     act(() => root.unmount());
   });
 
+  it("shows a sub-1 QPS with decimals instead of rounding it to zero", async () => {
+    const list = inferenceServiceList();
+    // ~3 requests a minute is a real rate, but Math.round would render it "0".
+    list[0].metrics = { qps: 0.048, p95: 412, tps: 1, spark: [0, 0.01, 0.05] };
+    stubData(list);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    expect(container.querySelector('[data-od-id="metrics-empty"]')).toBeNull();
+    expect(container.textContent).toContain("0.05");
+
+    act(() => root.unmount());
+  });
+
   it("prints every condition beside its pill, True ones included", async () => {
     stubData([
       inferenceServiceSummary({

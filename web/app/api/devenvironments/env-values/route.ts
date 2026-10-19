@@ -30,7 +30,7 @@ interface EnvVar {
  * deliberately carries only names (and valueFrom sources): it spans every
  * namespace and goes to every authenticated caller, while an env value can be a
  * registry token. Here the request names one environment, so it can be answered
- * on demand and kept masked in the panel until the user asks to see it.
+ * when that environment's detail panel opens.
  *
  * Variables whose value comes from a Secret/ConfigMap are absent from the map:
  * their source is already on the summary, and their value is not in the CR.

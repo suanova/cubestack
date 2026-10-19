@@ -313,6 +313,66 @@ describe("inference services route", () => {
     expect(body.items[0].gpuModel).toBe("MXC500 / MXC550");
   });
 
+  it("resolves a templated gpuPerPod against the effective overrides", async () => {
+    // Some profiles grant a pod as many GPUs as the engine's tensor-parallel
+    // size: gpuPerPod is `{{ overrides.tpSize }}` rather than a literal. The
+    // list must resolve it (service value, else profile default) instead of
+    // dropping the role — otherwise a serving service shows no GPU resources.
+    listClusterCustomObject.mockImplementation(({ plural }: { plural: string }) => {
+      if (plural === "inferenceservices") {
+        return Promise.resolve({
+          items: [
+            {
+              metadata: { name: "tp4", namespace: "default", creationTimestamp: "2026-09-02T00:00:00Z" },
+              spec: { modelRef: "m", profileRef: "metax-vllm-tp", overrides: { tpSize: 4 } },
+            },
+            {
+              metadata: { name: "default-tp", namespace: "default", creationTimestamp: "2026-09-01T00:00:00Z" },
+              spec: { modelRef: "m", profileRef: "metax-vllm-tp" },
+            },
+          ],
+        });
+      }
+      if (plural === "inferenceruntimeprofiles") {
+        return Promise.resolve({
+          items: [
+            {
+              metadata: { name: "metax-vllm-tp" },
+              spec: {
+                engine: { name: "vllm" },
+                accelerator: { vendor: "metax", models: ["MXC500", "MXC550"] },
+                overrides: [
+                  { name: "tpSize", type: "integer", default: 2, enum: [2, 4, 8] },
+                  { name: "metax_model", type: "string", default: "MXC550" },
+                ],
+                roles: [
+                  {
+                    name: "vllm",
+                    podTemplate: {
+                      nodeSelector: { "metax-tech.com/gpu.product": "{{ overrides.metax_model }}" },
+                      resources: { gpuPerPod: "{{ overrides.tpSize }}" },
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        });
+      }
+      return Promise.resolve({ items: [] });
+    });
+
+    const { GET } = await importRoute();
+    const body = await (await GET(await authedGet(), undefined)).json();
+    const tp4 = body.items.find((i: { name: string }) => i.name === "tp4");
+    const dflt = body.items.find((i: { name: string }) => i.name === "default-tp");
+    expect(tp4.gpuRoles).toEqual([{ name: "vllm", gpuPerPod: 4, model: "MXC550" }]);
+    expect(tp4.gpuPerPod).toBe(4);
+    expect(tp4.gpuModel).toBe("MXC550");
+    // No user value -> the profile's declared default applies.
+    expect(dflt.gpuRoles).toEqual([{ name: "vllm", gpuPerPod: 2, model: "MXC550" }]);
+  });
+
   it("uses a role's own accelerator for its GPU model", async () => {
     // A heterogeneous PD profile: decode runs on NVIDIA, so its label and its
     // fallback model come from the role, not from the profile-level metax one.

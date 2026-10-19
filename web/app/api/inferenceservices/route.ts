@@ -147,7 +147,9 @@ interface ProfileRole {
   accelerator?: { vendor?: string; models?: string[] };
   podTemplate?: {
     nodeSelector?: Record<string, string>;
-    resources?: { gpuPerPod?: number };
+    // int-or-string: a profile may template the count from an override (the
+    // tensor-parallel size), which the renderer resolves to a concrete Int.
+    resources?: { gpuPerPod?: number | string };
   };
 }
 interface ProfileSpec {
@@ -199,6 +201,27 @@ function roleGpuModel(
   }
   const models = accel?.models ?? [];
   return models.length === 1 ? models[0] : null;
+}
+
+/**
+ * The number of cards a GPU role's pod requests. gpuPerPod is int-or-string:
+ * a profile may write `{{ overrides.tpSize }}` so a pod is granted as many
+ * GPUs as the engine shards the model across, and the renderer resolves that
+ * template before creating the workload. Resolve the same reference here so
+ * the page shows the effective count instead of dropping the role.
+ */
+function roleGpuPerPod(
+  role: ProfileRole,
+  effective: Map<string, string | number | boolean | null>,
+): number | null {
+  const raw = role.podTemplate?.resources?.gpuPerPod;
+  if (typeof raw === "number") return Number.isInteger(raw) && raw > 0 ? raw : null;
+  if (typeof raw !== "string") return null;
+  const ref = OVERRIDE_REF.exec(raw.trim());
+  const resolved = ref ? effective.get(ref[1]) : raw.trim();
+  if (typeof resolved !== "string" && typeof resolved !== "number") return null;
+  const n = Number(resolved);
+  return Number.isInteger(n) && n > 0 ? n : null;
 }
 
 function num(v: unknown): number | null {
@@ -324,11 +347,12 @@ function project(
   );
   const gpuRoles: InferenceServiceSummary["gpuRoles"] = profile
     ? (profile.spec?.roles ?? [])
-        .filter((r) => (r.podTemplate?.resources?.gpuPerPod ?? 0) > 0)
-        .map((r) => ({
-          name: r.name ?? "?",
-          gpuPerPod: r.podTemplate?.resources?.gpuPerPod ?? 0,
-          model: roleGpuModel(r, profile, effective),
+        .map((r) => ({ role: r, gpuPerPod: roleGpuPerPod(r, effective) }))
+        .filter((entry): entry is { role: ProfileRole; gpuPerPod: number } => entry.gpuPerPod !== null)
+        .map(({ role, gpuPerPod }) => ({
+          name: role.name ?? "?",
+          gpuPerPod,
+          model: roleGpuModel(role, profile, effective),
         }))
     : [];
   // The single-model fields stay as a compact summary: every concrete model a

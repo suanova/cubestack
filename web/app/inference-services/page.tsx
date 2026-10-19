@@ -139,7 +139,11 @@ function ReplicaRows({ s }: { s: InferenceServiceSummary }) {
   );
 }
 
-const numFmt = (n: number | null): string => (n === null ? "—" : String(Math.round(n)));
+// QPS is a rate, not a count: a service handling a few requests a minute is
+// well below 1/s, and rounding it to an integer would render as "0" — reading
+// as no traffic at all. Keep two decimals below 1 and round above it.
+const qpsFmt = (n: number | null): string =>
+  n === null ? "—" : n > 0 && n < 1 ? n.toFixed(2) : String(Math.round(n));
 
 // The list spans all namespaces, and the same service name can exist in two of
 // them (team-a/api and team-b/api). Selection, lookup and row keys therefore
@@ -703,7 +707,7 @@ function ServiceTable({
                     <ReplicaRows s={s} />
                   </td>
                   <td style={{ ...tdSx, fontFamily: "var(--font-mono)", fontSize: 12.5, whiteSpace: "nowrap" }}>
-                    {s.metrics ? numFmt(s.metrics.qps) : "—"}
+                    {s.metrics ? qpsFmt(s.metrics.qps) : "—"}
                   </td>
                   <td style={{ ...tdSx, fontFamily: "var(--font-mono)", fontSize: 12.5, whiteSpace: "nowrap" }}>
                     {s.metrics && s.metrics.p95 != null ? `${Math.round(s.metrics.p95)} ms` : "—"}
@@ -1016,11 +1020,11 @@ function MetricsCard({ s }: { s: InferenceServiceSummary }) {
         <Sparkline data={spark.length > 1 ? spark : [0, 0]} />
         <Box sx={{ display: "flex", justifyContent: "space-between", mt: "6px" }}>
           <Typography component="span" sx={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "text.secondary" }}>{t("inf.metrics.qpsTrend")}</Typography>
-          <Typography component="span" sx={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "text.secondary" }}>{numFmt(m.qps)}</Typography>
+          <Typography component="span" sx={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "text.secondary" }}>{qpsFmt(m.qps)}</Typography>
         </Box>
       </Box>
       <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr" }}>
-        <Metric label={t("inf.metrics.qps")} value={numFmt(m.qps)} />
+        <Metric label={t("inf.metrics.qps")} value={qpsFmt(m.qps)} />
         <Metric label={t("inf.metrics.p95")} value={m.p95 === null ? "—" : `${Math.round(m.p95)} ms`} />
         <Metric label={t("inf.metrics.tps")} value={m.tps === null ? "—" : `${Math.round(m.tps)} /s`} />
         <Metric label={t("inf.metrics.ready")} value={desiredPods === 0 ? "—" : `${readyPods} / ${desiredPods}`} />

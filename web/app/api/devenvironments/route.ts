@@ -66,8 +66,8 @@ export interface DevEnvironmentSummary {
   // ConfigMap, the source it reads. A literal value is not carried here — this
   // list spans every namespace and any authenticated caller can read it, and an
   // env value can be a credential. `hasValue` says one exists; the value itself
-  // is fetched for one environment at a time (see env-values/route.ts) and stays
-  // masked until asked for.
+  // is fetched for one environment at a time (see env-values/route.ts) when its
+  // detail panel opens.
   env: Array<{ name: string; hasValue: boolean; valueFrom: string | null }>;
   // spec.runtime.command and .args, as the argv they are. Both are projected in
   // full: neither can carry a credential the way an env value can.
