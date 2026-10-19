@@ -77,6 +77,16 @@ spec:
               route:
                 description: Route defines the public gateway route of the service.
                 properties:
+                  aigatewayRouter:
+                    description: |-
+                      AIGatewayRouter selects the platform's pre-installed shared AIGatewayRoute
+                      this service's catalog rule is attached to. Empty (or an absent route)
+                      means the service is not published and only provides a ClusterIP
+                      internal endpoint.
+                    enum:
+                    - cubestack-ai-gateway
+                    - cubestack-ai-gateway-private
+                    type: string
                   idleTimeoutSeconds:
                     default: 300
                     description: |-
@@ -90,17 +100,10 @@ spec:
                   modelName:
                     description: |-
                       ModelName is the catalog model name: what clients send as the request
-                      body's "model" field. It is the platform-wide identity of a published
-                      service and must be unique among published services.
+                      body's "model" field. It is the identity of a published service and must
+                      be unique among services published to the same route.
                     pattern: ^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$
                     type: string
-                  publish:
-                    default: false
-                    description: |-
-                      Publish exposes the service through the platform model catalog;
-                      defaults to false. Unpublished services only provide a ClusterIP
-                      internal endpoint.
-                    type: boolean
                   timeoutSeconds:
                     default: 0
                     description: |-
@@ -227,7 +230,7 @@ spec:
                     type: string
                   public:
                     description: Public is the public gateway endpoint; only present
-                      when publish is true.
+                      when published.
                     type: string
                 required:
                 - internal

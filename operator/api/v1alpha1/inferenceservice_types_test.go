@@ -47,7 +47,7 @@ func validInferenceService(name string) *InferenceService {
 				"maxModelLen":     {Raw: []byte("131072")},
 			},
 			Route: &RouteSpec{
-				Publish:            true,
+				AIGatewayRouter:    AIGatewayRouterPublic,
 				ModelName:          "dsv4-flash",
 				IdleTimeoutSeconds: ptrTo(int64(300)),
 			},
@@ -84,7 +84,7 @@ var _ = Describe("InferenceService", func() {
 			Expect(k8sClient.Delete(ctx, isvc)).To(Succeed())
 		})
 
-		It("defaults route publish to false, timeoutSeconds to 0 and idleTimeoutSeconds to 300", func() {
+		It("defaults a route with no aigatewayRouter to unpublished, timeoutSeconds to 0 and idleTimeoutSeconds to 300", func() {
 			isvc := validInferenceService("isvc-defaults")
 			isvc.Spec.Route = &RouteSpec{ModelName: "dsv4-flash"}
 
@@ -92,7 +92,8 @@ var _ = Describe("InferenceService", func() {
 
 			got := &InferenceService{}
 			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: isvc.Name, Namespace: testNamespace}, got)).To(Succeed())
-			Expect(got.Spec.Route.Publish).To(BeFalse())
+			Expect(got.Spec.Route.AIGatewayRouter).To(BeEmpty())
+			Expect(got.Spec.Route.Published()).To(BeFalse())
 			Expect(*got.Spec.Route.TimeoutSeconds).To(Equal(int64(0)))
 			Expect(*got.Spec.Route.IdleTimeoutSeconds).To(Equal(int64(300)))
 
@@ -223,6 +224,10 @@ var _ = Describe("InferenceService", func() {
 				"isvc-invalid-idle-zero",
 				func(s *InferenceServiceSpec) { *s.Route.IdleTimeoutSeconds = 0 },
 				"spec.route.idleTimeoutSeconds"),
+			Entry("aigatewayRouter not a known catalog route",
+				"isvc-invalid-aigateway-router",
+				func(s *InferenceServiceSpec) { s.Route.AIGatewayRouter = "cubestack-ai-gateway-other" },
+				"spec.route.aigatewayRouter"),
 		)
 	})
 })

@@ -42,7 +42,7 @@ func convergenceReconciler() *InferenceServiceReconciler {
 	return &InferenceServiceReconciler{
 		Client: k8sClient, Scheme: testScheme,
 		GatewayName: testGatewayName, GatewayNamespace: testGatewayNamespace,
-		CatalogRoute: testCatalogRoute, CatalogHostname: testCatalogHostname, AgentRouterAvailable: true,
+		CatalogHostname: testCatalogHostname, AgentRouterAvailable: true,
 	}
 }
 
@@ -82,7 +82,7 @@ func convergenceISVC(name string, publish bool) {
 	Expect(k8sClient.Create(ctx, cm)).To(Succeed())
 	isvc := isvcRefs(name)
 	if publish {
-		isvc.Spec.Route = &aiv1alpha1.RouteSpec{Publish: true, ModelName: "conv-flash", TimeoutSeconds: ptrTo[int64](30)}
+		isvc.Spec.Route = &aiv1alpha1.RouteSpec{AIGatewayRouter: aiv1alpha1.AIGatewayRouterPublic, ModelName: "conv-flash", TimeoutSeconds: ptrTo[int64](30)}
 	}
 	Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
 }
@@ -141,7 +141,7 @@ var _ = Describe("convergence", func() {
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: testNamespace}, got)).To(Succeed())
 		Expect(meta.FindStatusCondition(got.Status.Conditions, aiv1alpha1.ConditionEndpointReady).Status).To(Equal(metav1.ConditionTrue))
 		Expect(got.Status.Endpoint.Internal).To(Equal(name + "-router.default.svc:8001"))
-		// publish=false → RouteReady True/NotPublished, no route, no public.
+		// no aigatewayRouter → RouteReady True/NotPublished, no route, no public.
 		Expect(meta.FindStatusCondition(got.Status.Conditions, aiv1alpha1.ConditionRouteReady).Reason).To(Equal("NotPublished"))
 		Expect(got.Status.Endpoint.Public).To(BeEmpty())
 		route := &gatewayv1.HTTPRoute{}

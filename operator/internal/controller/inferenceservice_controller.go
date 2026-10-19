@@ -79,11 +79,6 @@ type InferenceServiceReconciler struct {
 	// catalog entry of a published service attaches to (spec.parentRefs).
 	GatewayName      string
 	GatewayNamespace string
-	// CatalogRoute is the name of the platform's pre-installed shared
-	// AIGatewayRoute (in GatewayNamespace) that published services attach a
-	// rule to. The operator never creates it; a missing one degrades to
-	// CatalogRouteNotFound (design §3.3).
-	CatalogRoute string
 	// CatalogHostname, when set, is surfaced in status.endpoint.public so the
 	// Agent Router can advertise the shared catalog's host. It is a display
 	// value only — it no longer gates publishing.
@@ -343,7 +338,7 @@ func (r *InferenceServiceReconciler) finalizeCatalogRule(ctx context.Context, re
 	if !slices.Contains(isvc.Finalizers, inferenceServiceCatalogFinalizer) {
 		return nil
 	}
-	if err := r.removeCatalogRule(ctx, isvc); err != nil {
+	if err := r.removeCatalogRuleFromAllRoutes(ctx, isvc); err != nil {
 		return err
 	}
 	// Re-fetch for a fresh resourceVersion before mutating finalizers: any
@@ -362,10 +357,10 @@ func (r *InferenceServiceReconciler) finalizeCatalogRule(ctx context.Context, re
 // ensureCatalogFinalizer adds the catalog finalizer to a published service that
 // does not already carry it, so its rule survives the service's deletion until
 // it is shed. A service that is not published — or already carries the
-// finalizer — is left untouched: the finalizer is added only for the
-// publish=true state, and a missing one means nothing needs guarding.
+// finalizer — is left untouched: the finalizer is added only for the published
+// state, and a missing one means nothing needs guarding.
 func (r *InferenceServiceReconciler) ensureCatalogFinalizer(ctx context.Context, isvc *aiv1alpha1.InferenceService) error {
-	if slices.Contains(isvc.Finalizers, inferenceServiceCatalogFinalizer) || isvc.Spec.Route == nil || !isvc.Spec.Route.Publish {
+	if slices.Contains(isvc.Finalizers, inferenceServiceCatalogFinalizer) || !isvc.Spec.Route.Published() {
 		return nil
 	}
 	// Patch, not Update: the finalizer is the only field this call means to
@@ -490,21 +485,26 @@ func (r *InferenceServiceReconciler) enqueueForOwnedCatalogObject(_ context.Cont
 	return nil
 }
 
-// enqueueForSharedCatalogRoute maps a change to the platform's shared catalog
-// route to every published service, whose rule lives in that route and must be
-// re-reconciled when the route is edited or its acceptance changes. Only the
-// single route named by CatalogRoute in GatewayNamespace is meaningful; any
+// enqueueForSharedCatalogRoute maps a change to one of the platform's shared
+// catalog routes to every service attached to that route, whose rule lives in
+// it and must be re-reconciled when the route is edited or its acceptance
+// changes. Only the two known routes in GatewayNamespace are meaningful; any
 // other AIGatewayRoute is left to the owning controller (the per-service
 // routes the previous design created are gone, but the CRD still allows
 // arbitrary routes in the cluster).
 func (r *InferenceServiceReconciler) enqueueForSharedCatalogRoute(ctx context.Context, obj client.Object) []reconcile.Request {
 	route := obj.(*aigwv1beta1.AIGatewayRoute)
-	if route.Name != r.CatalogRoute || route.Namespace != r.GatewayNamespace {
+	if route.Namespace != r.GatewayNamespace {
+		return nil
+	}
+	switch aiv1alpha1.AIGatewayRouterName(route.Name) {
+	case aiv1alpha1.AIGatewayRouterPublic, aiv1alpha1.AIGatewayRouterPrivate:
+	default:
 		return nil
 	}
 	var reqs []reconcile.Request
 	var list aiv1alpha1.InferenceServiceList
-	if err := r.List(ctx, &list, client.MatchingFields{publishIndexKey: publishIndexValue}); err != nil {
+	if err := r.List(ctx, &list, client.MatchingFields{aigatewayRouterIndexKey: route.Name}); err != nil {
 		return nil
 	}
 	for i := range list.Items {

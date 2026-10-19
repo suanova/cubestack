@@ -1,5 +1,6 @@
 import { getCoreClient, getCustomObjectsClient } from "@/lib/kubernetes";
 import { withAuth } from "@/lib/auth/guard";
+import { isAIGatewayRouter } from "@/lib/inference-routes";
 
 // @kubernetes/client-node needs Node APIs (TLS, fs), not the Edge runtime.
 export const runtime = "nodejs";
@@ -113,7 +114,7 @@ interface IsvcSpec {
   profileRef?: string;
   overrides?: Record<string, unknown>;
   route?: {
-    publish?: boolean;
+    aigatewayRouter?: string;
     modelName?: string;
     timeoutSeconds?: number;
     idleTimeoutSeconds?: number;
@@ -341,7 +342,7 @@ function project(
     namespace: isvc.metadata?.namespace ?? "",
     profileRef: spec.profileRef ?? "—",
     modelRef: spec.modelRef ?? "—",
-    published: spec.route?.publish ?? false,
+    published: (spec.route?.aigatewayRouter ?? "") !== "",
     routeModelName: spec.route?.modelName ?? null,
     timeoutSeconds: spec.route?.timeoutSeconds ?? null,
     idleTimeoutSeconds: spec.route?.idleTimeoutSeconds ?? null,
@@ -527,10 +528,8 @@ interface CreateBody {
   modelRef?: string;
   overrides?: Record<string, number | string | boolean>;
   route?: {
-    publish?: boolean;
+    aigatewayRouter?: string;
     modelName?: string;
-    timeoutSeconds?: number;
-    idleTimeoutSeconds?: number;
   };
 }
 interface ModelVersionRef {
@@ -600,31 +599,21 @@ export const POST = withAuth(async (req) => {
     const oerr = overrideError(body.overrides ?? {}, profile);
     if (oerr) return ValidationError(oerr.code, oerr.params);
 
-    // Route: publishing joins the platform model catalog, which requires a
-    // valid catalog model name. Both timeouts are bounded by the operator's CRD
-    // ranges; timeoutSeconds 0 means "no total-duration cap".
-    const timeout = body.route?.timeoutSeconds;
-    const idle = body.route?.idleTimeoutSeconds;
-    if (timeout !== undefined && timeout !== null && (Number.isNaN(timeout) || timeout < 0 || timeout > 86400)) {
-      return ValidationError("timeoutInvalid");
-    }
-    if (idle !== undefined && idle !== null && (Number.isNaN(idle) || idle < 1 || idle > 86400)) {
-      return ValidationError("idleTimeoutInvalid");
-    }
-    let route: {
-      publish: boolean;
-      modelName?: string;
-      timeoutSeconds?: number;
-      idleTimeoutSeconds?: number;
-    };
-    if (body.route?.publish) {
+    // Route: a non-empty aigatewayRouter publishes the service into the model
+    // catalog attached to that pre-installed AIGatewayRoute, which requires a
+    // valid catalog model name. An absent router leaves the service unpublished;
+    // the CRD supplies the timeout defaults.
+    let route: { aigatewayRouter: string; modelName: string } | undefined;
+    const router = body.route?.aigatewayRouter;
+    if (router !== undefined && router !== "") {
+      if (!isAIGatewayRouter(router)) {
+        return ValidationError("aigatewayRouterInvalid");
+      }
       const modelName = body.route?.modelName;
       if (!modelName || !MODEL_NAME_RE.test(modelName)) {
         return ValidationError("routeModelNameInvalid");
       }
-      route = { publish: true, modelName, timeoutSeconds: timeout ?? 0, idleTimeoutSeconds: idle ?? 300 };
-    } else {
-      route = { publish: false };
+      route = { aigatewayRouter: router, modelName };
     }
 
     const cr = {
@@ -635,7 +624,7 @@ export const POST = withAuth(async (req) => {
         modelRef: body.modelRef,
         profileRef: body.profileRef,
         overrides: body.overrides ?? {},
-        route,
+        ...(route ? { route } : {}),
       },
     };
 

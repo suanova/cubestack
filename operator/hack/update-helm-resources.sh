@@ -117,9 +117,6 @@ awk '
   print ind "- --gateway-name={{ . }}"
   print ind "{{- end }}"
   print ind "- --gateway-namespace={{ .Values.gateway.namespace | default \"envoy-gateway-system\" }}"
-  print ind "{{- with .Values.gateway.catalogRoute }}"
-  print ind "- --gateway-catalog-route={{ . }}"
-  print ind "{{- end }}"
   print ind "{{- with .Values.gateway.dataplaneNamespace }}"
   print ind "- --gateway-dataplane-namespace={{ . }}"
   print ind "{{- end }}"
@@ -207,19 +204,17 @@ rm -f "${OUT}"
 # --- 3. Validate the values-driven chart content (manager gateway args, absence of the platform's objects) ---
 # The manager's platform-Gateway args are injected into the deployment
 # template from .Values.gateway (section 2 rewrite). Assert the rendered args
-# for every value combination that changes behavior: defaults pass name, the
-# shared catalog route and the dataplane namespace but no catalog hostname (the
-# hostname is display-only — publishing depends on the name and the shared
-# route, not on it); an explicit route or hostname is passed verbatim; an
-# emptied name, route or dataplane namespace drops its flag; and emptying those
-# reproduces the unconfigured state — no --gateway-name, no
-# --gateway-catalog-route, no --gateway-catalog-hostname, no
+# for every value combination that changes behavior: defaults pass name and the
+# dataplane namespace but no catalog hostname (the hostname is display-only —
+# publishing is selected per service by spec.route.aigatewayRouter, not by the
+# chart); an explicit hostname is passed verbatim; an emptied name or dataplane
+# namespace drops its flag; and emptying those reproduces the unconfigured state
+# — no --gateway-name, no --gateway-catalog-hostname, no
 # --gateway-dataplane-namespace (RouteReady=False, GatewayNotConfigured, and
 # environments left default-deny inbound). The
 # namespace is not in that set: it always renders, from .Values.gateway.namespace,
 # because an omitted flag would leave the manager's own envoy-gateway-system
-# default in force. A silent no-op here would ship a chart whose publish feature
-# cannot be enabled by values.
+# default in force.
 #
 # The Gateway and the ClientTrafficPolicy are asserted ABSENT below: both belong
 # to the platform now. A stray resource added back under config/default, or a
@@ -246,13 +241,12 @@ expect_render() {
 expect_render defaults present '^[[:space:]]*- --gateway-name=cubestack-gateway$' --namespace cubestack-system
 expect_render defaults present '^[[:space:]]*- --gateway-namespace=envoy-gateway-system$' --namespace cubestack-system
 expect_render defaults absent  '^[[:space:]]*- --gateway-catalog-hostname=' --namespace cubestack-system
-# The shared catalog route renders from the chart's default value: it names the
-# platform's pre-installed AIGatewayRoute the operator publishes into. A value
-# that did not reach the rendered args would leave the manager's own default in
-# force instead of the name the release chose.
-expect_render defaults present '^[[:space:]]*- --gateway-catalog-route=cubestack-ai-gateway$' --namespace cubestack-system
-# A custom shared route name is passed verbatim.
-expect_render route-custom present '^[[:space:]]*- --gateway-catalog-route=my-catalog-route$' --set gateway.catalogRoute=my-catalog-route
+# The catalog route is selected per service by spec.route.aigatewayRouter; the
+# chart no longer carries an operator-wide route name.
+expect_render defaults absent '^[[:space:]]*- --gateway-catalog-route=' --namespace cubestack-system
+# The retired gateway.catalogRoute value is inert: a values file that still
+# carries it must render nothing rather than fail the release.
+expect_render catalog-route-retired absent '^[[:space:]]*- --gateway-catalog-route=' --set gateway.catalogRoute=my-catalog-route
 # The dataplane namespace is passed by default: it is what lets the DevEnvironment
 # controller admit the Gateway's proxies into environment pods.
 expect_render defaults present '^[[:space:]]*- --gateway-dataplane-namespace=envoy-gateway-system$' --namespace cubestack-system
@@ -279,10 +273,10 @@ expect_render dataplane-empty present '^[[:space:]]*- --gateway-name=cubestack-g
 expect_render ns-release present '^[[:space:]]*- --gateway-namespace=envoy-gateway-system$' --namespace cubestack-prod
 # All the optional flags empty: reproduce the unconfigured state. Only the
 # namespace line is left, and it is asserted present rather than skipped.
-expect_render all-empty absent '^[[:space:]]*- --gateway-(name|catalog-hostname|catalog-route|dataplane-namespace)=' \
-  --set gateway.name= --set gateway.catalogHostname= --set gateway.catalogRoute= --set gateway.dataplaneNamespace=
+expect_render all-empty absent '^[[:space:]]*- --gateway-(name|catalog-hostname|dataplane-namespace)=' \
+  --set gateway.name= --set gateway.catalogHostname= --set gateway.dataplaneNamespace=
 expect_render all-empty present '^[[:space:]]*- --gateway-namespace=envoy-gateway-system$' \
-  --set gateway.name= --set gateway.catalogHostname= --set gateway.catalogRoute= --set gateway.dataplaneNamespace=
+  --set gateway.name= --set gateway.catalogHostname= --set gateway.dataplaneNamespace=
 # The namespace follows its value verbatim, and an emptied value must NOT drop
 # the flag: an omitted flag falls back to envoy-gateway-system inside the
 # manager. These two pin the `| default` choice — the first proves a custom

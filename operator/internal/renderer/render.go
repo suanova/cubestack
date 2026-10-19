@@ -267,7 +267,7 @@ func routeVars(route *aiv1alpha1.RouteSpec) map[string]string {
 		idle = strconv.FormatInt(*route.IdleTimeoutSeconds, 10)
 	}
 	return map[string]string{
-		"publish":            strconv.FormatBool(route.Publish),
+		"publish":            strconv.FormatBool(route.Published()),
 		"modelName":          route.ModelName,
 		"timeoutSeconds":     timeout,
 		"idleTimeoutSeconds": idle,

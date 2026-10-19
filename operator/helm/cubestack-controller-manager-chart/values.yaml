@@ -11,14 +11,16 @@ image:
   pullPolicy: IfNotPresent
 
 # Platform Gateway the operator publishes InferenceService catalog entries to
-# (spec.route.publish: true), and that DevEnvironment ListenerSets attach to.
+# (services with a non-empty spec.route.aigatewayRouter), and that
+# DevEnvironment ListenerSets attach to.
 # The chart creates neither it nor its ClientTrafficPolicy: the platform owns
 # both, and this block only tells the manager which Gateway to use. The shape
 # the platform applies — a Gateway with the listener and the allowedListeners /
 # allowedRoutes opt-ins the operator needs, plus the Agent Router's
-# ClientTrafficPolicy — is in the chart README's Prerequisites.
+# ClientTrafficPolicy and the two pre-installed shared AIGatewayRoutes — is in
+# the chart README's Prerequisites.
 #
-# Set gateway.catalogHostname to enable publishing:
+# Set gateway.catalogHostname to surface the catalog's public address:
 #   helm install ... --set gateway.catalogHostname=ai.example.com
 #
 # The dataplane behind that Gateway is the platform's too: how the proxy is
@@ -40,15 +42,9 @@ gateway:
   # exists. The default is the platform convention: the namespace Envoy
   # Gateway and its `eg` GatewayClass are installed in (Prerequisites).
   namespace: envoy-gateway-system           # --gateway-namespace
-  # Name of the platform's pre-installed shared AIGatewayRoute (in
-  # `namespace` above) that published InferenceServices attach a rule to. The
-  # operator reads and edits a rule in this route but never creates it, so this
-  # must match the route the platform installs. A missing route degrades to
-  # RouteReady=False, CatalogRouteNotFound.
-  catalogRoute: cubestack-ai-gateway        # --gateway-catalog-route
   # Shared model-catalog hostname surfaced in status.endpoint.public so the
-  # Agent Router can advertise the catalog's host. Display only — it no longer
-  # gates publishing. Empty = flag omitted, which leaves status.endpoint.public
+  # Agent Router can advertise the catalog's host. Display only — it does not
+  # gate publishing. Empty = flag omitted, which leaves status.endpoint.public
   # unset.
   catalogHostname: ""           # --gateway-catalog-hostname
   # Namespace the Gateway's dataplane (proxy) pods run in — not the namespace

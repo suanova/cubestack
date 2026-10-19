@@ -28,17 +28,12 @@ const (
 	// ModelVersion storage.s3.credentialsRef.name.
 	credentialsRefIndexKey = "storage.s3.credentialsRef.name"
 
-	// publishIndexKey is the cache index field for InferenceService.spec.route.publish,
-	// holding the single key publishIndexValue for services that publish a
-	// catalog rule. It backs the shared catalog route watch: an edit to the
-	// platform's shared route re-enqueues exactly the published services, whose
-	// rules must be reconciled against the edited object.
-	publishIndexKey = "spec.route.publish"
-
-	// publishIndexValue is the boolean-true string the publish index holds for a
-	// published service (the value paired with publishIndexKey). The same
-	// boolean-true marker is reused on headless Services, so it is shared.
-	publishIndexValue = "true"
+	// aigatewayRouterIndexKey is the cache index field for
+	// InferenceService.spec.route.aigatewayRouter, holding the selected shared
+	// route name for published services. It backs the shared catalog route
+	// watches: an edit to either route re-enqueues exactly the services attached
+	// to it, whose rules must be reconciled against the edited object.
+	aigatewayRouterIndexKey = "spec.route.aigatewayRouter"
 )
 
 var (
@@ -72,15 +67,15 @@ func registerAllIndexes(mgr ctrl.Manager) error {
 		}); err != nil {
 		return err
 	}
-	// Only published services contribute to the index key; a nil Route means the
-	// service is not published and never attaches a rule to the shared route.
-	if err := mgr.GetCache().IndexField(ctx, &aiv1alpha1.InferenceService{}, publishIndexKey,
+	// Only published services contribute to the index; the key is the selected
+	// route name, so either shared-route watch finds exactly its own services.
+	if err := mgr.GetCache().IndexField(ctx, &aiv1alpha1.InferenceService{}, aigatewayRouterIndexKey,
 		func(o client.Object) []string {
 			isvc := o.(*aiv1alpha1.InferenceService)
-			if isvc.Spec.Route != nil && isvc.Spec.Route.Publish {
-				return []string{publishIndexValue}
+			if !isvc.Spec.Route.Published() {
+				return nil
 			}
-			return nil
+			return []string{string(isvc.Spec.Route.AIGatewayRouter)}
 		}); err != nil {
 		return err
 	}

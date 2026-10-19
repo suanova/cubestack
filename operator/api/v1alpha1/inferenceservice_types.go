@@ -22,19 +22,31 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
+// AIGatewayRouterName names one of the platform's pre-installed shared
+// AIGatewayRoutes (Agent Router catalog surfaces).
+// +kubebuilder:validation:Enum=cubestack-ai-gateway;cubestack-ai-gateway-private
+type AIGatewayRouterName string
+
+const (
+	// AIGatewayRouterPublic is the public model catalog route.
+	AIGatewayRouterPublic AIGatewayRouterName = "cubestack-ai-gateway"
+	// AIGatewayRouterPrivate is the private model catalog route.
+	AIGatewayRouterPrivate AIGatewayRouterName = "cubestack-ai-gateway-private"
+)
+
 // RouteSpec defines the public gateway route of the service: the platform
 // model catalog entry a published service joins.
 type RouteSpec struct {
-	// Publish exposes the service through the platform model catalog;
-	// defaults to false. Unpublished services only provide a ClusterIP
+	// AIGatewayRouter selects the platform's pre-installed shared AIGatewayRoute
+	// this service's catalog rule is attached to. Empty (or an absent route)
+	// means the service is not published and only provides a ClusterIP
 	// internal endpoint.
 	// +optional
-	// +kubebuilder:default:=false
-	Publish bool `json:"publish,omitempty"`
+	AIGatewayRouter AIGatewayRouterName `json:"aigatewayRouter,omitempty"`
 
 	// ModelName is the catalog model name: what clients send as the request
-	// body's "model" field. It is the platform-wide identity of a published
-	// service and must be unique among published services.
+	// body's "model" field. It is the identity of a published service and must
+	// be unique among services published to the same route.
 	// +optional
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$`
 	ModelName string `json:"modelName,omitempty"`
@@ -55,6 +67,11 @@ type RouteSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=86400
 	IdleTimeoutSeconds *int64 `json:"idleTimeoutSeconds,omitempty"`
+}
+
+// Published reports whether the service requests a catalog entry.
+func (r *RouteSpec) Published() bool {
+	return r != nil && r.AIGatewayRouter != ""
 }
 
 // InferenceServiceSpec defines the desired state of InferenceService.
@@ -155,7 +172,7 @@ type EndpointStatus struct {
 	// <isvc>-<role>.<namespace>.svc:8001.
 	Internal string `json:"internal"`
 
-	// Public is the public gateway endpoint; only present when publish is true.
+	// Public is the public gateway endpoint; only present when published.
 	// +optional
 	Public string `json:"public,omitempty"`
 }

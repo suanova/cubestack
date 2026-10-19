@@ -148,7 +148,7 @@ spec:
   validationActions: [Deny]
 ---
 # L1 validation for InferenceService per docs/design/isvc/api.md §3.3:
-# - route.modelName is required when route.publish is true (CREATE and UPDATE)
+# - route.modelName is required when route.aigatewayRouter is set (CREATE and UPDATE)
 #
 # Reference existence (modelRef/profileRef), override values and modelName
 # uniqueness are validated by the controller at L2 (Resolved/Rendered/RouteReady).
@@ -165,8 +165,8 @@ spec:
       operations: ["CREATE", "UPDATE"]
       resources: ["inferenceservices"]
   validations:
-  - expression: "!has(object.spec.route) || object.spec.route.publish != true || has(object.spec.route.modelName)"
-    message: "route.modelName is required when route.publish is true"
+  - expression: "!has(object.spec.route) || !has(object.spec.route.aigatewayRouter) || object.spec.route.aigatewayRouter == '' || has(object.spec.route.modelName)"
+    message: "route.modelName is required when route.aigatewayRouter is set"
     reason: Invalid
 ---
 apiVersion: admissionregistration.k8s.io/v1

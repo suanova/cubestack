@@ -151,8 +151,9 @@ func setInferenceServicePhase(status *aiv1alpha1.InferenceServiceStatus) {
 // Reading it as Failed would mark a healthy first deployment broken.
 //
 // EndpointReady and RouteReady are deliberately not consulted. A route that is
-// not published is not a fault — publish=false reports True/NotPublished — and
-// an endpoint that is not yet reachable is already what Progressing says.
+// not published is not a fault — no aigatewayRouter reports
+// True/NotPublished — and an endpoint that is not yet reachable is already what
+// Progressing says.
 func derivePhase(conditions []metav1.Condition) (aiv1alpha1.InferenceServicePhaseName, string) {
 	for _, t := range []string{
 		aiv1alpha1.ConditionResolved,

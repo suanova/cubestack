@@ -67,10 +67,11 @@ type routeCheck struct {
 // Kinds, API groups and the fixed fields of the Agent Router catalog objects a
 // published service owns: the Envoy Gateway Backend naming the endpoint pool,
 // the AIServiceBackend declaring the upstream schema and referencing that
-// Backend, and the ReferenceGrant authorising the shared catalog route (in the
-// Gateway's namespace) to reference this service's AIServiceBackend across
-// namespaces. The Backend type, weight, priority and modelsOwnedBy are spelled
-// explicitly so the API server's defaults never read as drift.
+// Backend, and the two ReferenceGrants authorising the cross-namespace hops —
+// the shared catalog route (in the Gateway's namespace) referencing this
+// service's AIServiceBackend, and the HTTPRoute generated from it referencing
+// this service's Backend. The Backend type, weight, priority and modelsOwnedBy
+// are spelled explicitly so the API server's defaults never read as drift.
 const (
 	envoyGatewayAPIGroup = "gateway.envoyproxy.io"
 	egBackendKind        = "Backend"
@@ -86,6 +87,15 @@ const (
 func backendName(isvc *aiv1alpha1.InferenceService) string          { return isvc.Name + "-endpoint" }
 func aiServiceBackendName(isvc *aiv1alpha1.InferenceService) string { return isvc.Name + "-backend" }
 func referenceGrantName(isvc *aiv1alpha1.InferenceService) string   { return isvc.Name + "-grant" }
+
+// backendReferenceGrantName is the ReferenceGrant that lets the HTTPRoute the
+// Agent Router generates from the shared AIGatewayRoute — which lives beside it
+// in the Gateway's namespace — reference this service's Backend. Grants are
+// per referenced object: one service's Backend named in spec.to means the grant
+// must name that Backend too, so there is one per service.
+func backendReferenceGrantName(isvc *aiv1alpha1.InferenceService) string {
+	return "cubestack-httproute-" + backendName(isvc)
+}
 
 // routeLabels are the labels every catalog object carries.
 func routeLabels(isvc *aiv1alpha1.InferenceService) map[string]string {
@@ -137,9 +147,9 @@ func (r *InferenceServiceReconciler) desiredAIServiceBackend(isvc *aiv1alpha1.In
 // that authorises the shared catalog AIGatewayRoute (in the Gateway's
 // namespace) to reference this service's AIServiceBackend — the route's
 // backendRef is what crosses the namespace boundary, the Gateway itself never
-// names the AIServiceBackend. The grant's `to` names only the
-// AIServiceBackend; the Backend is referenced by a same-namespace
-// AIServiceBackend and needs none.
+// names the AIServiceBackend. The Backend is a separate cross-namespace hop for
+// the HTTPRoute the Agent Router generates from that route; see
+// desiredBackendReferenceGrant.
 func (r *InferenceServiceReconciler) desiredReferenceGrant(isvc *aiv1alpha1.InferenceService) *gatewayv1.ReferenceGrant {
 	grant := &gatewayv1.ReferenceGrant{
 		ObjectMeta: metav1.ObjectMeta{Name: referenceGrantName(isvc), Namespace: isvc.Namespace, Labels: routeLabels(isvc)},
@@ -153,6 +163,32 @@ func (r *InferenceServiceReconciler) desiredReferenceGrant(isvc *aiv1alpha1.Infe
 				Group: gatewayv1.Group(aigwv1beta1.GroupName),
 				Kind:  gatewayv1.Kind("AIServiceBackend"),
 				Name:  ptr(gatewayv1.ObjectName(aiServiceBackendName(isvc))),
+			}},
+		},
+	}
+	_ = ctrl.SetControllerReference(isvc, grant, r.Scheme)
+	return grant
+}
+
+// desiredBackendReferenceGrant builds the ReferenceGrant, in the service's
+// namespace, that authorises the HTTPRoute the Agent Router generates (in the
+// Gateway's namespace, from the shared AIGatewayRoute) to reference this
+// service's Backend. It is separate from desiredReferenceGrant because they
+// grant different hops: that one lets the AIGatewayRoute name the
+// AIServiceBackend, this one lets the generated HTTPRoute name the Backend.
+func (r *InferenceServiceReconciler) desiredBackendReferenceGrant(isvc *aiv1alpha1.InferenceService) *gatewayv1.ReferenceGrant {
+	grant := &gatewayv1.ReferenceGrant{
+		ObjectMeta: metav1.ObjectMeta{Name: backendReferenceGrantName(isvc), Namespace: isvc.Namespace, Labels: routeLabels(isvc)},
+		Spec: gatewayv1.ReferenceGrantSpec{
+			From: []gatewayv1.ReferenceGrantFrom{{
+				Group:     gatewayv1.Group(gatewayAPIGroup),
+				Kind:      gatewayv1.Kind("HTTPRoute"),
+				Namespace: gatewayv1.Namespace(r.GatewayNamespace),
+			}},
+			To: []gatewayv1.ReferenceGrantTo{{
+				Group: gatewayv1.Group(envoyGatewayAPIGroup),
+				Kind:  gatewayv1.Kind(egBackendKind),
+				Name:  ptr(gatewayv1.ObjectName(backendName(isvc))),
 			}},
 		},
 	}
@@ -255,16 +291,17 @@ func catalogRuleEqual(a, b aigwv1beta1.AIGatewayRouteRule) bool {
 // check fails the closure returns the matching sentinel so the caller maps it
 // to the condition reason instead of a hard error.
 func (r *InferenceServiceReconciler) upsertCatalogRule(ctx context.Context, isvc *aiv1alpha1.InferenceService, modelName string) error {
-	// No shared route configured: nothing to write, and building the addressing
+	// No shared route selected: nothing to write, and building the addressing
 	// object with an empty name would reject every request. checkRoute reaches
-	// here only with a configured route, but the helper is shared with the
+	// here only with a selected route, but the helper is shared with the
 	// removal path, so it guards on its own.
-	if r.CatalogRoute == "" {
+	routeName := selectedCatalogRoute(isvc)
+	if routeName == "" {
 		return nil
 	}
 	desired := r.catalogRuleFor(isvc, modelName)
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		route := r.getSharedCatalogRoute()
+		route := r.getCatalogRoute(routeName)
 		if err := r.Get(ctx, client.ObjectKeyFromObject(route), route); err != nil {
 			return err
 		}
@@ -299,19 +336,19 @@ var (
 	errCatalogRouteFull      = errors.New("shared catalog route is at its rule cap")
 )
 
-// removeCatalogRule deletes this service's rule from the shared catalog route.
-// A missing route or an absent rule is a no-op, so it is safe to call on every
-// unpublish and on the ISVC's deletion.
-func (r *InferenceServiceReconciler) removeCatalogRule(ctx context.Context, isvc *aiv1alpha1.InferenceService) error {
-	// No shared route configured: nothing to remove. This guard is what keeps
-	// the publish=false and deletion paths working on a reconciler that has no
-	// catalog route set — building the addressing object with an empty name
-	// would reject every request.
-	if r.CatalogRoute == "" {
+// removeCatalogRule deletes this service's rule from the named shared catalog
+// route. A missing route or an absent rule is a no-op, so it is safe to call on
+// every unpublish and on the ISVC's deletion — including for a route the
+// cluster does not serve.
+func (r *InferenceServiceReconciler) removeCatalogRule(ctx context.Context, isvc *aiv1alpha1.InferenceService, routeName aiv1alpha1.AIGatewayRouterName) error {
+	// No route named: nothing to remove. This guard keeps the unpublished and
+	// deletion paths from building an addressing object with an empty name,
+	// which would reject every request.
+	if routeName == "" {
 		return nil
 	}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		route := r.getSharedCatalogRoute()
+		route := r.getCatalogRoute(routeName)
 		err := r.Get(ctx, client.ObjectKeyFromObject(route), route)
 		if apierrors.IsNotFound(err) || meta.IsNoMatchError(err) {
 			// Absent route, or a cluster serving no AIGatewayRoute CRD: there is
@@ -331,21 +368,67 @@ func (r *InferenceServiceReconciler) removeCatalogRule(ctx context.Context, isvc
 	})
 }
 
-// getSharedCatalogRoute returns an empty object addressing the platform's
-// pre-installed shared catalog route: the object the operator's published
-// services attach a rule to.
-func (r *InferenceServiceReconciler) getSharedCatalogRoute() *aigwv1beta1.AIGatewayRoute {
-	return &aigwv1beta1.AIGatewayRoute{ObjectMeta: metav1.ObjectMeta{Name: r.CatalogRoute, Namespace: r.GatewayNamespace}}
+// removeCatalogRuleFromAllRoutes removes this service's rule from every known
+// shared route. Unpublish and deletion use it because the spec no longer says
+// which route the rule was written to: switching routes and deleting before the
+// next reconcile would otherwise leave the old rule behind.
+func (r *InferenceServiceReconciler) removeCatalogRuleFromAllRoutes(ctx context.Context, isvc *aiv1alpha1.InferenceService) error {
+	for _, routeName := range catalogRouteNames {
+		if err := r.removeCatalogRule(ctx, isvc, routeName); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// checkRoute applies the publish decision: publish=false removes the service's
-// catalog objects and its rule from the shared route (a valid state reported
-// as NotPublished); publish=true creates the Backend, AIServiceBackend and
-// ReferenceGrant in the service's namespace and upserts the service's rule into
-// the platform's pre-installed shared catalog route, reporting acceptance from
-// the shared route and the service's AIServiceBackend. A cluster without the
-// Agent Router CRDs degrades to AgentRouterUnavailable; a missing shared route
-// degrades to CatalogRouteNotFound.
+// removeStaleCatalogRule removes this service's rule from every known route
+// except the selected one. It runs after the rule is upserted into the selected
+// route, so a switch that cannot be completed keeps serving from the old route
+// rather than taking the model offline.
+func (r *InferenceServiceReconciler) removeStaleCatalogRule(ctx context.Context, isvc *aiv1alpha1.InferenceService, selected aiv1alpha1.AIGatewayRouterName) error {
+	for _, routeName := range catalogRouteNames {
+		if routeName == selected {
+			continue
+		}
+		if err := r.removeCatalogRule(ctx, isvc, routeName); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// catalogRouteNames are the catalog surfaces a service can select. Both are
+// pre-installed by the platform in GatewayNamespace; the operator only edits
+// the one named by spec.route.aigatewayRouter.
+var catalogRouteNames = []aiv1alpha1.AIGatewayRouterName{
+	aiv1alpha1.AIGatewayRouterPublic,
+	aiv1alpha1.AIGatewayRouterPrivate,
+}
+
+// selectedCatalogRoute returns the shared route the service publishes to, or ""
+// when it is not published.
+func selectedCatalogRoute(isvc *aiv1alpha1.InferenceService) aiv1alpha1.AIGatewayRouterName {
+	if isvc.Spec.Route == nil {
+		return ""
+	}
+	return isvc.Spec.Route.AIGatewayRouter
+}
+
+// getCatalogRoute returns an empty object addressing one of the platform's
+// pre-installed shared catalog routes: the object a published service attaches
+// its rule to.
+func (r *InferenceServiceReconciler) getCatalogRoute(name aiv1alpha1.AIGatewayRouterName) *aigwv1beta1.AIGatewayRoute {
+	return &aigwv1beta1.AIGatewayRoute{ObjectMeta: metav1.ObjectMeta{Name: string(name), Namespace: r.GatewayNamespace}}
+}
+
+// checkRoute applies the publish decision: an empty spec.route.aigatewayRouter
+// removes the service's catalog objects and its rule from the shared routes (a
+// valid state reported as NotPublished); a non-empty one creates the Backend,
+// AIServiceBackend and ReferenceGrants in the service's namespace and upserts
+// the service's rule into the selected pre-installed shared catalog route,
+// reporting acceptance from that route and the service's AIServiceBackend. A
+// cluster without the Agent Router CRDs degrades to AgentRouterUnavailable; a
+// missing shared route degrades to CatalogRouteNotFound.
 func (r *InferenceServiceReconciler) checkRoute(ctx context.Context, isvc *aiv1alpha1.InferenceService, profile *aiv1alpha1.InferenceRuntimeProfile, endpoint *endpointCheck, modelName string) (*routeCheck, error) {
 	check := &routeCheck{}
 	// The retired per-model hostname HTTPRoute is removed on every pass: an
@@ -354,7 +437,8 @@ func (r *InferenceServiceReconciler) checkRoute(ctx context.Context, isvc *aiv1a
 	if err := r.deleteLegacyHTTPRoute(ctx, isvc); err != nil {
 		return routeErr(check, err)
 	}
-	if isvc.Spec.Route == nil || !isvc.Spec.Route.Publish {
+	routeName := selectedCatalogRoute(isvc)
+	if !isvc.Spec.Route.Published() {
 		if err := r.deleteCatalogObjects(ctx, isvc); err != nil {
 			return routeErr(check, err)
 		}
@@ -373,9 +457,9 @@ func (r *InferenceServiceReconciler) checkRoute(ctx context.Context, isvc *aiv1a
 		check.Reason = RouteGatewayNotConfigured
 		return check, nil
 	}
-	// The shared route is a platform prerequisite: the operator reads and edits
+	// The selected route is a platform prerequisite: the operator reads and edits
 	// a rule in it but never creates it.
-	shared := r.getSharedCatalogRoute()
+	shared := r.getCatalogRoute(routeName)
 	if err := r.Get(ctx, client.ObjectKeyFromObject(shared), shared); err != nil {
 		if apierrors.IsNotFound(err) {
 			check.Reason = RouteCatalogNotFound
@@ -408,6 +492,10 @@ func (r *InferenceServiceReconciler) checkRoute(ctx context.Context, isvc *aiv1a
 	if err := applyOwned(ctx, r.Client, isvc, grant, referenceGrantNeedsUpdate); err != nil {
 		return routeErr(check, err)
 	}
+	backendGrant := r.desiredBackendReferenceGrant(isvc)
+	if err := applyOwned(ctx, r.Client, isvc, backendGrant, referenceGrantNeedsUpdate); err != nil {
+		return routeErr(check, err)
+	}
 	// The optimistic retry re-validates the model name and the rule cap against
 	// the route's current state and reports a conflict or a full route through
 	// a sentinel rather than a hard error: a lost race is a stable condition for
@@ -423,9 +511,15 @@ func (r *InferenceServiceReconciler) checkRoute(ctx context.Context, isvc *aiv1a
 		}
 		return routeErr(check, err)
 	}
+	// The rule is now in the selected route; shed it from the other catalog
+	// surface. Upserting first means a failed switch keeps the old, working
+	// entry rather than taking the model offline.
+	if err := r.removeStaleCatalogRule(ctx, isvc, routeName); err != nil {
+		return routeErr(check, err)
+	}
 	// Re-fetch after the writes: the acceptance check must not run against a
 	// status written for a previous generation.
-	fresh := r.getSharedCatalogRoute()
+	fresh := r.getCatalogRoute(routeName)
 	if err := r.Get(ctx, client.ObjectKeyFromObject(fresh), fresh); err != nil {
 		return routeErrAfterApply(check, err)
 	}
@@ -551,16 +645,17 @@ func aiObjectAccepted(conditions []metav1.Condition, generation int64) bool {
 }
 
 // deleteCatalogObjects removes the objects a published service owns: the
-// Backend, AIServiceBackend and ReferenceGrant in its namespace, plus its rule
-// from the shared catalog route. The three objects carry a controller ownerRef
+// Backend, AIServiceBackend and two ReferenceGrants in its namespace, plus its
+// rule from the shared catalog route. The objects carry a controller ownerRef
 // to the service, so they also cascade on deletion; the rule lives in another
 // namespace and is not owned by the service, so it is removed explicitly here
 // and on the ISVC's finalizer.
 func (r *InferenceServiceReconciler) deleteCatalogObjects(ctx context.Context, isvc *aiv1alpha1.InferenceService) error {
-	if err := r.removeCatalogRule(ctx, isvc); err != nil {
+	if err := r.removeCatalogRuleFromAllRoutes(ctx, isvc); err != nil {
 		return err
 	}
 	for _, obj := range []client.Object{
+		&gatewayv1.ReferenceGrant{ObjectMeta: metav1.ObjectMeta{Name: backendReferenceGrantName(isvc), Namespace: isvc.Namespace}},
 		&gatewayv1.ReferenceGrant{ObjectMeta: metav1.ObjectMeta{Name: referenceGrantName(isvc), Namespace: isvc.Namespace}},
 		&aigwv1beta1.AIServiceBackend{ObjectMeta: metav1.ObjectMeta{Name: aiServiceBackendName(isvc), Namespace: isvc.Namespace}},
 		&egv1alpha1.Backend{ObjectMeta: metav1.ObjectMeta{Name: backendName(isvc), Namespace: isvc.Namespace}},
@@ -751,9 +846,9 @@ func routeErrAfterApply(check *routeCheck, err error) (*routeCheck, error) {
 }
 
 // setRouteReadyCondition sets the RouteReady condition from the check:
-// publish=false is a valid state reported as True/NotPublished (the service
-// simply did not request a public route); any other non-empty reason is a
-// failure reported as False.
+// an empty spec.route.aigatewayRouter is a valid state reported as
+// True/NotPublished (the service simply did not request a catalog route); any
+// other non-empty reason is a failure reported as False.
 func setRouteReadyCondition(conditions *[]metav1.Condition, check *routeCheck) {
 	if check.Reason == "" {
 		meta.SetStatusCondition(conditions, metav1.Condition{

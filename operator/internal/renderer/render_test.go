@@ -665,7 +665,7 @@ var _ = Describe("routeVars", func() {
 
 	It("defaults the timeouts of a route that declares none", func() {
 		// 0 disables the total-duration cap; the idle cap keeps its 300s default.
-		vars := routeVars(&aiv1alpha1.RouteSpec{Publish: true, ModelName: "flash"})
+		vars := routeVars(&aiv1alpha1.RouteSpec{AIGatewayRouter: aiv1alpha1.AIGatewayRouterPublic, ModelName: "flash"})
 		Expect(vars).To(HaveLen(4))
 		Expect(vars).To(HaveKeyWithValue("publish", "true"))
 		Expect(vars).To(HaveKeyWithValue("modelName", "flash"))
@@ -675,7 +675,7 @@ var _ = Describe("routeVars", func() {
 
 	It("renders the declared route values", func() {
 		route := &aiv1alpha1.RouteSpec{
-			Publish:            true,
+			AIGatewayRouter:    aiv1alpha1.AIGatewayRouterPrivate,
 			ModelName:          "qwen38-27b",
 			TimeoutSeconds:     ptrTo(int64(3600)),
 			IdleTimeoutSeconds: ptrTo(int64(120)),

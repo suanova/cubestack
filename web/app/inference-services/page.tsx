@@ -17,6 +17,7 @@ import { validationMessage, type ValidationErrorBody } from "@/lib/api-error";
 import { apiFetch } from "@/lib/base-path";
 import { copyText } from "@/lib/clipboard";
 import { useI18n } from "@/lib/i18n";
+import { AIGATEWAY_ROUTER_PRIVATE, AIGATEWAY_ROUTER_PUBLIC, type AIGatewayRouter } from "@/lib/inference-routes";
 import { platformPalette, usePlatformTheme } from "@/lib/perses/theme";
 
 // The prototype's filter set is 全部 / Ready / 准备中. "准备中" is a service the
@@ -1455,10 +1456,9 @@ interface DeployDraft {
   profileRef: string;
   modelRef: string;
   overrides: Record<string, OverrideValue>;
-  publish: boolean;
+  // The selected catalog route; empty means the service is not published.
+  aigatewayRouter: AIGatewayRouter | "";
   modelName: string;
-  timeout: string; // keep as string until parse for a friendlier error path
-  idleTimeout: string; // idem; the operator defaults are 0 (no cap) and 300
 }
 
 type OverrideDecl = CreateOptionsResponse["profiles"][number]["overrides"][number];
@@ -1485,10 +1485,8 @@ function DeployWizard({
     profileRef: "",
     modelRef: "",
     overrides: {},
-    publish: false,
+    aigatewayRouter: "",
     modelName: "",
-    timeout: "0",
-    idleTimeout: "300",
   });
   const [nameError, setNameError] = useState(false);
   const [createBusy, setCreateBusy] = useState(false);
@@ -1691,20 +1689,15 @@ function DeployWizard({
   const create = () => {
     setCreateBusy(true);
     setCreateError(null);
-    const timeout = parseInt(draft.timeout, 10);
-    const idleTimeout = parseInt(draft.idleTimeout, 10);
     const body = {
       namespace: draft.namespace,
       name: draft.name.trim(),
       profileRef: draft.profileRef,
       modelRef: draft.modelRef,
       overrides: draft.overrides,
-      route: {
-        publish: draft.publish,
-        modelName: draft.modelName.trim(),
-        timeoutSeconds: Number.isFinite(timeout) ? timeout : 0,
-        idleTimeoutSeconds: Number.isFinite(idleTimeout) ? idleTimeout : 300,
-      },
+      ...(draft.aigatewayRouter
+        ? { route: { aigatewayRouter: draft.aigatewayRouter, modelName: draft.modelName.trim() } }
+        : {}),
     };
     apiFetch("/api/inferenceservices", {
       method: "POST",
@@ -1899,12 +1892,12 @@ function DeployWizard({
                   <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                     <Typography sx={{ fontSize: 12.5, fontWeight: 600 }}>{t("inf.deploy.route")}</Typography>
                     <Switch
-                      checked={draft.publish}
+                      checked={draft.aigatewayRouter !== ""}
                       onChange={(e) => {
                         const publish = e.target.checked;
                         setDraft((prev) => ({
                           ...prev,
-                          publish,
+                          aigatewayRouter: publish ? AIGATEWAY_ROUTER_PUBLIC : "",
                           // Publishing joins the model catalog, which needs a
                           // model name. The service name is the natural default:
                           // it already satisfies the catalog name contract (a
@@ -1916,16 +1909,22 @@ function DeployWizard({
                       }}
                     />
                   </Box>
-                  {draft.publish && (
+                  {draft.aigatewayRouter !== "" && (
                     <Box sx={{ mt: "12px", display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
                       <WizField label={t("inf.deploy.modelName")} hint={t("inf.deploy.modelNameHint")}>
                         <TextField data-od-id="deploy-model-name" size="small" fullWidth value={draft.modelName} onChange={(e) => setField("modelName", e.target.value)} />
                       </WizField>
-                      <WizField label={t("inf.deploy.timeout")} hint="0–86400 s">
-                        <TextField size="small" fullWidth type="number" value={draft.timeout} onChange={(e) => setField("timeout", e.target.value)} />
-                      </WizField>
-                      <WizField label={t("inf.deploy.idleTimeout")} hint="1–86400 s">
-                        <TextField size="small" fullWidth type="number" value={draft.idleTimeout} onChange={(e) => setField("idleTimeout", e.target.value)} />
+                      <WizField label={t("inf.deploy.aigatewayRouter")} hint={t("inf.deploy.aigatewayRouterHint")}>
+                        <Select
+                          size="small"
+                          fullWidth
+                          data-od-id="deploy-aigateway-router"
+                          value={draft.aigatewayRouter}
+                          onChange={(e) => setField("aigatewayRouter", e.target.value as AIGatewayRouter)}
+                        >
+                          <MenuItem value={AIGATEWAY_ROUTER_PUBLIC}>{t("inf.deploy.aigatewayRouterPublic")}</MenuItem>
+                          <MenuItem value={AIGATEWAY_ROUTER_PRIVATE}>{t("inf.deploy.aigatewayRouterPrivate")}</MenuItem>
+                        </Select>
                       </WizField>
                     </Box>
                   )}
@@ -1949,7 +1948,9 @@ function DeployWizard({
                           return [`${t("inf.deploy.override")} ${overrideDisplayName(o.name)}`, Array.isArray(v) ? v.join(", ") : String(v)] as [string, string];
                         })
                       : []),
-                    [t("inf.deploy.route"), draft.publish ? `${t("inf.params.published")} ${draft.modelName}` : t("inf.params.unpublished")],
+                    [t("inf.deploy.route"), draft.aigatewayRouter
+                      ? `${t("inf.params.published")} · ${draft.aigatewayRouter === AIGATEWAY_ROUTER_PRIVATE ? t("inf.deploy.aigatewayRouterPrivate") : t("inf.deploy.aigatewayRouterPublic")} · ${draft.modelName}`
+                      : t("inf.params.unpublished")],
                   ]}
                 />
                 {createError ? (

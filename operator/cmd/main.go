@@ -75,7 +75,7 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
-	var gatewayName, gatewayNamespace, gatewayDataplaneNamespace, gatewayCatalogHostname, gatewayCatalogRoute string
+	var gatewayName, gatewayNamespace, gatewayDataplaneNamespace, gatewayCatalogHostname string
 	var l4PortRangeStart, l4PortRangeEnd int
 	var rdmaIBResource, rdmaRoCEResource string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
@@ -91,10 +91,6 @@ func main() {
 			"pods admit ingress from that Gateway, and published endpoints are addressed at the port "+
 			"its dataplane Service exposes them on. Leaving it empty keeps environments default-deny "+
 			"inbound, and addresses on their listener ports.")
-	flag.StringVar(&gatewayCatalogRoute, "gateway-catalog-route", "cubestack-ai-gateway",
-		"Name of the platform's pre-installed shared AIGatewayRoute (in --gateway-namespace) that "+
-			"published InferenceServices attach a rule to. The operator reads and edits a rule in this "+
-			"route but never creates it; a missing one degrades to RouteReady=False, CatalogRouteNotFound.")
 	flag.StringVar(&gatewayCatalogHostname, "gateway-catalog-hostname", "",
 		"Shared model-catalog hostname surfaced in status.endpoint.public so the Agent Router can "+
 			"advertise the catalog's host. Display only — it no longer gates publishing.")
@@ -284,10 +280,6 @@ func main() {
 		Scheme:           mgr.GetScheme(),
 		GatewayName:      gatewayName,
 		GatewayNamespace: gatewayNamespace,
-		// The platform's pre-installed shared AIGatewayRoute published services
-		// attach a rule to. The operator never creates it; a missing one
-		// degrades to RouteReady=False with reason CatalogRouteNotFound.
-		CatalogRoute: gatewayCatalogRoute,
 		// The shared model-catalog hostname surfaced in status.endpoint.public;
 		// a display value only, no longer a publish gate.
 		CatalogHostname: gatewayCatalogHostname,

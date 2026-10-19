@@ -904,6 +904,12 @@ describe("deploy wizard", () => {
     });
     await act(async () => {});
 
+    // The publish controls are the catalog model name and the route picker;
+    // the request/idle timeout inputs are gone.
+    expect(step2.querySelector('[data-od-id="deploy-aigateway-router"]')).not.toBeNull();
+    expect(step2.textContent).not.toContain("请求超时");
+    expect(step2.textContent).not.toContain("空闲超时");
+
     // The service name is a valid catalog name, so enabling publish fills the
     // empty field with it rather than making the user retype it.
     const modelName = () =>
@@ -925,6 +931,66 @@ describe("deploy wizard", () => {
     });
     await act(async () => {});
     expect(modelName().value).toBe("custom-model");
+
+    act(() => root.unmount());
+  });
+
+  it("publishes to the private catalog route when selected", async () => {
+    const { container, root, calls } = renderWithBoth();
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await fillNameAndGoToStep2();
+
+    const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
+    await act(async () => {
+      (step2.querySelector('input[type="checkbox"]') as HTMLInputElement).click();
+    });
+    await act(async () => {});
+
+    // The route picker offers public and private; choose private.
+    const picker = step2.querySelector('[data-od-id="deploy-aigateway-router"] [role="combobox"]') as HTMLElement;
+    await act(async () => {
+      picker.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    });
+    const privateOption = Array.from(document.body.querySelectorAll('[role="option"]')).find((o) =>
+      (o.textContent ?? "").includes("cubestack-ai-gateway-private"),
+    );
+    expect(privateOption).toBeDefined();
+    await act(async () => {
+      (privateOption as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    // A model is required to advance; pick the compatible one.
+    const modelSelect = Array.from(step2.querySelectorAll('[role="combobox"]')).find((c) =>
+      (c.textContent ?? "").includes("选择模型版本"),
+    ) as HTMLElement;
+    await act(async () => {
+      modelSelect.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    });
+    const model = Array.from(document.body.querySelectorAll('[role="option"]')).find(
+      (o) => o.textContent === "deepseek-v4-flash-w8a8-v1",
+    );
+    expect(model).toBeDefined();
+    await act(async () => {
+      (model as HTMLElement).click();
+    });
+    await act(async () => {});
+    await act(async () => {
+      (Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent === "下一步") as HTMLElement).click();
+    });
+    await act(async () => {});
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="wizard-create"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    expect(calls.find((c) => c.method === "POST")?.body).toMatchObject({
+      route: { aigatewayRouter: "cubestack-ai-gateway-private", modelName: "my-serve" },
+    });
 
     act(() => root.unmount());
   });

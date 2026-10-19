@@ -93,13 +93,20 @@ var _ = Describe("enqueueForOwnedCatalogObject", func() {
 })
 
 var _ = Describe("enqueueForSharedCatalogRoute", func() {
-	It("maps the shared catalog route to every published service and ignores other routes", func() {
+	It("maps each shared catalog route to the services that selected it", func() {
 		// The index backs this map: the suite registers it before the specs run.
 		published := &aiv1alpha1.InferenceService{
 			ObjectMeta: metav1.ObjectMeta{Name: "shared-pub", Namespace: testNamespace},
 			Spec: aiv1alpha1.InferenceServiceSpec{
 				ModelRef: testModelRef, ProfileRef: testWatchProfile,
-				Route: &aiv1alpha1.RouteSpec{Publish: true, ModelName: "shared-pub-model"},
+				Route: &aiv1alpha1.RouteSpec{AIGatewayRouter: aiv1alpha1.AIGatewayRouterPublic, ModelName: "shared-pub-model"},
+			},
+		}
+		private := &aiv1alpha1.InferenceService{
+			ObjectMeta: metav1.ObjectMeta{Name: "shared-priv", Namespace: testNamespace},
+			Spec: aiv1alpha1.InferenceServiceSpec{
+				ModelRef: testModelRef, ProfileRef: testWatchProfile,
+				Route: &aiv1alpha1.RouteSpec{AIGatewayRouter: aiv1alpha1.AIGatewayRouterPrivate, ModelName: "shared-priv-model"},
 			},
 		}
 		unpublished := &aiv1alpha1.InferenceService{
@@ -107,6 +114,7 @@ var _ = Describe("enqueueForSharedCatalogRoute", func() {
 			Spec:       aiv1alpha1.InferenceServiceSpec{ModelRef: testModelRef, ProfileRef: testWatchProfile},
 		}
 		Expect(k8sClient.Create(ctx, published)).To(Succeed())
+		Expect(k8sClient.Create(ctx, private)).To(Succeed())
 		Expect(k8sClient.Create(ctx, unpublished)).To(Succeed())
 
 		// The map lists through the cache index, so the reconciler must use the
@@ -116,29 +124,34 @@ var _ = Describe("enqueueForSharedCatalogRoute", func() {
 		r := routeReconciler()
 		r.Client = testMgr.GetClient()
 		// The index is read from the cache, which lags the direct client: wait
-		// until it observes the published service. Other specs in the shared
+		// until it observes both published services. Other specs in the shared
 		// envtest cluster may have left published services behind, so the index
 		// is not expected to hold exactly one entry — only membership is
 		// asserted below.
 		Eventually(func() bool {
 			var list aiv1alpha1.InferenceServiceList
-			Expect(r.List(ctx, &list, client.MatchingFields{publishIndexKey: publishIndexValue})).To(Succeed())
-			for i := range list.Items {
-				if list.Items[i].Namespace == testNamespace && list.Items[i].Name == "shared-pub" {
-					return true
-				}
-			}
-			return false
+			Expect(r.List(ctx, &list, client.MatchingFields{aigatewayRouterIndexKey: string(aiv1alpha1.AIGatewayRouterPublic)})).To(Succeed())
+			var privateList aiv1alpha1.InferenceServiceList
+			Expect(r.List(ctx, &privateList, client.MatchingFields{aigatewayRouterIndexKey: string(aiv1alpha1.AIGatewayRouterPrivate)})).To(Succeed())
+			return hasISVC(list.Items, "shared-pub") && hasISVC(privateList.Items, "shared-priv")
 		}, "2s").Should(BeTrue())
 
-		shared := &aigwv1beta1.AIGatewayRoute{ObjectMeta: metav1.ObjectMeta{Name: testCatalogRoute, Namespace: testGatewayNamespace}}
-		reqs := r.enqueueForSharedCatalogRoute(ctx, shared)
+		shared := &aigwv1beta1.AIGatewayRoute{ObjectMeta: metav1.ObjectMeta{Name: string(testCatalogRoute), Namespace: testGatewayNamespace}}
 		names := map[string]bool{}
-		for _, req := range reqs {
+		for _, req := range r.enqueueForSharedCatalogRoute(ctx, shared) {
 			names[req.Namespace+"/"+req.Name] = true
 		}
 		Expect(names).To(HaveKey(testNamespace + "/shared-pub"))
+		Expect(names).NotTo(HaveKey(testNamespace + "/shared-priv"))
 		Expect(names).NotTo(HaveKey(testNamespace + "/shared-unpub"))
+
+		privateRoute := &aigwv1beta1.AIGatewayRoute{ObjectMeta: metav1.ObjectMeta{Name: string(testPrivateCatalogRoute), Namespace: testGatewayNamespace}}
+		names = map[string]bool{}
+		for _, req := range r.enqueueForSharedCatalogRoute(ctx, privateRoute) {
+			names[req.Namespace+"/"+req.Name] = true
+		}
+		Expect(names).To(HaveKey(testNamespace + "/shared-priv"))
+		Expect(names).NotTo(HaveKey(testNamespace + "/shared-pub"))
 
 		// A route of the same name in another namespace is not the shared one.
 		foreign := shared.DeepCopy()
@@ -150,3 +163,14 @@ var _ = Describe("enqueueForSharedCatalogRoute", func() {
 		Expect(r.enqueueForSharedCatalogRoute(ctx, other)).To(BeEmpty())
 	})
 })
+
+// hasISVC reports whether items contains a service with the given name in the
+// test namespace.
+func hasISVC(items []aiv1alpha1.InferenceService, name string) bool {
+	for i := range items {
+		if items[i].Namespace == testNamespace && items[i].Name == name {
+			return true
+		}
+	}
+	return false
+}
