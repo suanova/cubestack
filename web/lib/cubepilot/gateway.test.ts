@@ -19,8 +19,10 @@ import {
   clearGatewayCaches,
   gatewayCatalog,
   gatewayFetch,
+  gatewayFetchForModel,
   gatewayTokenHeader,
   resolveGatewayBase,
+  resolveGatewayBases,
 } from "./gateway";
 
 // The dataplane Service Envoy Gateway generates for a Gateway. Its name ends in
@@ -109,9 +111,88 @@ describe("lib/cubepilot/gateway", () => {
     listNamespacedService.mockResolvedValue({ items: [dataplaneService()] });
     const base = await resolveGatewayBase();
     expect(base).toEqual({
+      name: "cubestack-gateway",
       url: "http://envoy-envoy-gateway-system-cubestack-gateway-27dc8f39.envoy-gateway-system.svc:8080",
       via: "direct",
     });
+  });
+
+  // The platform installs two model catalogs, each behind its own Gateway.
+  // Their dataplane Services carry the Gateway name in the label.
+  const PUBLIC_SERVICE = dataplaneService({
+    name: "envoy-envoy-gateway-system-cubestack-ai-gateway-aaaaaaaa",
+    gateway: "cubestack-ai-gateway",
+  });
+  const PRIVATE_SERVICE = dataplaneService({
+    name: "envoy-envoy-gateway-system-cubestack-ai-gateway-private-bbbbbbbb",
+    gateway: "cubestack-ai-gateway-private",
+  });
+
+  it("discovers both catalog Gateways, public first", async () => {
+    vi.stubEnv("KUBERNETES_SERVICE_HOST", "10.0.0.1");
+    vi.stubEnv("KUBERNETES_SERVICE_PORT", "443");
+    // Deliberately reversed: the public Gateway is the primary base whatever
+    // order the API server lists the Services in.
+    listNamespacedService.mockResolvedValue({ items: [PRIVATE_SERVICE, PUBLIC_SERVICE] });
+    const bases = await resolveGatewayBases();
+    expect(bases.map((b) => b.name)).toEqual(["cubestack-ai-gateway", "cubestack-ai-gateway-private"]);
+    expect(bases[0].url).toContain("cubestack-ai-gateway-aaaaaaaa");
+    expect(bases[1].url).toContain("cubestack-ai-gateway-private-bbbbbbbb");
+  });
+
+  it("merges the two Gateways' catalogs, dropping duplicates and non-chat models", async () => {
+    vi.stubEnv("KUBERNETES_SERVICE_HOST", "10.0.0.1");
+    vi.stubEnv("KUBERNETES_SERVICE_PORT", "443");
+    listNamespacedService.mockResolvedValue({ items: [PUBLIC_SERVICE, PRIVATE_SERVICE] });
+    const fetchMock = vi.fn(async (url: string) => {
+      const data = url.includes("cubestack-ai-gateway-private")
+        ? [
+            { id: "private-chat", owned_by: "CubeStack" },
+            { id: "shared-chat" },
+            { id: "text-embedding-3-large" },
+          ]
+        : [
+            { id: "qwen38-27b", owned_by: "CubeStack" },
+            { id: "shared-chat" },
+            { id: "qwen-image21" },
+          ];
+      return new Response(JSON.stringify({ data }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await gatewayCatalog()).toEqual([
+      { id: "qwen38-27b", ownedBy: "CubeStack" },
+      { id: "shared-chat", ownedBy: "" },
+      { id: "private-chat", ownedBy: "CubeStack" },
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("sends a chat request to the Gateway that serves the model", async () => {
+    vi.stubEnv("KUBERNETES_SERVICE_HOST", "10.0.0.1");
+    vi.stubEnv("KUBERNETES_SERVICE_PORT", "443");
+    listNamespacedService.mockResolvedValue({ items: [PUBLIC_SERVICE, PRIVATE_SERVICE] });
+    const urls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        urls.push(url);
+        const data = url.includes("cubestack-ai-gateway-private")
+          ? [{ id: "private-chat" }]
+          : [{ id: "qwen38-27b" }];
+        return new Response(JSON.stringify({ data }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }),
+    );
+    await gatewayFetchForModel("private-chat", "/v1/chat/completions");
+    await gatewayFetchForModel("qwen38-27b", "/v1/chat/completions");
+    const chats = urls.filter((u) => u.endsWith("/v1/chat/completions"));
+    expect(chats[0]).toContain("cubestack-ai-gateway-private-bbbbbbbb");
+    expect(chats[1]).toContain("cubestack-ai-gateway-aaaaaaaa");
   });
 
   it("ignores a dataplane Service that belongs to another Gateway", async () => {

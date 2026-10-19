@@ -1,9 +1,11 @@
-// /api/cubepilot/playground/services — the models served by the AI Gateway,
-// from its OpenAI-compatible GET /v1/models endpoint. The gateway base URL
-// comes from CUBESTACK_GATEWAT_URL or service discovery in
-// envoy-gateway-system (see lib/cubepilot/gateway.ts). `endpoint` is the
-// user-visible base URL (null when the gateway is reached through the
-// API-server proxy, which is not usable outside the cluster).
+// /api/cubepilot/playground/services — the models served by the AI Gateways,
+// from their OpenAI-compatible GET /v1/models endpoints. The platform installs
+// two Gateways (cubestack-ai-gateway and cubestack-ai-gateway-private), and
+// the list is the union of both. The gateway base URLs come from
+// CUBESTACK_GATEWAT_URL or service discovery in envoy-gateway-system (see
+// lib/cubepilot/gateway.ts). `endpoint` is the user-visible base URL of the
+// primary (public) gateway (null when it is reached through the API-server
+// proxy, which is not usable outside the cluster).
 
 import { gatewayCatalog, resolveGatewayBase } from "@/lib/cubepilot/gateway";
 import { logger } from "@/lib/log";

@@ -23,7 +23,13 @@ vi.mock("@/lib/kubernetes", () => ({
 }));
 
 const { gatewayCatalog, gatewayOpenAiBase } = vi.hoisted(() => ({ gatewayCatalog: vi.fn(), gatewayOpenAiBase: vi.fn() }));
-vi.mock("@/lib/cubepilot/gateway", () => ({ gatewayCatalog, gatewayOpenAiBase }));
+// The config route reads the primary (public) gateway's catalogue; the mock's
+// fixture is that catalogue.
+vi.mock("@/lib/cubepilot/gateway", () => ({
+  gatewayCatalog,
+  primaryGatewayCatalog: gatewayCatalog,
+  gatewayOpenAiBase,
+}));
 
 /** The catalog the gateway serves, as the gateway module reports it. */
 const catalogOf = (...ids: string[]): GatewayModel[] => ids.map((id) => ({ id, ownedBy: "" }));
