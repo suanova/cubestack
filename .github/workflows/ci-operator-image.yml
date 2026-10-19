@@ -56,6 +56,8 @@ jobs:
     permissions:
       contents: read
     runs-on: ubuntu-latest
+    outputs:
+      latest_moved: ${{ steps.publish.outputs.latest_moved }}
     steps:
       - name: Clone the code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -71,6 +73,7 @@ jobs:
           username: ${{ vars.CI_BOT_NAME }}
           password: ${{ secrets.CI_BOT_PASSWORD }}
       - name: Build and push images
+        id: publish
         env:
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
         run: |
@@ -138,3 +141,43 @@ jobs:
               docker push "${IMAGE}:latest"
             fi
           done
+          echo "latest_moved=${MOVE_LATEST}" >> "$GITHUB_OUTPUT"
+
+  notify-installer:
+    needs: build-push-image
+    if: "!cancelled() && github.ref_type == 'branch' && needs.build-push-image.outputs.latest_moved == 'true'"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - name: Create an installation token for cubestack-installer
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.SUANOVA_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.SUANOVA_BOT_APP_PRIVATE_KEY }}
+          owner: suanova
+          repositories: cubestack-installer
+          permission-contents: write
+      - name: Dispatch refresh-latest-offline
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          SOURCE_REPO: suanova/cubestack
+          COMPONENT: operator-image
+        run: |
+          set -euo pipefail
+          payload="$(jq -nc \
+            --arg r "${SOURCE_REPO}" --arg c "${COMPONENT}" \
+            --arg s "${GITHUB_SHA}" \
+            --arg u "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            '{event_type:"refresh-latest-offline",client_payload:{source_repo:$r,component:$c,sha:$s,run_url:$u}}')"
+          for i in 1 2 3; do
+            if printf '%s' "${payload}" | gh api --method POST \
+                repos/suanova/cubestack-installer/dispatches --input -; then
+              exit 0
+            fi
+            sleep $((i * 5))
+          done
+          echo "::error::repository_dispatch failed after 3 attempts"
+          exit 1
