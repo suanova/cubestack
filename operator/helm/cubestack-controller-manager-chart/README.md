@@ -157,7 +157,7 @@ controller prerequisite below.
   `AIGatewayRoute`s `cubestack-ai-gateway` (public) and
   `cubestack-ai-gateway-private` (private) serve `/v1/messages`, and the plain
   `HTTPRoute`s `cubestack-openai-paths` / `cubestack-openai-paths-private`
-  serve `/v1/chat/completions`, `/v1/responses` and `/v1/videos`. Services
+  serve `/v1/chat/completions`, `/v1/responses` and `/v1/images`. Services
   select a visibility with `spec.route.aigatewayRouter` and the paths they
   expose with `spec.route.paths`. The operator creates either object when it
   is missing and owns their `spec.rules` entirely: on every reconcile it

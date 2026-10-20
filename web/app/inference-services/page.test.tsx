@@ -1004,7 +1004,7 @@ describe("deploy wizard", () => {
       route: {
         aigatewayRouter: "cubestack-ai-gateway-private",
         modelName: "my-serve",
-        paths: ["/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/videos"],
+        paths: ["/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/images"],
       },
     });
 
@@ -1026,7 +1026,7 @@ describe("deploy wizard", () => {
     const paths = step2.querySelector('[data-od-id="deploy-catalog-paths"]') as HTMLElement;
     const combobox = paths.querySelector('[role="combobox"]') as HTMLElement;
     const pathText = () => selectText(combobox);
-    expect(pathText()).toBe("/v1/chat/completions, /v1/responses, /v1/messages, /v1/videos");
+    expect(pathText()).toBe("/v1/chat/completions, /v1/responses, /v1/messages, /v1/images");
 
     await act(async () => {
       combobox.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
@@ -1039,17 +1039,17 @@ describe("deploy wizard", () => {
       pathOption("/v1/responses").click();
     });
     await act(async () => {});
-    expect(pathText()).toBe("/v1/chat/completions, /v1/messages, /v1/videos");
+    expect(pathText()).toBe("/v1/chat/completions, /v1/messages, /v1/images");
 
     // The last selected path cannot be removed: a published model exposes at
     // least one.
-    for (const label of ["/v1/chat/completions", "/v1/messages", "/v1/videos"]) {
+    for (const label of ["/v1/chat/completions", "/v1/messages", "/v1/images"]) {
       await act(async () => {
         pathOption(label).click();
       });
       await act(async () => {});
     }
-    expect(pathText()).toBe("/v1/videos");
+    expect(pathText()).toBe("/v1/images");
 
     const modelSelect = Array.from(step2.querySelectorAll('[role="combobox"]')).find((c) =>
       (c.textContent ?? "").includes("选择模型版本"),
@@ -1074,7 +1074,7 @@ describe("deploy wizard", () => {
     await act(async () => {});
 
     expect(calls.find((c) => c.method === "POST")?.body).toMatchObject({
-      route: { paths: ["/v1/videos"] },
+      route: { paths: ["/v1/images"] },
     });
 
     act(() => root.unmount());

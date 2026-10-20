@@ -38,7 +38,7 @@ const (
 
 // CatalogPath is a client request path a published service exposes on the
 // platform's model catalog.
-// +kubebuilder:validation:Enum=/v1/chat/completions;/v1/responses;/v1/messages;/v1/videos
+// +kubebuilder:validation:Enum=/v1/chat/completions;/v1/responses;/v1/messages;/v1/images
 type CatalogPath string
 
 const (
@@ -49,8 +49,8 @@ const (
 	// CatalogPathMessages is the Anthropic messages endpoint. It is served by
 	// the Agent Router (through the AIServiceBackend whose schema is Anthropic).
 	CatalogPathMessages CatalogPath = "/v1/messages"
-	// CatalogPathVideos is the OpenAI videos endpoint.
-	CatalogPathVideos CatalogPath = "/v1/videos"
+	// CatalogPathImages is the OpenAI images endpoint.
+	CatalogPathImages CatalogPath = "/v1/images"
 )
 
 // CatalogPaths are all supported catalog paths, in display order.
@@ -58,7 +58,7 @@ var CatalogPaths = []CatalogPath{
 	CatalogPathChatCompletions,
 	CatalogPathResponses,
 	CatalogPathMessages,
-	CatalogPathVideos,
+	CatalogPathImages,
 }
 
 // RouteSpec defines the public gateway route of the service: the platform
@@ -81,11 +81,13 @@ type RouteSpec struct {
 	ModelName string `json:"modelName,omitempty"`
 
 	// Paths lists the client paths the catalog entry exposes. Unset means all
-	// supported paths; an explicitly empty list exposes none.
+	// supported paths; an explicitly empty list exposes none. The empty list
+	// must survive a round trip through a typed client, which omitempty would
+	// silently turn back into "unset" (all paths).
 	// +optional
 	// +kubebuilder:validation:MaxItems=4
 	// +listType=set
-	Paths []CatalogPath `json:"paths,omitempty"`
+	Paths []CatalogPath `json:"paths"`
 
 	// TimeoutSeconds caps the total duration of a request at the gateway,
 	// including every streamed chunk. 0 (the default) disables the cap.

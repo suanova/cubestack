@@ -69,6 +69,29 @@ var _ = Describe("InferenceService", func() {
 			Expect(k8sClient.Delete(ctx, isvc)).To(Succeed())
 		})
 
+		It("persists an explicitly empty paths list as exposing no paths", func() {
+			isvc := validInferenceService("isvc-empty-paths")
+			isvc.Spec.Route.Paths = []CatalogPath{}
+
+			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
+
+			got := &InferenceService{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: isvc.Name, Namespace: testNamespace}, got)).To(Succeed())
+			Expect(got.Spec.Route.ExposedPaths()).To(BeEmpty())
+
+			// A full-object write must not drop the empty list and resurrect
+			// "all paths".
+			got.Spec.Route.ModelName = "empty-paths-model"
+			Expect(k8sClient.Update(ctx, got)).To(Succeed())
+
+			again := &InferenceService{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: isvc.Name, Namespace: testNamespace}, again)).To(Succeed())
+			Expect(again.Spec.Route.ExposedPaths()).To(BeEmpty())
+			Expect(again.Spec.Route.Published()).To(BeTrue())
+
+			Expect(k8sClient.Delete(ctx, isvc)).To(Succeed())
+		})
+
 		It("accepts an unpublished service without route", func() {
 			isvc := validInferenceService("isvc-internal")
 			isvc.Spec.Overrides = nil

@@ -619,7 +619,10 @@ export const POST = withAuth(async (req) => {
         return ValidationError("routeModelNameInvalid");
       }
       const paths = body.route?.paths;
-      if (paths === undefined || !paths.every(isCatalogPath)) {
+      // Untrusted JSON: the CreateBody type does not survive the wire, so a
+      // null or a bare string must be refused here instead of throwing into
+      // the 500 handler.
+      if (!Array.isArray(paths) || !paths.every(isCatalogPath)) {
         return ValidationError("routePathsInvalid");
       }
       if (paths.length === 0) {

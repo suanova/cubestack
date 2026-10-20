@@ -109,7 +109,9 @@ spec:
                   paths:
                     description: |-
                       Paths lists the client paths the catalog entry exposes. Unset means all
-                      supported paths; an explicitly empty list exposes none.
+                      supported paths; an explicitly empty list exposes none. The empty list
+                      must survive a round trip through a typed client, which omitempty would
+                      silently turn back into "unset" (all paths).
                     items:
                       description: |-
                         CatalogPath is a client request path a published service exposes on the
@@ -118,7 +120,7 @@ spec:
                       - /v1/chat/completions
                       - /v1/responses
                       - /v1/messages
-                      - /v1/videos
+                      - /v1/images
                       type: string
                     maxItems: 4
                     type: array

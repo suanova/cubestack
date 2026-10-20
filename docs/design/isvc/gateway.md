@@ -138,7 +138,7 @@
 - **目录是平台预装、operator 全量维护的两对共享对象**（均在 `--gateway-namespace`）：
   `AIGatewayRoute` `cubestack-ai-gateway` / `cubestack-ai-gateway-private`（承接 `/v1/messages`），
   以及普通 `HTTPRoute` `cubestack-openai-paths` / `cubestack-openai-paths-private`（承接
-  `/v1/chat/completions`、`/v1/responses`、`/v1/videos`）。ISVC 用 `spec.route.aigatewayRouter`
+  `/v1/chat/completions`、`/v1/responses`、`/v1/images`）。ISVC 用 `spec.route.aigatewayRouter`
   选择其一；operator 每次 reconcile 都用**全部已发布 ISVC** 重建这两条（对）对象的 `spec.rules`
   ——**整体接管**：缺失时创建，存在时覆写（含手工加进去的 rule），不追加、不局部修改。
   不再各自创建 per-service 的 AIGatewayRoute。
@@ -210,7 +210,7 @@ spec:
 
 ```yaml
 # HTTPRoute <cubestack-openai-paths[-private]> 的 spec.rules[]：每个模型 × 每个选中的
-# OpenAI 路径一条（/v1/chat/completions、/v1/responses、/v1/videos）
+# OpenAI 路径一条（/v1/chat/completions、/v1/responses、/v1/images）
 - matches:
     - path: {type: PathPrefix, value: /v1/chat/completions}
       headers: [{type: Exact, name: x-ai-eg-model, value: <route.modelName>}]

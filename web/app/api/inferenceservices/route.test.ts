@@ -1006,6 +1006,27 @@ describe("inference services create (POST)", () => {
     expect(createNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
+  it("rejects route paths that are not an array", async () => {
+    // The body is untrusted JSON: a null or a bare string must be a validation
+    // error, not a TypeError escaping into the 500 handler.
+    const { POST } = await importRoute();
+    for (const paths of [null, "/v1/messages"]) {
+      const res = await POST(
+        await buildPost({
+          namespace: "project-a",
+          name: "ok-name",
+          profileRef: "metax-sglang-dsv4-pd",
+          modelRef: "deepseek-v4-flash-w8a8-v1",
+          route: { aigatewayRouter: "cubestack-ai-gateway", modelName: "dsv4-flash", paths },
+        }),
+        undefined,
+      );
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ error: "routePathsInvalid" });
+    }
+    expect(createNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
   it("rejects a published service that exposes no path", async () => {
     const { POST } = await importRoute();
     const res = await POST(

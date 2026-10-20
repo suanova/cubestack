@@ -281,6 +281,17 @@ func resetCatalogState() {
 	}
 }
 
+// persistCatalogObjects writes the catalog objects a rule references — the
+// Backend and the Anthropic-schema AIServiceBackend — without running a full
+// reconcile. The shared rule set includes a published service only when those
+// objects exist, so a spec that stages published services this way needs them.
+func persistCatalogObjects(name string) {
+	isvc := mustGetISVC(ctx, name)
+	r := routeReconciler()
+	Expect(k8sClient.Create(ctx, r.desiredBackend(isvc, routeProfile(name+"-prof"), 8001))).To(Succeed())
+	Expect(k8sClient.Create(ctx, r.desiredAnthropicAIServiceBackend(isvc))).To(Succeed())
+}
+
 var _ = Describe("checkRoute", func() {
 	readyEndpoint := func(name string) *endpointCheck {
 		return &endpointCheck{Internal: name + "-router.default.svc:8001", Role: testApplyRouterRole}
@@ -451,8 +462,7 @@ var _ = Describe("checkRoute", func() {
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(public), public)).To(Succeed())
 		Expect(findCatalogRuleIndex(public.Spec.Rules, mustGetISVC(ctx, name))).To(Equal(-1))
 		publicHTTP := sharedHTTPRoute(testCatalogRoute)
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(publicHTTP), publicHTTP)).To(Succeed())
-		Expect(findOpenAIRuleIndex(publicHTTP.Spec.Rules, mustGetISVC(ctx, name))).To(Equal(-1))
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(publicHTTP), publicHTTP))).To(BeTrue())
 		private := privateCatalogRoute()
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(private), private)).To(Succeed())
 		Expect(findCatalogRuleIndex(private.Spec.Rules, mustGetISVC(ctx, name))).NotTo(Equal(-1))
@@ -483,8 +493,9 @@ var _ = Describe("checkRoute", func() {
 
 	It("rebuilds the shared route with every published service's rule", func() {
 		ensureSharedCatalogRoute()
-		// Two services publish to the same route: whichever reconciles first
-		// writes both rules, because the operator owns the rule set as a whole.
+		// Two services publish to the same route. The first to reconcile writes
+		// the rules of every published service that has catalog objects; the
+		// other has not reached a ready endpoint, so it contributes nothing yet.
 		first := routeISVC("route-mine", true)
 		second := routeISVC("route-theirs", true)
 		second.Spec.Route.ModelName = "theirs-model"
@@ -495,7 +506,7 @@ var _ = Describe("checkRoute", func() {
 		Expect(err).NotTo(HaveOccurred())
 		route := sharedCatalogRoute()
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
-		Expect(route.Spec.Rules).To(HaveLen(2))
+		Expect(route.Spec.Rules).To(HaveLen(1))
 
 		// The other service reconciles: its own rule is added, the first one is
 		// kept.
@@ -548,9 +559,11 @@ var _ = Describe("checkRoute", func() {
 		// The cap is enforced while rebuilding the full rule set: the first
 		// catalogRuleMax services (oldest first) keep their /v1/messages rules.
 		for i := range catalogRuleMax {
-			isvc := routeISVC("route-cap-"+strconv.Itoa(i), true)
+			name := "route-cap-" + strconv.Itoa(i)
+			isvc := routeISVC(name, true)
 			isvc.Spec.Route.ModelName = "cap-model-" + strconv.Itoa(i)
 			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
+			persistCatalogObjects(name)
 		}
 		name := "route-full"
 		full := routeISVC(name, true)
@@ -571,6 +584,81 @@ var _ = Describe("checkRoute", func() {
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(httpRoute), httpRoute)).To(Succeed())
 		Expect(len(httpRoute.Spec.Rules)).To(BeNumerically("<=", openAIPathsRuleMax))
 		Expect(findOpenAIRuleIndex(httpRoute.Spec.Rules, mustGetISVC(ctx, name))).To(Equal(-1))
+	})
+
+	It("stages only published services whose catalog objects exist", func() {
+		// A published service that has not reached a ready endpoint owns no
+		// Backend, so its rule would reference something the shared route cannot
+		// resolve. One dangling backendRef rejects the whole route, taking every
+		// other service on it down with it.
+		ensureSharedCatalogRoute()
+		readySvc := "route-staged-ready"
+		pending := "route-staged-pending"
+		Expect(k8sClient.Create(ctx, routeISVC(readySvc, true))).To(Succeed())
+		pendingISVC := routeISVC(pending, true)
+		pendingISVC.Spec.Route.ModelName = "staged-pending-model"
+		Expect(k8sClient.Create(ctx, pendingISVC)).To(Succeed())
+
+		r := routeReconciler()
+		_, err := r.checkRoute(ctx, mustGetISVC(ctx, readySvc), routeProfile(readySvc+"-prof"), readyEndpoint(readySvc), testEngineModel)
+		Expect(err).NotTo(HaveOccurred())
+
+		route := sharedCatalogRoute()
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
+		Expect(route.Spec.Rules).To(HaveLen(1))
+		Expect(findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, pending))).To(Equal(-1))
+		httpRoute := sharedHTTPRoute(testCatalogRoute)
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(httpRoute), httpRoute)).To(Succeed())
+		Expect(httpRoute.Spec.Rules).To(HaveLen(len(catalogOpenAIPaths)))
+		Expect(findOpenAIRuleIndex(httpRoute.Spec.Rules, mustGetISVC(ctx, pending))).To(Equal(-1))
+
+		// Its objects appear: the next rebuild picks it up.
+		persistCatalogObjects(pending)
+		_, err = r.checkRoute(ctx, mustGetISVC(ctx, readySvc), routeProfile(readySvc+"-prof"), readyEndpoint(readySvc), testEngineModel)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
+		Expect(route.Spec.Rules).To(HaveLen(2))
+	})
+
+	It("does not create the shared surfaces when no Gateway name is configured", func() {
+		// Publishing is off without a Gateway name, and the routes cannot be
+		// created with an empty parentRef. The rebuild must leave them absent
+		// instead of failing every unpublished service and blocking the
+		// finalizer of a deleted one.
+		name := "route-nogwname"
+		Expect(k8sClient.Create(ctx, routeISVC(name, true))).To(Succeed())
+		persistCatalogObjects(name)
+
+		r := routeReconciler()
+		r.GatewayName = ""
+		Expect(r.syncSharedCatalogRoutes(ctx)).To(Succeed())
+		for _, routeName := range catalogRouteNames {
+			Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(catalogRouteNamed(routeName)), catalogRouteNamed(routeName)))).To(BeTrue())
+		}
+		httpRoute := sharedHTTPRoute(testCatalogRoute)
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(httpRoute), httpRoute))).To(BeTrue())
+	})
+
+	It("publishes OpenAI-only paths without an installed AIGatewayRoute", func() {
+		// The Agent Router surface is only created when some service exposes
+		// /v1/messages. A service that selects only OpenAI paths must not wait
+		// for a shared AIGatewayRoute that nothing will ever create.
+		name := "route-openai-only"
+		isvc := routeISVC(name, true)
+		isvc.Spec.Route.Paths = []aiv1alpha1.CatalogPath{aiv1alpha1.CatalogPathChatCompletions}
+		Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
+
+		r := routeReconciler()
+		check, err := r.checkRoute(ctx, mustGetISVC(ctx, name), routeProfile(name+"-prof"), readyEndpoint(name), testEngineModel)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(check.Reason).To(Equal(RouteGatewayNotAccepted))
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(catalogRouteNamed(testCatalogRoute)), catalogRouteNamed(testCatalogRoute)))).To(BeTrue())
+
+		// Only the OpenAI-paths gate applies; accepting the HTTPRoute is enough.
+		acceptOpenAIPathsRoute(testCatalogRoute)
+		check, err = r.checkRoute(ctx, mustGetISVC(ctx, name), routeProfile(name+"-prof"), readyEndpoint(name), testEngineModel)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(check.Reason).To(BeEmpty())
 	})
 
 	It("reports AgentRouterUnavailable when the cluster serves no Agent Router CRDs", func() {
@@ -670,9 +758,11 @@ var _ = Describe("checkRoute", func() {
 		route = privateCatalogRoute()
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
 		Expect(findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, name))).To(Equal(-1))
+		// The OpenAI-paths HTTPRoute had this service as its only writer: with no
+		// rules left the surface is removed rather than left attached with the
+		// CRD's defaulted catch-all rule.
 		httpRoute := sharedHTTPRoute(testCatalogRoute)
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(httpRoute), httpRoute)).To(Succeed())
-		Expect(findOpenAIRuleIndex(httpRoute.Spec.Rules, mustGetISVC(ctx, name))).To(Equal(-1))
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(httpRoute), httpRoute))).To(BeTrue())
 	})
 
 	It("removes the rule from both shared routes when a service is deleted", func() {

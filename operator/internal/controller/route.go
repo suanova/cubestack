@@ -108,7 +108,7 @@ func openAIPathsRouteName(route aiv1alpha1.AIGatewayRouterName) string {
 var catalogOpenAIPaths = []aiv1alpha1.CatalogPath{
 	aiv1alpha1.CatalogPathChatCompletions,
 	aiv1alpha1.CatalogPathResponses,
-	aiv1alpha1.CatalogPathVideos,
+	aiv1alpha1.CatalogPathImages,
 }
 
 // sharedRouteLabels are the labels the two shared catalog surfaces carry.
@@ -391,6 +391,24 @@ func (r *InferenceServiceReconciler) desiredSharedRuleSet(ctx context.Context, r
 			continue
 		}
 		isCurrent := current != nil && svc.UID == current.UID
+		if !isCurrent {
+			// A service that has not reached a ready endpoint has no catalog
+			// objects yet. Its rule would reference a Backend the shared route
+			// cannot resolve, and one dangling reference rejects the whole route
+			// — taking every other service on it down. The current service is
+			// exempt: checkRoute applied its objects just before this pass, and
+			// the cached client may not observe the writes yet.
+			//
+			// The gate is object existence, not endpoint readiness, so a rule
+			// survives an endpoint going unready: its objects stay behind.
+			exists, err := r.catalogObjectsExist(ctx, svc)
+			if err != nil {
+				return nil, err
+			}
+			if !exists {
+				continue
+			}
+		}
 		modelName := ""
 		if svc.Status.Model != nil {
 			modelName = svc.Status.Model.Name
@@ -436,6 +454,31 @@ func (r *InferenceServiceReconciler) desiredSharedRuleSet(ctx context.Context, r
 	return set, nil
 }
 
+// catalogObjectsExist reports whether the objects a rule references exist: the
+// Backend serving the OpenAI paths and the Anthropic-schema AIServiceBackend
+// serving /v1/messages. checkRoute creates them together once the service's
+// endpoint is ready, so a published service without them has never been
+// publishable.
+func (r *InferenceServiceReconciler) catalogObjectsExist(ctx context.Context, isvc *aiv1alpha1.InferenceService) (bool, error) {
+	backend := &egv1alpha1.Backend{}
+	err := r.Get(ctx, client.ObjectKey{Namespace: isvc.Namespace, Name: backendName(isvc)}, backend)
+	if apierrors.IsNotFound(err) || meta.IsNoMatchError(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	anthropic := &aigwv1beta1.AIServiceBackend{}
+	err = r.Get(ctx, client.ObjectKey{Namespace: isvc.Namespace, Name: anthropicServiceBackendName(isvc)}, anthropic)
+	if apierrors.IsNotFound(err) || meta.IsNoMatchError(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // syncSharedCatalogRoute rewrites both shared surfaces of one catalog route
 // from the current state of every published service, and rewrites the other
 // route's surfaces too: a service that has just moved must lose its rules from
@@ -478,11 +521,11 @@ func (r *InferenceServiceReconciler) syncRoutePair(ctx context.Context, routeNam
 // service's rules must disappear from whichever route held them, and the
 // remaining rules must survive.
 func (r *InferenceServiceReconciler) syncSharedCatalogRoutes(ctx context.Context) error {
-	if r.GatewayNamespace == "" {
+	if r.GatewayName == "" || r.GatewayNamespace == "" {
 		// No shared catalog surface is configured, so there is nothing this
 		// reconciler could have written to shed. Addressing the routes anyway
-		// would fail on the empty namespace — and only when the client is the
-		// uncached one, since the cache answers such a Get with NotFound.
+		// would fail: the empty namespace fails a direct-client Get, and an
+		// empty Gateway name is rejected when a route would have to be created.
 		return nil
 	}
 	for _, routeName := range catalogRouteNames {
@@ -549,6 +592,14 @@ func (r *InferenceServiceReconciler) applyOpenAIPathsRoute(ctx context.Context, 
 		}
 		if err != nil {
 			return err
+		}
+		if len(rules) == 0 {
+			// The Gateway API CRD defaults an empty or omitted rule list to a
+			// catch-all PathPrefix "/" rule, so an update could never store "no
+			// rules": the defaulted object would differ from the desired one on
+			// every pass and be rewritten forever. Drop the surface instead,
+			// matching the create path that leaves it absent.
+			return client.IgnoreNotFound(r.Delete(ctx, route))
 		}
 		if apiequality.Semantic.DeepEqual(route.Spec.Rules, rules) {
 			return nil
@@ -688,16 +739,20 @@ func (r *InferenceServiceReconciler) checkRoute(ctx context.Context, isvc *aiv1a
 		return check, nil
 	}
 	// Re-fetch after the writes: the acceptance check must not run against a
-	// status written for a previous generation.
-	fresh := r.getCatalogRoute(routeName)
-	if err := r.Get(ctx, client.ObjectKeyFromObject(fresh), fresh); err != nil {
-		return routeErrAfterApply(check, err)
+	// status written for a previous generation. The Agent Router surface only
+	// exists when some service publishes /v1/messages, so a service that
+	// exposes only OpenAI paths must not require the route to be present.
+	if isvc.Spec.Route.Exposes(aiv1alpha1.CatalogPathMessages) {
+		fresh := r.getCatalogRoute(routeName)
+		if err := r.Get(ctx, client.ObjectKeyFromObject(fresh), fresh); err != nil {
+			return routeErrAfterApply(check, err)
+		}
+		freshAnthropic := &aigwv1beta1.AIServiceBackend{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(anthropicSB), freshAnthropic); err != nil {
+			return routeErrAfterApply(check, err)
+		}
+		check = sharedRouteAcceptance(check, fresh, freshAnthropic, isvc)
 	}
-	freshAnthropic := &aigwv1beta1.AIServiceBackend{}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(anthropicSB), freshAnthropic); err != nil {
-		return routeErrAfterApply(check, err)
-	}
-	check = sharedRouteAcceptance(check, fresh, freshAnthropic, isvc)
 	if check.Reason != "" || !r.exposesOpenAIPaths(isvc) {
 		return check, nil
 	}
