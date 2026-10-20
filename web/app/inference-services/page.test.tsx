@@ -888,7 +888,7 @@ describe("deploy wizard", () => {
     await act(async () => {});
   }
 
-  it("defaults the catalog model name to the service name when publish is enabled", async () => {
+  it("always publishes and defaults the catalog model name to the service name", async () => {
     const { container, root } = renderWithBoth();
     await act(async () => {});
     await act(async () => {
@@ -898,25 +898,22 @@ describe("deploy wizard", () => {
     await fillNameAndGoToStep2();
 
     const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
-    const publish = step2.querySelector('input[type="checkbox"]') as HTMLInputElement;
-    await act(async () => {
-      publish.click();
-    });
-    await act(async () => {});
 
-    // The publish controls are the catalog model name and the route picker;
-    // the request/idle timeout inputs are gone.
+    // Publishing is mandatory, so the catalog controls are always present; the
+    // request/idle timeout inputs are gone.
     expect(step2.querySelector('[data-od-id="deploy-aigateway-router"]')).not.toBeNull();
+    expect(step2.querySelector('[data-od-id="deploy-catalog-paths"]')).not.toBeNull();
     expect(step2.textContent).not.toContain("请求超时");
     expect(step2.textContent).not.toContain("空闲超时");
 
-    // The service name is a valid catalog name, so enabling publish fills the
-    // empty field with it rather than making the user retype it.
+    // The service name is a valid catalog name, so the field follows it rather
+    // than making the user retype it.
     const modelName = () =>
       document.body.querySelector('[data-od-id="deploy-model-name"] input') as HTMLInputElement;
     expect(modelName().value).toBe("my-serve");
 
-    // A catalog name the user typed is theirs: cycling publish cannot clobber it.
+    // A catalog name the user typed is theirs: renaming the service leaves it
+    // alone.
     await act(async () => {
       const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
       setter.call(modelName(), "custom-model");
@@ -924,10 +921,18 @@ describe("deploy wizard", () => {
     });
     await act(async () => {});
     await act(async () => {
-      publish.click();
+      (Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent === "上一步") as HTMLElement).click();
     });
+    await act(async () => {});
+    const nameInput = document.body.querySelector('input[placeholder="e.g. dsv4-flash-serve"]') as HTMLInputElement;
     await act(async () => {
-      publish.click();
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
+      setter.call(nameInput, "renamed-serve");
+      nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {});
+    await act(async () => {
+      (Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent === "下一步") as HTMLElement).click();
     });
     await act(async () => {});
     expect(modelName().value).toBe("custom-model");
@@ -935,7 +940,7 @@ describe("deploy wizard", () => {
     act(() => root.unmount());
   });
 
-  it("publishes to the private catalog route when selected", async () => {
+  it("publishes to the private catalog route by default", async () => {
     const { container, root, calls } = renderWithBoth();
     await act(async () => {});
     await act(async () => {
@@ -945,24 +950,10 @@ describe("deploy wizard", () => {
     await fillNameAndGoToStep2();
 
     const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
-    await act(async () => {
-      (step2.querySelector('input[type="checkbox"]') as HTMLInputElement).click();
-    });
-    await act(async () => {});
 
-    // The route picker offers public and private; choose private.
-    const picker = step2.querySelector('[data-od-id="deploy-aigateway-router"] [role="combobox"]') as HTMLElement;
-    await act(async () => {
-      picker.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-    });
-    const privateOption = Array.from(document.body.querySelectorAll('[role="option"]')).find((o) =>
-      (o.textContent ?? "").includes("cubestack-ai-gateway-private"),
-    );
-    expect(privateOption).toBeDefined();
-    await act(async () => {
-      (privateOption as HTMLElement).click();
-    });
-    await act(async () => {});
+    // Private visibility is the default.
+    const picker = step2.querySelector('[data-od-id="deploy-aigateway-router"] [role="combobox"]');
+    expect(selectText(picker)).toContain("cubestack-ai-gateway-private");
 
     // A model is required to advance; pick the compatible one.
     const modelSelect = Array.from(step2.querySelectorAll('[role="combobox"]')).find((c) =>
@@ -1009,38 +1000,35 @@ describe("deploy wizard", () => {
     await fillNameAndGoToStep2();
 
     const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
-    await act(async () => {
-      (step2.querySelector('input[type="checkbox"]') as HTMLInputElement).click();
-    });
-    await act(async () => {});
 
     // Publishing starts with every supported path exposed.
     const paths = step2.querySelector('[data-od-id="deploy-catalog-paths"]') as HTMLElement;
-    const toggles = Array.from(paths.querySelectorAll("button")) as HTMLElement[];
-    expect(toggles.map((b) => b.textContent)).toEqual([
-      "/v1/chat/completions",
-      "/v1/responses",
-      "/v1/messages",
-      "/v1/videos",
-    ]);
-    expect(toggles.every((b) => b.getAttribute("aria-pressed") === "true")).toBe(true);
+    const combobox = paths.querySelector('[role="combobox"]') as HTMLElement;
+    const pathText = () => selectText(combobox);
+    expect(pathText()).toBe("/v1/chat/completions, /v1/responses, /v1/messages, /v1/videos");
+
+    await act(async () => {
+      combobox.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    });
+    const pathOption = (label: string) =>
+      Array.from(document.body.querySelectorAll('[role="option"]')).find((o) => o.textContent === label) as HTMLElement;
 
     // Drop /v1/responses.
     await act(async () => {
-      toggles[1].click();
+      pathOption("/v1/responses").click();
     });
     await act(async () => {});
-    expect(toggles[1].getAttribute("aria-pressed")).toBe("false");
+    expect(pathText()).toBe("/v1/chat/completions, /v1/messages, /v1/videos");
 
     // The last selected path cannot be removed: a published model exposes at
     // least one.
-    for (const toggle of [toggles[0], toggles[2], toggles[3]]) {
+    for (const label of ["/v1/chat/completions", "/v1/messages", "/v1/videos"]) {
       await act(async () => {
-        toggle.click();
+        pathOption(label).click();
       });
+      await act(async () => {});
     }
-    await act(async () => {});
-    expect(toggles[3].getAttribute("aria-pressed")).toBe("true");
+    expect(pathText()).toBe("/v1/videos");
 
     const modelSelect = Array.from(step2.querySelectorAll('[role="combobox"]')).find((c) =>
       (c.textContent ?? "").includes("选择模型版本"),
