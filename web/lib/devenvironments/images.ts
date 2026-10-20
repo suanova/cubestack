@@ -58,10 +58,11 @@ export const PLATFORM_USER = "user";
 export const PLATFORM_UID = 1000;
 export const PLATFORM_GID = 1000;
 
-// The registry (host and project path) the platform publishes its images to.
-// CUBESTACK_DEV_IMAGE_REGISTRY overrides it (helm: devImageRegistry), so a
-// deployment can point the catalog at its own mirror without a rebuild.
-const DEFAULT_REGISTRY = "harbor.isuanova.com/suanova";
+// The registry host the platform publishes its images to; every catalog image
+// lives in the `suanova` project under it. CUBESTACK_DEV_IMAGE_REGISTRY
+// overrides the host (helm: image.registry), so a deployment can point the
+// catalog at its own mirror without a rebuild.
+const DEFAULT_REGISTRY = "harbor.isuanova.com";
 const REGISTRY =
   (process.env.CUBESTACK_DEV_IMAGE_REGISTRY ?? "").trim().replace(/\/+$/, "") || DEFAULT_REGISTRY;
 
@@ -72,7 +73,7 @@ const REGISTRY =
 // DevEnvironment can be pointed at (docs/design/devenv-images/decision.md).
 export const DEV_IMAGES: DevImage[] = [
   {
-    tag: `${REGISTRY}/cpu-pytorch:latest`,
+    tag: `${REGISTRY}/suanova/cpu-pytorch:latest`,
     label: "suanova/cpu-pytorch · CPU · JupyterLab (ubuntu)",
     // Stock-derived overlay: docker-stacks' jovyan is uid 1000 / gid *100*, and
     // no other spec field implies that gid — the platform default is 1000.
@@ -81,7 +82,7 @@ export const DEV_IMAGES: DevImage[] = [
     vendor: "cpu",
   },
   {
-    tag: `${REGISTRY}/cpu-pytorch:latest`,
+    tag: `${REGISTRY}/suanova/cpu-pytorch:latest`,
     label: "suanova/cpu-pytorch · CPU · SSH (ubuntu)",
     // Self-authored family: account ubuntu, uid/gid 1000 — the platform default.
     user: "ubuntu",
@@ -89,28 +90,28 @@ export const DEV_IMAGES: DevImage[] = [
     vendor: "cpu",
   },
   {
-    tag: `${REGISTRY}/cuda-pytorch:latest`,
+    tag: `${REGISTRY}/suanova/cuda-pytorch:latest`,
     label: "suanova/cuda-pytorch · NVIDIA CUDA · JupyterLab (ubuntu)",
     user: "ubuntu",
     interface: "jupyter",
     vendor: "nvidia",
   },
   {
-    tag: `${REGISTRY}/cuda-pytorch:latest`,
+    tag: `${REGISTRY}/suanova/cuda-pytorch:latest`,
     label: "suanova/cuda-pytorch · NVIDIA CUDA · SSH (ubuntu)",
     user: "ubuntu",
     interface: "ssh",
     vendor: "nvidia",
   },
   {
-    tag: `${REGISTRY}/maca-pytorch:latest`,
+    tag: `${REGISTRY}/suanova/maca-pytorch:latest`,
     label: "suanova/maca-pytorch · Metax MACA · JupyterLab (ubuntu)",
     user: "ubuntu",
     interface: "jupyter",
     vendor: "metax",
   },
   {
-    tag: `${REGISTRY}/maca-pytorch:latest`,
+    tag: `${REGISTRY}/suanova/maca-pytorch:latest`,
     label: "suanova/maca-pytorch · Metax MACA · SSH (ubuntu)",
     user: "ubuntu",
     interface: "ssh",

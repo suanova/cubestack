@@ -2,10 +2,11 @@
 
 # Image settings
 image:
-  # Registry (host and project path) the platform's images are published under
-  # (CUBESTACK_DEV_IMAGE_REGISTRY for the dev-environment catalog).
-  registry: harbor.isuanova.com/suanova
-  repository: cubestack-ui
+  # Registry host the platform's images are published under
+  # (CUBESTACK_DEV_IMAGE_REGISTRY for the dev-environment catalog, whose
+  # images live in the `suanova` project).
+  registry: harbor.isuanova.com
+  repository: suanova/cubestack-ui
   tag: "latest"
   pullPolicy: IfNotPresent
 

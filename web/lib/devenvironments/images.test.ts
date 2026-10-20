@@ -84,12 +84,12 @@ describe("CUBESTACK_DEV_IMAGE_REGISTRY", () => {
     vi.resetModules();
   });
 
-  it("builds every tag under the configured registry", async () => {
+  it("builds every tag under the configured registry host", async () => {
     vi.resetModules();
-    vi.stubEnv("CUBESTACK_DEV_IMAGE_REGISTRY", "registry.example.com/cubestack/");
+    vi.stubEnv("CUBESTACK_DEV_IMAGE_REGISTRY", "registry.example.com/");
     const { DEV_IMAGES: images } = await import("./images");
     for (const image of images) {
-      expect(image.tag).toMatch(/^registry\.example\.com\/cubestack\/[a-z0-9.-]+:[a-z0-9.-]+$/);
+      expect(image.tag).toMatch(/^registry\.example\.com\/suanova\/[a-z0-9.-]+:[a-z0-9.-]+$/);
     }
   });
 });

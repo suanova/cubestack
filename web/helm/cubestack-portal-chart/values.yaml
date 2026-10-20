@@ -9,13 +9,14 @@ nameOverride: cubestack-portal
 
 # Image settings
 image:
-  # Registry (host and project path) the platform's images are published under.
-  # The portal builds each dev-environment catalog reference from it today
-  # (CUBESTACK_DEV_IMAGE_REGISTRY); it is the chart-level registry for any
-  # image reference the chart or the app needs to derive.
-  registry: harbor.isuanova.com/suanova
+  # Registry host the platform's images are published under. The portal builds
+  # each dev-environment catalog reference from it today
+  # (CUBESTACK_DEV_IMAGE_REGISTRY, with the images in its `suanova` project);
+  # it is the chart-level registry host for any image reference the chart or
+  # the app needs to derive.
+  registry: harbor.isuanova.com
   # UI image name inside image.registry.
-  repository: cubestack-ui
+  repository: suanova/cubestack-ui
   # Empty means the chart's appVersion, so a released chart pulls the images
   # released with it. Set a tag to point the chart somewhere else.
   tag: ""
