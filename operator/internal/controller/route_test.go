@@ -906,6 +906,32 @@ var _ = Describe("checkRoute", func() {
 		Expect(check.Reason).To(Equal(RouteGatewayNotConfigured))
 	})
 
+	It("reports GatewayNotConfigured when the shared routes' namespace is not configured", func() {
+		ensureSharedCatalogRoute()
+		name := "route-nons"
+		Expect(k8sClient.Create(ctx, routeISVC(name, true))).To(Succeed())
+		r := routeReconciler()
+		r.GatewayNamespace = ""
+		check, err := r.checkRoute(ctx, mustGetISVC(ctx, name), routeProfile(name+"-prof"), readyEndpoint(name), testEngineModel)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(check.Reason).To(Equal(RouteGatewayNotConfigured))
+	})
+
+	It("leaves the shared routes alone when no gateway is configured", func() {
+		// The reconcile of an unpublished service rebuilds the shared routes to
+		// shed a rule it may have had. Without a gateway namespace there is no
+		// route to address, so the pass must succeed without one — an empty
+		// namespace fails a direct-client Get.
+		name := "route-nocfg"
+		Expect(k8sClient.Create(ctx, routeISVC(name, false))).To(Succeed())
+		r := routeReconciler()
+		r.GatewayName = ""
+		r.GatewayNamespace = ""
+		check, err := r.checkRoute(ctx, mustGetISVC(ctx, name), routeProfile(name+"-prof"), readyEndpoint(name), testEngineModel)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(check.Reason).To(Equal(RouteNotPublished))
+	})
+
 	It("sets the RouteReady condition from the check", func() {
 		conditions := []metav1.Condition{}
 		setRouteReadyCondition(&conditions, &routeCheck{Reason: "NotPublished"})

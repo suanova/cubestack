@@ -478,6 +478,13 @@ func (r *InferenceServiceReconciler) syncRoutePair(ctx context.Context, routeNam
 // service's rules must disappear from whichever route held them, and the
 // remaining rules must survive.
 func (r *InferenceServiceReconciler) syncSharedCatalogRoutes(ctx context.Context) error {
+	if r.GatewayNamespace == "" {
+		// No shared catalog surface is configured, so there is nothing this
+		// reconciler could have written to shed. Addressing the routes anyway
+		// would fail on the empty namespace — and only when the client is the
+		// uncached one, since the cache answers such a Get with NotFound.
+		return nil
+	}
 	for _, routeName := range catalogRouteNames {
 		if _, err := r.syncRoutePair(ctx, routeName, nil, ""); err != nil {
 			return err
@@ -639,7 +646,7 @@ func (r *InferenceServiceReconciler) checkRoute(ctx context.Context, isvc *aiv1a
 		check.Reason = EndpointNotReady
 		return check, nil
 	}
-	if r.GatewayName == "" {
+	if r.GatewayName == "" || r.GatewayNamespace == "" {
 		check.Reason = RouteGatewayNotConfigured
 		return check, nil
 	}
