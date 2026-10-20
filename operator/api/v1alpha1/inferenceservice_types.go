@@ -17,6 +17,8 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"slices"
+
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -34,22 +36,56 @@ const (
 	AIGatewayRouterPrivate AIGatewayRouterName = "cubestack-ai-gateway-private"
 )
 
+// CatalogPath is a client request path a published service exposes on the
+// platform's model catalog.
+// +kubebuilder:validation:Enum=/v1/chat/completions;/v1/responses;/v1/messages;/v1/videos
+type CatalogPath string
+
+const (
+	// CatalogPathChatCompletions is the OpenAI chat-completions endpoint.
+	CatalogPathChatCompletions CatalogPath = "/v1/chat/completions"
+	// CatalogPathResponses is the OpenAI responses endpoint.
+	CatalogPathResponses CatalogPath = "/v1/responses"
+	// CatalogPathMessages is the Anthropic messages endpoint. It is served by
+	// the Agent Router (through the AIServiceBackend whose schema is Anthropic).
+	CatalogPathMessages CatalogPath = "/v1/messages"
+	// CatalogPathVideos is the OpenAI videos endpoint.
+	CatalogPathVideos CatalogPath = "/v1/videos"
+)
+
+// CatalogPaths are all supported catalog paths, in display order.
+var CatalogPaths = []CatalogPath{
+	CatalogPathChatCompletions,
+	CatalogPathResponses,
+	CatalogPathMessages,
+	CatalogPathVideos,
+}
+
 // RouteSpec defines the public gateway route of the service: the platform
 // model catalog entry a published service joins.
 type RouteSpec struct {
-	// AIGatewayRouter selects the platform's pre-installed shared AIGatewayRoute
-	// this service's catalog rule is attached to. Empty (or an absent route)
-	// means the service is not published and only provides a ClusterIP
-	// internal endpoint.
+	// AIGatewayRouter selects the platform's shared AIGatewayRoute this
+	// service's catalog rule is attached to. The operator maintains that route
+	// (and the matching OpenAI-paths HTTPRoute) in full from all published
+	// services. Empty (or an absent route) means the service is not published
+	// and only provides a ClusterIP internal endpoint.
 	// +optional
 	AIGatewayRouter AIGatewayRouterName `json:"aigatewayRouter,omitempty"`
 
 	// ModelName is the catalog model name: what clients send as the request
-	// body's "model" field. It is the identity of a published service and must
+	// body's "model" field (and the value of the x-ai-eg-model header used by
+	// the plain HTTPRoute). It is the identity of a published service and must
 	// be unique among services published to the same route.
 	// +optional
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$`
 	ModelName string `json:"modelName,omitempty"`
+
+	// Paths lists the client paths the catalog entry exposes. Unset means all
+	// supported paths; an explicitly empty list exposes none.
+	// +optional
+	// +kubebuilder:validation:MaxItems=4
+	// +listType=set
+	Paths []CatalogPath `json:"paths,omitempty"`
 
 	// TimeoutSeconds caps the total duration of a request at the gateway,
 	// including every streamed chunk. 0 (the default) disables the cap.
@@ -72,6 +108,24 @@ type RouteSpec struct {
 // Published reports whether the service requests a catalog entry.
 func (r *RouteSpec) Published() bool {
 	return r != nil && r.AIGatewayRouter != ""
+}
+
+// ExposedPaths returns the client paths the service publishes. An unset list
+// means every supported path (services created before the field existed); an
+// explicitly empty list means none.
+func (r *RouteSpec) ExposedPaths() []CatalogPath {
+	if r == nil {
+		return nil
+	}
+	if r.Paths == nil {
+		return CatalogPaths
+	}
+	return r.Paths
+}
+
+// Exposes reports whether the service publishes the given path.
+func (r *RouteSpec) Exposes(path CatalogPath) bool {
+	return slices.Contains(r.ExposedPaths(), path)
 }
 
 // InferenceServiceSpec defines the desired state of InferenceService.

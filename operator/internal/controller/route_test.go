@@ -76,11 +76,18 @@ const (
 	// testEngineModel is the engine's served model name the reconcile reads
 	// from the ModelVersion and writes into the rule as the modelNameOverride.
 	testEngineModel = "flash-engine"
+	// testCatalogModelName is the catalog model name the route fixtures declare.
+	testCatalogModelName = "flash"
+	// testOpenAISuffix is the suffix of the OpenAI-schema AIServiceBackend.
+	testOpenAISuffix = "-backend"
+	// testAnthropicSuffix is the suffix of the Anthropic-schema AIServiceBackend
+	// that serves /v1/messages.
+	testAnthropicSuffix = "-anthropic"
 )
 
 func routeISVC(name string, publish bool) *aiv1alpha1.InferenceService {
 	isvc := isvcForApply(name)
-	isvc.Spec.Route = &aiv1alpha1.RouteSpec{ModelName: "flash", TimeoutSeconds: ptrTo[int64](60)}
+	isvc.Spec.Route = &aiv1alpha1.RouteSpec{ModelName: testCatalogModelName, TimeoutSeconds: ptrTo[int64](60)}
 	if publish {
 		isvc.Spec.Route.AIGatewayRouter = aiv1alpha1.AIGatewayRouterPublic
 	}
@@ -164,7 +171,8 @@ func ensureCatalogRoutes() {
 const aiAcceptedReason = "ReconciliationSucceeded"
 
 // acceptCatalogRoute marks the named shared route accepted by the Agent Router
-// controller for its current generation.
+// controller for its current generation, together with the OpenAI-paths
+// HTTPRoute paired with it.
 func acceptCatalogRoute(name aiv1alpha1.AIGatewayRouterName) {
 	route := catalogRouteNamed(name)
 	Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
@@ -173,6 +181,7 @@ func acceptCatalogRoute(name aiv1alpha1.AIGatewayRouterName) {
 		LastTransitionTime: metav1.Now(), ObservedGeneration: route.Generation,
 	}}
 	Expect(k8sClient.Status().Update(ctx, route)).To(Succeed())
+	acceptOpenAIPathsRoute(name)
 }
 
 // acceptSharedCatalogRoute marks the public shared route accepted.
@@ -181,22 +190,95 @@ func acceptSharedCatalogRoute() {
 }
 
 // acceptAIServiceBackend writes the Accepted condition the Agent Router
-// controller would set on the service's AIServiceBackend.
+// controller would set on the service's AIServiceBackends.
 func acceptAIServiceBackend(name string) {
-	sb := &aigwv1beta1.AIServiceBackend{}
-	Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-backend", Namespace: testNamespace}, sb)).To(Succeed())
-	sb.Status.Conditions = []metav1.Condition{{
-		Type: aigwv1beta1.ConditionTypeAccepted, Status: metav1.ConditionTrue, Reason: aiAcceptedReason,
-		LastTransitionTime: metav1.Now(), ObservedGeneration: sb.Generation,
-	}}
-	Expect(k8sClient.Status().Update(ctx, sb)).To(Succeed())
+	for _, suffix := range []string{testOpenAISuffix, testAnthropicSuffix} {
+		sb := &aigwv1beta1.AIServiceBackend{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + suffix, Namespace: testNamespace}, sb)).To(Succeed())
+		sb.Status.Conditions = []metav1.Condition{{
+			Type: aigwv1beta1.ConditionTypeAccepted, Status: metav1.ConditionTrue, Reason: aiAcceptedReason,
+			LastTransitionTime: metav1.Now(), ObservedGeneration: sb.Generation,
+		}}
+		Expect(k8sClient.Status().Update(ctx, sb)).To(Succeed())
+	}
+}
+
+// acceptOpenAIPathsRoute writes the status.parents a gateway reports for the
+// shared OpenAI-paths HTTPRoute of the named catalog route. A route that does
+// not exist yet is skipped: nothing is published there.
+func acceptOpenAIPathsRoute(name aiv1alpha1.AIGatewayRouterName) {
+	route := &gatewayv1.HTTPRoute{}
+	err := k8sClient.Get(ctx, client.ObjectKey{Name: openAIPathsRouteName(name), Namespace: testGatewayNamespace}, route)
+	if apierrors.IsNotFound(err) {
+		return
+	}
+	Expect(err).NotTo(HaveOccurred())
+	route.Status.Parents = gatewayRouteParents(gatewayv1.ParentReference{
+		Name:      gatewayv1.ObjectName(testGatewayName),
+		Namespace: ptrTo(gatewayv1.Namespace(testGatewayNamespace)),
+	}, route.Generation, true, "", "")
+	Expect(k8sClient.Status().Update(ctx, route)).To(Succeed())
 }
 
 // acceptRoute marks the catalog objects accepted by the Agent Router
-// controller: the shared route (route-level) and the service's AIServiceBackend.
+// controller: the shared route and HTTPRoute (route-level) and the service's
+// AIServiceBackends.
 func acceptRoute(name string) {
 	acceptSharedCatalogRoute()
 	acceptAIServiceBackend(name)
+}
+
+// findOpenAIRuleIndex returns the index of one of this service's rules in a
+// shared OpenAI-paths HTTPRoute, or -1. The rule is identified by its backend
+// reference — this service's Backend, in this service's namespace.
+func findOpenAIRuleIndex(rules []gatewayv1.HTTPRouteRule, isvc *aiv1alpha1.InferenceService) int {
+	for i := range rules {
+		refs := rules[i].BackendRefs
+		if len(refs) != 1 || refs[0].Namespace == nil {
+			continue
+		}
+		if refs[0].Name == gatewayv1.ObjectName(backendName(isvc)) && string(*refs[0].Namespace) == isvc.Namespace {
+			return i
+		}
+	}
+	return -1
+}
+
+// sharedHTTPRoute returns the OpenAI-paths HTTPRoute paired with the named
+// catalog route, addressed in the gateway namespace.
+func sharedHTTPRoute(name aiv1alpha1.AIGatewayRouterName) *gatewayv1.HTTPRoute {
+	return &gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Name: openAIPathsRouteName(name), Namespace: testGatewayNamespace}}
+}
+
+// resetCatalogState removes every published service the suite left behind and
+// deletes both shared catalog surfaces. The operator's full-takeover sync builds
+// the rules from every published service in the cluster, so a spec must see only
+// the services it creates — otherwise another spec's model names compete for
+// the catalog and its rules occupy the route.
+func resetCatalogState() {
+	ensureGatewayNamespace()
+	var list aiv1alpha1.InferenceServiceList
+	Expect(k8sClient.List(ctx, &list, client.InNamespace(testNamespace))).To(Succeed())
+	for i := range list.Items {
+		if list.Items[i].Spec.Route != nil && list.Items[i].Spec.Route.Published() {
+			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &list.Items[i]))).To(Succeed())
+		}
+	}
+	// The manager drops the catalog finalizer on the delete reconcile; wait for
+	// the deletions to complete so no deleting service lingers in the list.
+	Eventually(func(g Gomega) {
+		var rest aiv1alpha1.InferenceServiceList
+		g.Expect(k8sClient.List(ctx, &rest, client.InNamespace(testNamespace))).To(Succeed())
+		for i := range rest.Items {
+			if rest.Items[i].Spec.Route != nil && rest.Items[i].Spec.Route.Published() {
+				g.Expect(rest.Items[i].Name).To(BeEmpty(), "service %q is still published", rest.Items[i].Name)
+			}
+		}
+	}, "10s").Should(Succeed())
+	for _, name := range catalogRouteNames {
+		Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, catalogRouteNamed(name)))).To(Succeed())
+		Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, sharedHTTPRoute(name)))).To(Succeed())
+	}
 }
 
 var _ = Describe("checkRoute", func() {
@@ -204,19 +286,25 @@ var _ = Describe("checkRoute", func() {
 		return &endpointCheck{Internal: name + "-router.default.svc:8001", Role: testApplyRouterRole}
 	}
 
-	It("reports CatalogRouteNotFound when the shared route does not exist", func() {
-		// Earlier specs may have created the shared route: delete it so the
-		// precondition (a platform prerequisite the operator never creates)
-		// holds deterministically.
-		route := sharedCatalogRoute()
-		err := k8sClient.Delete(ctx, route)
-		Expect(err == nil || apierrors.IsNotFound(err)).To(BeTrue())
+	BeforeEach(resetCatalogState)
+
+	It("creates the shared catalog surfaces when the platform has not installed them", func() {
 		name := "route-noshared"
 		Expect(k8sClient.Create(ctx, routeISVC(name, true))).To(Succeed())
 		r := routeReconciler()
 		check, err := r.checkRoute(ctx, mustGetISVC(ctx, name), routeProfile(name+"-prof"), readyEndpoint(name), testEngineModel)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(check.Reason).To(Equal(RouteCatalogNotFound))
+		// The surfaces exist now, but no gateway has accepted them yet.
+		Expect(check.Reason).To(Equal(RouteGatewayNotAccepted))
+
+		route := sharedCatalogRoute()
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
+		Expect(findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, name))).NotTo(Equal(-1))
+		Expect(string(route.Spec.ParentRefs[0].Name)).To(Equal(testGatewayName))
+
+		httpRoute := sharedHTTPRoute(testCatalogRoute)
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(httpRoute), httpRoute)).To(Succeed())
+		Expect(httpRoute.Spec.Rules).To(HaveLen(len(catalogOpenAIPaths)))
 	})
 
 	It("creates the catalog objects and a rule in the shared route for a published service", func() {
@@ -234,29 +322,77 @@ var _ = Describe("checkRoute", func() {
 		Expect(backend.Spec.Endpoints).To(Equal([]egv1alpha1.BackendEndpoint{{
 			FQDN: &egv1alpha1.FQDNEndpoint{Hostname: name + "-router.default.svc.cluster.local", Port: 8001},
 		}}))
-		sb := &aigwv1beta1.AIServiceBackend{}
-		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-backend", Namespace: testNamespace}, sb)).To(Succeed())
-		Expect(string(sb.Spec.BackendRef.Name)).To(Equal(name + "-endpoint"))
-		// The ReferenceGrant authorises the Gateway to cross into the service's
-		// namespace for the AIServiceBackend.
+		for suffix, schema := range map[string]aigwv1beta1.APISchema{
+			testOpenAISuffix:    aigwv1beta1.APISchemaOpenAI,
+			testAnthropicSuffix: aigwv1beta1.APISchemaAnthropic,
+		} {
+			sb := &aigwv1beta1.AIServiceBackend{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + suffix, Namespace: testNamespace}, sb)).To(Succeed())
+			Expect(sb.Spec.APISchema.Name).To(Equal(schema))
+			Expect(string(sb.Spec.BackendRef.Name)).To(Equal(name + "-endpoint"))
+		}
+		// The ReferenceGrant authorises the shared catalog route to cross into
+		// the service's namespace for either AIServiceBackend. The plain HTTPRoute
+		// relies on the platform's namespace-wide Backend grant instead, so no
+		// per-Backend grant is created.
 		grant := &gatewayv1.ReferenceGrant{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-grant", Namespace: testNamespace}, grant)).To(Succeed())
-		// The per-Backend grant authorises the HTTPRoute the Agent Router
-		// generates from the shared route to reference this service's Backend.
+		Expect(grant.Spec.To).To(HaveLen(2))
 		backendGrant := &gatewayv1.ReferenceGrant{}
-		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "cubestack-httproute-" + name + "-endpoint", Namespace: testNamespace}, backendGrant)).To(Succeed())
-		Expect(string(*backendGrant.Spec.To[0].Name)).To(Equal(name + "-endpoint"))
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKey{Name: "cubestack-httproute-" + name + "-endpoint", Namespace: testNamespace}, backendGrant))).To(BeTrue())
 
-		// The service's rule is in the shared route, named after its backend.
+		// The /v1/messages rule is in the shared AIGatewayRoute and targets the
+		// Anthropic-schema backend.
 		route := sharedCatalogRoute()
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
 		Expect(route.Spec.Rules).To(HaveLen(1))
-		Expect(route.Spec.Rules[0].Matches[0].Headers[0].Value).To(Equal("flash"))
-		Expect(route.Spec.Rules[0].BackendRefs[0].Name).To(Equal(name + "-backend"))
+		Expect(route.Spec.Rules[0].Matches[0].Headers[0].Value).To(Equal(testCatalogModelName))
+		Expect(route.Spec.Rules[0].BackendRefs[0].Name).To(Equal(name + testAnthropicSuffix))
 		Expect(route.Spec.Rules[0].BackendRefs[0].ModelNameOverride).To(Equal(testEngineModel))
+
+		// The OpenAI paths are served by the shared plain HTTPRoute, one rule per
+		// selected path, each pointing at the service's Backend.
+		httpRoute := sharedHTTPRoute(testCatalogRoute)
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(httpRoute), httpRoute)).To(Succeed())
+		Expect(httpRoute.Spec.Rules).To(HaveLen(len(catalogOpenAIPaths)))
+		for _, rule := range httpRoute.Spec.Rules {
+			Expect(rule.Matches[0].Headers[0].Value).To(Equal(testCatalogModelName))
+			Expect(rule.BackendRefs[0].Name).To(Equal(gatewayv1.ObjectName(name + "-endpoint")))
+			Expect(string(*rule.BackendRefs[0].Namespace)).To(Equal(testNamespace))
+		}
 
 		// The Agent Router accepts; the next check reports the catalog entry ready.
 		acceptRoute(name)
+		check, err = r.checkRoute(ctx, mustGetISVC(ctx, name), routeProfile(name+"-prof"), readyEndpoint(name), testEngineModel)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(check.Reason).To(BeEmpty())
+	})
+
+	It("creates only the selected paths", func() {
+		ensureSharedCatalogRoute()
+		name := "route-paths"
+		isvc := routeISVC(name, true)
+		isvc.Spec.Route.ModelName = "paths-model"
+		isvc.Spec.Route.Paths = []aiv1alpha1.CatalogPath{aiv1alpha1.CatalogPathChatCompletions}
+		Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
+		r := routeReconciler()
+		check, err := r.checkRoute(ctx, mustGetISVC(ctx, name), routeProfile(name+"-prof"), readyEndpoint(name), testEngineModel)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(check.Reason).To(Equal(RouteGatewayNotAccepted))
+
+		// No /v1/messages: the Agent Router route carries no rule for the service.
+		route := sharedCatalogRoute()
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
+		Expect(findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, name))).To(Equal(-1))
+
+		httpRoute := sharedHTTPRoute(testCatalogRoute)
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(httpRoute), httpRoute)).To(Succeed())
+		Expect(httpRoute.Spec.Rules).To(HaveLen(1))
+		Expect(*httpRoute.Spec.Rules[0].Matches[0].Path.Value).To(Equal(string(aiv1alpha1.CatalogPathChatCompletions)))
+
+		// Only the HTTPRoute gate applies: accepting it makes the entry ready
+		// without any AIServiceBackend acceptance.
+		acceptCatalogRoute(testCatalogRoute)
 		check, err = r.checkRoute(ctx, mustGetISVC(ctx, name), routeProfile(name+"-prof"), readyEndpoint(name), testEngineModel)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(check.Reason).To(BeEmpty())
@@ -276,10 +412,17 @@ var _ = Describe("checkRoute", func() {
 		private := privateCatalogRoute()
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(private), private)).To(Succeed())
 		Expect(private.Spec.Rules).To(HaveLen(1))
-		Expect(private.Spec.Rules[0].BackendRefs[0].Name).To(Equal(name + "-backend"))
+		Expect(private.Spec.Rules[0].BackendRefs[0].Name).To(Equal(name + testAnthropicSuffix))
 		public := sharedCatalogRoute()
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(public), public)).To(Succeed())
 		Expect(findCatalogRuleIndex(public.Spec.Rules, mustGetISVC(ctx, name))).To(Equal(-1))
+		privateHTTP := sharedHTTPRoute(testPrivateCatalogRoute)
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(privateHTTP), privateHTTP)).To(Succeed())
+		Expect(findOpenAIRuleIndex(privateHTTP.Spec.Rules, mustGetISVC(ctx, name))).NotTo(Equal(-1))
+		// Only the selected route's surfaces are touched: the public HTTPRoute was
+		// never created for this service.
+		publicHTTP := sharedHTTPRoute(testCatalogRoute)
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(publicHTTP), publicHTTP))).To(BeTrue())
 
 		acceptCatalogRoute(testPrivateCatalogRoute)
 		acceptAIServiceBackend(name)
@@ -296,7 +439,8 @@ var _ = Describe("checkRoute", func() {
 		_, err := r.checkRoute(ctx, mustGetISVC(ctx, name), routeProfile(name+"-prof"), readyEndpoint(name), testEngineModel)
 		Expect(err).NotTo(HaveOccurred())
 
-		// Public → private: the private rule appears and the public one goes.
+		// Public → private: the private rule appears and the public one goes —
+		// from both surfaces.
 		current := mustGetISVC(ctx, name)
 		current.Spec.Route.AIGatewayRouter = aiv1alpha1.AIGatewayRouterPrivate
 		Expect(k8sClient.Update(ctx, current)).To(Succeed())
@@ -306,6 +450,9 @@ var _ = Describe("checkRoute", func() {
 		public := sharedCatalogRoute()
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(public), public)).To(Succeed())
 		Expect(findCatalogRuleIndex(public.Spec.Rules, mustGetISVC(ctx, name))).To(Equal(-1))
+		publicHTTP := sharedHTTPRoute(testCatalogRoute)
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(publicHTTP), publicHTTP)).To(Succeed())
+		Expect(findOpenAIRuleIndex(publicHTTP.Spec.Rules, mustGetISVC(ctx, name))).To(Equal(-1))
 		private := privateCatalogRoute()
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(private), private)).To(Succeed())
 		Expect(findCatalogRuleIndex(private.Spec.Rules, mustGetISVC(ctx, name))).NotTo(Equal(-1))
@@ -334,10 +481,10 @@ var _ = Describe("checkRoute", func() {
 		Expect(check.Reason).To(BeEmpty())
 	})
 
-	It("leaves other services' rules untouched when upserting its own", func() {
+	It("rebuilds the shared route with every published service's rule", func() {
 		ensureSharedCatalogRoute()
-		// A second service already has a rule in the shared route, written for
-		// its own backend: the first service's upsert must not rewrite it.
+		// Two services publish to the same route: whichever reconciles first
+		// writes both rules, because the operator owns the rule set as a whole.
 		first := routeISVC("route-mine", true)
 		second := routeISVC("route-theirs", true)
 		second.Spec.Route.ModelName = "theirs-model"
@@ -348,99 +495,82 @@ var _ = Describe("checkRoute", func() {
 		Expect(err).NotTo(HaveOccurred())
 		route := sharedCatalogRoute()
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
-		theirsRV := route.ResourceVersion
-		theirsRule := route.Spec.Rules[0]
+		Expect(route.Spec.Rules).To(HaveLen(2))
 
-		// The first service now upserts its own rule: the second's rule must be
-		// byte-identical and its generation must not move.
+		// The other service reconciles: its own rule is added, the first one is
+		// kept.
 		_, err = r.checkRoute(ctx, mustGetISVC(ctx, "route-mine"), routeProfile("p1"), readyEndpoint("route-mine"), testEngineModel)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
 		Expect(route.Spec.Rules).To(HaveLen(2))
-		idx := findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, "route-theirs"))
-		Expect(idx).NotTo(Equal(-1))
-		Expect(route.Spec.Rules[idx]).To(Equal(theirsRule))
-		// The RV bumped because a rule was added — the point is the existing
-		// rule's content is preserved, not that the write was skipped.
-		_ = theirsRV
+		mine := route.Spec.Rules[findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, "route-mine"))]
+		theirs := route.Spec.Rules[findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, "route-theirs"))]
+		Expect(mine.BackendRefs[0].Name).To(Equal("route-mine-anthropic"))
+		Expect(mine.Matches[0].Headers[0].Value).To(Equal(testCatalogModelName))
+		Expect(theirs.BackendRefs[0].Name).To(Equal("route-theirs-anthropic"))
+		Expect(theirs.Matches[0].Headers[0].Value).To(Equal("theirs-model"))
+
+		// The OpenAI surface picks up both services as well, one rule per path.
+		httpRoute := sharedHTTPRoute(testCatalogRoute)
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(httpRoute), httpRoute)).To(Succeed())
+		Expect(httpRoute.Spec.Rules).To(HaveLen(2 * len(catalogOpenAIPaths)))
+		Expect(findOpenAIRuleIndex(httpRoute.Spec.Rules, mustGetISVC(ctx, "route-mine"))).NotTo(Equal(-1))
+		Expect(findOpenAIRuleIndex(httpRoute.Spec.Rules, mustGetISVC(ctx, "route-theirs"))).NotTo(Equal(-1))
 	})
 
-	It("reports ModelNameConflict when another rule claims the model name", func() {
+	It("reports ModelNameConflict for the later service claiming the same model name", func() {
 		ensureSharedCatalogRoute()
-		name := "route-conflict"
+		// The first-created service keeps the name; the later one — whichever
+		// reconciles first — must lose all of its rules. Creation timestamps have
+		// second granularity, so the names also order the two deterministically.
 		other := routeISVC("route-other", true)
-		Expect(k8sClient.Create(ctx, routeISVC(name, true))).To(Succeed())
 		Expect(k8sClient.Create(ctx, other)).To(Succeed())
+		name := "route-other-later"
+		Expect(k8sClient.Create(ctx, routeISVC(name, true))).To(Succeed())
 		r := routeReconciler()
-		// The other service's rule already claims the same model name.
 		_, err := r.checkRoute(ctx, mustGetISVC(ctx, "route-other"), routeProfile("po"), readyEndpoint("route-other"), testEngineModel)
 		Expect(err).NotTo(HaveOccurred())
 
 		check, err := r.checkRoute(ctx, mustGetISVC(ctx, name), routeProfile(name+"-prof"), readyEndpoint(name), testEngineModel)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(check.Reason).To(Equal(RouteModelNameConflict))
-		// The conflicting service publishes nothing of its own.
+		// The conflicting service publishes nothing of its own, on either surface.
 		route := sharedCatalogRoute()
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
 		Expect(findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, name))).To(Equal(-1))
+		httpRoute := sharedHTTPRoute(testCatalogRoute)
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(httpRoute), httpRoute)).To(Succeed())
+		Expect(findOpenAIRuleIndex(httpRoute.Spec.Rules, mustGetISVC(ctx, name))).To(Equal(-1))
 	})
 
 	It("reports CatalogFull when the shared route is at its rule cap", func() {
 		ensureSharedCatalogRoute()
-		route := sharedCatalogRoute()
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
-		// Fill the shared route with catalogRuleMax foreign rules, none of them
-		// this service's.
-		route.Spec.Rules = make([]aigwv1beta1.AIGatewayRouteRule, 0, catalogRuleMax)
+		// The cap is enforced while rebuilding the full rule set: the first
+		// catalogRuleMax services (oldest first) keep their /v1/messages rules.
 		for i := range catalogRuleMax {
-			route.Spec.Rules = append(route.Spec.Rules, aigwv1beta1.AIGatewayRouteRule{
-				BackendRefs: []aigwv1beta1.AIGatewayRouteRuleBackendRef{{Name: "foreign-" + strconv.Itoa(i), Weight: ptr(int32(1)), Priority: ptr(uint32(0))}},
-			})
+			isvc := routeISVC("route-cap-"+strconv.Itoa(i), true)
+			isvc.Spec.Route.ModelName = "cap-model-" + strconv.Itoa(i)
+			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
 		}
-		Expect(k8sClient.Update(ctx, route)).To(Succeed())
-
 		name := "route-full"
-		Expect(k8sClient.Create(ctx, routeISVC(name, true))).To(Succeed())
+		full := routeISVC(name, true)
+		full.Spec.Route.ModelName = "cap-model-overflow"
+		Expect(k8sClient.Create(ctx, full)).To(Succeed())
+
 		check, err := routeReconciler().checkRoute(ctx, mustGetISVC(ctx, name), routeProfile(name+"-prof"), readyEndpoint(name), testEngineModel)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(check.Reason).To(Equal(RouteCatalogFull))
-	})
 
-	It("refuses a conflicting name or a full route inside the write itself", func() {
-		// The checkRoute pre-checks are a fast path; the authoritative ones run
-		// inside the write's conflict retry, against the route state each
-		// attempt reads. Drive the write directly to pin that path: a state the
-		// pre-check never saw must be refused by the write, not appended by a
-		// retry.
-		ensureSharedCatalogRoute()
-		other := routeISVC("route-race-other", true)
-		Expect(k8sClient.Create(ctx, other)).To(Succeed())
-		r := routeReconciler()
-		_, err := r.checkRoute(ctx, mustGetISVC(ctx, "route-race-other"), routeProfile("pr"), readyEndpoint("route-race-other"), testEngineModel)
-		Expect(err).NotTo(HaveOccurred())
-
-		// The other service's rule claims the model name both services declare:
-		// the write itself must refuse the second rule.
-		name := "route-race"
-		Expect(k8sClient.Create(ctx, routeISVC(name, true))).To(Succeed())
-		err = r.upsertCatalogRule(ctx, mustGetISVC(ctx, name), testEngineModel)
-		Expect(err).To(MatchError(errCatalogModelNameTaken))
-
-		// The same holds for the rule cap: once the route is full, the write
-		// refuses a new rule instead of letting the retry overfill it.
 		route := sharedCatalogRoute()
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
-		for len(route.Spec.Rules) < catalogRuleMax {
-			route.Spec.Rules = append(route.Spec.Rules, aigwv1beta1.AIGatewayRouteRule{
-				BackendRefs: []aigwv1beta1.AIGatewayRouteRuleBackendRef{{Name: "filler-" + strconv.Itoa(len(route.Spec.Rules)), Weight: ptr(int32(1)), Priority: ptr(uint32(0))}},
-			})
-		}
-		Expect(k8sClient.Update(ctx, route)).To(Succeed())
-		full := routeISVC("route-race-full", true)
-		full.Spec.Route.ModelName = "another-model"
-		Expect(k8sClient.Create(ctx, full)).To(Succeed())
-		err = r.upsertCatalogRule(ctx, mustGetISVC(ctx, "route-race-full"), testEngineModel)
-		Expect(err).To(MatchError(errCatalogRouteFull))
+		Expect(route.Spec.Rules).To(HaveLen(catalogRuleMax))
+		Expect(findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, name))).To(Equal(-1))
+		// The OpenAI-paths HTTPRoute caps at 16 rules, three per model, so earlier
+		// services fill it and the overflow service is dropped there too.
+		httpRoute := sharedHTTPRoute(testCatalogRoute)
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(httpRoute), httpRoute)).To(Succeed())
+		Expect(len(httpRoute.Spec.Rules)).To(BeNumerically("<=", openAIPathsRuleMax))
+		Expect(findOpenAIRuleIndex(httpRoute.Spec.Rules, mustGetISVC(ctx, name))).To(Equal(-1))
 	})
 
 	It("reports AgentRouterUnavailable when the cluster serves no Agent Router CRDs", func() {
@@ -528,18 +658,21 @@ var _ = Describe("checkRoute", func() {
 
 		backend := &egv1alpha1.Backend{}
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-endpoint", Namespace: testNamespace}, backend))).To(BeTrue())
-		sb := &aigwv1beta1.AIServiceBackend{}
-		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-backend", Namespace: testNamespace}, sb))).To(BeTrue())
+		for _, suffix := range []string{testOpenAISuffix, testAnthropicSuffix} {
+			sb := &aigwv1beta1.AIServiceBackend{}
+			Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKey{Name: name + suffix, Namespace: testNamespace}, sb))).To(BeTrue())
+		}
 		grant := &gatewayv1.ReferenceGrant{}
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-grant", Namespace: testNamespace}, grant))).To(BeTrue())
-		backendGrant := &gatewayv1.ReferenceGrant{}
-		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKey{Name: "cubestack-httproute-" + name + "-endpoint", Namespace: testNamespace}, backendGrant))).To(BeTrue())
 		route := sharedCatalogRoute()
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
 		Expect(findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, name))).To(Equal(-1))
 		route = privateCatalogRoute()
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
 		Expect(findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, name))).To(Equal(-1))
+		httpRoute := sharedHTTPRoute(testCatalogRoute)
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(httpRoute), httpRoute)).To(Succeed())
+		Expect(findOpenAIRuleIndex(httpRoute.Spec.Rules, mustGetISVC(ctx, name))).To(Equal(-1))
 	})
 
 	It("removes the rule from both shared routes when a service is deleted", func() {
@@ -563,7 +696,7 @@ var _ = Describe("checkRoute", func() {
 		current := mustGetISVC(ctx, name)
 		current.Spec.Route.AIGatewayRouter = testPrivateCatalogRoute
 		Expect(k8sClient.Update(ctx, current)).To(Succeed())
-		Expect(r.removeCatalogRuleFromAllRoutes(ctx, mustGetISVC(ctx, name))).To(Succeed())
+		Expect(r.syncSharedCatalogRoutes(ctx)).To(Succeed())
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
 		Expect(findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, name))).To(Equal(-1))
 	})
@@ -619,7 +752,7 @@ var _ = Describe("checkRoute", func() {
 		Expect(check.Reason).To(Equal(RouteGatewayNotAccepted))
 	})
 
-	It("updates the service's rule when the declared timeout changes, without rewriting other rules", func() {
+	It("rebuilds the route when the declared timeout changes, keeping the other rules", func() {
 		ensureSharedCatalogRoute()
 		name := "route-update"
 		isvc := isvcForApply(name)
@@ -629,8 +762,6 @@ var _ = Describe("checkRoute", func() {
 		other.Spec.Route.ModelName = "update-other"
 		Expect(k8sClient.Create(ctx, other)).To(Succeed())
 		r := routeReconciler()
-		// Both services get a rule: the "other" service's rule is the one this
-		// spec must not rewrite.
 		_, err := r.checkRoute(ctx, mustGetISVC(ctx, name), routeProfile(name+"-prof"), readyEndpoint(name), testEngineModel)
 		Expect(err).NotTo(HaveOccurred())
 		_, err = r.checkRoute(ctx, mustGetISVC(ctx, "route-update-other"), routeProfile("po"), readyEndpoint("route-update-other"), testEngineModel)
@@ -644,10 +775,9 @@ var _ = Describe("checkRoute", func() {
 		myIdx := findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, name))
 		Expect(route.Spec.Rules[myIdx].Timeouts.Request).To(HaveValue(Equal(gatewayv1.Duration("60s"))))
 		theirsIdx := findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, "route-update-other"))
-		theirsRule := route.Spec.Rules[theirsIdx]
+		Expect(route.Spec.Rules[theirsIdx].BackendRefs[0].Name).To(Equal("route-update-other-anthropic"))
 
-		// The in-cluster spec changes the timeout; the next pass must update only
-		// this service's rule.
+		// The in-cluster spec changes the timeout; the next pass rebuilds the set.
 		current := mustGetISVC(ctx, name)
 		*current.Spec.Route.TimeoutSeconds = 30
 		Expect(k8sClient.Update(ctx, current)).To(Succeed())
@@ -655,8 +785,9 @@ var _ = Describe("checkRoute", func() {
 		_, err = r.checkRoute(ctx, mustGetISVC(ctx, name), routeProfile(name+"-prof"), readyEndpoint(name), testEngineModel)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
+		Expect(route.Spec.Rules).To(HaveLen(2))
 		Expect(route.Spec.Rules[findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, name))].Timeouts.Request).To(HaveValue(Equal(gatewayv1.Duration("30s"))))
-		Expect(route.Spec.Rules[findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, "route-update-other"))]).To(Equal(theirsRule))
+		Expect(route.Spec.Rules[findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, "route-update-other"))].Timeouts.Request).To(HaveValue(Equal(gatewayv1.Duration("60s"))))
 	})
 
 	It("sees no drift in the objects a real API server stored", func() {
@@ -675,35 +806,40 @@ var _ = Describe("checkRoute", func() {
 		backend := &egv1alpha1.Backend{}
 		stored(backend, name+"-endpoint", testNamespace)
 		sb := &aigwv1beta1.AIServiceBackend{}
-		stored(sb, name+"-backend", testNamespace)
+		stored(sb, name+testOpenAISuffix, testNamespace)
+		anthropicSB := &aigwv1beta1.AIServiceBackend{}
+		stored(anthropicSB, name+testAnthropicSuffix, testNamespace)
 		grant := &gatewayv1.ReferenceGrant{}
 		stored(grant, name+"-grant", testNamespace)
-		backendGrant := &gatewayv1.ReferenceGrant{}
-		stored(backendGrant, "cubestack-httproute-"+name+"-endpoint", testNamespace)
 		route := sharedCatalogRoute()
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
 		myIdx := findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, name))
 		myRule := route.Spec.Rules[myIdx]
 		routeRV := route.ResourceVersion
+		httpRoute := sharedHTTPRoute(testCatalogRoute)
+		stored(httpRoute, openAIPathsRouteName(testCatalogRoute), testGatewayNamespace)
+		httpRouteRV := httpRoute.ResourceVersion
 
-		// A second pass must touch none of the objects or the rule: the shared
-		// route's RV is stable because the rule is unchanged.
+		// A second pass must touch none of the objects or the rules: the shared
+		// routes' RVs are stable because nothing changed.
 		_, err = r.checkRoute(ctx, mustGetISVC(ctx, name), routeProfile(name+"-prof"), readyEndpoint(name), testEngineModel)
 		Expect(err).NotTo(HaveOccurred())
 		after := &egv1alpha1.Backend{}
 		stored(after, name+"-endpoint", testNamespace)
 		Expect(after.ResourceVersion).To(Equal(backend.ResourceVersion))
 		afterSB := &aigwv1beta1.AIServiceBackend{}
-		stored(afterSB, name+"-backend", testNamespace)
+		stored(afterSB, name+testOpenAISuffix, testNamespace)
 		Expect(afterSB.ResourceVersion).To(Equal(sb.ResourceVersion))
+		afterAnthropic := &aigwv1beta1.AIServiceBackend{}
+		stored(afterAnthropic, name+testAnthropicSuffix, testNamespace)
+		Expect(afterAnthropic.ResourceVersion).To(Equal(anthropicSB.ResourceVersion))
 		afterGrant := &gatewayv1.ReferenceGrant{}
 		stored(afterGrant, name+"-grant", testNamespace)
 		Expect(afterGrant.ResourceVersion).To(Equal(grant.ResourceVersion))
-		afterBackendGrant := &gatewayv1.ReferenceGrant{}
-		stored(afterBackendGrant, "cubestack-httproute-"+name+"-endpoint", testNamespace)
-		Expect(afterBackendGrant.ResourceVersion).To(Equal(backendGrant.ResourceVersion))
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
 		Expect(route.ResourceVersion).To(Equal(routeRV))
+		stored(httpRoute, openAIPathsRouteName(testCatalogRoute), testGatewayNamespace)
+		Expect(httpRoute.ResourceVersion).To(Equal(httpRouteRV))
 
 		// A genuine change is still drift: a different endpoint or schema must
 		// update, or the catalog would keep serving the old object after the
@@ -822,7 +958,7 @@ var _ = Describe("desired catalog objects", func() {
 		Expect(metav1.IsControlledBy(sb, isvc)).To(BeTrue())
 	})
 
-	It("renders the ReferenceGrant authorising the shared catalog route to the AIServiceBackend", func() {
+	It("renders the ReferenceGrant authorising the shared catalog route to both AIServiceBackends", func() {
 		isvc := routeISVC("catalog-isvc", true)
 		grant := routeReconciler().desiredReferenceGrant(isvc)
 
@@ -833,29 +969,24 @@ var _ = Describe("desired catalog objects", func() {
 		Expect(string(grant.Spec.From[0].Group)).To(Equal("aigateway.envoyproxy.io"))
 		Expect(string(grant.Spec.From[0].Kind)).To(Equal("AIGatewayRoute"))
 		Expect(string(grant.Spec.From[0].Namespace)).To(Equal(testGatewayNamespace))
-		Expect(grant.Spec.To).To(HaveLen(1))
-		Expect(string(grant.Spec.To[0].Group)).To(Equal("aigateway.envoyproxy.io"))
-		Expect(string(grant.Spec.To[0].Kind)).To(Equal("AIServiceBackend"))
-		Expect(string(*grant.Spec.To[0].Name)).To(Equal("catalog-isvc-backend"))
+		Expect(grant.Spec.To).To(HaveLen(2))
+		for i, want := range []string{"catalog-isvc-backend", "catalog-isvc-anthropic"} {
+			Expect(string(grant.Spec.To[i].Group)).To(Equal("aigateway.envoyproxy.io"))
+			Expect(string(grant.Spec.To[i].Kind)).To(Equal("AIServiceBackend"))
+			Expect(string(*grant.Spec.To[i].Name)).To(Equal(want))
+		}
 		Expect(metav1.IsControlledBy(grant, isvc)).To(BeTrue())
 	})
 
-	It("renders the ReferenceGrant authorising the generated HTTPRoute to the Backend", func() {
+	It("renders the Anthropic-schema AIServiceBackend over the same Backend", func() {
 		isvc := routeISVC("catalog-isvc", true)
-		grant := routeReconciler().desiredBackendReferenceGrant(isvc)
+		sb := routeReconciler().desiredAnthropicAIServiceBackend(isvc)
 
-		Expect(grant.Name).To(Equal("cubestack-httproute-catalog-isvc-endpoint"))
-		Expect(grant.Namespace).To(Equal(testNamespace))
-		expectCatalogLabels(grant.Labels)
-		Expect(grant.Spec.From).To(HaveLen(1))
-		Expect(string(grant.Spec.From[0].Group)).To(Equal(gatewayAPIGroup))
-		Expect(string(grant.Spec.From[0].Kind)).To(Equal("HTTPRoute"))
-		Expect(string(grant.Spec.From[0].Namespace)).To(Equal(testGatewayNamespace))
-		Expect(grant.Spec.To).To(HaveLen(1))
-		Expect(string(grant.Spec.To[0].Group)).To(Equal(envoyGatewayAPIGroup))
-		Expect(string(grant.Spec.To[0].Kind)).To(Equal(egBackendKind))
-		Expect(string(*grant.Spec.To[0].Name)).To(Equal("catalog-isvc-endpoint"))
-		Expect(metav1.IsControlledBy(grant, isvc)).To(BeTrue())
+		Expect(sb.Name).To(Equal("catalog-isvc-anthropic"))
+		expectCatalogLabels(sb.Labels)
+		Expect(sb.Spec.APISchema.Name).To(Equal(aigwv1beta1.APISchemaAnthropic))
+		Expect(string(sb.Spec.BackendRef.Name)).To(Equal("catalog-isvc-endpoint"))
+		Expect(metav1.IsControlledBy(sb, isvc)).To(BeTrue())
 	})
 
 	It("renders the shared-route rule matched on the model name", func() {
@@ -865,9 +996,9 @@ var _ = Describe("desired catalog objects", func() {
 		Expect(rule.Matches[0].Headers).To(Equal([]gatewayv1.HTTPHeaderMatch{{
 			Type:  ptrTo(gatewayv1.HeaderMatchExact),
 			Name:  gatewayv1.HTTPHeaderName(aiModelHeaderName),
-			Value: "flash", // the route.modelName routeISVC declares
+			Value: testCatalogModelName, // the route.modelName routeISVC declares
 		}}))
-		Expect(rule.BackendRefs[0].Name).To(Equal("catalog-isvc-backend"))
+		Expect(rule.BackendRefs[0].Name).To(Equal("catalog-isvc-anthropic"))
 		Expect(string(*rule.BackendRefs[0].Namespace)).To(Equal(testNamespace))
 		Expect(rule.BackendRefs[0].ModelNameOverride).To(Equal("qwen38-27b"))
 		Expect(rule.BackendRefs[0].Weight).To(HaveValue(Equal(int32(1))))
@@ -875,6 +1006,26 @@ var _ = Describe("desired catalog objects", func() {
 		Expect(rule.Timeouts.Request).To(HaveValue(Equal(gatewayv1.Duration("60s"))))
 		Expect(rule.StreamIdleTimeout).To(HaveValue(Equal(gatewayv1.Duration("300s"))))
 		Expect(rule.ModelsOwnedBy).To(HaveValue(Equal(catalogOwnedBy)))
+	})
+
+	It("renders the OpenAI-paths rule matched on the path and the model header", func() {
+		isvc := routeISVC("catalog-isvc", true)
+		rule := routeReconciler().openAIPathsRuleFor(isvc, aiv1alpha1.CatalogPathChatCompletions)
+
+		Expect(rule.Matches).To(HaveLen(1))
+		Expect(*rule.Matches[0].Path.Type).To(Equal(gatewayv1.PathMatchPathPrefix))
+		Expect(*rule.Matches[0].Path.Value).To(Equal("/v1/chat/completions"))
+		Expect(rule.Matches[0].Headers).To(Equal([]gatewayv1.HTTPHeaderMatch{{
+			Type:  ptrTo(gatewayv1.HeaderMatchExact),
+			Name:  gatewayv1.HTTPHeaderName(aiModelHeaderName),
+			Value: testCatalogModelName,
+		}}))
+		Expect(rule.BackendRefs).To(HaveLen(1))
+		Expect(*rule.BackendRefs[0].Group).To(Equal(gatewayv1.Group(envoyGatewayAPIGroup)))
+		Expect(*rule.BackendRefs[0].Kind).To(Equal(gatewayv1.Kind(egBackendKind)))
+		Expect(rule.BackendRefs[0].Name).To(Equal(gatewayv1.ObjectName("catalog-isvc-endpoint")))
+		Expect(string(*rule.BackendRefs[0].Namespace)).To(Equal(testNamespace))
+		Expect(rule.Timeouts.Request).To(HaveValue(Equal(gatewayv1.Duration("60s"))))
 	})
 
 	It("honours the declared timeouts in the rule", func() {

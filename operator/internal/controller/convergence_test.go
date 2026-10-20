@@ -104,7 +104,7 @@ func readyEndpoints(name string) {
 // Router, so the spec writes the conditions it would. g is the Eventually
 // block's Gomega so a not-yet-created object retries instead of failing.
 func acceptCatalogObjects(g Gomega, name string) {
-	// The route-level acceptance lives on the platform's shared route; the
+	// The route-level acceptance lives on the platform's shared routes; the
 	// per-service acceptance lives on the service's AIServiceBackend.
 	route := sharedCatalogRoute()
 	g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
@@ -114,8 +114,18 @@ func acceptCatalogObjects(g Gomega, name string) {
 	}}
 	g.Expect(k8sClient.Status().Update(ctx, route)).To(Succeed())
 
+	// The OpenAI paths are served by the shared plain HTTPRoute, whose parents'
+	// acceptance is part of RouteReady.
+	httpRoute := sharedHTTPRoute(testCatalogRoute)
+	g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(httpRoute), httpRoute)).To(Succeed())
+	httpRoute.Status.Parents = gatewayRouteParents(gatewayv1.ParentReference{
+		Name:      gatewayv1.ObjectName(testGatewayName),
+		Namespace: ptrTo(gatewayv1.Namespace(testGatewayNamespace)),
+	}, httpRoute.Generation, true, "", "")
+	g.Expect(k8sClient.Status().Update(ctx, httpRoute)).To(Succeed())
+
 	sb := &aigwv1beta1.AIServiceBackend{}
-	g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-backend", Namespace: testNamespace}, sb)).To(Succeed())
+	g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-anthropic", Namespace: testNamespace}, sb)).To(Succeed())
 	sb.Status.Conditions = []metav1.Condition{{
 		Type: aigwv1beta1.ConditionTypeAccepted, Status: metav1.ConditionTrue, Reason: aiAcceptedReason,
 		LastTransitionTime: metav1.Now(), ObservedGeneration: sb.Generation,
@@ -177,7 +187,7 @@ var _ = Describe("convergence", func() {
 			idx := findCatalogRuleIndex(route.Spec.Rules, isvc)
 			g.Expect(idx).NotTo(Equal(-1))
 			g.Expect(route.Spec.Rules[idx].Matches[0].Headers[0].Value).To(Equal("conv-flash"))
-			g.Expect(route.Spec.Rules[idx].BackendRefs[0].Name).To(Equal(name + "-backend"))
+			g.Expect(route.Spec.Rules[idx].BackendRefs[0].Name).To(Equal(name + "-anthropic"))
 			// No Agent Router controller runs in envtest — accept the catalog
 			// objects directly so RouteReady can converge.
 			acceptCatalogObjects(g, name)

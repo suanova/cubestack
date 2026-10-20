@@ -11,3 +11,14 @@ export type AIGatewayRouter = (typeof AIGATEWAY_ROUTERS)[number];
 export function isAIGatewayRouter(value: unknown): value is AIGatewayRouter {
   return value === AIGATEWAY_ROUTER_PUBLIC || value === AIGATEWAY_ROUTER_PRIVATE;
 }
+
+// Client paths a published service exposes on the catalog. The values are the
+// CRD enum (spec.route.paths): /v1/messages is served by the Agent Router, the
+// other three by the platform's plain HTTPRoute.
+export const CATALOG_PATHS = ["/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/videos"] as const;
+
+export type CatalogPath = (typeof CATALOG_PATHS)[number];
+
+export function isCatalogPath(value: unknown): value is CatalogPath {
+  return typeof value === "string" && (CATALOG_PATHS as readonly string[]).includes(value);
+}

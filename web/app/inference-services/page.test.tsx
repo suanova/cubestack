@@ -989,7 +989,83 @@ describe("deploy wizard", () => {
     await act(async () => {});
 
     expect(calls.find((c) => c.method === "POST")?.body).toMatchObject({
-      route: { aigatewayRouter: "cubestack-ai-gateway-private", modelName: "my-serve" },
+      route: {
+        aigatewayRouter: "cubestack-ai-gateway-private",
+        modelName: "my-serve",
+        paths: ["/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/videos"],
+      },
+    });
+
+    act(() => root.unmount());
+  });
+
+  it("publishes only the catalog paths that stay selected", async () => {
+    const { container, root, calls } = renderWithBoth();
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await fillNameAndGoToStep2();
+
+    const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
+    await act(async () => {
+      (step2.querySelector('input[type="checkbox"]') as HTMLInputElement).click();
+    });
+    await act(async () => {});
+
+    // Publishing starts with every supported path exposed.
+    const paths = step2.querySelector('[data-od-id="deploy-catalog-paths"]') as HTMLElement;
+    const toggles = Array.from(paths.querySelectorAll("button")) as HTMLElement[];
+    expect(toggles.map((b) => b.textContent)).toEqual([
+      "/v1/chat/completions",
+      "/v1/responses",
+      "/v1/messages",
+      "/v1/videos",
+    ]);
+    expect(toggles.every((b) => b.getAttribute("aria-pressed") === "true")).toBe(true);
+
+    // Drop /v1/responses.
+    await act(async () => {
+      toggles[1].click();
+    });
+    await act(async () => {});
+    expect(toggles[1].getAttribute("aria-pressed")).toBe("false");
+
+    // The last selected path cannot be removed: a published model exposes at
+    // least one.
+    for (const toggle of [toggles[0], toggles[2], toggles[3]]) {
+      await act(async () => {
+        toggle.click();
+      });
+    }
+    await act(async () => {});
+    expect(toggles[3].getAttribute("aria-pressed")).toBe("true");
+
+    const modelSelect = Array.from(step2.querySelectorAll('[role="combobox"]')).find((c) =>
+      (c.textContent ?? "").includes("选择模型版本"),
+    ) as HTMLElement;
+    await act(async () => {
+      modelSelect.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    });
+    const model = Array.from(document.body.querySelectorAll('[role="option"]')).find(
+      (o) => o.textContent === "deepseek-v4-flash-w8a8-v1",
+    );
+    await act(async () => {
+      (model as HTMLElement).click();
+    });
+    await act(async () => {});
+    await act(async () => {
+      (Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent === "下一步") as HTMLElement).click();
+    });
+    await act(async () => {});
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="wizard-create"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    expect(calls.find((c) => c.method === "POST")?.body).toMatchObject({
+      route: { paths: ["/v1/videos"] },
     });
 
     act(() => root.unmount());

@@ -25,7 +25,7 @@ limitations under the License.
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=leaderworkerset.x-k8s.io,resources=leaderworkersets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=aigateway.envoyproxy.io,resources=aigatewayroutes,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=aigateway.envoyproxy.io,resources=aigatewayroutes,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=aigateway.envoyproxy.io,resources=aiservicebackends,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=referencegrants,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=gateway.envoyproxy.io,resources=backends,verbs=get;list;watch;create;update;patch;delete
@@ -326,19 +326,20 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 }
 
 // finalizeCatalogRule removes the catalog finalizer from a service that is
-// being deleted, after shedding its rule from the platform's shared catalog
-// route. The rule lives in another namespace and is not owned by the service,
-// so it is removed explicitly here; the other catalog objects cascade through
-// their ownerRef. The guard is on the finalizer's presence, not on spec.route —
-// a service that was published and later had publish flipped off still carries
-// a rule to remove, and the finalizer is only ever added while the service is
-// being reconciled as published. A service without the finalizer has nothing to
-// shed, so deletion proceeds immediately.
+// being deleted, after rebuilding the platform's shared catalog surfaces from
+// the services that remain. The shared surfaces live in another namespace and
+// are not owned by the service, so their rules are rewritten explicitly here;
+// the other catalog objects cascade through their ownerRef. The guard is on the
+// finalizer's presence, not on spec.route — a service that was published and
+// later had its router cleared still contributes rules to remove, and the
+// finalizer is only ever added while the service is being reconciled as
+// published. A service without the finalizer has nothing to shed, so deletion
+// proceeds immediately.
 func (r *InferenceServiceReconciler) finalizeCatalogRule(ctx context.Context, req ctrl.Request, isvc *aiv1alpha1.InferenceService) error {
 	if !slices.Contains(isvc.Finalizers, inferenceServiceCatalogFinalizer) {
 		return nil
 	}
-	if err := r.removeCatalogRuleFromAllRoutes(ctx, isvc); err != nil {
+	if err := r.syncSharedCatalogRoutes(ctx); err != nil {
 		return err
 	}
 	// Re-fetch for a fresh resourceVersion before mutating finalizers: any
@@ -441,6 +442,8 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			Owns(&egv1alpha1.Backend{}).
 			Watches(&aigwv1beta1.AIGatewayRoute{},
 				handler.EnqueueRequestsFromMapFunc(r.enqueueForSharedCatalogRoute)).
+			Watches(&gatewayv1.HTTPRoute{},
+				handler.EnqueueRequestsFromMapFunc(r.enqueueForOpenAIPathsRoute)).
 			Watches(&aigwv1beta1.AIServiceBackend{},
 				handler.EnqueueRequestsFromMapFunc(r.enqueueForOwnedCatalogObject)).
 			Watches(&egv1alpha1.Backend{},
@@ -499,12 +502,37 @@ func (r *InferenceServiceReconciler) enqueueForSharedCatalogRoute(ctx context.Co
 	}
 	switch aiv1alpha1.AIGatewayRouterName(route.Name) {
 	case aiv1alpha1.AIGatewayRouterPublic, aiv1alpha1.AIGatewayRouterPrivate:
+		return r.enqueueForCatalogRoute(ctx, aiv1alpha1.AIGatewayRouterName(route.Name))
 	default:
 		return nil
 	}
+}
+
+// enqueueForOpenAIPathsRoute maps a change to one of the shared OpenAI-paths
+// HTTPRoutes to every service attached to the paired catalog route: the route's
+// rules are rebuilt from those services, and its acceptance is part of their
+// RouteReady. Any other HTTPRoute is left alone.
+func (r *InferenceServiceReconciler) enqueueForOpenAIPathsRoute(ctx context.Context, obj client.Object) []reconcile.Request {
+	route := obj.(*gatewayv1.HTTPRoute)
+	if route.Namespace != r.GatewayNamespace {
+		return nil
+	}
+	switch route.Name {
+	case openAIPathsRouteName(aiv1alpha1.AIGatewayRouterPublic):
+		return r.enqueueForCatalogRoute(ctx, aiv1alpha1.AIGatewayRouterPublic)
+	case openAIPathsRouteName(aiv1alpha1.AIGatewayRouterPrivate):
+		return r.enqueueForCatalogRoute(ctx, aiv1alpha1.AIGatewayRouterPrivate)
+	default:
+		return nil
+	}
+}
+
+// enqueueForCatalogRoute lists the services publishing to one catalog route
+// through the cache index and maps them to reconcile requests.
+func (r *InferenceServiceReconciler) enqueueForCatalogRoute(ctx context.Context, routeName aiv1alpha1.AIGatewayRouterName) []reconcile.Request {
 	var reqs []reconcile.Request
 	var list aiv1alpha1.InferenceServiceList
-	if err := r.List(ctx, &list, client.MatchingFields{aigatewayRouterIndexKey: route.Name}); err != nil {
+	if err := r.List(ctx, &list, client.MatchingFields{aigatewayRouterIndexKey: string(routeName)}); err != nil {
 		return nil
 	}
 	for i := range list.Items {

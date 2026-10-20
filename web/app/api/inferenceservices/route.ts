@@ -1,6 +1,6 @@
 import { getCoreClient, getCustomObjectsClient } from "@/lib/kubernetes";
 import { withAuth } from "@/lib/auth/guard";
-import { isAIGatewayRouter } from "@/lib/inference-routes";
+import { CATALOG_PATHS, isAIGatewayRouter, isCatalogPath, type CatalogPath } from "@/lib/inference-routes";
 
 // @kubernetes/client-node needs Node APIs (TLS, fs), not the Edge runtime.
 export const runtime = "nodejs";
@@ -530,6 +530,7 @@ interface CreateBody {
   route?: {
     aigatewayRouter?: string;
     modelName?: string;
+    paths?: string[];
   };
 }
 interface ModelVersionRef {
@@ -601,9 +602,9 @@ export const POST = withAuth(async (req) => {
 
     // Route: a non-empty aigatewayRouter publishes the service into the model
     // catalog attached to that pre-installed AIGatewayRoute, which requires a
-    // valid catalog model name. An absent router leaves the service unpublished;
-    // the CRD supplies the timeout defaults.
-    let route: { aigatewayRouter: string; modelName: string } | undefined;
+    // valid catalog model name and at least one exposed path. An absent router
+    // leaves the service unpublished; the CRD supplies the timeout defaults.
+    let route: { aigatewayRouter: string; modelName: string; paths: CatalogPath[] } | undefined;
     const router = body.route?.aigatewayRouter;
     if (router !== undefined && router !== "") {
       if (!isAIGatewayRouter(router)) {
@@ -613,7 +614,16 @@ export const POST = withAuth(async (req) => {
       if (!modelName || !MODEL_NAME_RE.test(modelName)) {
         return ValidationError("routeModelNameInvalid");
       }
-      route = { aigatewayRouter: router, modelName };
+      const paths = body.route?.paths;
+      if (paths === undefined || !paths.every(isCatalogPath)) {
+        return ValidationError("routePathsInvalid");
+      }
+      if (paths.length === 0) {
+        return ValidationError("routePathsRequired");
+      }
+      // The CRD list is a set: dedupe instead of rejecting a repeated path.
+      const unique = CATALOG_PATHS.filter((p) => paths.includes(p));
+      route = { aigatewayRouter: router, modelName, paths: unique };
     }
 
     const cr = {

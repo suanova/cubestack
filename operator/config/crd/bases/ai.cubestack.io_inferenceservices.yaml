@@ -79,10 +79,11 @@ spec:
                 properties:
                   aigatewayRouter:
                     description: |-
-                      AIGatewayRouter selects the platform's pre-installed shared AIGatewayRoute
-                      this service's catalog rule is attached to. Empty (or an absent route)
-                      means the service is not published and only provides a ClusterIP
-                      internal endpoint.
+                      AIGatewayRouter selects the platform's shared AIGatewayRoute this
+                      service's catalog rule is attached to. The operator maintains that route
+                      (and the matching OpenAI-paths HTTPRoute) in full from all published
+                      services. Empty (or an absent route) means the service is not published
+                      and only provides a ClusterIP internal endpoint.
                     enum:
                     - cubestack-ai-gateway
                     - cubestack-ai-gateway-private
@@ -100,10 +101,28 @@ spec:
                   modelName:
                     description: |-
                       ModelName is the catalog model name: what clients send as the request
-                      body's "model" field. It is the identity of a published service and must
+                      body's "model" field (and the value of the x-ai-eg-model header used by
+                      the plain HTTPRoute). It is the identity of a published service and must
                       be unique among services published to the same route.
                     pattern: ^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$
                     type: string
+                  paths:
+                    description: |-
+                      Paths lists the client paths the catalog entry exposes. Unset means all
+                      supported paths; an explicitly empty list exposes none.
+                    items:
+                      description: |-
+                        CatalogPath is a client request path a published service exposes on the
+                        platform's model catalog.
+                      enum:
+                      - /v1/chat/completions
+                      - /v1/responses
+                      - /v1/messages
+                      - /v1/videos
+                      type: string
+                    maxItems: 4
+                    type: array
+                    x-kubernetes-list-type: set
                   timeoutSeconds:
                     default: 0
                     description: |-

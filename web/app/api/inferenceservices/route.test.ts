@@ -938,7 +938,13 @@ describe("inference services create (POST)", () => {
         modelRef: "deepseek-v4-flash-w8a8-v1",
         // A catalog model name is not a hostname segment: mixed case and "/"
         // are legal, while DNS_LABEL_RE would reject both.
-        route: { aigatewayRouter: "cubestack-ai-gateway", modelName: "Qwen3.8-27B/instruct" },
+        route: {
+          aigatewayRouter: "cubestack-ai-gateway",
+          modelName: "Qwen3.8-27B/instruct",
+          // The CRD list is a set: a repeated path is deduped and the order is
+          // canonical, so the operator's generated rules stay stable.
+          paths: ["/v1/messages", "/v1/chat/completions", "/v1/messages"],
+        },
       }),
       undefined,
     );
@@ -949,6 +955,7 @@ describe("inference services create (POST)", () => {
         route: {
           aigatewayRouter: "cubestack-ai-gateway",
           modelName: "Qwen3.8-27B/instruct",
+          paths: ["/v1/chat/completions", "/v1/messages"],
         },
       },
     });
@@ -965,14 +972,54 @@ describe("inference services create (POST)", () => {
         name: "ok-name",
         profileRef: "metax-sglang-dsv4-pd",
         modelRef: "deepseek-v4-flash-w8a8-v1",
-        route: { aigatewayRouter: "cubestack-ai-gateway-private", modelName: "dsv4-flash" },
+        route: { aigatewayRouter: "cubestack-ai-gateway-private", modelName: "dsv4-flash", paths: ["/v1/responses"] },
       }),
       undefined,
     );
     expect(res.status).toBe(201);
     expect(createNamespacedCustomObject.mock.calls[0][0].body).toMatchObject({
-      spec: { route: { aigatewayRouter: "cubestack-ai-gateway-private", modelName: "dsv4-flash" } },
+      spec: {
+        route: {
+          aigatewayRouter: "cubestack-ai-gateway-private",
+          modelName: "dsv4-flash",
+          paths: ["/v1/responses"],
+        },
+      },
     });
+  });
+
+  it("rejects an unknown catalog path", async () => {
+    const { POST } = await importRoute();
+    const res = await POST(
+      await buildPost({
+        namespace: "project-a",
+        name: "ok-name",
+        profileRef: "metax-sglang-dsv4-pd",
+        modelRef: "deepseek-v4-flash-w8a8-v1",
+        route: { aigatewayRouter: "cubestack-ai-gateway", modelName: "dsv4-flash", paths: ["/v1/embeddings"] },
+      }),
+      undefined,
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "routePathsInvalid" });
+    expect(createNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
+  it("rejects a published service that exposes no path", async () => {
+    const { POST } = await importRoute();
+    const res = await POST(
+      await buildPost({
+        namespace: "project-a",
+        name: "ok-name",
+        profileRef: "metax-sglang-dsv4-pd",
+        modelRef: "deepseek-v4-flash-w8a8-v1",
+        route: { aigatewayRouter: "cubestack-ai-gateway", modelName: "dsv4-flash", paths: [] },
+      }),
+      undefined,
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "routePathsRequired" });
+    expect(createNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
   it("rejects an unknown catalog route", async () => {

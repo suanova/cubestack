@@ -8,7 +8,7 @@
 // (decodeReplicas / prefillReplicas / groupSize) via a PATCH. Metrics are
 // best-effort Prometheus data and show an empty state when absent.
 
-import { Box, Button, Dialog, DialogActions, DialogContent, DialogTitle, Menu, MenuItem, Select, Switch, TextField, Typography, Stepper, Step, StepLabel } from "@mui/material";
+import { Box, Button, Dialog, DialogActions, DialogContent, DialogTitle, Menu, MenuItem, Select, Switch, TextField, ToggleButton, ToggleButtonGroup, Typography, Stepper, Step, StepLabel } from "@mui/material";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { CreateOptionsResponse } from "@/app/api/inferenceservices/options/route";
@@ -17,7 +17,7 @@ import { validationMessage, type ValidationErrorBody } from "@/lib/api-error";
 import { apiFetch } from "@/lib/base-path";
 import { copyText } from "@/lib/clipboard";
 import { useI18n } from "@/lib/i18n";
-import { AIGATEWAY_ROUTER_PRIVATE, AIGATEWAY_ROUTER_PUBLIC, type AIGatewayRouter } from "@/lib/inference-routes";
+import { AIGATEWAY_ROUTER_PRIVATE, AIGATEWAY_ROUTER_PUBLIC, CATALOG_PATHS, type AIGatewayRouter, type CatalogPath } from "@/lib/inference-routes";
 import { platformPalette, usePlatformTheme } from "@/lib/perses/theme";
 
 // The prototype's filter set is 全部 / Ready / 准备中. "准备中" is a service the
@@ -1459,6 +1459,9 @@ interface DeployDraft {
   // The selected catalog route; empty means the service is not published.
   aigatewayRouter: AIGatewayRouter | "";
   modelName: string;
+  // The client paths the catalog entry exposes; publishing starts with all of
+  // them selected, and the service must expose at least one.
+  paths: CatalogPath[];
 }
 
 type OverrideDecl = CreateOptionsResponse["profiles"][number]["overrides"][number];
@@ -1487,6 +1490,7 @@ function DeployWizard({
     overrides: {},
     aigatewayRouter: "",
     modelName: "",
+    paths: [...CATALOG_PATHS],
   });
   const [nameError, setNameError] = useState(false);
   const [createBusy, setCreateBusy] = useState(false);
@@ -1696,7 +1700,7 @@ function DeployWizard({
       modelRef: draft.modelRef,
       overrides: draft.overrides,
       ...(draft.aigatewayRouter
-        ? { route: { aigatewayRouter: draft.aigatewayRouter, modelName: draft.modelName.trim() } }
+        ? { route: { aigatewayRouter: draft.aigatewayRouter, modelName: draft.modelName.trim(), paths: draft.paths } }
         : {}),
     };
     apiFetch("/api/inferenceservices", {
@@ -1910,23 +1914,46 @@ function DeployWizard({
                     />
                   </Box>
                   {draft.aigatewayRouter !== "" && (
-                    <Box sx={{ mt: "12px", display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
-                      <WizField label={t("inf.deploy.modelName")} hint={t("inf.deploy.modelNameHint")}>
-                        <TextField data-od-id="deploy-model-name" size="small" fullWidth value={draft.modelName} onChange={(e) => setField("modelName", e.target.value)} />
-                      </WizField>
-                      <WizField label={t("inf.deploy.aigatewayRouter")} hint={t("inf.deploy.aigatewayRouterHint")}>
-                        <Select
-                          size="small"
-                          fullWidth
-                          data-od-id="deploy-aigateway-router"
-                          value={draft.aigatewayRouter}
-                          onChange={(e) => setField("aigatewayRouter", e.target.value as AIGatewayRouter)}
-                        >
-                          <MenuItem value={AIGATEWAY_ROUTER_PUBLIC}>{t("inf.deploy.aigatewayRouterPublic")}</MenuItem>
-                          <MenuItem value={AIGATEWAY_ROUTER_PRIVATE}>{t("inf.deploy.aigatewayRouterPrivate")}</MenuItem>
-                        </Select>
-                      </WizField>
-                    </Box>
+                    <>
+                      <Box sx={{ mt: "12px", display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
+                        <WizField label={t("inf.deploy.modelName")} hint={t("inf.deploy.modelNameHint")}>
+                          <TextField data-od-id="deploy-model-name" size="small" fullWidth value={draft.modelName} onChange={(e) => setField("modelName", e.target.value)} />
+                        </WizField>
+                        <WizField label={t("inf.deploy.aigatewayRouter")} hint={t("inf.deploy.aigatewayRouterHint")}>
+                          <Select
+                            size="small"
+                            fullWidth
+                            data-od-id="deploy-aigateway-router"
+                            value={draft.aigatewayRouter}
+                            onChange={(e) => setField("aigatewayRouter", e.target.value as AIGatewayRouter)}
+                          >
+                            <MenuItem value={AIGATEWAY_ROUTER_PUBLIC}>{t("inf.deploy.aigatewayRouterPublic")}</MenuItem>
+                            <MenuItem value={AIGATEWAY_ROUTER_PRIVATE}>{t("inf.deploy.aigatewayRouterPrivate")}</MenuItem>
+                          </Select>
+                        </WizField>
+                      </Box>
+                      <Box sx={{ mt: "12px" }}>
+                        <WizField label={t("inf.deploy.paths")} hint={t("inf.deploy.pathsHint")}>
+                          <ToggleButtonGroup
+                            size="small"
+                            data-od-id="deploy-catalog-paths"
+                            value={draft.paths}
+                            onChange={(_, next: CatalogPath[]) => {
+                              // A published model must expose at least one path,
+                              // so deselecting the last one is ignored.
+                              if (next.length > 0) setField("paths", next);
+                            }}
+                            sx={{ flexWrap: "wrap", gap: "6px" }}
+                          >
+                            {CATALOG_PATHS.map((path) => (
+                              <ToggleButton key={path} value={path} sx={{ textTransform: "none", fontSize: 12, px: "10px", py: "4px" }}>
+                                {path}
+                              </ToggleButton>
+                            ))}
+                          </ToggleButtonGroup>
+                        </WizField>
+                      </Box>
+                    </>
                   )}
                 </Box>
               </Box>
@@ -1949,7 +1976,7 @@ function DeployWizard({
                         })
                       : []),
                     [t("inf.deploy.route"), draft.aigatewayRouter
-                      ? `${t("inf.params.published")} · ${draft.aigatewayRouter === AIGATEWAY_ROUTER_PRIVATE ? t("inf.deploy.aigatewayRouterPrivate") : t("inf.deploy.aigatewayRouterPublic")} · ${draft.modelName}`
+                      ? `${t("inf.params.published")} · ${draft.aigatewayRouter === AIGATEWAY_ROUTER_PRIVATE ? t("inf.deploy.aigatewayRouterPrivate") : t("inf.deploy.aigatewayRouterPublic")} · ${draft.modelName} · ${draft.paths.join(" ")}`
                       : t("inf.params.unpublished")],
                   ]}
                 />

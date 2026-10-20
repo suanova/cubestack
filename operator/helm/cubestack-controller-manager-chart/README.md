@@ -153,12 +153,25 @@ controller prerequisite below.
   with a non-empty `spec.route.aigatewayRouter` reports `RouteReady=False,
   reason=AgentRouterUnavailable` and no catalog entry is created.
 
-- The **two pre-installed shared `AIGatewayRoute`s** the Agent Router model
-  catalog is attached to, in `gateway.namespace`: `cubestack-ai-gateway`
-  (public) and `cubestack-ai-gateway-private` (private). Services select one
-  with `spec.route.aigatewayRouter`. The operator reads and edits a rule in the
-  selected route but never creates either; a missing route degrades that
-  service to `RouteReady=False, reason=CatalogRouteNotFound`.
+- The **two shared catalog surfaces**, in `gateway.namespace`: the
+  `AIGatewayRoute`s `cubestack-ai-gateway` (public) and
+  `cubestack-ai-gateway-private` (private) serve `/v1/messages`, and the plain
+  `HTTPRoute`s `cubestack-openai-paths` / `cubestack-openai-paths-private`
+  serve `/v1/chat/completions`, `/v1/responses` and `/v1/videos`. Services
+  select a visibility with `spec.route.aigatewayRouter` and the paths they
+  expose with `spec.route.paths`. The operator creates either object when it
+  is missing and owns their `spec.rules` entirely: on every reconcile it
+  rebuilds the rules from every published service, so rules added by hand are
+  overwritten. `spec.rules` caps the catalog at 15 models (AIGatewayRoute) and
+  16 rules (HTTPRoute, three per model with all paths selected); a service
+  that does not fit reports `RouteReady=False, reason=CatalogFull`.
+
+  The HTTPRoute rules are matched on the `x-ai-eg-model` request header, so
+  clients calling the OpenAI paths must send it. Cross-namespace references to
+  the per-service `gateway.envoyproxy.io` `Backend` objects are authorized by
+  the platform's namespace-wide `ReferenceGrant`
+  `cubestack-ai-gateway-backends`; the operator does not create per-backend
+  grants.
 
 - The **upstream LeaderWorkerSet controller** running in the cluster, which
   provides the `leaderworkerset.x-k8s.io` / `disaggregatedset.x-k8s.io` CRDs
