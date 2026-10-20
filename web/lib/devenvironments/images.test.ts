@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { DEV_IMAGES, devImageFor } from "./images";
 
@@ -25,12 +25,12 @@ describe("DEV_IMAGES", () => {
     // offered the four vendor images the project publishes (images/README.md).
     // Changing the set means changing this list too.
     expect(DEV_IMAGES.map((image) => image.tag)).toEqual([
-      "harbor.isuanova.com/suanova/jupyter-minimal:latest",
-      "harbor.isuanova.com/suanova/ssh-ubuntu22.04:latest",
-      "harbor.isuanova.com/suanova/jupyter-cuda-pytorch:latest",
-      "harbor.isuanova.com/suanova/ssh-cuda-pytorch:latest",
-      "harbor.isuanova.com/suanova/jupyter-maca-pytorch:latest",
-      "harbor.isuanova.com/suanova/ssh-maca-pytorch:latest",
+      "harbor.isuanova.com/suanova/cpu-pytorch:latest",
+      "harbor.isuanova.com/suanova/cpu-pytorch:latest",
+      "harbor.isuanova.com/suanova/cuda-pytorch:latest",
+      "harbor.isuanova.com/suanova/cuda-pytorch:latest",
+      "harbor.isuanova.com/suanova/maca-pytorch:latest",
+      "harbor.isuanova.com/suanova/maca-pytorch:latest",
     ]);
   });
 
@@ -53,12 +53,12 @@ describe("DEV_IMAGES", () => {
     // interface, which would put a metax environment on the CPU image — an
     // Accepted=False / BrandMismatch on the cluster.
     expect(DEV_IMAGES.map((image) => [image.tag.split("/").pop(), image.vendor, image.interface])).toEqual([
-      ["jupyter-minimal:latest", "cpu", "jupyter"],
-      ["ssh-ubuntu22.04:latest", "cpu", "ssh"],
-      ["jupyter-cuda-pytorch:latest", "nvidia", "jupyter"],
-      ["ssh-cuda-pytorch:latest", "nvidia", "ssh"],
-      ["jupyter-maca-pytorch:latest", "metax", "jupyter"],
-      ["ssh-maca-pytorch:latest", "metax", "ssh"],
+      ["cpu-pytorch:latest", "cpu", "jupyter"],
+      ["cpu-pytorch:latest", "cpu", "ssh"],
+      ["cuda-pytorch:latest", "nvidia", "jupyter"],
+      ["cuda-pytorch:latest", "nvidia", "ssh"],
+      ["maca-pytorch:latest", "metax", "jupyter"],
+      ["maca-pytorch:latest", "metax", "ssh"],
     ]);
     // Every vendor with a jupyter image has an ssh one and the other way round,
     // since that is exactly the lookup the wizard performs.
@@ -68,22 +68,42 @@ describe("DEV_IMAGES", () => {
     }
   });
 
-  it("states the stock-derived jupyter image's gid, which nothing else implies", () => {
-    const jupyter = devImageFor("harbor.isuanova.com/suanova/jupyter-minimal:latest");
-    expect(jupyter).toMatchObject({ user: "jovyan", runAsGroup: 100 });
+  it("states the account each image runs as, and no group the platform default covers", () => {
+    // Every shipped image runs 1000:1000 — the platform default — so none pins
+    // a securityContext group; the account is the part the image has to state.
+    for (const image of DEV_IMAGES) {
+      expect(image.user).toBe("ubuntu");
+      expect(image.runAsGroup).toBeUndefined();
+    }
+  });
+});
 
-    // The self-authored family runs 1000:1000, the platform default, so it
-    // must *not* pin a group — the CRD would otherwise carry a redundant field.
-    const ssh = devImageFor("harbor.isuanova.com/suanova/ssh-ubuntu22.04:latest");
-    expect(ssh?.user).toBe("ubuntu");
-    expect(ssh?.runAsGroup).toBeUndefined();
+describe("CUBESTACK_DEV_IMAGE_REGISTRY", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  it("builds every tag under the configured registry", async () => {
+    vi.resetModules();
+    vi.stubEnv("CUBESTACK_DEV_IMAGE_REGISTRY", "registry.example.com/cubestack/");
+    const { DEV_IMAGES: images } = await import("./images");
+    for (const image of images) {
+      expect(image.tag).toMatch(/^registry\.example\.com\/cubestack\/[a-z0-9.-]+:[a-z0-9.-]+$/);
+    }
   });
 });
 
 describe("devImageFor", () => {
-  it("resolves each catalog entry by its reference", () => {
+  it("resolves each catalog tag, with one image serving both interfaces", () => {
+    // A vendor image is listed twice — once per interface — so the pair shares
+    // one tag. The lookup answers with the first entry; both state the same
+    // account, which is all the create route falls back to.
     for (const image of DEV_IMAGES) {
-      expect(devImageFor(image.tag)).toBe(image);
+      const resolved = devImageFor(image.tag);
+      expect(resolved).toBeDefined();
+      expect(resolved?.tag).toBe(image.tag);
+      expect(resolved?.user).toBe(image.user);
     }
   });
 

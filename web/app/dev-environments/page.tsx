@@ -1718,6 +1718,10 @@ interface Draft {
   // number field would turn an empty box into 0, and 0 is not a missing uid —
   // it is the request to run as root.
   runAsRoot: boolean;
+  // spec.runtime.sudo: passwordless sudo for the container's non-root account.
+  // Off by default; a root container already has the privilege, so the grant is
+  // neither offered nor sent when runAsRoot is on.
+  sudo: boolean;
   runtimeUser: string;
   runAsUser: string;
   runAsGroup: string;
@@ -1820,6 +1824,7 @@ function CreateWizard({
     idleCustom: false,
     idleMinutes: "",
     runAsRoot: false,
+    sudo: false,
     runtimeUser: "",
     runAsUser: String(PLATFORM_UID),
     runAsGroup: String(PLATFORM_GID),
@@ -2092,6 +2097,9 @@ function CreateWizard({
             runtimeUser: effectiveUser,
             runAsUser: Number(effectiveUid),
             runAsGroup: Number(effectiveGid),
+            // The grant follows the container's non-root account; a root
+            // environment already has the privilege and states nothing.
+            ...(draft.sudo ? { sudo: true } : {}),
           }),
       // Step 3's storage / runtime / network sections. Each is sent only when it
       // states something, so an untouched wizard describes exactly the
@@ -2213,7 +2221,7 @@ function CreateWizard({
       t("dev.wizard.identity"),
       draft.runAsRoot
         ? t("dev.wizard.identityRoot")
-        : t("dev.wizard.identityValue", { user: effectiveUser, uid: effectiveUid, gid: effectiveGid }),
+        : `${t("dev.wizard.identityValue", { user: effectiveUser, uid: effectiveUid, gid: effectiveGid })}${draft.sudo ? " · sudo" : ""}`,
     ],
   ];
   // Only what the user actually stated: a list of empty rows would bury the
@@ -2532,6 +2540,19 @@ function CreateWizard({
                       <Box sx={{ fontSize: 11, color: "text.secondary", mt: "2px" }}>{t("dev.wizard.rootHint")}</Box>
                     </Box>
                     <Switch size="small" checked={draft.runAsRoot} onChange={(e) => setField("runAsRoot", e.target.checked)} data-od-id="wizard-root" />
+                  </Box>
+                  <Box sx={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "12px", py: "8px" }}>
+                    <Box>
+                      <Box sx={{ fontSize: 12.5 }}>{t("dev.wizard.sudo")}</Box>
+                      <Box sx={{ fontSize: 11, color: "text.secondary", mt: "2px" }}>{t("dev.wizard.sudoHint")}</Box>
+                    </Box>
+                    <Switch
+                      size="small"
+                      checked={draft.sudo}
+                      disabled={draft.runAsRoot}
+                      onChange={(e) => setField("sudo", e.target.checked)}
+                      data-od-id="wizard-sudo"
+                    />
                   </Box>
                   <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" }, gap: "0 14px", pt: "6px" }}>
                     <WizField label={t("dev.wizard.account")} hint={t("dev.wizard.accountHint")} error={accountError} errorText={t("dev.wizard.errAccount")}>

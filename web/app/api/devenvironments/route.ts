@@ -409,6 +409,10 @@ interface CreateBody {
   runtimeUser?: string; // → spec.runtime.user
   runAsUser?: number; // → spec.runtime.securityContext.runAsUser
   runAsGroup?: number; // → spec.runtime.securityContext.runAsGroup
+  // spec.runtime.sudo: passwordless sudo for the container's account. Absent /
+  // false = no grant, the CRD's default, so only true is ever written. A root
+  // container already has the privilege, so it is dropped there.
+  sudo?: boolean;
   // Form-shaped where the UI is a single box, CR-named where the UI already
   // edits a CR leaf.
   mountPath?: string; // → spec.storage.mountPath (absent = derived)
@@ -750,6 +754,9 @@ export const POST = withAuth(async (req) => {
     const user = runAsRoot ? undefined : body.runtimeUser || published?.user;
     const runAsGroup = runAsRoot ? 0 : body.runAsGroup ?? published?.runAsGroup;
     const runAsUser = body.runAsUser;
+    // The grant follows the container's non-root account: root already has the
+    // privilege, so a request that states both is answered with root alone.
+    const sudo = !runAsRoot && body.sudo === true;
     const securityContext =
       runAsUser === undefined && runAsGroup === undefined
         ? undefined
@@ -760,6 +767,7 @@ export const POST = withAuth(async (req) => {
     const runtime =
       user === undefined &&
       securityContext === undefined &&
+      !sudo &&
       env.length === 0 &&
       command.length === 0 &&
       args.length === 0
@@ -767,6 +775,7 @@ export const POST = withAuth(async (req) => {
         : {
             ...(user !== undefined ? { user } : {}),
             ...(securityContext ? { securityContext } : {}),
+            ...(sudo ? { sudo } : {}),
             ...(env.length ? { env } : {}),
             ...(command.length ? { command } : {}),
             ...(args.length ? { args } : {}),

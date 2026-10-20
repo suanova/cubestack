@@ -38,7 +38,8 @@ The following table lists the configurable parameters of the Portal chart and th
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `image.repository` | UI image repository | `harbor.isuanova.com/suanova/cubestack-ui` |
+| `image.registry` | Registry and project path the platform's images are published under (`CUBESTACK_DEV_IMAGE_REGISTRY` for the dev-environment catalog) | `harbor.isuanova.com/suanova` |
+| `image.repository` | UI image name inside `image.registry` | `cubestack-ui` |
 | `image.tag` | UI image tag | `latest` |
 | `image.pullPolicy` | Image pull policy | `Always` |
 | `replicaCount` | Number of replicas | `1` |

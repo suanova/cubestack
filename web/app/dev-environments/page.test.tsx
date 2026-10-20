@@ -1147,6 +1147,10 @@ describe("create wizard", () => {
     return document.body.querySelector('[data-od-id="wizard-root"] input') as HTMLElement;
   }
 
+  function sudoSwitch(): HTMLInputElement {
+    return document.body.querySelector('[data-od-id="wizard-sudo"] input') as HTMLInputElement;
+  }
+
   /** The image combobox's text box, on step 1. */
   function imageInput(): HTMLInputElement {
     return document.body.querySelector('[data-od-id="wizard-image"] input') as HTMLInputElement;
@@ -1723,6 +1727,54 @@ describe("create wizard", () => {
     // The operator serves "root" itself and reports spec.runtime.user as
     // overridden, so there is no account to state.
     expect("runtimeUser" in body).toBe(false);
+
+    act(() => root.unmount());
+  });
+
+  it("grants sudo to the runtime account only when asked", async () => {
+    const { container, root } = renderWithBoth();
+    await act(async () => {});
+    await toStep3(container);
+
+    await act(async () => {
+      sudoSwitch().click();
+    });
+    await nextStep();
+    // The confirmation restates the grant beside the identity, so it is visible
+    // before the environment is created.
+    expect(document.body.textContent).toContain("sudo");
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="wizard-create"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    expect(createdBody()).toMatchObject({ sudo: true });
+
+    act(() => root.unmount());
+  });
+
+  it("does not state sudo for a root environment", async () => {
+    const { container, root } = renderWithBoth();
+    await act(async () => {});
+    await toStep3(container);
+
+    await act(async () => {
+      sudoSwitch().click();
+    });
+    await act(async () => {
+      rootSwitch().click();
+    });
+    // The grant belongs to the non-root account; a root container already has it.
+    expect(sudoSwitch().disabled).toBe(true);
+    await nextStep();
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="wizard-create"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    const body = createdBody();
+    expect(body).toMatchObject({ runAsUser: 0, runAsGroup: 0 });
+    expect("sudo" in body).toBe(false);
 
     act(() => root.unmount());
   });

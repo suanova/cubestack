@@ -57,7 +57,7 @@ spec:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
       - name: ui
-        image: {{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}
+        image: {{ .Values.image.registry }}/{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}
         imagePullPolicy: {{ .Values.image.pullPolicy }}
         ports:
         - containerPort: 3000
@@ -89,6 +89,9 @@ spec:
         # values means "the target namespace".
         - name: CUBESTACK_TASKS_NAMESPACE
           value: {{ .Values.operatorNamespace | default .Values.namespace | quote }}
+        # Registry/project the dev-environment image catalog is published to.
+        - name: CUBESTACK_DEV_IMAGE_REGISTRY
+          value: {{ .Values.image.registry | quote }}
         {{- if .Values.agentApiUrl }}
         # CubePilot agent API (chat backend); unset = in-cluster Service DNS.
         - name: CUBESTACK_PILOT_URL

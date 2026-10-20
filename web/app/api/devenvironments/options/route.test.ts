@@ -168,12 +168,12 @@ describe("GET /api/devenvironments/options", () => {
     // built for one interface cannot serve the other, and the pair a change moves
     // between is the vendor.
     expect(await images()).toEqual([
-      { tag: "harbor.isuanova.com/suanova/jupyter-minimal:latest", label: "suanova/jupyter-minimal · CPU · JupyterLab (jovyan)", user: "jovyan", runAsGroup: 100, interface: "jupyter", vendor: "cpu" },
-      { tag: "harbor.isuanova.com/suanova/ssh-ubuntu22.04:latest", label: "suanova/ssh-ubuntu22.04 · CPU · SSH (ubuntu)", user: "ubuntu", runAsGroup: undefined, interface: "ssh", vendor: "cpu" },
-      { tag: "harbor.isuanova.com/suanova/jupyter-cuda-pytorch:latest", label: "suanova/jupyter-cuda-pytorch · NVIDIA CUDA · JupyterLab (ubuntu)", user: "ubuntu", runAsGroup: undefined, interface: "jupyter", vendor: "nvidia" },
-      { tag: "harbor.isuanova.com/suanova/ssh-cuda-pytorch:latest", label: "suanova/ssh-cuda-pytorch · NVIDIA CUDA · SSH (ubuntu)", user: "ubuntu", runAsGroup: undefined, interface: "ssh", vendor: "nvidia" },
-      { tag: "harbor.isuanova.com/suanova/jupyter-maca-pytorch:latest", label: "suanova/jupyter-maca-pytorch · Metax MACA · JupyterLab (ubuntu)", user: "ubuntu", runAsGroup: undefined, interface: "jupyter", vendor: "metax" },
-      { tag: "harbor.isuanova.com/suanova/ssh-maca-pytorch:latest", label: "suanova/ssh-maca-pytorch · Metax MACA · SSH (ubuntu)", user: "ubuntu", runAsGroup: undefined, interface: "ssh", vendor: "metax" },
+      { tag: "harbor.isuanova.com/suanova/cpu-pytorch:latest", label: "suanova/cpu-pytorch · CPU · JupyterLab (ubuntu)", user: "ubuntu", runAsGroup: undefined, interface: "jupyter", vendor: "cpu" },
+      { tag: "harbor.isuanova.com/suanova/cpu-pytorch:latest", label: "suanova/cpu-pytorch · CPU · SSH (ubuntu)", user: "ubuntu", runAsGroup: undefined, interface: "ssh", vendor: "cpu" },
+      { tag: "harbor.isuanova.com/suanova/cuda-pytorch:latest", label: "suanova/cuda-pytorch · NVIDIA CUDA · JupyterLab (ubuntu)", user: "ubuntu", runAsGroup: undefined, interface: "jupyter", vendor: "nvidia" },
+      { tag: "harbor.isuanova.com/suanova/cuda-pytorch:latest", label: "suanova/cuda-pytorch · NVIDIA CUDA · SSH (ubuntu)", user: "ubuntu", runAsGroup: undefined, interface: "ssh", vendor: "nvidia" },
+      { tag: "harbor.isuanova.com/suanova/maca-pytorch:latest", label: "suanova/maca-pytorch · Metax MACA · JupyterLab (ubuntu)", user: "ubuntu", runAsGroup: undefined, interface: "jupyter", vendor: "metax" },
+      { tag: "harbor.isuanova.com/suanova/maca-pytorch:latest", label: "suanova/maca-pytorch · Metax MACA · SSH (ubuntu)", user: "ubuntu", runAsGroup: undefined, interface: "ssh", vendor: "metax" },
     ]);
   });
 

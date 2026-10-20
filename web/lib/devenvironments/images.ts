@@ -37,7 +37,7 @@ export interface DevImage {
   interface: "jupyter" | "ssh";
   /**
    * The accelerator stack the image carries — also what the two entries of a
-   * pair have in common: jupyter-cuda-pytorch and ssh-cuda-pytorch are one
+   * pair have in common: cuda-pytorch and ssh-cuda-pytorch are one
    * vendor's stack in two modes. The wizard keeps it across a type change, so
    * an environment moved to ssh from a CUDA jupyter image lands on the CUDA ssh
    * image rather than on the CPU one, which the operator would refuse as a brand
@@ -58,7 +58,12 @@ export const PLATFORM_USER = "user";
 export const PLATFORM_UID = 1000;
 export const PLATFORM_GID = 1000;
 
-const REGISTRY = "harbor.isuanova.com/suanova";
+// The registry (host and project path) the platform publishes its images to.
+// CUBESTACK_DEV_IMAGE_REGISTRY overrides it (helm: devImageRegistry), so a
+// deployment can point the catalog at its own mirror without a rebuild.
+const DEFAULT_REGISTRY = "harbor.isuanova.com/suanova";
+const REGISTRY =
+  (process.env.CUBESTACK_DEV_IMAGE_REGISTRY ?? "").trim().replace(/\/+$/, "") || DEFAULT_REGISTRY;
 
 // The platform's published set (images/README.md), CPU first and then the two
 // vendor pairs, in the order the wizard's own accelerator select offers them.
@@ -67,47 +72,46 @@ const REGISTRY = "harbor.isuanova.com/suanova";
 // DevEnvironment can be pointed at (docs/design/devenv-images/decision.md).
 export const DEV_IMAGES: DevImage[] = [
   {
-    tag: `${REGISTRY}/jupyter-minimal:latest`,
-    label: "suanova/jupyter-minimal · CPU · JupyterLab (jovyan)",
+    tag: `${REGISTRY}/cpu-pytorch:latest`,
+    label: "suanova/cpu-pytorch · CPU · JupyterLab (ubuntu)",
     // Stock-derived overlay: docker-stacks' jovyan is uid 1000 / gid *100*, and
     // no other spec field implies that gid — the platform default is 1000.
-    user: "jovyan",
-    runAsGroup: 100,
+    user: "ubuntu",
     interface: "jupyter",
     vendor: "cpu",
   },
   {
-    tag: `${REGISTRY}/ssh-ubuntu22.04:latest`,
-    label: "suanova/ssh-ubuntu22.04 · CPU · SSH (ubuntu)",
+    tag: `${REGISTRY}/cpu-pytorch:latest`,
+    label: "suanova/cpu-pytorch · CPU · SSH (ubuntu)",
     // Self-authored family: account ubuntu, uid/gid 1000 — the platform default.
     user: "ubuntu",
     interface: "ssh",
     vendor: "cpu",
   },
   {
-    tag: `${REGISTRY}/jupyter-cuda-pytorch:latest`,
-    label: "suanova/jupyter-cuda-pytorch · NVIDIA CUDA · JupyterLab (ubuntu)",
+    tag: `${REGISTRY}/cuda-pytorch:latest`,
+    label: "suanova/cuda-pytorch · NVIDIA CUDA · JupyterLab (ubuntu)",
     user: "ubuntu",
     interface: "jupyter",
     vendor: "nvidia",
   },
   {
-    tag: `${REGISTRY}/ssh-cuda-pytorch:latest`,
-    label: "suanova/ssh-cuda-pytorch · NVIDIA CUDA · SSH (ubuntu)",
+    tag: `${REGISTRY}/cuda-pytorch:latest`,
+    label: "suanova/cuda-pytorch · NVIDIA CUDA · SSH (ubuntu)",
     user: "ubuntu",
     interface: "ssh",
     vendor: "nvidia",
   },
   {
-    tag: `${REGISTRY}/jupyter-maca-pytorch:latest`,
-    label: "suanova/jupyter-maca-pytorch · Metax MACA · JupyterLab (ubuntu)",
+    tag: `${REGISTRY}/maca-pytorch:latest`,
+    label: "suanova/maca-pytorch · Metax MACA · JupyterLab (ubuntu)",
     user: "ubuntu",
     interface: "jupyter",
     vendor: "metax",
   },
   {
-    tag: `${REGISTRY}/ssh-maca-pytorch:latest`,
-    label: "suanova/ssh-maca-pytorch · Metax MACA · SSH (ubuntu)",
+    tag: `${REGISTRY}/maca-pytorch:latest`,
+    label: "suanova/maca-pytorch · Metax MACA · SSH (ubuntu)",
     user: "ubuntu",
     interface: "ssh",
     vendor: "metax",
