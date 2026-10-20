@@ -924,11 +924,14 @@ function Kvs({ rows }: { rows: Array<[string, string]> }) {
 function EndpointsCard({ s }: { s: InferenceServiceSummary }) {
   const { t } = useI18n();
   const internal = s.internalEndpoint ?? "—";
-  // The public endpoint is the observed value the operator reports (the shared
-  // catalog host differs per cluster); fall back to "—" when it isn't published
-  // yet. The catalog host serves every published model, so the model name that
-  // selects this service is shown alongside it.
-  const external = s.publicEndpoint ?? "—";
+  // A service published to the private catalog route is not reachable through
+  // the platform's public listener, so its AI Gateway endpoint is the
+  // in-cluster Service address. The public route's address is the observed
+  // value the operator reports (the shared catalog host differs per cluster);
+  // fall back to "—" when it isn't published yet. The catalog host serves every
+  // published model, so the model name that selects this service is shown
+  // alongside it.
+  const external = (s.aigatewayRouter === AIGATEWAY_ROUTER_PRIVATE ? s.internalEndpoint : s.publicEndpoint) ?? "—";
   return (
     <Card title={t("inf.endpoints.title")}>
       {/* Stacked, not side by side: this card is a third of the panel's width

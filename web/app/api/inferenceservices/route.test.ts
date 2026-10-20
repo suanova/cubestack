@@ -206,6 +206,7 @@ describe("inference services route", () => {
       profileRef: "metax-sglang-dsv4-pd",
       modelRef: "deepseek-v4-flash-w8a8-v1",
       published: true,
+      aigatewayRouter: "cubestack-ai-gateway",
       routeModelName: "dsv4-flash",
       timeoutSeconds: 0,
       idleTimeoutSeconds: 300,

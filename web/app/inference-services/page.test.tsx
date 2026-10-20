@@ -117,6 +117,27 @@ describe("inference services page", () => {
     act(() => root.unmount());
   });
 
+  it("shows the in-cluster address as the AI Gateway endpoint of a private service", async () => {
+    // The private catalog route has no public listener: the address a caller
+    // uses is the service's own in-cluster endpoint, not the cluster's public
+    // catalog host.
+    stubData([
+      inferenceServiceSummary({
+        aigatewayRouter: "cubestack-ai-gateway-private",
+        internalEndpoint: "dsv4-api.project-a.svc:8001",
+        publicEndpoint: "https://ai.cubestack.dev",
+      }),
+    ]);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    expect(container.textContent).toContain("外部端点(AI Gateway)");
+    expect(container.textContent).toContain("dsv4-api.project-a.svc:8001");
+    expect(container.textContent).not.toContain("https://ai.cubestack.dev");
+
+    act(() => root.unmount());
+  });
+
   it("renders the phase the controller reported, and nothing else", async () => {
     const list = [
       // Just created: the operator reads it as Progressing (Reconciling) — the

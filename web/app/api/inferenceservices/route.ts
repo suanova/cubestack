@@ -36,6 +36,9 @@ export interface InferenceServiceSummary {
   profileRef: string;
   modelRef: string;
   published: boolean;
+  // The shared catalog route the service publishes to (public or private), or
+  // null when it is not published. Drives which endpoint the detail card shows.
+  aigatewayRouter: string | null;
   routeModelName: string | null;
   timeoutSeconds: number | null;
   idleTimeoutSeconds: number | null;
@@ -343,6 +346,7 @@ function project(
     profileRef: spec.profileRef ?? "—",
     modelRef: spec.modelRef ?? "—",
     published: (spec.route?.aigatewayRouter ?? "") !== "",
+    aigatewayRouter: spec.route?.aigatewayRouter ?? null,
     routeModelName: spec.route?.modelName ?? null,
     timeoutSeconds: spec.route?.timeoutSeconds ?? null,
     idleTimeoutSeconds: spec.route?.idleTimeoutSeconds ?? null,
