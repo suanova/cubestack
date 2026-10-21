@@ -83,7 +83,16 @@ export function ConfigPane() {
           origin: "system",
         }))
       : gatewayModels.length > 0
-        ? [{ name: PLATFORM_MODEL_NAME, models: gatewayModels, keyed: false, origin: "system" }]
+        ? [{
+            name: PLATFORM_MODEL_NAME,
+            // The union carries no endpoint of its own; the template's public
+            // entry is the one the last save pointed at it, and the note under
+            // the select shows where the selection runs.
+            endpoint: providers.find((p) => p.name === PLATFORM_MODEL_NAME)?.endpoint,
+            models: gatewayModels,
+            keyed: false,
+            origin: "system",
+          }]
         : [];
   /** The providers the select reads models from: the template's own, plus the
    *  platform's live entries. A declared platform entry is dropped while the

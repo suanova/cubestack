@@ -1552,23 +1552,22 @@ test.describe("cubepilot config (AgentInstance CR + AgentTemplate catalog)", () 
     const pane = page.locator('[data-od-id="cp-config-pane"]');
     await expect(pane).toBeVisible();
 
-    // Model from the CR; the options are the TEMPLATE'S PROVIDERS — one group per
-    // provider, bare ids as labels and the "<provider>/<id>" ref as the value. An
-    // external provider is a first-class choice here: reading this list from the
-    // gateway's served ids instead is what hid every provider the user added, and
-    // what made the card claim the template declared none while the gateway list
-    // was still in flight.
+    // Model from the CR; the options are the live platform catalogue plus the
+    // template's EXTERNAL providers — one group per provider, bare ids as labels
+    // and the "<provider>/<id>" ref as the value. The platform group is the
+    // live union: the template's own entry only holds the ids the last save
+    // wrote, and reading the list from it hid a model another Gateway serves.
     const modelSelect = page.locator('[data-od-id="cp-config-model-select"]');
     await expect(modelSelect).toBeEnabled();
     await expect(modelSelect).toHaveValue("cubestack/qwen38-27b");
-    await expect(modelSelect.locator("option")).toHaveCount(2);
+    await expect(modelSelect.locator("option")).toHaveCount(3);
     await expect(modelSelect.locator("optgroup")).toHaveCount(2);
     await expect(modelSelect).toContainText("qwen38-27b");
     // The external provider's model, which the gateway stub does NOT serve.
     await expect(modelSelect).toContainText("glm-5.2-chat");
-    // …and an id the gateway serves but no provider declares is not offered: it
-    // is not part of the catalog.
-    await expect(modelSelect).not.toContainText("system-only");
+    // …and an id the gateway serves but the template has not saved yet is
+    // offered too: selecting it is what lets the save write it into the entry.
+    await expect(modelSelect).toContainText("system-only");
     await expect(page.locator('[data-od-id="cp-config-model-note"]')).toContainText("http://ai-gateway.test:8080/v1");
 
     await expect(page.locator('[data-od-id="cp-config-prompt-input"]')).toHaveValue("巡检优先,写操作全部走审批");
@@ -1608,13 +1607,11 @@ test.describe("cubepilot config (AgentInstance CR + AgentTemplate catalog)", () 
     // providers (written to the AgentTemplate, keyed ones through a Secret).
     await expect(page.locator('[data-od-id="cp-config-llm"]')).toBeVisible();
     await expect(page.locator('[data-od-id="cp-config-llm-src-system"]')).toHaveAttribute("aria-pressed", "true");
-    // The platform list is the platform PROVIDER's models — the template's own
-    // entry, which is what the assistant can actually run. An id the gateway
-    // serves but no provider declares is not in the catalog, so it is not here
-    // either (it used to be listed, straight off the gateway's response).
+    // The platform list is the live catalogue — what the Gateways serve now,
+    // the same source the select's platform group reads.
     const platformList = page.locator('[data-od-id="cp-config-llm-system"]');
     await expect(platformList).toContainText("qwen38-27b");
-    await expect(platformList).not.toContainText("system-only");
+    await expect(platformList).toContainText("system-only");
     await page.locator('[data-od-id="cp-config-llm-src-external"]').click();
     await expect(page.locator('[data-od-id="cp-config-llm-external"]')).toContainText("glm-5.2-chat");
     await expect(page.locator('[data-od-id="cp-config-llm-external"]')).toContainText("密钥");
@@ -1715,7 +1712,7 @@ test.describe("cubepilot config (AgentInstance CR + AgentTemplate catalog)", () 
     await expect(page.locator('[data-od-id="cp-config-model-select"]')).toBeDisabled();
 
     // When it lands, the catalog is there and the warning still is not.
-    await expect(page.locator('[data-od-id="cp-config-model-select"] option')).toHaveCount(2, { timeout: 10000 });
+    await expect(page.locator('[data-od-id="cp-config-model-select"] option')).toHaveCount(3, { timeout: 10000 });
     await expect(page.locator('[data-od-id="cp-config-model-select"]')).toBeEnabled();
     await expect(pane).not.toContainText("模板未声明 provider");
   });
