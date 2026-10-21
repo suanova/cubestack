@@ -11,6 +11,7 @@ const {
   listNamespace,
   createNamespacedSecret,
   listClusterCustomObject,
+  getNamespacedCustomObject,
   patchNamespacedCustomObject,
   createNamespacedCustomObject,
   deleteNamespacedCustomObject,
@@ -18,6 +19,7 @@ const {
   listNamespace: vi.fn(),
   createNamespacedSecret: vi.fn(),
   listClusterCustomObject: vi.fn(),
+  getNamespacedCustomObject: vi.fn(),
   patchNamespacedCustomObject: vi.fn(),
   createNamespacedCustomObject: vi.fn(),
   deleteNamespacedCustomObject: vi.fn(),
@@ -25,7 +27,7 @@ const {
 
 vi.mock("@/lib/kubernetes", () => ({
   getCoreClient: () => ({ listNamespace, createNamespacedSecret }),
-  getCustomObjectsClient: () => ({ listClusterCustomObject, patchNamespacedCustomObject, createNamespacedCustomObject, deleteNamespacedCustomObject }),
+  getCustomObjectsClient: () => ({ listClusterCustomObject, getNamespacedCustomObject, patchNamespacedCustomObject, createNamespacedCustomObject, deleteNamespacedCustomObject }),
 }));
 
 /** The cluster fixture mirrors the real KinD data: one running, one stopped env. */
@@ -85,6 +87,7 @@ function clearMocks() {
   listNamespace.mockClear();
   createNamespacedSecret.mockClear();
   listClusterCustomObject.mockClear();
+  getNamespacedCustomObject.mockClear();
   patchNamespacedCustomObject.mockClear();
   createNamespacedCustomObject.mockClear();
   deleteNamespacedCustomObject.mockClear();
@@ -1117,6 +1120,8 @@ describe("PATCH /api/devenvironments", () => {
     // the value when present and creates it when absent.
     expect(arg.body).toEqual([{ op: "add", path: "/spec/running", value: false }]);
     expect(arg.fieldManager).toBe("cubestack-web");
+    // Stopping has no mark to clear, so the read guard is not triggered.
+    expect(getNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
   it("patches an existing resource that omits spec.running (add creates the field)", async () => {
@@ -1124,6 +1129,9 @@ describe("PATCH /api/devenvironments", () => {
     // no `running` key; JSON-Patch `add` on the existing spec object creates
     // the member, so the same body works for resources that predate the field.
     patchNamespacedCustomObject.mockResolvedValue({});
+    // ssh-dataset-prep is not auto-stopped, so the mark is absent and the start
+    // sends only the running add — the same request as before the mark existed.
+    getNamespacedCustomObject.mockResolvedValue({ metadata: { annotations: {} } });
     const { PATCH } = await importRoute();
     const res = await PATCH(
       await authedRequest({ method: "PATCH", body: JSON.stringify({ namespace: "project-a", name: "ssh-dataset-prep", running: true }) }),
@@ -1133,6 +1141,36 @@ describe("PATCH /api/devenvironments", () => {
     const arg = patchNamespacedCustomObject.mock.calls[0][0];
     expect(arg.name).toBe("ssh-dataset-prep");
     expect(arg.body).toEqual([{ op: "add", path: "/spec/running", value: true }]);
+  });
+
+  it("clears the auto-stopped mark when starting an auto-stopped environment", async () => {
+    // Starting an auto-stopped environment requires clearing the mark, which is
+    // the whole of the stopped state. The mark is removed in the same request as
+    // the running add, so the controller wakes and the environment starts.
+    patchNamespacedCustomObject.mockResolvedValue({});
+    getNamespacedCustomObject.mockResolvedValue({
+      metadata: {
+        annotations: {
+          "ai.cubestack.io/auto-stopped": "true",
+          "ai.cubestack.io/auto-stopped-at": "2026-09-01T06:12:00Z",
+        },
+      },
+    });
+    const { PATCH } = await importRoute();
+    const res = await PATCH(
+      await authedRequest({ method: "PATCH", body: JSON.stringify({ namespace: "project-a", name: "jupyter-nlp-ln", running: true }) }),
+      undefined,
+    );
+    expect(res.status).toBe(200);
+    const arg = patchNamespacedCustomObject.mock.calls[0][0];
+    expect(arg.name).toBe("jupyter-nlp-ln");
+    // The mark is removed in the same request as the running add; the
+    // auto-stopped-at record is left untouched (it is the controller's own
+    // record of when it stopped the environment, and a floor under the idle clock).
+    expect(arg.body).toEqual([
+      { op: "add", path: "/spec/running", value: true },
+      { op: "remove", path: "/metadata/annotations/ai.cubestack.io~1auto-stopped" },
+    ]);
   });
 
   it("rejects a missing running boolean", async () => {

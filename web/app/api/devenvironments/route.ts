@@ -14,6 +14,13 @@ export const dynamic = "force-dynamic";
 const GROUP = "ai.cubestack.io";
 const VERSION = "v1alpha1";
 const PLURAL_DEVENV = "devenvironments";
+// The idle auto-stop mark the operator sets on an environment it has idled out.
+// It is the whole of the stopped state: clearing it is what starts the environment
+// again, which is the client's job (spec.running stays true throughout). The
+// companion ai.cubestack.io/auto-stopped-at key is the controller's own record of
+// when it stopped the environment, and it is a floor under the idle clock — the
+// portal must not clear it.
+const AUTO_STOPPED_ANNOTATION = "ai.cubestack.io/auto-stopped";
 
 // The user's public keys, when the create request carries any: they are
 // written to a per-environment Secret (created after the CR, owned by it) and
@@ -149,13 +156,18 @@ interface DevEnvStatus {
   jupyterTokenSecret?: { name?: string; namespace?: string };
 }
 interface DevEnv {
-  metadata?: { name?: string; namespace?: string; creationTimestamp?: string };
+  metadata?: { name?: string; namespace?: string; creationTimestamp?: string; annotations?: Record<string, string> };
   spec?: DevEnvSpec;
   status?: DevEnvStatus;
 }
 
 function num(v: unknown): number {
   return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+
+/** RFC 6901 JSON Pointer escape for an object key used in a patch path. */
+function jsonPointerEscape(key: string): string {
+  return key.replace(/~/g, "~0").replace(/\//g, "~1");
 }
 
 /** Where a valueFrom env entry reads its value from, as one readable line. */
@@ -924,6 +936,15 @@ export const POST = withAuth(async (req) => {
  * rejected with a 400 decode error). The `add` operation replaces
  * `spec.running` when present and creates it when the resource omits it
  * (existing resources created before the field was added to the API).
+ *
+ * Starting an auto-stopped environment also clears its
+ * `ai.cubestack.io/auto-stopped` mark, which is the whole of the stopped
+ * state — the operator never writes `spec.running` itself, so without the
+ * clear the Start would change nothing and the controller would never wake.
+ * The mark is removed only when present, because a JSON-Patch `remove` on an
+ * absent path rejects the entire patch; the controller's own
+ * `ai.cubestack.io/auto-stopped-at` record is left untouched, since clearing
+ * it would re-introduce the idle re-mark the operator just fixed.
  */
 export const PATCH = withAuth(async (req) => {
   try {
@@ -932,14 +953,32 @@ export const PATCH = withAuth(async (req) => {
       return Response.json({ error: "namespace, name and running (boolean) are required" }, { status: 400 });
     }
     const co = getCustomObjectsClient();
+    const ops: Array<{ op: string; path: string; value?: unknown }> = [
+      // JSON-Patch `add`: replaces /spec/running when present, creates it when absent.
+      { op: "add", path: "/spec/running", value: body.running },
+    ];
+    if (body.running) {
+      // Starting an auto-stopped environment requires clearing the mark, which
+      // is the whole of the stopped state. A JSON-Patch `remove` on an absent
+      // path rejects the entire patch, so only clear it when it is actually there.
+      const current = (await co.getNamespacedCustomObject({
+        group: GROUP,
+        version: VERSION,
+        namespace: body.namespace,
+        plural: PLURAL_DEVENV,
+        name: body.name,
+      })) as DevEnv | undefined;
+      if (current?.metadata?.annotations?.[AUTO_STOPPED_ANNOTATION]) {
+        ops.push({ op: "remove", path: `/metadata/annotations/${jsonPointerEscape(AUTO_STOPPED_ANNOTATION)}` });
+      }
+    }
     await co.patchNamespacedCustomObject({
       group: GROUP,
       version: VERSION,
       namespace: body.namespace,
       plural: PLURAL_DEVENV,
       name: body.name,
-      // JSON-Patch `add`: replaces /spec/running when present, creates it when absent.
-      body: [{ op: "add", path: "/spec/running", value: body.running }],
+      body: ops,
       fieldManager: "cubestack-web",
     });
     return Response.json({ ok: true });
