@@ -304,14 +304,17 @@ export async function gatewayCatalog(timeoutMs = 2500): Promise<GatewayModel[] |
 }
 
 /**
- * The primary (public) Gateway's catalogue. The assistant's platform provider
- * has a single endpoint, so it is written from this one rather than from the
- * union — see gatewayOpenAiBase.
+ * Each resolved Gateway with its own chat catalogue, public first. A Gateway
+ * that could not be read contributes an empty list, so a caller pairing a model
+ * with the endpoint that serves it sees exactly the ids that endpoint answers
+ * for. Empty when no base resolves.
  */
-export async function primaryGatewayCatalog(timeoutMs = 2500): Promise<GatewayModel[] | null> {
-  const base = await resolveGatewayBase();
-  if (!base) return null;
-  return gatewayCatalogAt(base, timeoutMs);
+export async function gatewayCatalogs(
+  timeoutMs = 2500,
+): Promise<Array<{ base: GatewayBase; models: GatewayModel[] }>> {
+  const bases = await resolveGatewayBases();
+  const catalogs = await Promise.all(bases.map((base) => gatewayCatalogAt(base, timeoutMs)));
+  return bases.map((base, i) => ({ base, models: catalogs[i] ?? [] }));
 }
 
 /**
@@ -473,14 +476,11 @@ async function fetchAtBase(base: GatewayBase, path: string, init: RequestInit = 
 }
 
 /**
- * The OpenAI-compatible base of the model API (the endpoint the agent runtime
- * must call): the primary gateway base with `/v1` appended — a full request
- * URL or an existing `/v1` is normalised, never doubled. Null when no gateway
- * base can be resolved (nothing to write into a CR then).
+ * The OpenAI-compatible base of a resolved gateway (the endpoint the agent
+ * runtime must call): its URL with `/v1` appended — a full request URL or an
+ * existing `/v1` is normalised, never doubled.
  */
-export async function gatewayOpenAiBase(): Promise<string | null> {
-  const base = await resolveGatewayBase();
-  if (!base) return null;
+export function gatewayOpenAiBaseOf(base: GatewayBase): string {
   let url = base.url.trim().replace(/\/+$/, "");
   const suffix = "/chat/completions";
   if (url.toLowerCase().endsWith(suffix)) url = url.slice(0, -suffix.length).replace(/\/+$/, "");

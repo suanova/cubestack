@@ -62,17 +62,33 @@ export function ConfigPane() {
    *  A template written before that entry existed declares none, and the
    *  select used to be unusable until a save wrote one — but the save is
    *  driven BY the selection, so the page had no way in. The gateway's served
-   *  chat models stand in until the first save writes the entry. */
+   *  chat models stand in until the first save writes the entry.
+   *
+   *  The live catalogue wins while it answers: it is the union of both
+   *  Gateways (public and private), whereas the entry only holds the ids of the
+   *  one Gateway the last save pointed it at. Reading the entry first is what
+   *  hid a model published to the other catalogue. The endpoint stays the
+   *  declared one for display — the save rewrites it to whichever Gateway
+   *  serves the selection. */
   const declaredPlatformProvider = providers.find((p) => p.name === PLATFORM_MODEL_NAME);
-  const platformProvider: TemplateProviderOption | undefined = declaredPlatformProvider?.models?.length
-    ? declaredPlatformProvider
-    : gatewayModels.length > 0
-      ? { name: PLATFORM_MODEL_NAME, models: gatewayModels, keyed: false, origin: "system" }
+  const platformProvider: TemplateProviderOption | undefined =
+    gatewayModels.length > 0
+      ? {
+          name: PLATFORM_MODEL_NAME,
+          endpoint: declaredPlatformProvider?.endpoint,
+          models: gatewayModels,
+          keyed: false,
+          origin: "system",
+        }
       : declaredPlatformProvider;
   /** The providers the select reads models from: the template's, plus the
-   *  platform's stand-in when the template declares no usable entry. */
+   *  platform's live stand-in when it differs from the declared entry. The
+   *  declared platform entry is dropped in that case — its group would repeat
+   *  the same refs the live one already offers. */
   const catalogProviders: TemplateProviderOption[] =
-    platformProvider && platformProvider !== declaredPlatformProvider ? [platformProvider, ...providers] : providers;
+    platformProvider && platformProvider !== declaredPlatformProvider
+      ? [platformProvider, ...providers.filter((p) => p !== declaredPlatformProvider)]
+      : providers;
   /** Every selectable model, grouped by the provider it belongs to: the ref is
    *  what the CR stores, and the template's providers are the catalog — the
    *  reference says as much in its own hint ("models come from the template's

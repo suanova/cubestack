@@ -42,7 +42,7 @@ import {
   type AgentTemplateCr,
   type JsonPatchOp,
 } from "@/lib/cubepilot/agentcrd";
-import { primaryGatewayCatalog, gatewayOpenAiBase } from "@/lib/cubepilot/gateway";
+import { gatewayCatalogs, gatewayOpenAiBaseOf } from "@/lib/cubepilot/gateway";
 import { validateInstructions } from "@/lib/cubepilot/instructions";
 import { modelKey } from "@/lib/cubepilot/llm";
 import { logger } from "@/lib/log";
@@ -60,17 +60,42 @@ function clearOrAdd(value: string | undefined, path: string, current: string | u
   return current !== undefined ? [{ op: "remove", path }] : [];
 }
 
+type PlatformCatalog = Awaited<ReturnType<typeof gatewayCatalogs>>;
+
 /**
- * The model ids the primary (public) AI Gateway serves — the platform
- * provider's entry is written from this one, since a provider has a single
- * endpoint. Best effort — an absent or slow gateway simply means "no models":
+ * The model ids the platform's AI Gateways serve — the union of the public and
+ * private catalogues, merged by id, so a model published to either one is
+ * offered. Best effort — an absent or slow gateway simply means "no models":
  * the platform provider's entry is left as it stands and its ids are not
  * offered. The call itself is memoized and bounded by the gateway module, so a
  * slow gateway is not paid for on every read.
  */
-async function gatewayModels(): Promise<string[]> {
-  const catalog = await primaryGatewayCatalog();
-  return (catalog ?? []).map((m) => m.id);
+function servedModels(catalogs: PlatformCatalog): string[] {
+  const seen = new Set<string>();
+  const ids: string[] = [];
+  for (const { models } of catalogs) {
+    for (const model of models) {
+      if (seen.has(model.id)) continue;
+      seen.add(model.id);
+      ids.push(model.id);
+    }
+  }
+  return ids;
+}
+
+/**
+ * The platform provider entry for `model`: the gateway that serves it (public
+ * first), so the endpoint written into the template is one that answers for
+ * the ids listed under it — the two catalogues are separate Gateways, and a
+ * provider has a single endpoint. An empty or unknown `model` falls back to the
+ * first gateway that serves anything; null when no gateway answered.
+ */
+function platformEntryFor(catalogs: PlatformCatalog, model: string): { api: string; models: string[] } | null {
+  const serving =
+    (model ? catalogs.find((c) => c.models.some((m) => m.id === model)) : undefined) ??
+    catalogs.find((c) => c.models.length > 0);
+  if (!serving) return null;
+  return { api: gatewayOpenAiBaseOf(serving.base), models: serving.models.map((m) => m.id) };
 }
 
 function configFromCr(cr: AgentInstanceCr | null, tmpl: AgentTemplateCr | null, gateway: string[]): AgentConfig {
@@ -97,7 +122,7 @@ export const GET = withAuth(async (_req, session) => {
         hint: "install the CubePilot operator, or point CUBESTACK_TASKS_NAMESPACE at the namespace holding the CRs",
       });
     }
-    return Response.json({ config: configFromCr(cr, tmpl, await gatewayModels()) });
+    return Response.json({ config: configFromCr(cr, tmpl, servedModels(await gatewayCatalogs())) });
   } catch (e) {
     return k8sErrorResponse(e);
   }
@@ -146,8 +171,8 @@ export const PUT = withAuth(async (req, session) => {
     //    providers the template declares) is a supported shape, so a missing
     //    gateway means "no platform models in this save", never a refusal — the
     //    platform is a capability of the cluster, not a precondition of a save.
-    const served = await gatewayModels();
-    const modelApi = served.length > 0 ? await gatewayOpenAiBase() : null;
+    const catalogs = await gatewayCatalogs();
+    const served = servedModels(catalogs);
     // selectedModel is written as the "<provider>/<model id>" ref the operator
     // resolves against the template's PROVIDERS, not against the gateway: an
     // external provider added in the LLM card is a first-class choice for the
@@ -168,9 +193,6 @@ export const PUT = withAuth(async (req, session) => {
     const selectable = new Set<string>(
       externalProviders.flatMap((p) => (p.models ?? []).map((id) => modelKey(p.name ?? "", id))),
     );
-    if (modelApi) {
-      for (const id of served) selectable.add(modelKey(PLATFORM_MODEL_NAME, id));
-    }
     const requested = patch.selectedModel ?? "";
     // A bare id means the platform provider's — unless the gateway itself serves
     // an id containing a slash (a namespaced model like "meta-llama/Llama-3"),
@@ -182,6 +204,17 @@ export const PUT = withAuth(async (req, session) => {
         : served.includes(requested) || !requested.includes("/")
           ? modelKey(PLATFORM_MODEL_NAME, requested)
           : requested;
+    // The gateway that serves the selection: a provider has a single endpoint,
+    // and the public/private catalogues are separate Gateways, so the entry
+    // written below must point at the one whose ids it lists.
+    const platformId = requestedRef.startsWith(`${PLATFORM_MODEL_NAME}/`)
+      ? requestedRef.slice(PLATFORM_MODEL_NAME.length + 1)
+      : "";
+    const platform = served.length > 0 ? platformEntryFor(catalogs, platformId) : null;
+    const modelApi = platform?.api ?? null;
+    if (modelApi) {
+      for (const id of served) selectable.add(modelKey(PLATFORM_MODEL_NAME, id));
+    }
     if (requestedRef !== "" && !selectable.has(requestedRef)) {
       // A platform ref whose platform is missing is not an unknown model: name
       // what is missing, and what can be picked instead.
@@ -212,12 +245,14 @@ export const PUT = withAuth(async (req, session) => {
           : ([...selectable][0] ?? "")
         : "";
     const selectedModel = requestedRef || derived;
-    const templateOps = modelApi ? platformProviderOps(tmpl.spec?.providers, modelApi, served) : [];
-    if (modelApi && templateOps.length > 0) {
+    // The entry lists the ids of the gateway it points at, not the union: a
+    // single endpoint cannot answer for the other Gateway's models.
+    const templateOps = platform ? platformProviderOps(tmpl.spec?.providers, platform.api, platform.models) : [];
+    if (platform && templateOps.length > 0) {
       logger("agent").info("template updated for the platform provider", {
         provider: PLATFORM_MODEL_NAME,
-        endpoint: modelApi,
-        models: served.length,
+        endpoint: platform.api,
+        models: platform.models.length,
         ops: templateOps.length,
       });
     }

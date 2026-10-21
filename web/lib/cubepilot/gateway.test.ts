@@ -18,8 +18,10 @@ import {
   GATEWAY_NAMESPACE,
   clearGatewayCaches,
   gatewayCatalog,
+  gatewayCatalogs,
   gatewayFetch,
   gatewayFetchForModel,
+  gatewayOpenAiBaseOf,
   gatewayTokenHeader,
   resolveGatewayBase,
   resolveGatewayBases,
@@ -168,6 +170,28 @@ describe("lib/cubepilot/gateway", () => {
       { id: "private-chat", ownedBy: "CubeStack" },
     ]);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("pairs each Gateway with the models its own endpoint serves", async () => {
+    // The config page writes one provider entry per endpoint, so it needs the
+    // catalogue split by Gateway — not just the union.
+    vi.stubEnv("KUBERNETES_SERVICE_HOST", "10.0.0.1");
+    vi.stubEnv("KUBERNETES_SERVICE_PORT", "443");
+    listNamespacedService.mockResolvedValue({ items: [PUBLIC_SERVICE, PRIVATE_SERVICE] });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const data = url.includes("cubestack-ai-gateway-private") ? [{ id: "private-chat" }] : [{ id: "qwen38-27b" }];
+        return new Response(JSON.stringify({ data }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }),
+    );
+    const catalogs = await gatewayCatalogs();
+    expect(catalogs.map((c) => c.base.name)).toEqual(["cubestack-ai-gateway", "cubestack-ai-gateway-private"]);
+    expect(catalogs.map((c) => c.models.map((m) => m.id))).toEqual([["qwen38-27b"], ["private-chat"]]);
+    expect(gatewayOpenAiBaseOf(catalogs[1].base)).toBe(`${catalogs[1].base.url}/v1`);
   });
 
   it("sends a chat request to the Gateway that serves the model", async () => {
