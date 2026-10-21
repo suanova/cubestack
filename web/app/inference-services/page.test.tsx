@@ -117,10 +117,30 @@ describe("inference services page", () => {
     act(() => root.unmount());
   });
 
-  it("shows the in-cluster address as the AI Gateway endpoint of a private service", async () => {
-    // The private catalog route has no public listener: the address a caller
-    // uses is the service's own in-cluster endpoint, not the cluster's public
-    // catalog host.
+  it("shows the profile's effective maxModelLen when the user did not override it", async () => {
+    // The runtime uses the profile default when spec.overrides omits the knob,
+    // so the details card must show that value rather than an empty placeholder.
+    stubData([
+      inferenceServiceSummary({
+        overrideNums: {},
+        overrides: [
+          { name: "maxModelLen", type: "integer", min: 4096, max: 262144, enum: null, current: 123456, default: 123456 },
+        ],
+      }),
+    ]);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    expect(container.textContent).toContain("maxModelLen");
+    expect(container.textContent).toContain("123456");
+
+    act(() => root.unmount());
+  });
+
+  it("shows the private gateway's in-cluster address as the AI Gateway endpoint of a private service", async () => {
+    // The private catalog route has no public listener: a caller inside the
+    // cluster reaches it through the private gateway's Service, not the
+    // cluster's public catalog host — and not the model server's own address.
     stubData([
       inferenceServiceSummary({
         aigatewayRouter: "cubestack-ai-gateway-private",
@@ -131,7 +151,8 @@ describe("inference services page", () => {
     const { container, root } = renderPage();
     await act(async () => {});
 
-    expect(container.textContent).toContain("外部端点(AI Gateway)");
+    expect(container.textContent).toContain("集群内端点(AI Gateway)");
+    expect(container.textContent).toContain("http://cubestack-ai-private.envoy-gateway-system.svc");
     expect(container.textContent).toContain("dsv4-api.project-a.svc:8001");
     expect(container.textContent).not.toContain("https://ai.cubestack.dev");
 
