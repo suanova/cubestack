@@ -763,10 +763,40 @@ func (r *InferenceServiceReconciler) checkRoute(ctx context.Context, isvc *aiv1a
 	if err := r.Get(ctx, client.ObjectKeyFromObject(freshOpenAI), freshOpenAI); err != nil {
 		return routeErrAfterApply(check, err)
 	}
-	if !routeParentsAccepted(freshOpenAI.Status.Parents, freshOpenAI.Generation, r.GatewayName, r.GatewayNamespace) {
+	if !openAIPathsRouteAccepted(freshOpenAI) {
 		check.Reason = RouteGatewayNotAccepted
 	}
 	return check, nil
+}
+
+// openAIPathsRouteAccepted reports whether the shared OpenAI-paths HTTPRoute is
+// accepted by a Gateway it declares as a parent. The platform owns the route's
+// parentRefs: an install may attach the private catalog surface to a second
+// Gateway (cubestack-gateway-private) rather than to the configured public one,
+// so checking only the configured name would report the private surface
+// GatewayNotAccepted forever. Each declared Gateway parent is asked; a route
+// attached to none has no accepted parent.
+func openAIPathsRouteAccepted(route *gatewayv1.HTTPRoute) bool {
+	for _, ref := range route.Spec.ParentRefs {
+		group, kind := gatewayAPIGroup, gatewayKind
+		if ref.Group != nil {
+			group = string(*ref.Group)
+		}
+		if ref.Kind != nil {
+			kind = string(*ref.Kind)
+		}
+		if group != gatewayAPIGroup || kind != gatewayKind {
+			continue
+		}
+		namespace := route.Namespace
+		if ref.Namespace != nil {
+			namespace = string(*ref.Namespace)
+		}
+		if routeParentsAccepted(route.Status.Parents, route.Generation, string(ref.Name), namespace) {
+			return true
+		}
+	}
+	return false
 }
 
 // exposesOpenAIPaths reports whether the service publishes any path served by

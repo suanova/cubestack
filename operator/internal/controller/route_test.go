@@ -213,10 +213,19 @@ func acceptOpenAIPathsRoute(name aiv1alpha1.AIGatewayRouterName) {
 		return
 	}
 	Expect(err).NotTo(HaveOccurred())
-	route.Status.Parents = gatewayRouteParents(gatewayv1.ParentReference{
+	// Report the status for the Gateway the route actually declares: the
+	// platform owns the attachment, and the private surface may name its own.
+	parent := gatewayv1.ParentReference{
 		Name:      gatewayv1.ObjectName(testGatewayName),
 		Namespace: ptrTo(gatewayv1.Namespace(testGatewayNamespace)),
-	}, route.Generation, true, "", "")
+	}
+	if len(route.Spec.ParentRefs) > 0 {
+		parent = route.Spec.ParentRefs[0]
+		if parent.Namespace == nil {
+			parent.Namespace = ptrTo(gatewayv1.Namespace(route.Namespace))
+		}
+	}
+	route.Status.Parents = gatewayRouteParents(parent, route.Generation, true, "", "")
 	Expect(k8sClient.Status().Update(ctx, route)).To(Succeed())
 }
 
@@ -434,6 +443,32 @@ var _ = Describe("checkRoute", func() {
 		// never created for this service.
 		publicHTTP := sharedHTTPRoute(testCatalogRoute)
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(publicHTTP), publicHTTP))).To(BeTrue())
+
+		acceptCatalogRoute(testPrivateCatalogRoute)
+		acceptAIServiceBackend(name)
+		check, err = r.checkRoute(ctx, mustGetISVC(ctx, name), routeProfile(name+"-prof"), readyEndpoint(name), testEngineModel)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(check.Reason).To(BeEmpty())
+	})
+
+	It("accepts the private surface attached to a separate private Gateway", func() {
+		ensureCatalogRoutes()
+		name := "route-private-gateway"
+		isvc := routeISVC(name, false)
+		isvc.Spec.Route.AIGatewayRouter = aiv1alpha1.AIGatewayRouterPrivate
+		Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
+		r := routeReconciler()
+		check, err := r.checkRoute(ctx, mustGetISVC(ctx, name), routeProfile(name+"-prof"), readyEndpoint(name), testEngineModel)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(check.Reason).To(Equal(RouteGatewayNotAccepted))
+
+		// The platform attaches the private surface to its own Gateway, which is
+		// not the configured public name. The operator owns only spec.rules, so
+		// the parent it has to verify is the one the route declares.
+		privateHTTP := sharedHTTPRoute(testPrivateCatalogRoute)
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(privateHTTP), privateHTTP)).To(Succeed())
+		privateHTTP.Spec.ParentRefs = []gatewayv1.ParentReference{{Name: gatewayv1.ObjectName(testGatewayName + "-private")}}
+		Expect(k8sClient.Update(ctx, privateHTTP)).To(Succeed())
 
 		acceptCatalogRoute(testPrivateCatalogRoute)
 		acceptAIServiceBackend(name)
