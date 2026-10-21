@@ -571,9 +571,9 @@ func (r *InferenceServiceReconciler) applyCatalogRoute(ctx context.Context, rout
 }
 
 // applyOpenAIPathsRoute writes the full rule set to the named shared HTTPRoute,
-// creating it when absent and the set is not empty. The platform owns any
-// existing object's other spec fields (hostnames, parentRefs); only the rules
-// are reconciled.
+// creating it when absent and the set is not empty. The platform may have
+// installed the object itself: its lifetime and other spec fields (hostnames,
+// parentRefs) are not the operator's, and only the rules are reconciled.
 func (r *InferenceServiceReconciler) applyOpenAIPathsRoute(ctx context.Context, routeName aiv1alpha1.AIGatewayRouterName, rules []gatewayv1.HTTPRouteRule) error {
 	if rules == nil {
 		rules = []gatewayv1.HTTPRouteRule{}
@@ -594,11 +594,14 @@ func (r *InferenceServiceReconciler) applyOpenAIPathsRoute(ctx context.Context, 
 			return err
 		}
 		if len(rules) == 0 {
-			// The Gateway API CRD defaults an empty or omitted rule list to a
-			// catch-all PathPrefix "/" rule, so an update could never store "no
-			// rules": the defaulted object would differ from the desired one on
-			// every pass and be rewritten forever. Drop the surface instead,
-			// matching the create path that leaves it absent.
+			// spec.rules must hold at least one rule, so "no rules" cannot be
+			// stored. Remove the surface only when this operator created it — the
+			// managed-by label it stamps at creation is that marker. A surface the
+			// platform installed predates the label and its lifetime is not ours
+			// to end, so it is left in place.
+			if route.Labels[managedByLabelKey] != managedByValue {
+				return nil
+			}
 			return client.IgnoreNotFound(r.Delete(ctx, route))
 		}
 		if apiequality.Semantic.DeepEqual(route.Spec.Rules, rules) {

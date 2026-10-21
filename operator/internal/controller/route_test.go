@@ -758,11 +758,39 @@ var _ = Describe("checkRoute", func() {
 		route = privateCatalogRoute()
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
 		Expect(findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, name))).To(Equal(-1))
-		// The OpenAI-paths HTTPRoute had this service as its only writer: with no
-		// rules left the surface is removed rather than left attached with the
-		// CRD's defaulted catch-all rule.
+		// The OpenAI-paths HTTPRoute here was created by the operator, which
+		// stamps its managed-by label on creation: with no rules left it is
+		// removed rather than left attached with the CRD's defaulted catch-all
+		// rule.
 		httpRoute := sharedHTTPRoute(testCatalogRoute)
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(httpRoute), httpRoute))).To(BeTrue())
+	})
+
+	It("leaves a platform-installed OpenAI-paths HTTPRoute in place when nothing is published", func() {
+		// The platform may install the shared surfaces itself. They carry no
+		// managed-by label, so their lifetime is not the operator's: an empty rule
+		// set — which the CRD cannot store — must not end in the object being
+		// deleted.
+		ensureSharedCatalogRoute()
+		platform := &gatewayv1.HTTPRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: openAIPathsRouteName(testCatalogRoute), Namespace: testGatewayNamespace},
+			Spec: gatewayv1.HTTPRouteSpec{
+				CommonRouteSpec: gatewayv1.CommonRouteSpec{
+					ParentRefs: []gatewayv1.ParentReference{{Name: gatewayv1.ObjectName(testGatewayName)}},
+				},
+				Rules: []gatewayv1.HTTPRouteRule{{
+					Matches: []gatewayv1.HTTPRouteMatch{{Path: &gatewayv1.HTTPPathMatch{Type: ptrTo(gatewayv1.PathMatchPathPrefix), Value: ptrTo("/")}}},
+				}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, platform)).To(Succeed())
+
+		Expect(routeReconciler().syncSharedCatalogRoutes(ctx)).To(Succeed())
+
+		stored := sharedHTTPRoute(testCatalogRoute)
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(stored), stored)).To(Succeed())
+		Expect(stored.Labels).NotTo(HaveKey(managedByLabelKey))
+		Expect(stored.Spec.Rules).To(HaveLen(1))
 	})
 
 	It("removes the rule from both shared routes when a service is deleted", func() {
