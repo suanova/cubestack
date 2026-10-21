@@ -941,13 +941,16 @@ function EndpointsCard({ s }: { s: InferenceServiceSummary }) {
   return (
     <Card title={t("inf.endpoints.title")}>
       {/* Stacked, not side by side: this card is a third of the panel's width
-          now, and two addresses across it would ellipsise both. */}
+          now, and two addresses across it would ellipsise both. The track's
+          minimum is 0, not the row's min-content: a long in-cluster gateway
+          address is one unbreakable token, and an `auto` minimum sized the
+          track past the card, pushing the copy button outside its border. */}
       <Box
         sx={{
           px: "18px",
           py: "14px",
           display: "grid",
-          gridTemplateColumns: "1fr",
+          gridTemplateColumns: "minmax(0, 1fr)",
           rowGap: "14px",
           alignItems: "start",
         }}
