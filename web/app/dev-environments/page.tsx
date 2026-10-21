@@ -2541,19 +2541,6 @@ function CreateWizard({
                     </Box>
                     <Switch size="small" checked={draft.runAsRoot} onChange={(e) => setField("runAsRoot", e.target.checked)} data-od-id="wizard-root" />
                   </Box>
-                  <Box sx={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "12px", py: "8px" }}>
-                    <Box>
-                      <Box sx={{ fontSize: 12.5 }}>{t("dev.wizard.sudo")}</Box>
-                      <Box sx={{ fontSize: 11, color: "text.secondary", mt: "2px" }}>{t("dev.wizard.sudoHint")}</Box>
-                    </Box>
-                    <Switch
-                      size="small"
-                      checked={draft.sudo}
-                      disabled={draft.runAsRoot}
-                      onChange={(e) => setField("sudo", e.target.checked)}
-                      data-od-id="wizard-sudo"
-                    />
-                  </Box>
                   <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" }, gap: "0 14px", pt: "6px" }}>
                     <WizField label={t("dev.wizard.account")} hint={t("dev.wizard.accountHint")} error={accountError} errorText={t("dev.wizard.errAccount")}>
                       <TextField
@@ -2590,6 +2577,19 @@ function CreateWizard({
                 </WizSection>
 
                 <WizSection odId="sec-runtime" title={t("dev.wizard.runtime")} badge="runtime.env / args / command">
+                  <Box sx={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "12px", py: "8px" }}>
+                    <Box>
+                      <Box sx={{ fontSize: 12.5 }}>{t("dev.wizard.sudo")}</Box>
+                      <Box sx={{ fontSize: 11, color: "text.secondary", mt: "2px" }}>{t("dev.wizard.sudoHint")}</Box>
+                    </Box>
+                    <Switch
+                      size="small"
+                      checked={draft.sudo}
+                      disabled={draft.runAsRoot}
+                      onChange={(e) => setField("sudo", e.target.checked)}
+                      data-od-id="wizard-sudo"
+                    />
+                  </Box>
                   <WizField label={t("dev.wizard.envs")} hint={t("dev.wizard.envHint")} error={envError} errorText={t("dev.wizard.errEnv")}>
                     {draft.envs.map((r) => (
                       <Box key={r.id} sx={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: "8px", alignItems: "center", mb: "8px" }}>
