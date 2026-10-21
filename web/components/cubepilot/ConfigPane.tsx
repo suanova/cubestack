@@ -17,6 +17,7 @@ import { providerNameNotice } from "@/lib/cubepilot/provider-names";
 import {
   PLATFORM_MODEL_NAME,
   displayModelName,
+  isPlatformProviderName,
   type AgentConfig,
   type AgentStatus,
   type AllowlistRule,
@@ -58,36 +59,39 @@ export function ConfigPane() {
   const [policySel, setPolicySel] = useState("");
   const providers: TemplateProviderOption[] = config.providers ?? [];
   const gatewayModels = config.gatewayModels ?? [];
-  /** The platform's own provider — the builtin entry pointing at the gateway.
-   *  A template written before that entry existed declares none, and the
-   *  select used to be unusable until a save wrote one — but the save is
-   *  driven BY the selection, so the page had no way in. The gateway's served
-   *  chat models stand in until the first save writes the entry.
+  /** The platform's own providers, one per Gateway, from the live catalogue.
+   *  A template written before an entry existed declares none, and the select
+   *  used to be unusable until a save wrote one — but the save is driven BY the
+   *  selection, so the page had no way in. The served chat models stand in
+   *  until the first save writes the entries.
    *
-   *  The live catalogue wins while it answers: it is the union of both
-   *  Gateways (public and private), whereas the entry only holds the ids of the
-   *  one Gateway the last save pointed it at. Reading the entry first is what
-   *  hid a model published to the other catalogue. The endpoint stays the
-   *  declared one for display — the save rewrites it to whichever Gateway
-   *  serves the selection. */
-  const declaredPlatformProvider = providers.find((p) => p.name === PLATFORM_MODEL_NAME);
-  const platformProvider: TemplateProviderOption | undefined =
-    gatewayModels.length > 0
-      ? {
-          name: PLATFORM_MODEL_NAME,
-          endpoint: declaredPlatformProvider?.endpoint,
-          models: gatewayModels,
+   *  The live catalogue wins while it answers: it holds every Gateway's current
+   *  list, whereas a declared entry holds only the ids of the Gateway the last
+   *  save pointed it at. Reading the declared entries first is what hid a model
+   *  published to a catalogue no one had saved yet.
+   *
+   *  A response that predates gatewayProviders carries just the union of ids;
+   *  that stands in under the original "cubestack" name. */
+  const gatewayProviders = config.gatewayProviders ?? [];
+  const livePlatformProviders: TemplateProviderOption[] =
+    gatewayProviders.length > 0
+      ? gatewayProviders.map((p) => ({
+          name: p.name,
+          endpoint: p.endpoint,
+          models: p.models,
           keyed: false,
           origin: "system",
-        }
-      : declaredPlatformProvider;
-  /** The providers the select reads models from: the template's, plus the
-   *  platform's live stand-in when it differs from the declared entry. The
-   *  declared platform entry is dropped in that case — its group would repeat
-   *  the same refs the live one already offers. */
+        }))
+      : gatewayModels.length > 0
+        ? [{ name: PLATFORM_MODEL_NAME, models: gatewayModels, keyed: false, origin: "system" }]
+        : [];
+  /** The providers the select reads models from: the template's own, plus the
+   *  platform's live entries. A declared platform entry is dropped while the
+   *  live one stands in for it — its group would repeat the same refs the live
+   *  one already offers. */
   const catalogProviders: TemplateProviderOption[] =
-    platformProvider && platformProvider !== declaredPlatformProvider
-      ? [platformProvider, ...providers.filter((p) => p !== declaredPlatformProvider)]
+    livePlatformProviders.length > 0
+      ? [...livePlatformProviders, ...providers.filter((p) => !isPlatformProviderName(p.name))]
       : providers;
   /** Every selectable model, grouped by the provider it belongs to: the ref is
    *  what the CR stores, and the template's providers are the catalog — the
@@ -95,11 +99,11 @@ export function ConfigPane() {
    *  providers"), so an external provider added in the card below is selectable
    *  the moment it is saved.
    *
-   *  The gateway's served list is NOT the catalog: it is the ids the PLATFORM
-   *  provider's entry gets written with, and they are already in here as that
-   *  provider's models. Reading the catalog from it instead is what hid every
-   *  provider the user added. It is the fallback only when the template has no
-   *  platform entry at all (see platformProvider).
+   *  The live catalogue is NOT the catalog: the platform's entries are in here
+   *  as their own groups, but reading the catalog from the gateway alone is
+   *  what hid every provider the user added. The live entries are the fallback
+   *  only when the template declares no platform entry at all (see
+   *  livePlatformProviders).
    *
    *  Non-chat ids are dropped: the assistant can only run a chat model, and a
    *  provider's list may carry one the platform serves for another modality. */
@@ -120,13 +124,19 @@ export function ConfigPane() {
     : (modelOptions[0]?.ref ?? "");
   /** The provider the current selection belongs to, for the note under the
    *  select: an external model does not run through the platform endpoint. */
-  const selectedProvider = catalogProviders.find((p) => modelValue.startsWith(`${p.name}/`)) ?? platformProvider;
-  /** The platform provider's ids: what the gateway serves, as the template's
-   *  platform entry holds them. This is the card's "platform" list — the select
-   *  above no longer reads it as the catalog, because that is what hid every
-   *  provider the user added. Non-chat ids are dropped here too: the entry may
-   *  have been written before the chat filter existed. */
-  const systemModels: string[] = (platformProvider?.models?.length ? platformProvider.models : gatewayModels).filter(isChatModel);
+  const selectedProvider =
+    catalogProviders.find((p) => modelValue.startsWith(`${p.name}/`)) ??
+    livePlatformProviders[0] ??
+    providers.find((p) => p.origin === "system");
+  /** The platform's ids — the live entries' union (that is what the Gateways
+   *  serve now), falling back to the declared platform entries. This is the
+   *  card's "platform" list — the select above no longer reads it as the
+   *  catalog, because that is what hid every provider the user added. Non-chat
+   *  ids are dropped here too: an entry may have been written before the chat
+   *  filter existed. */
+  const systemModelList =
+    livePlatformProviders.length > 0 ? livePlatformProviders : providers.filter((p) => p.origin === "system");
+  const systemModels: string[] = [...new Set(systemModelList.flatMap((p) => p.models ?? []))].filter(isChatModel);
   const selectedId = displayModelName(config.selectedModel);
   const externalProviders = providers.filter((p) => p.origin !== "system");
   const [confirmBusy, setConfirmBusy] = useState(false);
@@ -556,7 +566,7 @@ export function ConfigPane() {
                     // any other one is named, because the sentence's whole point is
                     // which endpoint the model runs through.
                     provider:
-                      selectedProvider && selectedProvider.name !== PLATFORM_MODEL_NAME
+                      selectedProvider && !isPlatformProviderName(selectedProvider.name)
                         ? selectedProvider.name
                         : t("cubepilot.config.providerPlatform"),
                     endpoint: selectedProvider?.endpoint || "—",

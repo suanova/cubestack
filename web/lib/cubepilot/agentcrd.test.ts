@@ -223,14 +223,22 @@ describe("platformProviderOps", () => {
   const ENDPOINT = "http://gw:8080/v1";
 
   it("adds the provider to an empty list", () => {
-    expect(platformProviderOps(undefined, ENDPOINT, ["a"])).toEqual([
+    expect(platformProviderOps(undefined, "cubestack", ENDPOINT, ["a"])).toEqual([
       { op: "add", path: "/spec/providers", value: [{ name: "cubestack", endpoint: ENDPOINT, models: ["a"] }] },
     ]);
   });
 
   it("appends it when the template has other providers", () => {
-    expect(platformProviderOps([{ name: "deepseek" }], ENDPOINT, ["a"])).toEqual([
+    expect(platformProviderOps([{ name: "deepseek" }], "cubestack", ENDPOINT, ["a"])).toEqual([
       { op: "add", path: "/spec/providers/-", value: { name: "cubestack", endpoint: ENDPOINT, models: ["a"] } },
+    ]);
+  });
+
+  it("adds a second Gateway's entry without touching the first", () => {
+    // The private Gateway gets its own provider: sharing one entry between the
+    // catalogues would replace one's ids with the other's on every save.
+    expect(platformProviderOps([{ name: "cubestack", endpoint: "http://pub:8080/v1", models: ["a"] }], "cubestack-private", ENDPOINT, ["b"])).toEqual([
+      { op: "add", path: "/spec/providers/-", value: { name: "cubestack-private", endpoint: ENDPOINT, models: ["b"] } },
     ]);
   });
 
@@ -238,6 +246,7 @@ describe("platformProviderOps", () => {
     expect(
       platformProviderOps(
         [{ name: "x" }, { name: "cubestack", endpoint: "http://old:8080/v1", models: ["old"], credentialRef: { name: "someone-elses" } }],
+        "cubestack",
         ENDPOINT,
         ["a"],
       ),
@@ -249,12 +258,14 @@ describe("platformProviderOps", () => {
   });
 
   it("is a no-op when the provider is already current", () => {
-    expect(platformProviderOps([{ name: "cubestack", endpoint: ENDPOINT, models: ["a", "b"] }], ENDPOINT, ["a", "b"])).toEqual([]);
+    expect(
+      platformProviderOps([{ name: "cubestack", endpoint: ENDPOINT, models: ["a", "b"] }], "cubestack", ENDPOINT, ["a", "b"]),
+    ).toEqual([]);
   });
 
   it("rewrites the list when the ids or their order changed", () => {
-    expect(platformProviderOps([{ name: "cubestack", endpoint: ENDPOINT, models: ["b", "a"] }], ENDPOINT, ["a", "b"])).toEqual([
-      { op: "replace", path: "/spec/providers/0/models", value: ["a", "b"] },
-    ]);
+    expect(
+      platformProviderOps([{ name: "cubestack", endpoint: ENDPOINT, models: ["b", "a"] }], "cubestack", ENDPOINT, ["a", "b"]),
+    ).toEqual([{ op: "replace", path: "/spec/providers/0/models", value: ["a", "b"] }]);
   });
 });

@@ -80,22 +80,32 @@ export interface Report {
 }
 
 /**
- * The provider name the platform owns: the AgentTemplate always carries an
- * entry with this name pointing at the AI Gateway, and the config save selects
- * a ref through it, so the agent sees one stable provider in front of the
- * gateway. Its prefix is internal plumbing users never chose (see
- * displayModelName). (Here rather than in agentcrd.ts because client
- * components use it and agentcrd pulls in the Kubernetes client.)
+ * The provider name the platform owns: the public Gateway's AgentTemplate entry
+ * carries this name, and the config save selects a ref through it, so the agent
+ * sees a stable provider in front of the gateway. Other Gateways get their own
+ * derivative ("cubestack-private") — see isPlatformProviderName. The prefix is
+ * internal plumbing users never chose (see displayModelName). (Here rather
+ * than in agentcrd.ts because client components use it and agentcrd pulls in
+ * the Kubernetes client.)
  */
 export const PLATFORM_MODEL_NAME = "cubestack";
 
+/** Whether `name` is a provider the platform owns: "cubestack" itself, or a
+ *  per-Gateway derivative ("cubestack-private"). Those entries point at the AI
+ *  Gateways, so they are written by the config save and are not the admin's to
+ *  edit. */
+export function isPlatformProviderName(name: string): boolean {
+  return name === PLATFORM_MODEL_NAME || name.startsWith(`${PLATFORM_MODEL_NAME}-`);
+}
+
 /** The model name users see for the agent's selection: the platform provider
- *  prefix ("cubestack/<id>") is internal plumbing users never chose, so only
- *  the model id after the "/" is shown; any other ref (an external provider's)
- *  is shown whole, as "<provider>/<modelId>". */
+ *  prefix ("cubestack/<id>", "cubestack-private/<id>") is internal plumbing
+ *  users never chose, so only the model id after the "/" is shown; any other
+ *  ref (an external provider's) is shown whole, as "<provider>/<modelId>". */
 export function displayModelName(selectedModel: string): string {
-  const prefix = `${PLATFORM_MODEL_NAME}/`;
-  return selectedModel.startsWith(prefix) ? selectedModel.slice(prefix.length) : selectedModel;
+  const slash = selectedModel.indexOf("/");
+  if (slash < 0) return selectedModel;
+  return isPlatformProviderName(selectedModel.slice(0, slash)) ? selectedModel.slice(slash + 1) : selectedModel;
 }
 
 /** One provider of the AgentTemplate (reference TemplateProviderSpec): an
@@ -127,9 +137,15 @@ export interface AgentConfig {
   userInstructions: string;
   /** The AgentTemplate's provider list (template-level, read-only here). */
   providers?: TemplateProviderOption[];
-  /** The model ids the AI Gateway serves (the chat tab's source): what the
-   *  platform provider's entry gets written with. */
+  /** The model ids the AI Gateways serve (the chat tab's source): the union of
+   *  the platform providers' model lists. */
   gatewayModels?: string[];
+  /** The platform's own provider entries, one per resolved Gateway: the name
+   *  the entry is written under, the endpoint it points at and the ids that
+   *  endpoint serves. A selection through one is "<name>/<id>" — the entries
+   *  are named per Gateway so a save for one catalogue never replaces another's
+   *  models. */
+  gatewayProviders?: Array<{ name: string; endpoint: string; models: string[] }>;
   /** true when the builtin AgentTemplate is missing from the operator
    *  namespace — the operator is not installed, or CUBESTACK_TASKS_NAMESPACE
    *  points somewhere else. The page then has no catalog and no runtime. */

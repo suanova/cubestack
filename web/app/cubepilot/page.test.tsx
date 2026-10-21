@@ -1348,6 +1348,38 @@ describe("cubepilot page", () => {
     act(() => root.unmount());
   });
 
+  it("offers each Gateway's models under its own platform provider", async () => {
+    // The public and private catalogues are separate providers: each ref points
+    // at the endpoint that serves it, so one save cannot replace the other's
+    // models.
+    stubApi({
+      exists: true,
+      selectedModel: "cubestack-private/dsv4-api",
+      userInstructions: "",
+      providers: [
+        { name: "cubestack", endpoint: "http://pub.test:8080/v1", models: ["qwen38-27b"], origin: "system" },
+        { name: "cubestack-private", endpoint: "http://priv.test:8080/v1", models: ["dsv4-api"], origin: "system" },
+      ],
+      gatewayModels: ["qwen38-27b", "dsv4-api"],
+      gatewayProviders: [
+        { name: "cubestack", endpoint: "http://pub.test:8080/v1", models: ["qwen38-27b"] },
+        { name: "cubestack-private", endpoint: "http://priv.test:8080/v1", models: ["dsv4-api"] },
+      ],
+    });
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    const model = container.querySelector('[data-od-id="cp-config-model-select"]') as HTMLSelectElement;
+    expect(Array.from(model.options).map((o) => o.value)).toEqual(["cubestack/qwen38-27b", "cubestack-private/dsv4-api"]);
+    // The option labels stay bare ids: neither provider prefix is shown.
+    expect(model.textContent).not.toContain("cubestack/");
+    expect(model.textContent).not.toContain("cubestack-private/");
+    // The note names the endpoint that actually serves the selection.
+    const note = container.querySelector('[data-od-id="cp-config-model-note"]') as HTMLElement;
+    expect(note.textContent).toContain("http://priv.test:8080/v1");
+    act(() => root.unmount());
+  });
+
   it("restores the persisted tab on mount", async () => {
     localStorage.setItem("cubestack.cubepilot.tab", "config");
     const { container, root } = renderPage();

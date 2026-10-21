@@ -23,6 +23,7 @@ import {
   gatewayFetchForModel,
   gatewayOpenAiBaseOf,
   gatewayTokenHeader,
+  platformProviderNameOf,
   resolveGatewayBase,
   resolveGatewayBases,
 } from "./gateway";
@@ -140,6 +141,21 @@ describe("lib/cubepilot/gateway", () => {
     expect(bases.map((b) => b.name)).toEqual(["cubestack-ai-gateway", "cubestack-ai-gateway-private"]);
     expect(bases[0].url).toContain("cubestack-ai-gateway-aaaaaaaa");
     expect(bases[1].url).toContain("cubestack-ai-gateway-private-bbbbbbbb");
+  });
+
+  it("names a platform provider per Gateway, from the Gateway name", () => {
+    // The public Gateway keeps the original name (refs written before the
+    // private catalogue existed use it); every other Gateway gets its own entry,
+    // so a save for one catalogue cannot replace the other's models.
+    expect(platformProviderNameOf({ url: "http://a", via: "direct" })).toBe("cubestack");
+    expect(platformProviderNameOf({ name: "cubestack-ai-gateway", url: "http://a", via: "direct" })).toBe("cubestack");
+    expect(platformProviderNameOf({ name: "cubestack-gateway", url: "http://a", via: "direct" })).toBe("cubestack");
+    expect(platformProviderNameOf({ name: "cubestack-ai-gateway-private", url: "http://b", via: "direct" })).toBe(
+      "cubestack-private",
+    );
+    // Position does not matter: a Gateway missing from discovery must not
+    // rename the one that did resolve.
+    expect(platformProviderNameOf({ name: "cubestack-ai-gateway-eu", url: "http://c", via: "direct" })).toBe("cubestack-eu");
   });
 
   it("merges the two Gateways' catalogs, dropping duplicates and non-chat models", async () => {

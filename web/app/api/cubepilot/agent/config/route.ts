@@ -11,12 +11,18 @@
 // by the operator's ModelKey rule.
 //
 // A SAVE WRITES TWO OBJECTS, IN THIS ORDER:
-//   1. the builtin AgentTemplate — its platform provider (name "cubestack") is
-//      pointed at the resolved model API (<gateway>/v1) and given the model ids
-//      the gateway serves, so the agent always has one stable provider in front
-//      of the gateway; spec.defaultModel names the ref it selects;
+//   1. the builtin AgentTemplate — the platform provider entry for the Gateway
+//      serving the selection ("cubestack" for the public Gateway,
+//      "cubestack-<suffix>" for the others, e.g. "cubestack-private") is pointed
+//      at that Gateway's model API (<gateway>/v1) and given the ids it serves, so
+//      the agent always has a stable provider in front of each Gateway;
+//      spec.defaultModel names the ref it selects;
 //   2. the caller's AgentInstance — selectedModel "<provider>/<model id>" (e.g.
-//      "cubestack/qwen38-27b") and userInstructions.
+//      "cubestack/qwen38-27b", "cubestack-private/dsv4-api") and
+//      userInstructions.
+// Each Gateway has its own entry: a provider has a single endpoint, and the
+// entries are shared by every instance, so one save must never replace another
+// Gateway's entry.
 // The platform half is optional: a cluster can run the assistant on the
 // providers the template declares with no AI Gateway at all, and then only (2)
 // is written. A save never stores a platform endpoint or model id it could not
@@ -42,11 +48,11 @@ import {
   type AgentTemplateCr,
   type JsonPatchOp,
 } from "@/lib/cubepilot/agentcrd";
-import { gatewayCatalogs, gatewayOpenAiBaseOf } from "@/lib/cubepilot/gateway";
+import { gatewayCatalogs, gatewayOpenAiBaseOf, platformProviderNameOf } from "@/lib/cubepilot/gateway";
 import { validateInstructions } from "@/lib/cubepilot/instructions";
 import { modelKey } from "@/lib/cubepilot/llm";
 import { logger } from "@/lib/log";
-import type { AgentConfig } from "@/lib/cubepilot/types";
+import { isPlatformProviderName, type AgentConfig } from "@/lib/cubepilot/types";
 import { withAuth } from "@/lib/auth/guard";
 
 export const runtime = "nodejs";
@@ -62,49 +68,63 @@ function clearOrAdd(value: string | undefined, path: string, current: string | u
 
 type PlatformCatalog = Awaited<ReturnType<typeof gatewayCatalogs>>;
 
+/** One platform provider entry: the AgentTemplate provider `name`, the endpoint
+ *  it points at and the ids that endpoint serves. */
+interface PlatformEntry {
+  name: string;
+  endpoint: string;
+  models: string[];
+}
+
 /**
- * The model ids the platform's AI Gateways serve — the union of the public and
- * private catalogues, merged by id, so a model published to either one is
- * offered. Best effort — an absent or slow gateway simply means "no models":
- * the platform provider's entry is left as it stands and its ids are not
- * offered. The call itself is memoized and bounded by the gateway module, so a
- * slow gateway is not paid for on every read.
+ * The platform's provider entries — one per Gateway that answered with at
+ * least one model, public first. Each Gateway is written under its own name
+ * (see platformProviderNameOf): a provider has a single endpoint, so sharing
+ * one entry between the public and private catalogues would replace one
+ * catalogue with the other on every save and strand the other's selections.
  */
-function servedModels(catalogs: PlatformCatalog): string[] {
+function platformEntries(catalogs: PlatformCatalog): PlatformEntry[] {
+  return catalogs.flatMap(({ base, models }) =>
+    models.length > 0
+      ? [
+          {
+            name: platformProviderNameOf(base),
+            endpoint: gatewayOpenAiBaseOf(base),
+            models: models.map((m) => m.id),
+          },
+        ]
+      : [],
+  );
+}
+
+/**
+ * The model ids the platform's AI Gateways serve — the union of the entries,
+ * merged by id, so a model published to either one is offered. Best effort —
+ * an absent or slow gateway simply means "no models" from it. The call itself
+ * is memoized and bounded by the gateway module, so a slow gateway is not paid
+ * for on every read.
+ */
+function servedModels(entries: PlatformEntry[]): string[] {
   const seen = new Set<string>();
   const ids: string[] = [];
-  for (const { models } of catalogs) {
-    for (const model of models) {
-      if (seen.has(model.id)) continue;
-      seen.add(model.id);
-      ids.push(model.id);
+  for (const { models } of entries) {
+    for (const id of models) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      ids.push(id);
     }
   }
   return ids;
 }
 
-/**
- * The platform provider entry for `model`: the gateway that serves it (public
- * first), so the endpoint written into the template is one that answers for
- * the ids listed under it — the two catalogues are separate Gateways, and a
- * provider has a single endpoint. An empty or unknown `model` falls back to the
- * first gateway that serves anything; null when no gateway answered.
- */
-function platformEntryFor(catalogs: PlatformCatalog, model: string): { api: string; models: string[] } | null {
-  const serving =
-    (model ? catalogs.find((c) => c.models.some((m) => m.id === model)) : undefined) ??
-    catalogs.find((c) => c.models.length > 0);
-  if (!serving) return null;
-  return { api: gatewayOpenAiBaseOf(serving.base), models: serving.models.map((m) => m.id) };
-}
-
-function configFromCr(cr: AgentInstanceCr | null, tmpl: AgentTemplateCr | null, gateway: string[]): AgentConfig {
+function configFromCr(cr: AgentInstanceCr | null, tmpl: AgentTemplateCr | null, entries: PlatformEntry[]): AgentConfig {
   return {
     exists: Boolean(cr),
     selectedModel: cr?.spec?.selectedModel ?? "",
     userInstructions: cr?.spec?.userInstructions ?? "",
     providers: templateProviders(tmpl),
-    gatewayModels: gateway,
+    gatewayModels: servedModels(entries),
+    gatewayProviders: entries,
     templateMissing: !tmpl,
   };
 }
@@ -122,7 +142,7 @@ export const GET = withAuth(async (_req, session) => {
         hint: "install the CubePilot operator, or point CUBESTACK_TASKS_NAMESPACE at the namespace holding the CRs",
       });
     }
-    return Response.json({ config: configFromCr(cr, tmpl, servedModels(await gatewayCatalogs())) });
+    return Response.json({ config: configFromCr(cr, tmpl, platformEntries(await gatewayCatalogs())) });
   } catch (e) {
     return k8sErrorResponse(e);
   }
@@ -164,15 +184,15 @@ export const PUT = withAuth(async (req, session) => {
         { status: 503 },
       );
     }
-    // 1) the model API the platform serves models from — the agent talks to it
-    //    through the platform provider, so it is written into the template first.
-    //    Writing that entry needs both halves: a base to point it at, and the ids
-    //    to list. An install with no AI Gateway (the assistant running on the
-    //    providers the template declares) is a supported shape, so a missing
-    //    gateway means "no platform models in this save", never a refusal — the
-    //    platform is a capability of the cluster, not a precondition of a save.
-    const catalogs = await gatewayCatalogs();
-    const served = servedModels(catalogs);
+    // 1) the model APIs the platform serves models from — the agent talks to
+    //    them through the platform providers, so the one serving this selection
+    //    is written into the template first. Writing an entry needs both halves:
+    //    a base to point it at, and the ids to list. An install with no AI
+    //    Gateway (the assistant running on the providers the template declares)
+    //    is a supported shape, so a missing gateway means "no platform models in
+    //    this save", never a refusal — the platform is a capability of the
+    //    cluster, not a precondition of a save.
+    const entries = platformEntries(await gatewayCatalogs());
     // selectedModel is written as the "<provider>/<model id>" ref the operator
     // resolves against the template's PROVIDERS, not against the gateway: an
     // external provider added in the LLM card is a first-class choice for the
@@ -182,43 +202,41 @@ export const PUT = withAuth(async (req, session) => {
     // provider's — it is what the select sent before providers were selectable
     // — and a ref the template cannot resolve is refused, because a stored ref
     // the runtime cannot answer fails every turn.
-    // The template's providers MINUS the platform's: that entry is rewritten from
-    // `served` by this same save (platformProviderOps below), so a platform id the
-    // template still lists but the gateway no longer serves would pass a check
-    // against the template and then disappear from it — leaving a stored selection
-    // that no longer resolves. The platform's ids are accepted from `served` only.
+    // The template's providers MINUS the platform's: those entries are rewritten
+    // from the live catalogues by this same save (platformProviderOps below), so
+    // a platform id the template still lists but the gateway no longer serves
+    // would pass a check against the template and then disappear from it —
+    // leaving a stored selection that no longer resolves. The platform's ids are
+    // accepted from the live entries only.
     const externalProviders = ((tmpl.spec?.providers ?? []) as Array<{ name?: string; models?: string[] }>).filter(
-      (p) => p.name !== PLATFORM_MODEL_NAME,
+      (p) => !isPlatformProviderName(p.name ?? ""),
     );
     const selectable = new Set<string>(
       externalProviders.flatMap((p) => (p.models ?? []).map((id) => modelKey(p.name ?? "", id))),
     );
+    for (const entry of entries) {
+      for (const id of entry.models) selectable.add(modelKey(entry.name, id));
+    }
     const requested = patch.selectedModel ?? "";
-    // A bare id means the platform provider's — unless the gateway itself serves
-    // an id containing a slash (a namespaced model like "meta-llama/Llama-3"),
-    // which is a bare id too and would otherwise read as a ref for a provider
-    // named "meta-llama".
+    // A bare id means the provider that serves it — unless the gateway itself
+    // serves an id containing a slash (a namespaced model like
+    // "meta-llama/Llama-3"), which is a bare id too and would otherwise read as
+    // a ref for a provider named "meta-llama". A bare id no entry serves is read
+    // as the public provider's, so the refusal below can name it.
+    const serving = requested === "" ? undefined : entries.find((e) => e.models.includes(requested));
     const requestedRef =
       requested === ""
         ? ""
-        : served.includes(requested) || !requested.includes("/")
-          ? modelKey(PLATFORM_MODEL_NAME, requested)
-          : requested;
-    // The gateway that serves the selection: a provider has a single endpoint,
-    // and the public/private catalogues are separate Gateways, so the entry
-    // written below must point at the one whose ids it lists.
-    const platformId = requestedRef.startsWith(`${PLATFORM_MODEL_NAME}/`)
-      ? requestedRef.slice(PLATFORM_MODEL_NAME.length + 1)
-      : "";
-    const platform = served.length > 0 ? platformEntryFor(catalogs, platformId) : null;
-    const modelApi = platform?.api ?? null;
-    if (modelApi) {
-      for (const id of served) selectable.add(modelKey(PLATFORM_MODEL_NAME, id));
-    }
+        : serving
+          ? modelKey(serving.name, requested)
+          : requested.includes("/")
+            ? requested
+            : modelKey(PLATFORM_MODEL_NAME, requested);
     if (requestedRef !== "" && !selectable.has(requestedRef)) {
-      // A platform ref whose platform is missing is not an unknown model: name
+      // A platform ref whose provider is missing is not an unknown model: name
       // what is missing, and what can be picked instead.
-      if (!modelApi && requestedRef.startsWith(`${PLATFORM_MODEL_NAME}/`)) {
+      const refProvider = requestedRef.includes("/") ? requestedRef.slice(0, requestedRef.indexOf("/")) : "";
+      if (isPlatformProviderName(refProvider) && !entries.some((e) => e.name === refProvider)) {
         return Response.json(
           {
             error:
@@ -240,19 +258,29 @@ export const PUT = withAuth(async (req, session) => {
     // instructions-only update would replace the reader's own choice.
     const derived =
       patch.selectedModel === undefined && !existing
-        ? modelApi
-          ? modelKey(PLATFORM_MODEL_NAME, served[0])
+        ? entries.length > 0
+          ? modelKey(entries[0].name, entries[0].models[0])
           : ([...selectable][0] ?? "")
         : "";
     const selectedModel = requestedRef || derived;
-    // The entry lists the ids of the gateway it points at, not the union: a
-    // single endpoint cannot answer for the other Gateway's models.
-    const templateOps = platform ? platformProviderOps(tmpl.spec?.providers, platform.api, platform.models) : [];
-    if (platform && templateOps.length > 0) {
+    // The entry this save writes: the one serving a named platform selection, or
+    // the one a first save's default comes from. Every other save — an
+    // instructions-only update, an external provider's model, a clear — leaves
+    // the shared entries alone: this instance's stored selection may be served
+    // by another Gateway, and rewriting that Gateway's entry here would point it
+    // at a catalogue that no longer lists the model.
+    const target =
+      entries.find((e) => requestedRef.startsWith(`${e.name}/`)) ??
+      entries.find((e) => derived !== "" && derived.startsWith(`${e.name}/`)) ??
+      null;
+    const templateOps = target
+      ? platformProviderOps(tmpl.spec?.providers, target.name, target.endpoint, target.models)
+      : [];
+    if (target && templateOps.length > 0) {
       logger("agent").info("template updated for the platform provider", {
-        provider: PLATFORM_MODEL_NAME,
-        endpoint: platform.api,
-        models: platform.models.length,
+        provider: target.name,
+        endpoint: target.endpoint,
+        models: target.models.length,
         ops: templateOps.length,
       });
     }
@@ -263,7 +291,7 @@ export const PUT = withAuth(async (req, session) => {
     const defaultOps: JsonPatchOp[] =
       selectedModel === "" ||
       tmpl.spec?.defaultModel === selectedModel ||
-      (requestedRef === "" && !modelApi)
+      (requestedRef === "" && entries.length === 0)
         ? []
         : [{ op: "add", path: "/spec/defaultModel", value: selectedModel }];
     const opsToSend = [...templateOps, ...defaultOps];
@@ -274,7 +302,7 @@ export const PUT = withAuth(async (req, session) => {
         selectedModel,
         userInstructions: patch.userInstructions,
       });
-      return Response.json({ config: configFromCr(cr, updatedTmpl, served) });
+      return Response.json({ config: configFromCr(cr, updatedTmpl, entries) });
     }
     if (existing.spec?.owner !== session.user) {
       return Response.json({ error: "agent instance name already taken by another user" }, { status: 409 });
@@ -293,7 +321,7 @@ export const PUT = withAuth(async (req, session) => {
       ...clearOrAdd(patch.userInstructions, "/spec/userInstructions", existing.spec?.userInstructions),
     ];
     const cr = ops.length > 0 ? await patchAgentInstanceCr(name, ops) : existing;
-    return Response.json({ config: configFromCr(cr, updatedTmpl, served) });
+    return Response.json({ config: configFromCr(cr, updatedTmpl, entries) });
   } catch (e) {
     if (e instanceof InstanceConflictError) {
       return Response.json({ error: e.message }, { status: 409 });

@@ -25,7 +25,7 @@ import { Readable } from "node:stream";
 import { getCoreClient, getKubeConfig } from "@/lib/kubernetes";
 import { logger } from "@/lib/log";
 import { isChatModel } from "./llm";
-import type { GatewayModel } from "./types";
+import { PLATFORM_MODEL_NAME, type GatewayModel } from "./types";
 
 /** Namespace the AI Gateway Services live in
  *  (CUBESTACK_GATEWAY_NAMESPACE overrides the default). */
@@ -34,7 +34,7 @@ export const GATEWAY_NAMESPACE = (process.env.CUBESTACK_GATEWAY_NAMESPACE ?? "")
 /** The two model catalogs the platform installs. They are separate Gateways
  *  (public and private), so each has its own dataplane Service and its own
  *  /v1/models answer. Public comes first: it is the endpoint shown to users
- *  and the one the assistant's platform provider points at. */
+ *  and the one the original "cubestack" provider entry points at. */
 export const GATEWAY_NAMES_DEFAULT = ["cubestack-ai-gateway", "cubestack-ai-gateway-private"] as const;
 
 /** The single-Gateway name older platform installs use
@@ -87,9 +87,9 @@ function safeRead(path: string): string | undefined {
  * Empty when nothing is found or the cluster cannot be listed.
  *
  * The two catalog Gateways are separate: the public one is listed first so it
- * remains the base used for display and for the assistant's provider, and both
- * are queried for their model list. A cluster with only the legacy
- * Gateway/cubestack-gateway still resolves to that one.
+ * remains the base used for display, and both are queried for their model
+ * list. A cluster with only the legacy Gateway/cubestack-gateway still
+ * resolves to that one.
  *
  * The answer is memoized (see BASE_TTL_MS): discovery is a Service LIST, and
  * every gateway call used to pay for one.
@@ -485,6 +485,28 @@ export function gatewayOpenAiBaseOf(base: GatewayBase): string {
   const suffix = "/chat/completions";
   if (url.toLowerCase().endsWith(suffix)) url = url.slice(0, -suffix.length).replace(/\/+$/, "");
   return url.toLowerCase().endsWith("/v1") ? url : `${url}/v1`;
+}
+
+/**
+ * The AgentTemplate provider name a Gateway's catalogue is written under. The
+ * public Gateway keeps the original "cubestack" (refs stored before the private
+ * catalogue existed name it), and any other Gateway gets a stable
+ * "cubestack-<suffix>" derived from its own name — the private Gateway,
+ * "cubestack-private". Derived from the name rather than from discovery order,
+ * so one Gateway missing from discovery never renames another one's entry.
+ */
+export function platformProviderNameOf(base: GatewayBase): string {
+  const gateway = (base.name ?? "").trim().toLowerCase();
+  // The public catalog Gateway, the legacy single Gateway and an explicitly
+  // configured URL all keep the original name.
+  if (!gateway || gateway === "cubestack-ai-gateway" || gateway === GATEWAY_NAME.toLowerCase()) {
+    return PLATFORM_MODEL_NAME;
+  }
+  const suffix = gateway
+    .replace(/^cubestack-(?:ai-gateway-)?/, "")
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return suffix ? `${PLATFORM_MODEL_NAME}-${suffix}` : PLATFORM_MODEL_NAME;
 }
 
 function noGatewayError(): Error {
