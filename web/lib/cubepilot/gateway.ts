@@ -4,16 +4,20 @@
 //      NodePort, or an in-cluster DNS name);
 //   2. the dataplane Services of the platform Gateways, discovered in
 //      envoy-gateway-system by the label Envoy Gateway stamps on them. The
-//      platform installs two model catalogs — cubestack-ai-gateway (public)
-//      and cubestack-ai-gateway-private (private) — so discovery returns a
-//      list, and the model list is the union of their /v1/models answers:
+//      platform installs one Gateway per model catalog — the public
+//      `<GATEWAY_NAME>` (cubestack-gateway) and the private
+//      `<GATEWAY_NAME>-private` (cubestack-gateway-private) — so discovery
+//      returns a list, and the model list is the union of their /v1/models
+//      answers. (The catalog *routes* are the differently named
+//      cubestack-ai-gateway / cubestack-ai-gateway-private.)
 //      - inside the cluster: plain in-cluster DNS (http://<svc>.<ns>.svc:<port>);
 //      - local dev: the API-server service proxy, which works off-cluster and
 //        is authenticated with the kubeconfig credentials (client certs/token).
 //      The Service's generated name ends in a random suffix, so it is found by
 //      label rather than guessed from a name. CUBESTACK_GATEWAY_NAMES (comma
-//      separated) or the single-gateway CUBESTACK_GATEWAY_NAME narrows the
-//      discovery to the named Gateways.
+//      separated) pins an exact list; CUBESTACK_GATEWAY_NAME (or the default,
+//      cubestack-gateway) is the public Gateway and also admits its
+//      `<name>-<suffix>` siblings.
 // CUBESTACK_GATEWAY_TOKEN, when set, is sent as a bearer header on every
 // gateway request.
 
@@ -31,25 +35,39 @@ import { PLATFORM_MODEL_NAME, type GatewayModel } from "./types";
  *  (CUBESTACK_GATEWAY_NAMESPACE overrides the default). */
 export const GATEWAY_NAMESPACE = (process.env.CUBESTACK_GATEWAY_NAMESPACE ?? "").trim() || "envoy-gateway-system";
 
-/** The two model catalogs the platform installs. They are separate Gateways
- *  (public and private), so each has its own dataplane Service and its own
- *  /v1/models answer. Public comes first: it is the endpoint shown to users
- *  and the one the original "cubestack" provider entry points at. */
-export const GATEWAY_NAMES_DEFAULT = ["cubestack-ai-gateway", "cubestack-ai-gateway-private"] as const;
-
-/** The single-Gateway name older platform installs use
- *  (CUBESTACK_GATEWAY_NAME overrides the default). Kept as the fallback when
- *  neither of the two catalog Gateways is present. */
+/** The public Gateway's name older platform installs use and the chart's
+ *  default (CUBESTACK_GATEWAY_NAME overrides the default). Every platform
+ *  Gateway name is this, or starts with `<name>-`. */
 export const GATEWAY_NAME = (process.env.CUBESTACK_GATEWAY_NAME ?? "").trim() || "cubestack-gateway";
 
-/** Gateways to discover. CUBESTACK_GATEWAY_NAMES (comma separated) or the
- *  single CUBESTACK_GATEWAY_NAME pin the list; otherwise the two platform
- *  catalogs are used, with the legacy Gateway as the fallback. */
-function wantedGatewayNames(): string[] | null {
+/** Whether a Gateway belongs to the platform's model catalogs: the public
+ *  Gateway itself or one of its `<name>-<suffix>` siblings (the private
+ *  catalog's Gateway is `cubestack-gateway-private`). A Gateway someone else
+ *  installed in the namespace is not part of the platform's catalog. */
+function isPlatformGatewayName(name: string): boolean {
+  const gateway = name.trim().toLowerCase();
+  const base = GATEWAY_NAME.toLowerCase();
+  return gateway === base || gateway.startsWith(`${base}-`);
+}
+
+/** The names to discover. CUBESTACK_GATEWAY_NAMES (comma separated) pins an
+ *  exact list; otherwise the platform's own Gateways are discovered (see
+ *  isPlatformGatewayName). */
+function pinnedGatewayNames(): string[] | null {
   const names = (process.env.CUBESTACK_GATEWAY_NAMES ?? "").trim();
-  if (names) return names.split(",").map((n) => n.trim()).filter(Boolean);
-  const one = (process.env.CUBESTACK_GATEWAY_NAME ?? "").trim();
-  return one ? [one] : null;
+  if (!names) return null;
+  return names.split(",").map((n) => n.trim()).filter(Boolean);
+}
+
+/** Public Gateway first: it is the endpoint shown to users and the one the
+ *  original "cubestack" provider entry points at. The rest keep a stable
+ *  order regardless of the order the API server lists the Services in. */
+function byGatewayOrder(a: string, b: string): number {
+  const base = GATEWAY_NAME.toLowerCase();
+  const aPublic = a.toLowerCase() === base;
+  const bPublic = b.toLowerCase() === base;
+  if (aPublic !== bPublic) return aPublic ? -1 : 1;
+  return a.localeCompare(b);
 }
 
 /** The label Envoy Gateway puts on the dataplane Service it generates for a
@@ -86,10 +104,9 @@ function safeRead(path: string): string | undefined {
  * when running in the cluster, or an API-server service-proxy URL off-cluster.
  * Empty when nothing is found or the cluster cannot be listed.
  *
- * The two catalog Gateways are separate: the public one is listed first so it
- * remains the base used for display, and both are queried for their model
- * list. A cluster with only the legacy Gateway/cubestack-gateway still
- * resolves to that one.
+ * The public and private catalog Gateways are separate (cubestack-gateway and
+ * cubestack-gateway-private on the platform's install), so each is queried for
+ * its own model list; the public one is listed first as the displayed base.
  *
  * The answer is memoized (see BASE_TTL_MS): discovery is a Service LIST, and
  * every gateway call used to pay for one.
@@ -106,11 +123,12 @@ async function discoverGatewayBases(): Promise<GatewayBase[]> {
       const name = svc.metadata?.labels?.[GATEWAY_DATAPLANE_NAME_LABEL] as string;
       if (!byGateway.has(name)) byGateway.set(name, svc);
     }
-    // The env override wins; otherwise the platform's two catalogs, and only
-    // when neither is present the legacy single Gateway.
-    const pinned = wantedGatewayNames();
-    let names = pinned ?? GATEWAY_NAMES_DEFAULT.filter((n) => byGateway.has(n));
-    if (!pinned && names.length === 0 && byGateway.has(GATEWAY_NAME)) names = [GATEWAY_NAME];
+    // An explicit list wins; otherwise every platform Gateway in the
+    // namespace, public first. Discovery is by label, so the private catalog's
+    // Gateway is found under whatever name its install gave it, as long as it
+    // follows the platform's `<GATEWAY_NAME>-<suffix>` convention.
+    const pinned = pinnedGatewayNames();
+    const names = pinned ?? [...byGateway.keys()].filter(isPlatformGatewayName).sort(byGatewayOrder);
 
     const cluster = inCluster() ? null : getKubeConfig().getCurrentCluster();
     if (!inCluster() && !cluster?.server) return [];
@@ -198,7 +216,7 @@ export async function resolveGatewayBases(): Promise<GatewayBase[]> {
     }
     logger("gateway").warn("no gateway base resolved — system model list and playground chat are unavailable", {
       namespace: GATEWAY_NAMESPACE,
-      gateways: wantedGatewayNames() ?? [...GATEWAY_NAMES_DEFAULT, GATEWAY_NAME],
+      gateways: pinnedGatewayNames() ?? `${GATEWAY_NAME} or ${GATEWAY_NAME}-*`,
       hint: "set CUBESTACK_GATEWAT_URL, or point CUBESTACK_GATEWAY_NAMES / CUBESTACK_GATEWAY_NAMESPACE at the platform Gateways",
     });
     basesCache = { bases: [], loadedAt: Date.now() };
@@ -492,20 +510,25 @@ export function gatewayOpenAiBaseOf(base: GatewayBase): string {
  * public Gateway keeps the original "cubestack" (refs stored before the private
  * catalogue existed name it), and any other Gateway gets a stable
  * "cubestack-<suffix>" derived from its own name — the private Gateway,
- * "cubestack-private". Derived from the name rather than from discovery order,
- * so one Gateway missing from discovery never renames another one's entry.
+ * "cubestack-gateway-private", becomes "cubestack-private". Derived from the
+ * name rather than from discovery order, so one Gateway missing from discovery
+ * never renames another one's entry.
  */
 export function platformProviderNameOf(base: GatewayBase): string {
   const gateway = (base.name ?? "").trim().toLowerCase();
-  // The public catalog Gateway, the legacy single Gateway and an explicitly
+  const publicName = GATEWAY_NAME.toLowerCase();
+  // The public Gateway, the older route-named Gateway and an explicitly
   // configured URL all keep the original name.
-  if (!gateway || gateway === "cubestack-ai-gateway" || gateway === GATEWAY_NAME.toLowerCase()) {
+  if (!gateway || gateway === publicName || gateway === "cubestack-ai-gateway" || gateway === PLATFORM_MODEL_NAME) {
     return PLATFORM_MODEL_NAME;
   }
-  const suffix = gateway
-    .replace(/^cubestack-(?:ai-gateway-)?/, "")
-    .replace(/[^a-z0-9-]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+  // Strip the platform's own prefix: `<public>-private` is "private", and an
+  // install that names its Gateways after the catalog routes keeps working.
+  const prefix = `${publicName}-`;
+  const stripped = gateway.startsWith(prefix)
+    ? gateway.slice(prefix.length)
+    : gateway.replace(/^cubestack-(?:ai-gateway-)?/, "");
+  const suffix = stripped.replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
   return suffix ? `${PLATFORM_MODEL_NAME}-${suffix}` : PLATFORM_MODEL_NAME;
 }
 

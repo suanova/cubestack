@@ -120,15 +120,16 @@ describe("lib/cubepilot/gateway", () => {
     });
   });
 
-  // The platform installs two model catalogs, each behind its own Gateway.
+  // The platform installs two model catalogs, each behind its own Gateway:
+  // the public cubestack-gateway and the private cubestack-gateway-private.
   // Their dataplane Services carry the Gateway name in the label.
   const PUBLIC_SERVICE = dataplaneService({
-    name: "envoy-envoy-gateway-system-cubestack-ai-gateway-aaaaaaaa",
-    gateway: "cubestack-ai-gateway",
+    name: "envoy-envoy-gateway-system-cubestack-gateway-aaaaaaaa",
+    gateway: "cubestack-gateway",
   });
   const PRIVATE_SERVICE = dataplaneService({
-    name: "envoy-envoy-gateway-system-cubestack-ai-gateway-private-bbbbbbbb",
-    gateway: "cubestack-ai-gateway-private",
+    name: "envoy-envoy-gateway-system-cubestack-gateway-private-bbbbbbbb",
+    gateway: "cubestack-gateway-private",
   });
 
   it("discovers both catalog Gateways, public first", async () => {
@@ -138,9 +139,9 @@ describe("lib/cubepilot/gateway", () => {
     // order the API server lists the Services in.
     listNamespacedService.mockResolvedValue({ items: [PRIVATE_SERVICE, PUBLIC_SERVICE] });
     const bases = await resolveGatewayBases();
-    expect(bases.map((b) => b.name)).toEqual(["cubestack-ai-gateway", "cubestack-ai-gateway-private"]);
-    expect(bases[0].url).toContain("cubestack-ai-gateway-aaaaaaaa");
-    expect(bases[1].url).toContain("cubestack-ai-gateway-private-bbbbbbbb");
+    expect(bases.map((b) => b.name)).toEqual(["cubestack-gateway", "cubestack-gateway-private"]);
+    expect(bases[0].url).toContain("cubestack-gateway-aaaaaaaa");
+    expect(bases[1].url).toContain("cubestack-gateway-private-bbbbbbbb");
   });
 
   it("names a platform provider per Gateway, from the Gateway name", () => {
@@ -150,12 +151,18 @@ describe("lib/cubepilot/gateway", () => {
     expect(platformProviderNameOf({ url: "http://a", via: "direct" })).toBe("cubestack");
     expect(platformProviderNameOf({ name: "cubestack-ai-gateway", url: "http://a", via: "direct" })).toBe("cubestack");
     expect(platformProviderNameOf({ name: "cubestack-gateway", url: "http://a", via: "direct" })).toBe("cubestack");
+    // The install names the private Gateway after the public one; the provider
+    // name is the suffix, not "cubestack-gateway-private".
+    expect(platformProviderNameOf({ name: "cubestack-gateway-private", url: "http://b", via: "direct" })).toBe(
+      "cubestack-private",
+    );
     expect(platformProviderNameOf({ name: "cubestack-ai-gateway-private", url: "http://b", via: "direct" })).toBe(
       "cubestack-private",
     );
     // Position does not matter: a Gateway missing from discovery must not
     // rename the one that did resolve.
     expect(platformProviderNameOf({ name: "cubestack-ai-gateway-eu", url: "http://c", via: "direct" })).toBe("cubestack-eu");
+    expect(platformProviderNameOf({ name: "cubestack-gateway-eu", url: "http://c", via: "direct" })).toBe("cubestack-eu");
   });
 
   it("merges the two Gateways' catalogs, dropping duplicates and non-chat models", async () => {
@@ -163,7 +170,7 @@ describe("lib/cubepilot/gateway", () => {
     vi.stubEnv("KUBERNETES_SERVICE_PORT", "443");
     listNamespacedService.mockResolvedValue({ items: [PUBLIC_SERVICE, PRIVATE_SERVICE] });
     const fetchMock = vi.fn(async (url: string) => {
-      const data = url.includes("cubestack-ai-gateway-private")
+      const data = url.includes("cubestack-gateway-private")
         ? [
             { id: "private-chat", owned_by: "CubeStack" },
             { id: "shared-chat" },
@@ -197,7 +204,7 @@ describe("lib/cubepilot/gateway", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string) => {
-        const data = url.includes("cubestack-ai-gateway-private") ? [{ id: "private-chat" }] : [{ id: "qwen38-27b" }];
+        const data = url.includes("cubestack-gateway-private") ? [{ id: "private-chat" }] : [{ id: "qwen38-27b" }];
         return new Response(JSON.stringify({ data }), {
           status: 200,
           headers: { "content-type": "application/json" },
@@ -205,7 +212,7 @@ describe("lib/cubepilot/gateway", () => {
       }),
     );
     const catalogs = await gatewayCatalogs();
-    expect(catalogs.map((c) => c.base.name)).toEqual(["cubestack-ai-gateway", "cubestack-ai-gateway-private"]);
+    expect(catalogs.map((c) => c.base.name)).toEqual(["cubestack-gateway", "cubestack-gateway-private"]);
     expect(catalogs.map((c) => c.models.map((m) => m.id))).toEqual([["qwen38-27b"], ["private-chat"]]);
     expect(gatewayOpenAiBaseOf(catalogs[1].base)).toBe(`${catalogs[1].base.url}/v1`);
   });
@@ -219,7 +226,7 @@ describe("lib/cubepilot/gateway", () => {
       "fetch",
       vi.fn(async (url: string) => {
         urls.push(url);
-        const data = url.includes("cubestack-ai-gateway-private")
+        const data = url.includes("cubestack-gateway-private")
           ? [{ id: "private-chat" }]
           : [{ id: "qwen38-27b" }];
         return new Response(JSON.stringify({ data }), {
@@ -231,8 +238,8 @@ describe("lib/cubepilot/gateway", () => {
     await gatewayFetchForModel("private-chat", "/v1/chat/completions");
     await gatewayFetchForModel("qwen38-27b", "/v1/chat/completions");
     const chats = urls.filter((u) => u.endsWith("/v1/chat/completions"));
-    expect(chats[0]).toContain("cubestack-ai-gateway-private-bbbbbbbb");
-    expect(chats[1]).toContain("cubestack-ai-gateway-aaaaaaaa");
+    expect(chats[0]).toContain("cubestack-gateway-private-bbbbbbbb");
+    expect(chats[1]).toContain("cubestack-gateway-aaaaaaaa");
   });
 
   it("ignores a dataplane Service that belongs to another Gateway", async () => {
