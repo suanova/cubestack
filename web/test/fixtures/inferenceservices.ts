@@ -41,6 +41,7 @@ export function inferenceServiceSummary(
     roles: [],
     internalEndpoint: null,
     publicEndpoint: null,
+    privateGatewayEndpoint: null,
     metrics: null,
     ...overrides,
   };

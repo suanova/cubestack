@@ -48,6 +48,12 @@ describe("providerNameError", () => {
     expect(providerNameError("a.b")).toContain("DNS-1123 label");
     expect(providerNameError("a".repeat(64))).toContain("DNS-1123 label");
   });
+
+  it("rejects the platform's reserved provider namespace", () => {
+    expect(providerNameError("cubestack")).toContain("reserved");
+    expect(providerNameError("cubestack-private")).toContain("reserved");
+    expect(providerNameError("x-cubestack")).toBe("");
+  });
 });
 
 describe("model ids", () => {

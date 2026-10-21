@@ -598,9 +598,16 @@ func (r *InferenceServiceReconciler) applyOpenAIPathsRoute(ctx context.Context, 
 			// stored. Remove the surface only when this operator created it — the
 			// managed-by label it stamps at creation is that marker. A surface the
 			// platform installed predates the label and its lifetime is not ours
-			// to end, so it is left in place.
+			// to end: clear the rules it carries instead, or the last published
+			// service's backendRefs outlive the Backend objects cleanup deletes.
+			// Omitting the field stores the CRD's default catch-all rule, which
+			// references nothing; an object already in that state is left alone.
 			if route.Labels[managedByLabelKey] != managedByValue {
-				return nil
+				if rulesReferenceNothing(route.Spec.Rules) {
+					return nil
+				}
+				route.Spec.Rules = nil
+				return r.Update(ctx, route)
 			}
 			return client.IgnoreNotFound(r.Delete(ctx, route))
 		}
@@ -610,6 +617,19 @@ func (r *InferenceServiceReconciler) applyOpenAIPathsRoute(ctx context.Context, 
 		route.Spec.Rules = rules
 		return r.Update(ctx, route)
 	})
+}
+
+// rulesReferenceNothing reports whether no rule forwards to a backend or runs a
+// filter — the shape the HTTPRoute CRD defaults an omitted rule list to. A rule
+// with no destination answers 500 for what it matches, so such a route is
+// harmless while nothing is published, and its reconciliation is a no-op.
+func rulesReferenceNothing(rules []gatewayv1.HTTPRouteRule) bool {
+	for _, rule := range rules {
+		if len(rule.BackendRefs) > 0 || len(rule.Filters) > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // desiredCatalogRoute builds the shared AIGatewayRoute the operator maintains:
@@ -788,11 +808,7 @@ func openAIPathsRouteAccepted(route *gatewayv1.HTTPRoute) bool {
 		if group != gatewayAPIGroup || kind != gatewayKind {
 			continue
 		}
-		namespace := route.Namespace
-		if ref.Namespace != nil {
-			namespace = string(*ref.Namespace)
-		}
-		if routeParentsAccepted(route.Status.Parents, route.Generation, string(ref.Name), namespace) {
+		if routeParentsAcceptedForRef(route.Status.Parents, route.Generation, ref, route.Namespace) {
 			return true
 		}
 	}
@@ -989,7 +1005,22 @@ func (r *InferenceServiceReconciler) deleteOwned(ctx context.Context, isvc *aiv1
 // It takes the parents rather than a route so it applies to every route kind:
 // HTTPRoute and TCPRoute are distinct types sharing only this status shape.
 func routeParentsAccepted(parents []gatewayv1.RouteParentStatus, generation int64, gatewayName, gatewayNamespace string) bool {
-	parent := routeParentFor(parents, gatewayName, gatewayNamespace)
+	return parentAccepted(routeParentFor(parents, gatewayName, gatewayNamespace), generation)
+}
+
+// routeParentsAcceptedForRef is routeParentsAccepted for the entry belonging to
+// one complete parentRef. A route may declare several listeners on one Gateway
+// (sectionName, port), and the Gateway reports one entry per listener, some
+// accepted and some not: matching on name and namespace alone could read the
+// wrong listener's verdict.
+func routeParentsAcceptedForRef(parents []gatewayv1.RouteParentStatus, generation int64, ref gatewayv1.ParentReference, routeNamespace string) bool {
+	return parentAccepted(routeParentForRef(parents, ref, routeNamespace), generation)
+}
+
+// parentAccepted evaluates one status.parents entry: Accepted=True and
+// ResolvedRefs=True for the current generation. A nil entry — the gateway has
+// not reported on the route — is not accepted.
+func parentAccepted(parent *gatewayv1.RouteParentStatus, generation int64) bool {
 	if parent == nil {
 		return false
 	}
@@ -1022,6 +1053,67 @@ func routeParentFor(parents []gatewayv1.RouteParentStatus, gatewayName, gatewayN
 		return &parents[i]
 	}
 	return nil
+}
+
+// routeParentForRef returns the status.parents entry the Gateway wrote for ref,
+// matching every field that identifies the listener: group, kind, name,
+// namespace, sectionName and port. An unset namespace means the route's own
+// namespace, and an unset group or kind means a Gateway in the Gateway API
+// group. It is nil when the gateway has not reported on this parent.
+func routeParentForRef(parents []gatewayv1.RouteParentStatus, ref gatewayv1.ParentReference, routeNamespace string) *gatewayv1.RouteParentStatus {
+	for i := range parents {
+		if !sameParentRef(parents[i].ParentRef, ref, routeNamespace) {
+			continue
+		}
+		return &parents[i]
+	}
+	return nil
+}
+
+// sameParentRef reports whether two parent references address the same
+// listener, applying the API's defaults for an unset namespace, group and kind.
+func sameParentRef(a, b gatewayv1.ParentReference, routeNamespace string) bool {
+	return parentRefGroup(a) == parentRefGroup(b) &&
+		parentRefKind(a) == parentRefKind(b) &&
+		a.Name == b.Name &&
+		parentRefNamespace(a, routeNamespace) == parentRefNamespace(b, routeNamespace) &&
+		sameSectionName(a.SectionName, b.SectionName) &&
+		samePortNumber(a.Port, b.Port)
+}
+
+func parentRefGroup(ref gatewayv1.ParentReference) string {
+	if ref.Group == nil {
+		return gatewayAPIGroup
+	}
+	return string(*ref.Group)
+}
+
+func parentRefKind(ref gatewayv1.ParentReference) string {
+	if ref.Kind == nil {
+		return gatewayKind
+	}
+	return string(*ref.Kind)
+}
+
+func parentRefNamespace(ref gatewayv1.ParentReference, routeNamespace string) string {
+	if ref.Namespace == nil {
+		return routeNamespace
+	}
+	return string(*ref.Namespace)
+}
+
+func sameSectionName(a, b *gatewayv1.SectionName) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+func samePortNumber(a, b *gatewayv1.PortNumber) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 // routeParentsTo reports whether a route's spec.parentRefs attach it to the

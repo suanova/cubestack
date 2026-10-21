@@ -131,8 +131,12 @@ describe("inference services page", () => {
     const { container, root } = renderPage();
     await act(async () => {});
 
-    expect(container.textContent).toContain("maxModelLen");
-    expect(container.textContent).toContain("123456");
+    // Locate the row in the parameters card rather than searching the page:
+    // the replicas table renders the same integer, so a page-wide match would
+    // pass even if this card still showed "—".
+    const label = Array.from(container.querySelectorAll("span")).find((el) => el.textContent === "maxModelLen");
+    expect(label).toBeDefined();
+    expect(label!.parentElement?.lastElementChild?.textContent).toBe("123456");
 
     act(() => root.unmount());
   });
@@ -146,13 +150,18 @@ describe("inference services page", () => {
         aigatewayRouter: "cubestack-ai-gateway-private",
         internalEndpoint: "dsv4-api.project-a.svc:8001",
         publicEndpoint: "https://ai.cubestack.dev",
+        // The API resolves this from the private Gateway's dataplane Service.
+        privateGatewayEndpoint:
+          "http://envoy-envoy-gateway-system-cubestack-gateway-private-bbbbbbbb.envoy-gateway-system.svc:8080",
       }),
     ]);
     const { container, root } = renderPage();
     await act(async () => {});
 
     expect(container.textContent).toContain("集群内端点(AI Gateway)");
-    expect(container.textContent).toContain("http://cubestack-ai-private.envoy-gateway-system.svc");
+    expect(container.textContent).toContain(
+      "http://envoy-envoy-gateway-system-cubestack-gateway-private-bbbbbbbb.envoy-gateway-system.svc:8080",
+    );
     expect(container.textContent).toContain("dsv4-api.project-a.svc:8001");
     expect(container.textContent).not.toContain("https://ai.cubestack.dev");
 

@@ -24,6 +24,7 @@ import {
   gatewayOpenAiBaseOf,
   gatewayTokenHeader,
   platformProviderNameOf,
+  privateGatewayClusterEndpoint,
   resolveGatewayBase,
   resolveGatewayBases,
 } from "./gateway";
@@ -117,6 +118,11 @@ describe("lib/cubepilot/gateway", () => {
       name: "cubestack-gateway",
       url: "http://envoy-envoy-gateway-system-cubestack-gateway-27dc8f39.envoy-gateway-system.svc:8080",
       via: "direct",
+      service: {
+        name: "envoy-envoy-gateway-system-cubestack-gateway-27dc8f39",
+        namespace: "envoy-gateway-system",
+        port: 8080,
+      },
     });
   });
 
@@ -142,6 +148,25 @@ describe("lib/cubepilot/gateway", () => {
     expect(bases.map((b) => b.name)).toEqual(["cubestack-gateway", "cubestack-gateway-private"]);
     expect(bases[0].url).toContain("cubestack-gateway-aaaaaaaa");
     expect(bases[1].url).toContain("cubestack-gateway-private-bbbbbbbb");
+  });
+
+  it("resolves the private catalog's in-cluster Service address", async () => {
+    // The address is the generated dataplane Service, not a guessed hostname:
+    // its name carries the suffix Envoy Gateway assigns, so only discovery can
+    // know it.
+    vi.stubEnv("KUBERNETES_SERVICE_HOST", "10.0.0.1");
+    vi.stubEnv("KUBERNETES_SERVICE_PORT", "443");
+    listNamespacedService.mockResolvedValue({ items: [PUBLIC_SERVICE, PRIVATE_SERVICE] });
+    expect(await privateGatewayClusterEndpoint()).toBe(
+      "http://envoy-envoy-gateway-system-cubestack-gateway-private-bbbbbbbb.envoy-gateway-system.svc:8080",
+    );
+  });
+
+  it("resolves no private catalog endpoint when that Gateway is absent", async () => {
+    vi.stubEnv("KUBERNETES_SERVICE_HOST", "10.0.0.1");
+    vi.stubEnv("KUBERNETES_SERVICE_PORT", "443");
+    listNamespacedService.mockResolvedValue({ items: [PUBLIC_SERVICE] });
+    expect(await privateGatewayClusterEndpoint()).toBeNull();
   });
 
   it("names a platform provider per Gateway, from the Gateway name", () => {

@@ -84,6 +84,11 @@ export interface GatewayBase {
   via: "direct" | "apiserver";
   /** Set when CUBESTACK_GATEWAT_URL supplied the URL rather than discovery. */
   configured?: boolean;
+  /** The dataplane Service the URL was resolved from; absent for an explicit
+   *  URL. Its in-cluster DNS name and port are what a pod inside the cluster
+   *  dials, however the portal itself reaches the gateway (off-cluster it goes
+   *  through the API-server service proxy). */
+  service?: { name: string; namespace: string; port: number };
 }
 
 export function inCluster(): boolean {
@@ -138,13 +143,15 @@ async function discoverGatewayBases(): Promise<GatewayBase[]> {
       if (!svc) continue;
       const serviceName = svc.metadata?.name ?? "";
       const port = svc.spec?.ports?.[0]?.port ?? 8080;
+      const service = { name: serviceName, namespace: GATEWAY_NAMESPACE, port };
       if (inCluster()) {
-        bases.push({ name, url: `http://${serviceName}.${GATEWAY_NAMESPACE}.svc:${port}`, via: "direct" });
+        bases.push({ name, url: `http://${serviceName}.${GATEWAY_NAMESPACE}.svc:${port}`, via: "direct", service });
       } else {
         bases.push({
           name,
           url: `${cluster!.server!.replace(/\/+$/, "")}/api/v1/namespaces/${GATEWAY_NAMESPACE}/services/${serviceName}:${port}/proxy`,
           via: "apiserver",
+          service,
         });
       }
     }
@@ -233,6 +240,20 @@ export async function resolveGatewayBases(): Promise<GatewayBase[]> {
 /** The primary (public) gateway base, or null when none resolves. */
 export async function resolveGatewayBase(): Promise<GatewayBase | null> {
   return (await resolveGatewayBases())[0] ?? null;
+}
+
+/**
+ * The private catalog Gateway's in-cluster Service address — the endpoint a
+ * caller inside the cluster reaches the private route on — or null when
+ * discovery finds no private Gateway. The dataplane Service name ends in a
+ * generated suffix, so it is taken from discovery rather than composed from the
+ * Gateway name. The public gateway's own base is deliberately not used: off
+ * cluster it is an API-server proxy URL, which no in-cluster caller can dial.
+ */
+export async function privateGatewayClusterEndpoint(): Promise<string | null> {
+  const base = (await resolveGatewayBases()).find((b) => b.name === `${GATEWAY_NAME}-private`);
+  if (!base?.service) return null;
+  return `http://${base.service.name}.${base.service.namespace}.svc:${base.service.port}`;
 }
 
 /**

@@ -1,5 +1,6 @@
 import { getCoreClient, getCustomObjectsClient } from "@/lib/kubernetes";
 import { withAuth } from "@/lib/auth/guard";
+import { privateGatewayClusterEndpoint } from "@/lib/cubepilot/gateway";
 import { CATALOG_PATHS, isAIGatewayRouter, isCatalogPath, type CatalogPath } from "@/lib/inference-routes";
 
 // @kubernetes/client-node needs Node APIs (TLS, fs), not the Edge runtime.
@@ -91,6 +92,13 @@ export interface InferenceServiceSummary {
   }>;
   internalEndpoint: string | null;
   publicEndpoint: string | null;
+  /**
+   * The private catalog Gateway's in-cluster Service address, discovered from
+   * the cluster's dataplane Services; null when no private Gateway is found.
+   * Only meaningful for a service published to the private route (it has no
+   * public listener), whose detail card shows this as its AI Gateway endpoint.
+   */
+  privateGatewayEndpoint: string | null;
   /**
    * Best-effort engine metrics; null when Prometheus has none. `p95` is in
    * milliseconds (the engine histogram itself is in seconds).
@@ -295,6 +303,7 @@ function project(
   isvc: Isvc,
   profile: Profile | undefined,
   metrics: NonNullable<InferenceServiceSummary["metrics"]> | null,
+  privateGatewayEndpoint: string | null,
 ): InferenceServiceSummary {
   const spec = isvc.spec ?? {};
   const status = isvc.status ?? {};
@@ -397,6 +406,7 @@ function project(
     roles,
     internalEndpoint: status.endpoint?.internal ?? null,
     publicEndpoint: status.endpoint?.public ?? null,
+    privateGatewayEndpoint,
     metrics,
   };
 }
@@ -431,19 +441,24 @@ export const GET = withAuth(async () => {
     // Best-effort, per-service metrics in parallel; a failure (or a stalled
     // backend, which now times out) degrades that service to `metrics: null`
     // (the page then shows its empty state).
-    const metrics = await Promise.all(
-      isvcs.map((isvc) => {
-        const profile = byProfile.get(isvc.spec?.profileRef ?? "");
-        return loadMetrics(
-          isvc.metadata?.namespace ?? "",
-          isvc.metadata?.name ?? "",
-          profile?.spec?.engine?.name,
-        ).catch(() => null);
-      }),
-    );
+    const [privateGatewayEndpoint, metrics] = await Promise.all([
+      // The private catalog's address is a cluster fact, resolved once per
+      // response (discovery is memoized in the gateway client).
+      privateGatewayClusterEndpoint(),
+      Promise.all(
+        isvcs.map((isvc) => {
+          const profile = byProfile.get(isvc.spec?.profileRef ?? "");
+          return loadMetrics(
+            isvc.metadata?.namespace ?? "",
+            isvc.metadata?.name ?? "",
+            profile?.spec?.engine?.name,
+          ).catch(() => null);
+        }),
+      ),
+    ]);
 
     const items = isvcs.map((isvc, i) =>
-      project(isvc, byProfile.get(isvc.spec?.profileRef ?? ""), metrics[i]),
+      project(isvc, byProfile.get(isvc.spec?.profileRef ?? ""), metrics[i], privateGatewayEndpoint),
     );
     // Newest first, mirroring the prototype's ordering by freshness.
     items.sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""));

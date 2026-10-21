@@ -17,7 +17,7 @@ import { validationMessage, type ValidationErrorBody } from "@/lib/api-error";
 import { apiFetch } from "@/lib/base-path";
 import { copyText } from "@/lib/clipboard";
 import { useI18n } from "@/lib/i18n";
-import { AIGATEWAY_ROUTER_PRIVATE, AIGATEWAY_ROUTER_PUBLIC, CATALOG_PATHS, PRIVATE_GATEWAY_ENDPOINT, type AIGatewayRouter, type CatalogPath } from "@/lib/inference-routes";
+import { AIGATEWAY_ROUTER_PRIVATE, AIGATEWAY_ROUTER_PUBLIC, CATALOG_PATHS, type AIGatewayRouter, type CatalogPath } from "@/lib/inference-routes";
 import { platformPalette, usePlatformTheme } from "@/lib/perses/theme";
 
 // The prototype's filter set is 全部 / Ready / 准备中. "准备中" is a service the
@@ -935,9 +935,11 @@ function EndpointsCard({ s }: { s: InferenceServiceSummary }) {
   // either route). The public route's address is the observed value; fall back
   // to "—" when it isn't published yet. The catalog host serves every published
   // model, so the model name that selects this service is shown alongside it.
+  // The private address is discovered by the API route, not composed here: the
+  // dataplane Service name carries a generated suffix.
   const isPrivate = s.aigatewayRouter === AIGATEWAY_ROUTER_PRIVATE;
   const gatewayLabel = isPrivate ? t("inf.endpoints.gatewayInternal") : t("inf.endpoints.public");
-  const gateway = isPrivate ? PRIVATE_GATEWAY_ENDPOINT : (s.publicEndpoint ?? "—");
+  const gateway = isPrivate ? (s.privateGatewayEndpoint ?? "—") : (s.publicEndpoint ?? "—");
   return (
     <Card title={t("inf.endpoints.title")}>
       {/* Stacked, not side by side: this card is a third of the panel's width

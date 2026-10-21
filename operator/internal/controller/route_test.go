@@ -813,8 +813,18 @@ var _ = Describe("checkRoute", func() {
 				CommonRouteSpec: gatewayv1.CommonRouteSpec{
 					ParentRefs: []gatewayv1.ParentReference{{Name: gatewayv1.ObjectName(testGatewayName)}},
 				},
+				// The rule the last published service left: it references the
+				// Backend cleanup deletes along with that service.
 				Rules: []gatewayv1.HTTPRouteRule{{
-					Matches: []gatewayv1.HTTPRouteMatch{{Path: &gatewayv1.HTTPPathMatch{Type: ptrTo(gatewayv1.PathMatchPathPrefix), Value: ptrTo("/")}}},
+					BackendRefs: []gatewayv1.HTTPBackendRef{{
+						BackendRef: gatewayv1.BackendRef{
+							BackendObjectReference: gatewayv1.BackendObjectReference{
+								Group: ptrTo(gatewayv1.Group(envoyGatewayAPIGroup)),
+								Kind:  ptrTo(gatewayv1.Kind(egBackendKind)),
+								Name:  "gone-endpoint",
+							},
+						},
+					}},
 				}},
 			},
 		}
@@ -825,7 +835,19 @@ var _ = Describe("checkRoute", func() {
 		stored := sharedHTTPRoute(testCatalogRoute)
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(stored), stored)).To(Succeed())
 		Expect(stored.Labels).NotTo(HaveKey(managedByLabelKey))
+		// The stale backendRefs are gone: the object is left with the CRD's
+		// default rule, which references nothing.
 		Expect(stored.Spec.Rules).To(HaveLen(1))
+		Expect(stored.Spec.Rules[0].BackendRefs).To(BeEmpty())
+		Expect(stored.Spec.Rules[0].Filters).To(BeEmpty())
+
+		// A second pass is a no-op: the neutralized object must not be rewritten
+		// on every reconcile.
+		before := stored.ResourceVersion
+		Expect(routeReconciler().syncSharedCatalogRoutes(ctx)).To(Succeed())
+		again := sharedHTTPRoute(testCatalogRoute)
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(again), again)).To(Succeed())
+		Expect(again.ResourceVersion).To(Equal(before))
 	})
 
 	It("removes the rule from both shared routes when a service is deleted", func() {
@@ -1239,6 +1261,40 @@ var _ = Describe("routeParentsAccepted", func() {
 
 	It("accepts a status that leaves observedGeneration unset", func() {
 		Expect(routeParentsAccepted(parentsAcceptedBy(0), 3, testGatewayName, testGatewayNamespace)).To(BeTrue())
+	})
+})
+
+var _ = Describe("routeParentsAcceptedForRef", func() {
+	refWithSection := func(section string) gatewayv1.ParentReference {
+		return gatewayv1.ParentReference{
+			Name:        gatewayv1.ObjectName(testGatewayName),
+			Namespace:   ptrTo(gatewayv1.Namespace(testGatewayNamespace)),
+			SectionName: ptrTo(gatewayv1.SectionName(section)),
+		}
+	}
+	statusFor := func(ref gatewayv1.ParentReference, accepted bool) gatewayv1.RouteParentStatus {
+		reason := ""
+		if !accepted {
+			reason = string(gatewayv1.RouteReasonNoMatchingParent)
+		}
+		return gatewayRouteParents(ref, 3, accepted, reason, "")[0]
+	}
+
+	It("reads the status of the listener it asked about", func() {
+		// Two listeners on one Gateway: the first status entry rejects another
+		// section, the second accepts this ref. Matching on name and namespace
+		// alone would return the rejection.
+		parents := []gatewayv1.RouteParentStatus{
+			statusFor(refWithSection("public"), false),
+			statusFor(refWithSection("private"), true),
+		}
+		Expect(routeParentsAcceptedForRef(parents, 3, refWithSection("private"), testGatewayNamespace)).To(BeTrue())
+		Expect(routeParentsAcceptedForRef(parents, 3, refWithSection("public"), testGatewayNamespace)).To(BeFalse())
+	})
+
+	It("does not borrow another listener's acceptance", func() {
+		parents := []gatewayv1.RouteParentStatus{statusFor(refWithSection("public"), true)}
+		Expect(routeParentsAcceptedForRef(parents, 3, refWithSection("private"), testGatewayNamespace)).To(BeFalse())
 	})
 })
 

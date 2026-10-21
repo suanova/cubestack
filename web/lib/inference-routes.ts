@@ -8,11 +8,6 @@ export const AIGATEWAY_ROUTERS = [AIGATEWAY_ROUTER_PUBLIC, AIGATEWAY_ROUTER_PRIV
 
 export type AIGatewayRouter = (typeof AIGATEWAY_ROUTERS)[number];
 
-// The private catalog route has no public listener: callers reach it through
-// this Service in the gateway namespace, so a service published there shows the
-// in-cluster address as its AI Gateway endpoint.
-export const PRIVATE_GATEWAY_ENDPOINT = "http://cubestack-ai-private.envoy-gateway-system.svc";
-
 export function isAIGatewayRouter(value: unknown): value is AIGatewayRouter {
   return value === AIGATEWAY_ROUTER_PUBLIC || value === AIGATEWAY_ROUTER_PRIVATE;
 }

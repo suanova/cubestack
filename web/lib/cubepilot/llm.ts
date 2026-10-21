@@ -5,6 +5,8 @@
 // only referenced through TemplateProviderCr.credentialRef. An instance
 // selects one of the refs the providers define: "<provider>/<modelId>".
 
+import { isPlatformProviderName } from "./types";
+
 /** One provider of the builtin AgentTemplate (spec.providers[]). */
 export interface TemplateProviderCr {
   /** The provider key: the ref prefix and the OpenClaw models.providers key. */
@@ -59,6 +61,12 @@ export function sanitizeProviderName(raw: string): string {
 export function providerNameError(name: string): string {
   if (name === "" || name.length > MAX_PROVIDER_NAME || !DNS_1123_LABEL.test(name)) {
     return `provider name "${name}" must be a DNS-1123 label: lowercase letters, digits and "-", at most ${MAX_PROVIDER_NAME} characters`;
+  }
+  // "cubestack" and "cubestack-*" name the platform's own AI Gateway providers
+  // (see isPlatformProviderName): an external provider stored under one would
+  // be hidden from the external-provider editor and treated as system-owned.
+  if (isPlatformProviderName(name)) {
+    return `provider name "${name}" is reserved for the platform's AI Gateway providers`;
   }
   return "";
 }
