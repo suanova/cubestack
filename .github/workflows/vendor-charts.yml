@@ -279,46 +279,10 @@ jobs:
           # together, never one without the other. Edited in place, never
           # re-serialized: the catalog file is heavily commented and a YAML
           # round-trip would flatten the whole entry into the diff.
-          python3 - "${COMPONENT}" "${ORDER}" "${CATALOG_VERSION}" "${catalog}" "${charts}/README.md" README.md <<'PY'
-          import re
+          python3 - "${CATALOG_VERSION}" "$catalog" <<'PY'
           import sys
 
-          component, order, version, catalog, charts_readme, root_readme = sys.argv[1:]
-          prefix = f"| {order} | `{component}` |"
-          archive = f"{component}-{version}.tgz"
-
-
-          def rewrite_row(path, build):
-              """Replace the component's row in a markdown table, or fail loudly."""
-              with open(path) as handle:
-                  lines = handle.readlines()
-              hits = [i for i, line in enumerate(lines) if line.startswith(prefix)]
-              if len(hits) != 1:
-                  sys.exit(f"expected one {prefix!r} row in {path}, found {len(hits)}")
-              lines[hits[0]] = build(lines[hits[0]])
-              with open(path, "w") as handle:
-                  handle.writelines(lines)
-
-
-          # Pin and version each have their own column here, so rebuild the whole
-          # row: patching fields across the `|` separators is what silently drops
-          # a column the next time one is added.
-          def charts_row(_row):
-              return (
-                  f"{prefix} `{version}` | `{archive}` | `{component}-chart` {version} "
-                  "| cubestack repo CI (OCI) |\n"
-              )
-
-
-          # The root README's component table names only the file.
-          def root_row(row):
-              updated, count = re.subn(
-                  r"`assets/charts/[^`]+`", f"`assets/charts/{archive}`", row
-              )
-              if count != 1:
-                  sys.exit(f"expected one chart path in the row of {root_readme}, found {count}")
-              return updated
-
+          version, catalog = sys.argv[1:]
 
           # The pin in the catalog is what the operator resolves the file name from:
           # the `oci:` block's version, and only that one. `defaultValues:`' children
@@ -346,9 +310,6 @@ jobs:
           lines[pins[0]] = f"  version: {version}\n"
           with open(catalog, "w") as handle:
               handle.writelines(lines)
-
-          rewrite_row(charts_readme, charts_row)
-          rewrite_row(root_readme, root_row)
           PY
 
           # The operator's preload list must name the images the chart renders;
@@ -451,8 +412,12 @@ jobs:
               printf 'The chart changed on `%s@%s`, so re-vendor it.\n\n' \
                 "$GITHUB_REPOSITORY" "${GITHUB_SHA:0:7}"
             fi
-            printf -- '- `assets/charts/%s-%s.tgz` — the archive, packaged from the chart at that commit\n- `assets/components/%s-%s.yaml` — the `oci.version` pin, which is the file name the operator resolves\n- `assets/charts/README.md` and `README.md` — the vendored-archive tables\n- `test/e2e/images.txt` — the own-image preload tags, which follow the chart appVersion\n\nOpened by the `suanova-bot` App from [`.github/workflows/vendor-charts.yml`](https://github.com/%s/blob/main/.github/workflows/vendor-charts.yml). The archive is `//go:embed`ed into the operator binary, so it is committed here rather than pulled at reconcile time; merging this fires `publish.yml`, which is what actually puts the new chart in front of clusters.\n' \
-              "$COMPONENT" "$CATALOG_VERSION" "$ORDER" "$COMPONENT" "$GITHUB_REPOSITORY"
+            preload_entry=''
+            if [ -e test/e2e/images.txt ]; then
+              preload_entry='- `test/e2e/images.txt` — the own-image preload tags, which follow the chart appVersion'
+            fi
+            printf -- '- `assets/charts/%s-%s.tgz` — the archive, packaged from the chart at that commit\n- `assets/components/%s-%s.yaml` — the `oci.version` pin, which is the file name the operator resolves\n%s\n\nOpened by the `suanova-bot` App from [`.github/workflows/vendor-charts.yml`](https://github.com/%s/blob/main/.github/workflows/vendor-charts.yml). The archive is `//go:embed`ed into the operator binary, so it is committed here rather than pulled at reconcile time; merging this fires `publish.yml`, which is what actually puts the new chart in front of clusters.\n' \
+              "$COMPONENT" "$CATALOG_VERSION" "$ORDER" "$COMPONENT" "$preload_entry" "$GITHUB_REPOSITORY"
           } > "$body"
 
           # Helm repacks identical content into different bytes, so a changed
