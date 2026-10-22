@@ -73,8 +73,9 @@ func vendorProductLabel(vendor aiv1alpha1.AcceleratorVendor) string {
 // the extended resources in requests AND limits), model volume composition
 // (design §4.5), additional volumes mounted at their declared at path,
 // envFromAssets → envFrom ConfigMap refs (<isvc>-<asset>), hostPort backfill
-// when hostNetwork is enabled. The container is named main.
-func buildPodSpec(pt aiv1alpha1.PodTemplate, isvcName string, model *aiv1alpha1.ModelVersion, vendor aiv1alpha1.AcceleratorVendor) corev1.PodSpec {
+// when hostNetwork is enabled. The container is named main. extendedResources
+// is the renderer's parsed form of podTemplate.resources.extendedResources.
+func buildPodSpec(pt aiv1alpha1.PodTemplate, isvcName string, model *aiv1alpha1.ModelVersion, vendor aiv1alpha1.AcceleratorVendor, extendedResources map[string]int64) corev1.PodSpec {
 	container := corev1.Container{
 		Name:            mainContainerName,
 		Image:           pt.Image,
@@ -114,7 +115,7 @@ func buildPodSpec(pt aiv1alpha1.PodTemplate, isvcName string, model *aiv1alpha1.
 			container.Resources.Requests[resourceName] = gpu
 			container.Resources.Limits[resourceName] = gpu
 		}
-		for name, n := range pt.Resources.ExtendedResources {
+		for name, n := range extendedResources {
 			resourceName := corev1.ResourceName(name)
 			q := *resource.NewQuantity(n, resource.DecimalSI)
 			container.Resources.Requests[resourceName] = q

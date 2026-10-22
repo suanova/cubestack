@@ -3,6 +3,7 @@ package renderer
 import (
 	"maps"
 	"strconv"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -15,10 +16,11 @@ import (
 )
 
 const (
-	overridePrefillReplicas  = "prefillReplicas"
-	overrideReplicaPlacement = "replicaPlacement"
-	overrideNodeSelector     = "nodeSelector"
-	bootstrapAsset           = "bootstrap"
+	overridePrefillReplicas   = "prefillReplicas"
+	overrideReplicaPlacement  = "replicaPlacement"
+	overrideNodeSelector      = "nodeSelector"
+	overrideExtendedResources = "extendedResources"
+	bootstrapAsset            = "bootstrap"
 	// nodePoolLabel and nodePoolValue are the node-pool label pair the
 	// nodeSelector table entries pin a service to.
 	nodePoolLabel = "node-pool"
@@ -163,6 +165,104 @@ var _ = Describe("Render", func() {
 		Expect(res.Errors).To(HaveLen(1))
 		Expect(res.Errors[0].Reason).To(Equal(ReasonInvalidOverride))
 	})
+
+	It("parses a literal extendedResources list into a resource map", func() {
+		p := renderProfile()
+		p.Spec.Roles[1].PodTemplate.Resources = &aiv1alpha1.PodResources{
+			GPUPerPod:         ptrTo(intstr.FromInt32(8)),
+			ExtendedResources: "rdma/ib_shared_devices=2,example.com/foo=1",
+		}
+		res := Render(renderISVC(), p, renderModel(), nil)
+		Expect(res.Errors).To(BeEmpty())
+		Expect(res.Roles[1].ExtendedResources).To(Equal(map[string]int64{
+			"rdma/ib_shared_devices": 2,
+			"example.com/foo":        1,
+		}))
+	})
+
+	It("resolves a stringList override into several extended resource pairs", func() {
+		p := renderProfile()
+		p.Spec.Overrides = append(p.Spec.Overrides, aiv1alpha1.Override{
+			Name:    overrideExtendedResources,
+			Type:    aiv1alpha1.OverrideTypeStringList,
+			Default: &apiextensionsv1.JSON{Raw: []byte(`["rdma/ib_shared_devices=2"]`)},
+		})
+		p.Spec.Roles[1].PodTemplate.Resources = &aiv1alpha1.PodResources{
+			GPUPerPod:         ptrTo(intstr.FromInt32(8)),
+			ExtendedResources: "{{ overrides.extendedResources }}",
+		}
+		isvc := renderISVC()
+		isvc.Spec.Overrides[overrideExtendedResources] = apiextensionsv1.JSON{
+			Raw: []byte(`["rdma/roce_shared_devices=4","example.com/foo=1"]`),
+		}
+		res := Render(isvc, p, renderModel(), nil)
+		Expect(res.Errors).To(BeEmpty())
+		Expect(res.Roles[1].ExtendedResources).To(Equal(map[string]int64{
+			"rdma/roce_shared_devices": 4,
+			"example.com/foo":          1,
+		}))
+		// The input profile keeps the template; the render resolves a copy.
+		Expect(p.Spec.Roles[1].PodTemplate.Resources.ExtendedResources).To(Equal("{{ overrides.extendedResources }}"))
+	})
+
+	It("accepts an uppercase name part and a 63-byte name like Kubernetes does", func() {
+		p := renderProfile()
+		longName := "example.com/" + strings.Repeat("a", 63)
+		p.Spec.Roles[1].PodTemplate.Resources = &aiv1alpha1.PodResources{
+			ExtendedResources: "rdma/HCA=1," + longName + "=1",
+		}
+		res := Render(renderISVC(), p, renderModel(), nil)
+		Expect(res.Errors).To(BeEmpty())
+		Expect(res.Roles[1].ExtendedResources).To(Equal(map[string]int64{"rdma/HCA": 1, longName: 1}))
+	})
+
+	It("adds no extended resource for an empty resolved value", func() {
+		p := renderProfile()
+		p.Spec.Overrides = append(p.Spec.Overrides, aiv1alpha1.Override{
+			Name:    overrideExtendedResources,
+			Type:    aiv1alpha1.OverrideTypeStringList,
+			Default: &apiextensionsv1.JSON{Raw: []byte(`[]`)},
+		})
+		p.Spec.Roles[1].PodTemplate.Resources = &aiv1alpha1.PodResources{
+			ExtendedResources: "{{ overrides.extendedResources }}",
+		}
+		res := Render(renderISVC(), p, renderModel(), nil)
+		Expect(res.Errors).To(BeEmpty())
+		Expect(res.Roles[1].ExtendedResources).To(BeNil())
+	})
+
+	It("rejects a variable outside overrides in extendedResources", func() {
+		p := renderProfile()
+		p.Spec.Roles[1].PodTemplate.Resources = &aiv1alpha1.PodResources{
+			ExtendedResources: "{{ model.name }}=2",
+		}
+		res := Render(renderISVC(), p, renderModel(), nil)
+		Expect(res.Errors).To(HaveLen(1))
+		Expect(res.Errors[0].Reason).To(Equal(ReasonPhaseViolation))
+	})
+
+	DescribeTable("rejects an invalid extendedResources declaration",
+		func(value string) {
+			p := renderProfile()
+			p.Spec.Roles[1].PodTemplate.Resources = &aiv1alpha1.PodResources{
+				ExtendedResources: value,
+			}
+			res := Render(renderISVC(), p, renderModel(), nil)
+			Expect(res.Errors).To(HaveLen(1))
+			Expect(res.Errors[0].Reason).To(Equal(ReasonInvalidOverride))
+		},
+		Entry("missing count", "rdma/ib_shared_devices"),
+		Entry("zero count", "rdma/ib_shared_devices=0"),
+		Entry("negative count", "rdma/ib_shared_devices=-1"),
+		Entry("non-integer count", "rdma/ib_shared_devices=two"),
+		Entry("name without a domain prefix", "ib_shared_devices=2"),
+		Entry("cpu collision", "cpu=2"),
+		Entry("memory collision", "memory=2"),
+		Entry("vendor GPU collision", "nvidia.com/gpu=2"),
+		Entry("reserved requests. prefix", "requests.example.com/foo=2"),
+		Entry("name part longer than 63 bytes", "example.com/"+strings.Repeat("a", 64)+"=1"),
+		Entry("duplicate name", "rdma/ib_shared_devices=2,rdma/ib_shared_devices=3"),
+	)
 
 	// gpuPrefill marks the prefill role as the GPU role of the fixture profile.
 	gpuPrefill := func(p *aiv1alpha1.InferenceRuntimeProfile) {

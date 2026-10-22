@@ -88,7 +88,7 @@ var _ = Describe("buildPodSpec", func() {
 				GPUPerPod: ptrTo(intstr.FromInt32(2)),
 			},
 		}
-		spec := buildPodSpec(pt, "svc", modelHostPath(), aiv1alpha1.AcceleratorVendorMetax)
+		spec := buildPodSpec(pt, "svc", modelHostPath(), aiv1alpha1.AcceleratorVendorMetax, nil)
 		c := spec.Containers[0]
 		Expect(c.Resources.Requests.Cpu().String()).To(Equal("8"))
 		Expect(c.Resources.Requests.Memory().String()).To(Equal("64Gi"))
@@ -101,7 +101,7 @@ var _ = Describe("buildPodSpec", func() {
 			Image:     testEngineImage,
 			Resources: &aiv1alpha1.PodResources{GPUPerPod: ptrTo(intstr.FromInt32(1))},
 		}
-		spec := buildPodSpec(pt, "svc", modelHostPath(), aiv1alpha1.AcceleratorVendorNvidia)
+		spec := buildPodSpec(pt, "svc", modelHostPath(), aiv1alpha1.AcceleratorVendorNvidia, nil)
 		c := spec.Containers[0]
 		Expect(c.Resources.Requests.Name("nvidia.com/gpu", resource.DecimalSI).String()).To(Equal("1"))
 		Expect(c.Resources.Limits.Name("nvidia.com/gpu", resource.DecimalSI).String()).To(Equal("1"))
@@ -116,7 +116,7 @@ var _ = Describe("buildPodSpec", func() {
 				FailureThreshold: ptrTo(int32(30)),
 			}},
 		}
-		spec := buildPodSpec(pt, "svc", modelHostPath(), aiv1alpha1.AcceleratorVendorMetax)
+		spec := buildPodSpec(pt, "svc", modelHostPath(), aiv1alpha1.AcceleratorVendorMetax, nil)
 		c := spec.Containers[0]
 		Expect(c.ReadinessProbe.Exec).To(Equal(&corev1.ExecAction{Command: testExecProbeCommand}))
 		Expect(c.ReadinessProbe.PeriodSeconds).To(Equal(int32(10)))
@@ -300,7 +300,7 @@ var _ = Describe("buildPodSpec", func() {
 				{Name: testShmVolName, At: testShmMountPath, EmptyDir: &aiv1alpha1.EmptyDirVolume{Medium: testMemoryMedium}},
 			},
 		}
-		spec := buildPodSpec(pt, "svc", modelHostPath(), aiv1alpha1.AcceleratorVendorMetax)
+		spec := buildPodSpec(pt, "svc", modelHostPath(), aiv1alpha1.AcceleratorVendorMetax, nil)
 		Expect(spec.Volumes).To(HaveLen(2))
 		Expect(spec.Containers[0].VolumeMounts).To(Equal([]corev1.VolumeMount{
 			{Name: testShmVolName, MountPath: testShmMountPath},
@@ -311,11 +311,11 @@ var _ = Describe("buildPodSpec", func() {
 		pt := aiv1alpha1.PodTemplate{
 			Image: testEngineImage,
 			Resources: &aiv1alpha1.PodResources{
-				GPUPerPod:         ptrTo(intstr.FromInt32(2)),
-				ExtendedResources: map[string]int64{"rdma/ib_shared_devices": 2},
+				GPUPerPod: ptrTo(intstr.FromInt32(2)),
 			},
 		}
-		spec := buildPodSpec(pt, "svc", modelHostPath(), aiv1alpha1.AcceleratorVendorMetax)
+		spec := buildPodSpec(pt, "svc", modelHostPath(), aiv1alpha1.AcceleratorVendorMetax,
+			map[string]int64{"rdma/ib_shared_devices": 2})
 		c := spec.Containers[0]
 		Expect(c.Resources.Requests.Name("rdma/ib_shared_devices", resource.DecimalSI).String()).To(Equal("2"))
 		Expect(c.Resources.Limits.Name("rdma/ib_shared_devices", resource.DecimalSI).String()).To(Equal("2"))
@@ -327,7 +327,7 @@ var _ = Describe("buildPodSpec", func() {
 			Image:  testEngineImage,
 			Mounts: []aiv1alpha1.ModelMount{{Model: modelKeyMain, At: testModelPath, ReadOnly: true}},
 		}
-		spec := buildPodSpec(pt, "svc", modelHostPath(), aiv1alpha1.AcceleratorVendorMetax)
+		spec := buildPodSpec(pt, "svc", modelHostPath(), aiv1alpha1.AcceleratorVendorMetax, nil)
 		Expect(spec.Volumes).To(HaveLen(1))
 		Expect(spec.Volumes[0].Name).To(Equal("model-main"))
 		Expect(spec.Volumes[0].HostPath.Path).To(Equal("/models/m"))
@@ -352,7 +352,7 @@ var _ = Describe("buildPodSpec", func() {
 			Image:  testEngineImage,
 			Mounts: []aiv1alpha1.ModelMount{{Model: modelKeyMain, At: testModelPath, ReadOnly: true}},
 		}
-		spec := buildPodSpec(pt, "other", mv, aiv1alpha1.AcceleratorVendorMetax)
+		spec := buildPodSpec(pt, "other", mv, aiv1alpha1.AcceleratorVendorMetax, nil)
 		Expect(spec.Volumes[0].PersistentVolumeClaim.ClaimName).To(Equal("other-model-main"))
 		Expect(spec.Volumes[0].PersistentVolumeClaim.ReadOnly).To(BeTrue())
 		Expect(spec.Containers[0].VolumeMounts[0].SubPath).To(Equal("m/v1"))
@@ -373,7 +373,7 @@ var _ = Describe("buildPodSpec", func() {
 			Image:  testEngineImage,
 			Mounts: []aiv1alpha1.ModelMount{{Model: modelKeyMain, At: testModelPath, ReadOnly: true}},
 		}
-		spec := buildPodSpec(pt, "other", mv, aiv1alpha1.AcceleratorVendorMetax)
+		spec := buildPodSpec(pt, "other", mv, aiv1alpha1.AcceleratorVendorMetax, nil)
 		Expect(spec.Volumes[0].PersistentVolumeClaim.ClaimName).To(Equal("other-model-main"))
 		Expect(spec.Volumes[0].PersistentVolumeClaim.ReadOnly).To(BeTrue())
 		Expect(spec.Containers[0].VolumeMounts[0].SubPath).To(BeEmpty())
@@ -427,7 +427,7 @@ var _ = Describe("buildPodSpec", func() {
 			Image:         testEngineImage,
 			EnvFromAssets: []string{testRuntimeConfig, "bootstrap"},
 		}
-		spec := buildPodSpec(pt, "other", modelHostPath(), aiv1alpha1.AcceleratorVendorMetax)
+		spec := buildPodSpec(pt, "other", modelHostPath(), aiv1alpha1.AcceleratorVendorMetax, nil)
 		Expect(spec.Containers[0].EnvFrom).To(Equal([]corev1.EnvFromSource{
 			{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "other-runtime-config"}}},
 			{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "other-bootstrap"}}},
@@ -442,7 +442,7 @@ var _ = Describe("buildPodSpec", func() {
 				{Name: "HOST_IP", FieldRef: &aiv1alpha1.ObjectFieldSelector{FieldPath: "status.hostIP"}},
 			},
 		}
-		spec := buildPodSpec(pt, "svc", modelHostPath(), aiv1alpha1.AcceleratorVendorMetax)
+		spec := buildPodSpec(pt, "svc", modelHostPath(), aiv1alpha1.AcceleratorVendorMetax, nil)
 		Expect(spec.Containers[0].Env).To(Equal([]corev1.EnvVar{
 			{Name: "STATIC", Value: "v"},
 			{Name: "HOST_IP", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.hostIP"}}},
@@ -455,7 +455,7 @@ var _ = Describe("buildPodSpec", func() {
 			HostNetwork: ptrTo(true),
 			Ports:       []aiv1alpha1.ContainerPort{{Name: "http", ContainerPort: 8001}},
 		}
-		spec := buildPodSpec(pt, "svc", modelHostPath(), aiv1alpha1.AcceleratorVendorMetax)
+		spec := buildPodSpec(pt, "svc", modelHostPath(), aiv1alpha1.AcceleratorVendorMetax, nil)
 		Expect(spec.HostNetwork).To(BeTrue())
 		Expect(spec.Containers[0].Ports[0].HostPort).To(Equal(int32(8001)))
 	})
@@ -478,7 +478,7 @@ var _ = Describe("buildPodSpec", func() {
 			NodeSelector: map[string]string{"pool": "gpu"},
 			DNSPolicy:    corev1.DNSClusterFirstWithHostNet,
 		}
-		spec := buildPodSpec(pt, "svc", modelHostPath(), aiv1alpha1.AcceleratorVendorMetax)
+		spec := buildPodSpec(pt, "svc", modelHostPath(), aiv1alpha1.AcceleratorVendorMetax, nil)
 		Expect(spec.Volumes).To(HaveLen(2))
 		Expect(spec.Volumes[0].EmptyDir).To(Equal(&corev1.EmptyDirVolumeSource{
 			Medium:    corev1.StorageMediumMemory,

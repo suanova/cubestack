@@ -436,7 +436,7 @@ Controller 将此模板按 `workload.kind` 写入对应位置：`LeaderWorkerSet
 
 **渲染规则**
 
-`command`、`args`、`env[].value`、`nodeSelector`、`labels` 和 `annotations` 的字符串值都可以使用 `{{ }}`。可用变量仅限 `model.*`、`service.*`、`overrides.*`、`role.*`、`roles.<name>.*`、`profile.*` 和 `route.*`；使用未知变量时，Controller 将设置 `Rendered=False`。字段名和 map 的 key 必须是字面量，不能使用模板。渲染完成后，Controller 会再次校验结果是否符合 Kubernetes 的格式要求。
+`command`、`args`、`env[].value`、`nodeSelector`、`labels`、`annotations` 和 `resources.extendedResources` 的字符串值都可以使用 `{{ }}`。可用变量仅限 `model.*`、`service.*`、`overrides.*`、`role.*`、`roles.<name>.*`、`profile.*` 和 `route.*`；使用未知变量时，Controller 将设置 `Rendered=False`。字段名和 map 的 key 必须是字面量，不能使用模板。渲染完成后，Controller 会再次校验结果是否符合 Kubernetes 的格式要求。
 
 | 字段 | 类型 | 校验规则 | 说明 |
 |---|---|---|---|
@@ -445,7 +445,7 @@ Controller 将此模板按 `workload.kind` 写入对应位置：`LeaderWorkerSet
 | `command` / `args` | list | — | 支持 `{{ }}` 渲染，也支持运行期的 `$()` 和 `${}` 变量。 |
 | `env[]` | list | L0：`value` 与 `fieldRef` 二选一 | `{name, value}` 或 `{name, fieldRef}`。`value` 支持 `{{ }}` 和 `$()`；后者可引用通过 `envFrom` 注入的环境变量。 |
 | `envFromAssets[]` | list[asset 别名] | — | 将渲染后的指定 ConfigMap 以 `envFrom` 方式注入 Pod。 |
-| `resources` | object | L1：`extendedResources` 的 key 不得与 `cpu`/`memory`/两厂商 GPU 扩展资源名冲突、须为域限定扩展资源名（`domain/name`），值 ≥1（VAP） | `{cpu, memory, gpuPerPod, extendedResources?}`。`cpu` 和 `memory` 写入 requests；`gpuPerPod` 按 GPU 厂商映射为扩展资源，并同时写入 requests 和 limits；`extendedResources`（map[string]int64）的每项按 key 同时写入 requests 和 limits（与 `gpuPerPod` 语义一致），用于 RDMA 等附加扩展资源。 |
+| `resources` | object | L0：`extendedResources` 只能是逗号分隔的 `name=count` 对或单个 `{{ ... }}` 占位符（Pattern）。L2：渲染后每对须解析为域限定扩展资源名（`domain/name`）、不得与 `cpu`/`memory`/两厂商 GPU 扩展资源名冲突，count 为正整数，否则 `InvalidOverride` | `{cpu, memory, gpuPerPod, extendedResources?}`。`cpu` 和 `memory` 写入 requests；`gpuPerPod` 按 GPU 厂商映射为扩展资源，并同时写入 requests 和 limits；`extendedResources` 是逗号分隔的 `name=count` 字符串，可整体引用 `{{ overrides.* }}`（`stringList` 每个元素一项），解析后每项同时写入 requests 和 limits（与 `gpuPerPod` 语义一致），用于 RDMA 等附加扩展资源；空值不注入任何资源。之所以是 string 而非 map：扩展资源名属于集群（站点用 IB 还是 RoCE、设备插件把它命名成什么），不是 Profile 的事实，而 map 的 key 不能模板化。 |
 | `securityContext` | object | — | `{privileged?, runAsUser?, runAsGroup?}`。三个字段可分别设置。 |
 | `terminationGracePeriodSeconds` | int | L0：可选，默认 30 | 需要等待连接摘流或 checkpoint 写入时可适当增大。 |
 | `mounts[]` | list | L0：`model` 固定 `main`、`readOnly` 固定 `true` | 模型挂载声明：`{model: main, at: <容器内路径>, readOnly: true}`。Profile 指定容器内挂载位置，ModelVersion 指定模型的存储方式。仅卷类策略（`HostPath`/`Dynamic`/`Static`）声明；`S3` 策略以 URI 消费模型，不声明 `mounts[]`（§4.5）。 |

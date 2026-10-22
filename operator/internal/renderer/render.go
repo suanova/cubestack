@@ -73,6 +73,12 @@ type RenderedRole struct {
 	// naming one value per label is a plain podTemplate.nodeSelector entry
 	// instead, because a nodeSelector map can only express equality.
 	NodeAffinityRequirements []NodeAffinityRequirement
+
+	// ExtendedResources is the resolved podTemplate.resources.extendedResources
+	// declaration: the extended resource name → count map the controller writes
+	// to the container's requests and limits. Nil when the role declares none
+	// or the resolved value is empty.
+	ExtendedResources map[string]int64
 }
 
 // NodeAffinityRequirement is a required nodeAffinity In term: the node's label
@@ -168,6 +174,7 @@ func Render(isvc *aiv1alpha1.InferenceService, profile *aiv1alpha1.InferenceRunt
 		}
 		ctx.role = roleV
 		rr.PodTemplate, res.Errors = renderPodTemplate(ctx, rr.PodTemplate, res.Errors)
+		rr.ExtendedResources, res.Errors = resolveExtendedResources(ctx, role.Name, rr.PodTemplate.Resources, res.Errors)
 		rr.UsesCredentials = roleV.usesCredentials
 		// The service-level selection merges before the role-level one so that a
 		// pair naming the vendor product label goes through the conflict rule
@@ -742,6 +749,95 @@ func resolveNodeSelector(ctx *renderContext, roleName, field string, errs []Erro
 		}
 	}
 	return sel, errs
+}
+
+// resolveExtendedResources renders a role's extendedResources declaration and
+// parses the resolved value as one or more comma-separated name=count pairs
+// (design §3.2). It mirrors resolveNodeSelector: only overrides.* is allowed,
+// because which extended resource a cluster advertises — an InfiniBand or a
+// RoCE fabric, for example — is the site's fact, not something derived from
+// the service or the model. A stringList override resolves to several pairs,
+// one per entry. An empty resolved value adds no resource, and so does an
+// absent field. Each pair is checked after resolution: the name must be a
+// domain-qualified extended resource name that does not collide with cpu,
+// memory or either vendor's GPU resource, and the count must be a positive
+// integer. A bad pair fails the render with InvalidOverride, so a typo
+// surfaces on the Rendered condition instead of leaving every replica Pending
+// on a resource no node can satisfy.
+func resolveExtendedResources(ctx *renderContext, roleName string, resources *aiv1alpha1.PodResources, errs []Error) (map[string]int64, []Error) {
+	if resources == nil || resources.ExtendedResources == "" {
+		return nil, errs
+	}
+	rendered, renderErrs := renderString(ctx, resources.ExtendedResources, workloadAllowed)
+	errs = append(errs, renderErrs...)
+	if len(renderErrs) > 0 {
+		return nil, errs
+	}
+	resolved := strings.TrimSpace(rendered)
+	if resolved == "" {
+		return nil, errs
+	}
+	subject := fmt.Sprintf("role %q extendedResources", roleName)
+	out := make(map[string]int64)
+	for item := range strings.SplitSeq(resolved, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		name, count, ok := strings.Cut(item, "=")
+		if !ok || name == "" || count == "" {
+			return nil, append(errs, Error{
+				Reason: ReasonInvalidOverride,
+				Msg:    fmt.Sprintf("%s does not resolve to a name=count pair: %q", subject, item),
+			})
+		}
+		if msg := validateExtendedResourceName(name); msg != "" {
+			return nil, append(errs, Error{
+				Reason: ReasonInvalidOverride,
+				Msg:    fmt.Sprintf("%s name %q %s", subject, name, msg),
+			})
+		}
+		n, parseErr := strconv.ParseInt(strings.TrimSpace(count), 10, 64)
+		if parseErr != nil || n < 1 {
+			return nil, append(errs, Error{
+				Reason: ReasonInvalidOverride,
+				Msg:    fmt.Sprintf("%s count of %q must be a positive integer: %q", subject, name, count),
+			})
+		}
+		if _, dup := out[name]; dup {
+			return nil, append(errs, Error{
+				Reason: ReasonInvalidOverride,
+				Msg:    fmt.Sprintf("%s lists %q more than once", subject, name),
+			})
+		}
+		out[name] = n
+	}
+	return out, errs
+}
+
+// validateExtendedResourceName reports why name cannot be an extended resource
+// name, or "" when it can. The rules mirror the ones the VAP applied while the
+// field was a map: a qualified name (content.IsLabelKey, the function
+// pkg/util/validation re-exports as IsQualifiedName) with a domain prefix, not
+// a native resource, not either vendor's GPU resource (gpuPerPod owns those)
+// and not the reserved requests. prefix.
+func validateExtendedResourceName(name string) string {
+	switch name {
+	case "cpu", "memory":
+		return "must not collide with the native resource"
+	case "nvidia.com/gpu", "metax-tech.com/gpu":
+		return "must not collide with the vendor GPU resource gpuPerPod requests"
+	}
+	if !strings.Contains(name, "/") {
+		return "must be a domain-qualified extended resource name, e.g. rdma/ib_shared_devices"
+	}
+	if strings.HasPrefix(name, "requests.") {
+		return `must not start with "requests."`
+	}
+	if problems := content.IsLabelKey(name); len(problems) > 0 {
+		return fmt.Sprintf("must be a domain-qualified extended resource name: %s", problems[0])
+	}
+	return ""
 }
 
 // renderPodTemplate renders the templated fields of a pod template: command,

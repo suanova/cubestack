@@ -46,7 +46,6 @@ const (
 	testShmMountPath     = "/dev/shm"
 	testIBHostPath       = "/dev/infiniband"
 	testModelMountPath   = "/workspace/model"
-	testRDMAResourceName = "rdma/ib_shared_devices"
 
 	// testHostnameTopologyKey is the topology domain the podAntiAffinity specs
 	// spread across.
@@ -234,7 +233,7 @@ var _ = Describe("InferenceRuntimeProfile", func() {
 				{Name: "dshm", At: testShmMountPath, EmptyDir: &EmptyDirVolume{Medium: testMemoryMedium, SizeLimit: ptrTo(resource.MustParse("8Gi"))}},
 				{Name: "ib", At: testIBHostPath, HostPath: &HostPathVolume{Path: testIBHostPath}},
 			}
-			irp.Spec.Roles[1].PodTemplate.Resources.ExtendedResources = map[string]int64{testRDMAResourceName: 2}
+			irp.Spec.Roles[1].PodTemplate.Resources.ExtendedResources = "rdma/ib_shared_devices=2"
 
 			Expect(k8sClient.Create(ctx, irp)).To(Succeed())
 
@@ -243,6 +242,24 @@ var _ = Describe("InferenceRuntimeProfile", func() {
 			Expect(got.Spec).To(Equal(irp.Spec))
 
 			Expect(k8sClient.Delete(ctx, irp)).To(Succeed())
+		})
+
+		It("accepts literal and templated extendedResources and round-trips them", func() {
+			for _, value := range []string{
+				"rdma/ib_shared_devices=2,example.com/foo=1",
+				"{{ overrides.extendedResources }}",
+			} {
+				irp := validInferenceRuntimeProfile("irp-extended-resources")
+				irp.Spec.Roles[1].PodTemplate.Resources.ExtendedResources = value
+
+				Expect(k8sClient.Create(ctx, irp)).To(Succeed())
+
+				got := &InferenceRuntimeProfile{}
+				Expect(k8sClient.Get(ctx, client.ObjectKey{Name: irp.Name}, got)).To(Succeed())
+				Expect(got.Spec.Roles[1].PodTemplate.Resources.ExtendedResources).To(Equal(value))
+
+				Expect(k8sClient.Delete(ctx, irp)).To(Succeed())
+			}
 		})
 
 		It("accepts the templated scheduling fields and round-trips the spec", func() {
@@ -508,6 +525,24 @@ var _ = Describe("InferenceRuntimeProfile", func() {
 					s.NodeSelector = "{{ overrides.nodeSelector }} {{ overrides.other }}"
 				},
 				"spec.nodeSelector"),
+			Entry("extendedResources without a count",
+				"irp-invalid-extended-resources-no-count",
+				func(s *InferenceRuntimeProfileSpec) {
+					s.Roles[1].PodTemplate.Resources.ExtendedResources = "rdma/ib_shared_devices"
+				},
+				"spec.roles[1].podTemplate.resources.extendedResources"),
+			Entry("extendedResources with a zero count",
+				"irp-invalid-extended-resources-zero",
+				func(s *InferenceRuntimeProfileSpec) {
+					s.Roles[1].PodTemplate.Resources.ExtendedResources = "rdma/ib_shared_devices=0"
+				},
+				"spec.roles[1].podTemplate.resources.extendedResources"),
+			Entry("extendedResources with more than one placeholder",
+				"irp-invalid-extended-resources-template",
+				func(s *InferenceRuntimeProfileSpec) {
+					s.Roles[1].PodTemplate.Resources.ExtendedResources = "{{ overrides.extendedResources }} {{ overrides.other }}"
+				},
+				"spec.roles[1].podTemplate.resources.extendedResources"),
 			Entry("probe without httpGet or tcpSocket",
 				"irp-invalid-probe-no-action",
 				func(s *InferenceRuntimeProfileSpec) {
