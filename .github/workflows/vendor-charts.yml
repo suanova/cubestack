@@ -7,27 +7,21 @@ name: Vendor charts into cubestack-operator
 # them: re-vendoring was a manual step, so the copy in the operator drifts from
 # the chart it claims to be.
 #
-# This workflow closes that loop, the way cuberouter's vendor-chart.yml does for
-# its own chart. On a merge to main that touches either chart it packages that
-# chart exactly as ci-operator-chart.yml / ci-portal-chart.yml package it for
-# Harbor, then opens — or refreshes — a pull request in the operator that
-# re-vendors the archive and its pins. That PR is checked by the operator's own
-# PR workflow, which runs TestCatalogChartsAreVendored, so the guard is not
-# duplicated here.
+# This workflow closes that loop: a branch push packages the rolling `-latest`
+# chart, a v* tag packages the release. A tag maps to release-X.Y (it does not
+# record its branch), a branch maps to itself, and a missing operator branch
+# falls back to main.
 #
 # Both charts are covered by one matrixed job rather than two workflow files:
 # everything below the packaging step — the App token, the clone, the push, the
-# pull request — is identical for both, and two copies would have to be fixed
-# twice.
+# pull request — is identical for both.
 #
-# The archives are packaged here rather than pulled back from Harbor: the pull
-# would have to wait on the chart push landing, and a plain `on: push` races it.
-# The trade is that the vendored bytes are a build of that chart version, not
-# necessarily the identical artifact Harbor holds — the version is a moving
-# `-latest` tag either way, so the two are the same content by construction.
+# The archives are packaged here rather than pulled from Harbor: a tag push
+# starts the chart publish and this workflow together.
 on:
   push:
-    branches: [main]
+    branches: [main, 'release-*']
+    tags: ['v*']
     paths:
       # The controller-manager chart is generated from operator/config by
       # hack/update-helm-resources.sh, so a change to any of these moves it;
@@ -48,14 +42,14 @@ permissions: {}
 jobs:
   vendor:
     runs-on: ubuntu-latest
-    # `workflow_dispatch` can be pointed at any branch, and this workflow's whole
-    # contract is "vendor what is on main". Dispatched from a feature branch it
-    # would package that branch's chart and push it to the same rolling branch,
-    # opening a pull request against the operator that claims to come from main
-    # but carries unreleased content. Refuse anything but main rather than
-    # publish a branch build; the push trigger is already main-only, so this
-    # only ever skips a dispatch, and it makes the contract explicit.
-    if: github.ref == 'refs/heads/main'
+    # Push triggers are already filtered; only a dispatch needs the ref gate, so
+    # a manual run cannot package a feature branch or tag over the rolling chart.
+    if: >-
+      (github.event_name == 'push' &&
+       (github.ref == 'refs/heads/main' ||
+        startsWith(github.ref, 'refs/heads/release-') ||
+        startsWith(github.ref, 'refs/tags/v'))) ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
     # Read-only for the GITHUB_TOKEN: it fetches this repo and nothing else.
     # Every write below — branch, pull request — goes through the App token.
     permissions:
@@ -68,11 +62,15 @@ jobs:
           - component: cubestack-controller-manager
             order: 30
             chart_dir: operator/helm/cubestack-controller-manager-chart
+            # The image repository the chart renders and the preload list names.
+            image: cubestack-controller-manager
             # Generated from operator/config/ — see the package step.
             package: make
           - component: cubestack-portal
             order: 90
             chart_dir: web/helm/cubestack-portal-chart
+            # The portal chart renders the platform UI image, not a portal image.
+            image: cubestack-ui
             package: helm
     # Grouped per component, not per run: the two matrix jobs push different
     # branches and have no business waiting on each other. Not cancelled in
@@ -80,18 +78,25 @@ jobs:
     # request for it, and a run killed between those two leaves a branch no later
     # run would necessarily come back for.
     concurrency:
-      group: vendor-chart-${{ matrix.component }}-${{ github.ref }}
+      group: vendor-chart-${{ matrix.component }}
       cancel-in-progress: false
+      # FIFO and up to 100 pending, so a release tag queued behind a rolling run
+      # is not dropped.
+      queue: max
     env:
       COMPONENT: ${{ matrix.component }}
       ORDER: ${{ matrix.order }}
+      IMAGE: ${{ matrix.image }}
       TARGET_REPO: suanova/cubestack-operator
-      TARGET_BRANCH: automation/vendor-${{ matrix.component }}-chart
     steps:
       - name: Clone the code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      # Empty on a branch push; the tag without its v on a release.
+      - name: Resolve the release version
+        id: release
+        uses: ./.github/actions/resolve-release-version
       # make helm-package regenerates the chart with bin/kustomize, which the
       # Makefile go-installs on demand — hence Go. The portal chart is packaged
       # by helm alone and needs none of it.
@@ -110,13 +115,20 @@ jobs:
         env:
           PACKAGE: ${{ matrix.package }}
           CHART_DIR: ${{ matrix.chart_dir }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
           CHART_NAME="$(helm show chart "${CHART_DIR}" | awk '/^name:/{print $2}')"
-          CHART_VERSION="$(helm show chart "${CHART_DIR}" | awk '/^version:/{print $2}')"
           test -n "${CHART_NAME}"
-          test -n "${CHART_VERSION}"
-          CATALOG_VERSION="${CHART_VERSION}-latest"
+          if [ -n "${RELEASE_VERSION}" ]; then
+            CATALOG_VERSION="${RELEASE_VERSION}"
+            APP_VERSION="${RELEASE_VERSION}"
+          else
+            CHART_VERSION="$(helm show chart "${CHART_DIR}" | awk '/^version:/{print $2}')"
+            test -n "${CHART_VERSION}"
+            CATALOG_VERSION="${CHART_VERSION}-latest"
+            APP_VERSION=latest
+          fi
 
           if [ "${PACKAGE}" = "make" ]; then
             # The make target, not a bare `helm package`: helm-package depends on
@@ -125,11 +137,11 @@ jobs:
             # which is deliberately not committed). A bare package would ship a
             # stale templates/ and no CRDs at all.
             make -C operator helm-package \
-              HELM_CHART_VERSION="${CATALOG_VERSION}" HELM_CHART_APP_VERSION=latest
+              HELM_CHART_VERSION="${CATALOG_VERSION}" HELM_CHART_APP_VERSION="${APP_VERSION}"
             ARCHIVE="${CHART_DIR}/${CHART_NAME}-${CATALOG_VERSION}.tgz"
           else
             helm package "${CHART_DIR}" \
-              --version "${CATALOG_VERSION}" --app-version latest \
+              --version "${CATALOG_VERSION}" --app-version "${APP_VERSION}" \
               --destination "${RUNNER_TEMP}"
             ARCHIVE="${RUNNER_TEMP}/${CHART_NAME}-${CATALOG_VERSION}.tgz"
           fi
@@ -146,6 +158,7 @@ jobs:
           packaged_version="$(helm show chart "${ARCHIVE}" | awk '/^version:/{print $2}')"
           test "${packaged_version}" = "${CATALOG_VERSION}"
           echo "catalog-version=${CATALOG_VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "app-version=${APP_VERSION}" >> "${GITHUB_OUTPUT}"
           echo "archive=${ARCHIVE}" >> "${GITHUB_OUTPUT}"
       # Scoped to the one repository the token has to write: the operator. The App
       # is installed org-wide, but a token minted for everything it can see would
@@ -158,11 +171,41 @@ jobs:
           private-key: ${{ secrets.SUANOVA_BOT_APP_PRIVATE_KEY }}
           owner: suanova
           repositories: cubestack-operator
+      - name: Resolve the target branch
+        id: target
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          candidate="$(scripts/vendor-chart-target.sh "${GITHUB_REF_TYPE}" "${GITHUB_REF_NAME}")"
+          if [ "$candidate" != "main" ]; then
+            # --include so a transient API failure is not read as a missing branch.
+            status="$(gh api --include "repos/${TARGET_REPO}/branches/${candidate}" 2>/dev/null \
+              | awk 'NR==1{print $2}')" || true
+            case "$status" in
+              200) ;;
+              404)
+                echo "::notice::${TARGET_REPO} has no ${candidate} branch; vendoring to main"
+                candidate=main
+                ;;
+              *)
+                echo "::error::cannot check ${TARGET_REPO} branch ${candidate} (HTTP ${status:-none})"
+                exit 1
+                ;;
+            esac
+          fi
+          echo "branch=${candidate}" >> "${GITHUB_OUTPUT}"
+          # main keeps its automation branch so an open PR is refreshed, not orphaned.
+          if [ "$candidate" = "main" ]; then
+            echo "automation-branch=automation/vendor-${COMPONENT}-chart" >> "${GITHUB_OUTPUT}"
+          else
+            echo "automation-branch=automation/vendor-${COMPONENT}-chart-${candidate}" >> "${GITHUB_OUTPUT}"
+          fi
       - name: Clone the target repo
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: ${{ env.TARGET_REPO }}
-          ref: main
+          ref: ${{ steps.target.outputs.branch }}
           path: target
           fetch-depth: 1
           # The same token is what the push below authenticates with (checkout
@@ -181,6 +224,7 @@ jobs:
         id: branch-tip
         working-directory: target
         env:
+          TARGET_BRANCH: ${{ steps.target.outputs.automation-branch }}
           GIT_TERMINAL_PROMPT: "0"
         run: |
           set -euo pipefail
@@ -190,6 +234,7 @@ jobs:
         working-directory: target
         env:
           CATALOG_VERSION: ${{ steps.package.outputs.catalog-version }}
+          APP_VERSION: ${{ steps.package.outputs.app-version }}
           ARCHIVE: ${{ steps.package.outputs.archive }}
         run: |
           set -euo pipefail
@@ -305,11 +350,38 @@ jobs:
           rewrite_row(charts_readme, charts_row)
           rewrite_row(root_readme, root_row)
           PY
+
+          # The operator's preload list must name the images the chart renders;
+          # TestOwnImagesArePreloaded checks both directions, so a new appVersion
+          # has to move these tags with it.
+          preload="test/e2e/images.txt"
+          if [ -f "$preload" ]; then
+            python3 - "${IMAGE}" "${APP_VERSION}" "$preload" <<'PY'
+          import re
+          import sys
+
+          image, app_version, path = sys.argv[1:]
+          own = re.compile(rf"^(\S*/{re.escape(image)}(?:-[^:\s]+)?):[^\s]+$")
+          changed = 0
+          with open(path) as handle:
+              lines = handle.readlines()
+          for i, line in enumerate(lines):
+              match = own.match(line.strip())
+              if match:
+                  lines[i] = f"{match.group(1)}:{app_version}\n"
+                  changed += 1
+          if app_version != "latest" and changed == 0:
+              sys.exit(f"no {image} images found in {path}")
+          with open(path, "w") as handle:
+              handle.writelines(lines)
+          PY
+          fi
       - name: Commit and push the branch
         id: commit
         working-directory: target
         env:
           CATALOG_VERSION: ${{ steps.package.outputs.catalog-version }}
+          TARGET_BRANCH: ${{ steps.target.outputs.automation-branch }}
           # The branch tip as of before this run's work; empty when the branch
           # does not exist yet, which is the one case the lease has no value for.
           EXPECTED_SHA: ${{ steps.branch-tip.outputs.sha }}
@@ -327,6 +399,10 @@ jobs:
           # Only the paths this workflow owns: a stray file elsewhere in the
           # checkout is not something to commit.
           git add --all -- assets README.md
+          # An older target branch may not carry the preload list.
+          if [ -e test/e2e/images.txt ]; then
+            git add --all -- test/e2e/images.txt
+          fi
           # Nothing staged means the archive and its pins already agree. Read the
           # index rather than `git status`: the one state that leaves no tracked
           # change is a version whose pin was bumped by hand while its archive went
@@ -346,7 +422,8 @@ jobs:
           # so a push that lands while this run is in flight is rejected rather
           # than clobbered. It does not preserve a commit already on the branch
           # when the run began: the branch is bot-owned scratch state, re-derived
-          # from main on every run, so nothing is meant to accumulate there.
+          # from its target branch on every run, so nothing is meant to accumulate
+          # there.
           target_ref="refs/heads/${TARGET_BRANCH}"
           if [ -n "$EXPECTED_SHA" ]; then
             git push --force-with-lease="${target_ref}:${EXPECTED_SHA}" origin "HEAD:${target_ref}"
@@ -360,13 +437,23 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           CATALOG_VERSION: ${{ steps.package.outputs.catalog-version }}
+          TARGET_BRANCH: ${{ steps.target.outputs.automation-branch }}
+          BASE_BRANCH: ${{ steps.target.outputs.branch }}
         run: |
           set -euo pipefail
           title="chore(charts): vendor ${COMPONENT} ${CATALOG_VERSION}"
           body="${RUNNER_TEMP}/pr-body.md"
-          printf 'The chart changed on `%s@%s`, so re-vendor it.\n\n- `assets/charts/%s-%s.tgz` — the archive, packaged from the chart at that commit\n- `assets/components/%s-%s.yaml` — the `oci.version` pin, which is the file name the operator resolves\n- `assets/charts/README.md` and `README.md` — the vendored-archive tables\n\nOpened by the `suanova-bot` App from [`.github/workflows/vendor-charts.yml`](https://github.com/%s/blob/main/.github/workflows/vendor-charts.yml). The archive is `//go:embed`ed into the operator binary, so it is committed here rather than pulled at reconcile time; merging this fires `publish.yml`, which is what actually puts the new chart in front of clusters.\n' \
-            "$GITHUB_REPOSITORY" "${GITHUB_SHA:0:7}" "$COMPONENT" "$CATALOG_VERSION" \
-            "$ORDER" "$COMPONENT" "$GITHUB_REPOSITORY" > "$body"
+          {
+            if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+              printf 'The chart was released as `%s`, so re-vendor it.\n\n' \
+                "${GITHUB_REF_NAME}"
+            else
+              printf 'The chart changed on `%s@%s`, so re-vendor it.\n\n' \
+                "$GITHUB_REPOSITORY" "${GITHUB_SHA:0:7}"
+            fi
+            printf -- '- `assets/charts/%s-%s.tgz` — the archive, packaged from the chart at that commit\n- `assets/components/%s-%s.yaml` — the `oci.version` pin, which is the file name the operator resolves\n- `assets/charts/README.md` and `README.md` — the vendored-archive tables\n- `test/e2e/images.txt` — the own-image preload tags, which follow the chart appVersion\n\nOpened by the `suanova-bot` App from [`.github/workflows/vendor-charts.yml`](https://github.com/%s/blob/main/.github/workflows/vendor-charts.yml). The archive is `//go:embed`ed into the operator binary, so it is committed here rather than pulled at reconcile time; merging this fires `publish.yml`, which is what actually puts the new chart in front of clusters.\n' \
+              "$COMPONENT" "$CATALOG_VERSION" "$ORDER" "$COMPONENT" "$GITHUB_REPOSITORY"
+          } > "$body"
 
           # Helm repacks identical content into different bytes, so a changed
           # archive is otherwise an opaque blob to review. This is what changed.
@@ -394,5 +481,5 @@ jobs:
             exit 0
           fi
 
-          gh pr create --repo "$TARGET_REPO" --base main --head "$TARGET_BRANCH" \
+          gh pr create --repo "$TARGET_REPO" --base "$BASE_BRANCH" --head "$TARGET_BRANCH" \
             --title "$title" --body-file "$body"
