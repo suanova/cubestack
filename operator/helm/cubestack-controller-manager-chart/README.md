@@ -240,6 +240,30 @@ helm install cubestack ./helm/cubestack-controller-manager-chart -n cubestack-sy
   --create-namespace --set image.pullPolicy=Always
 ```
 
+### Replicas and scheduling
+
+`replicaCount` sets the manager Deployment's replica count. The manager is
+leader-elected, so a second replica is a hot standby rather than extra
+capacity: it serves nothing until the leader's lease expires, then takes over.
+One replica is a single point of failure; use 2 or more for an HA control
+plane:
+
+```bash
+helm install cubestack ./helm/cubestack-controller-manager-chart -n cubestack-system \
+  --create-namespace --set replicaCount=2
+```
+
+`nodeSelector`, `tolerations` and `affinity` are rendered into the manager pod
+spec when set, and omitted otherwise. `affinity` is how the platform's HA
+switch keeps replicas apart: it writes required hostname anti-affinity, which
+needs at least as many nodes as replicas or the extra pods stay `Pending`.
+
+```bash
+helm install cubestack ./helm/cubestack-controller-manager-chart -n cubestack-system \
+  --create-namespace --set replicaCount=2 \
+  --set-json 'affinity={"podAntiAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":[{"topologyKey":"kubernetes.io/hostname","labelSelector":{"matchLabels":{"control-plane":"controller-manager"}}}]}}'
+```
+
 ### Upgrading an existing release
 
 Helm installs the CRDs in this chart's `crds/` directory once, on `helm install`,

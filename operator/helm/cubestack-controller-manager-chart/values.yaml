@@ -78,7 +78,19 @@ rdma:
   ibResource: rdma/ib_shared_devices    # --rdma-ib-resource
   roceResource: rdma/roce_shared_devices  # --rdma-roce-resource
 
+# Replicas of the manager Deployment. The manager is leader-elected, so a
+# second replica is a hot standby: it serves nothing until the leader's lease
+# expires, then takes over. 1 is a single point of failure; use 2 or more for
+# an HA control plane. The platform operator's spec.global.ha writes 2 here.
 replicaCount: 1
+
+# Pod scheduling for the manager, rendered only when non-empty. The platform
+# operator fills nodeSelector/tolerations from spec.global and, when
+# spec.global.ha is on, affinity with required hostname anti-affinity so the
+# replicas land on different nodes.
+nodeSelector: {}
+tolerations: []
+affinity: {}
 
 resources:
   limits:

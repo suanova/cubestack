@@ -202,6 +202,56 @@ END { flush() }
 ' "${OUT}"
 rm -f "${OUT}"
 
+# --- 2b. Manager Deployment: replicas + pod scheduling from values ---
+# config/manager/manager.yaml is kustomize source shared with `make deploy`, so
+# it keeps the literal single replica and no scheduling fields: an empty
+# affinity map there would show up in every kustomize deployment for nothing.
+# The chart, though, has to let the platform operator drive both --
+# spec.global.ha writes replicaCount plus required hostname anti-affinity, and
+# spec.global.{nodeSelector,tolerations} write the other two -- so the
+# values-driven blocks are injected into the generated template here.
+MANAGER_TPL="${TEMPLATES}/deployment-cubestack-controller-manager.yaml"
+[ -f "${MANAGER_TPL}" ] \
+  || { echo "manager Deployment template not generated at ${MANAGER_TPL} — update section 2b of update-helm-resources.sh"; exit 1; }
+awk '
+/^  replicas: 1$/ {
+  print "  replicas: {{ .Values.replicaCount }}"
+  replicas++
+  next
+}
+/^    spec:$/ {
+  print
+  print "      {{- with .Values.nodeSelector }}"
+  print "      nodeSelector:"
+  print "        {{- toYaml . | nindent 8 }}"
+  print "      {{- end }}"
+  print "      {{- with .Values.tolerations }}"
+  print "      tolerations:"
+  print "        {{- toYaml . | nindent 8 }}"
+  print "      {{- end }}"
+  print "      {{- with .Values.affinity }}"
+  print "      affinity:"
+  print "        {{- toYaml . | nindent 8 }}"
+  print "      {{- end }}"
+  podspec++
+  next
+}
+{ print }
+END {
+  # Fail loudly if the anchors moved: both needles are the only thing that
+  # makes these values reach the pod spec, and a silent no-op would leave the
+  # chart ignoring replicaCount/affinity while the drift gate stays green.
+  if (replicas != 1) {
+    print "manager spec.replicas not found in the kustomize output — update needle in update-helm-resources.sh" > "/dev/stderr"
+    exit 1
+  }
+  if (podspec != 1) {
+    print "manager pod template spec not found in the kustomize output — update needle in update-helm-resources.sh" > "/dev/stderr"
+    exit 1
+  }
+}
+' "${MANAGER_TPL}" > "${MANAGER_TPL}.new" && mv "${MANAGER_TPL}.new" "${MANAGER_TPL}"
+
 # --- 3. Validate the values-driven chart content (manager gateway args, absence of the platform's objects) ---
 # The manager's platform-Gateway args are injected into the deployment
 # template from .Values.gateway (section 2 rewrite). Assert the rendered args
@@ -341,5 +391,21 @@ expect_render image-tag-set present '^[[:space:]]*image: "harbor\.isuanova\.com/
 # interpolated policy from a literal one.
 expect_render defaults present '^[[:space:]]*imagePullPolicy: IfNotPresent$' --namespace cubestack-system
 expect_render pull-policy-set present '^[[:space:]]*imagePullPolicy: Always$' --set image.pullPolicy=Always
+# Replica count is wired to spec.replicas. The default equals the kustomize
+# literal, so only an override proves interpolation (same argument as the pull
+# policy above); the platform operator's HA switch writes exactly this value.
+expect_render defaults present '^  replicas: 1$' --namespace cubestack-system
+expect_render replicas-set present '^  replicas: 2$' --set replicaCount=2 --namespace cubestack-system
+# Pod scheduling is rendered from values only when set, and the operator's HA
+# injection writes required hostname anti-affinity -- if the block is dropped
+# from the template, two replicas can land on one node without any error.
+expect_render affinity-set present '^[[:space:]]*topologyKey: kubernetes\.io/hostname$' \
+  --set-json 'affinity={"podAntiAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":[{"topologyKey":"kubernetes.io/hostname","labelSelector":{"matchLabels":{"control-plane":"controller-manager"}}}]}}' \
+  --namespace cubestack-system
+expect_render node-selector-set present '^[[:space:]]*disk: ssd$' \
+  --set-json 'nodeSelector={"disk":"ssd"}' --namespace cubestack-system
+expect_render tolerations-set present '^[[:space:]]*key: dedicated$' \
+  --set-json 'tolerations=[{"key":"dedicated","operator":"Equal","value":"gpu","effect":"NoSchedule"}]' \
+  --namespace cubestack-system
 
 echo "chart resources regenerated under ${CHART}"
