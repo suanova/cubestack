@@ -289,9 +289,9 @@ chart:
 
 ```bash
 helm show crds oci://harbor.isuanova.com/suanova/cubestack-controller-manager-chart \
-  --version 1.0.0 | kubectl apply --server-side -f -
+  --version 2.0.0 | kubectl apply --server-side -f -
 helm upgrade cubestack oci://harbor.isuanova.com/suanova/cubestack-controller-manager-chart \
-  --version 1.0.0 -n cubestack-system
+  --version 2.0.0 -n cubestack-system
 ```
 
 ### Upgrading from a chart that created the Gateway
