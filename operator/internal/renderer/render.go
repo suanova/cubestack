@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/validate/content"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
@@ -19,6 +20,10 @@ const (
 	modelMain = "main"
 	// overridesNamespace is the variable namespace of the resolved overrides.
 	overridesNamespace = "overrides"
+	// roceResource is the shared RDMA resource a RoCE fabric requests. Unlike
+	// an InfiniBand device, RoCE reaches the host's RDMA NIC through the host
+	// network namespace, so a Pod requesting it needs host networking.
+	roceResource = "rdma/roce_shared_devices"
 )
 
 // Vendor product labels, written by the vendor device plugin to every GPU
@@ -175,6 +180,19 @@ func Render(isvc *aiv1alpha1.InferenceService, profile *aiv1alpha1.InferenceRunt
 		ctx.role = roleV
 		rr.PodTemplate, res.Errors = renderPodTemplate(ctx, rr.PodTemplate, res.Errors)
 		rr.ExtendedResources, res.Errors = resolveExtendedResources(ctx, role.Name, rr.PodTemplate.Resources, res.Errors)
+		// RoCE reaches the host's RDMA device through the host network
+		// namespace, so a role that requests the RoCE resource gets host
+		// networking and the DNS policy that keeps cluster DNS working there.
+		// The rule follows the role's own resolved extendedResources: in a PD
+		// profile both prefill and decode request it, a standard profile
+		// applies it to its single GPU role, and a role requesting something
+		// else (or no extended resource at all, such as the router) is left on
+		// the pod network.
+		if n, ok := rr.ExtendedResources[roceResource]; ok && n > 0 {
+			hostNetwork := true
+			rr.PodTemplate.HostNetwork = &hostNetwork
+			rr.PodTemplate.DNSPolicy = corev1.DNSClusterFirstWithHostNet
+		}
 		rr.UsesCredentials = roleV.usesCredentials
 		// The service-level selection merges before the role-level one so that a
 		// pair naming the vendor product label goes through the conflict rule

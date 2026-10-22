@@ -1276,7 +1276,7 @@ function ScaleCard({
       ) : (
         <Box sx={{ px: "18px", py: "12px", display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: "12px", alignItems: "end" }}>
           {s.overrides.map((o) => (
-            <Field key={o.name} label={overrideDisplayName(o.name)} error={!scaleValueValid(o, effective[o.name])}>
+            <Field key={o.name} label={overrideDisplayName(o.name, t("inf.deploy.rdmaType"))} error={!scaleValueValid(o, effective[o.name])}>
               <ScaleInput o={o} value={effective[o.name]} nodes={nodes} onChange={(v) => setValues((prev) => ({ ...prev, [o.name]: v }))} />
             </Field>
           ))}
@@ -1580,8 +1580,10 @@ function DeployWizard({
     nameValid && !nameTaken && draft.name.trim().length > 0 && !!draft.namespace && !!draft.profileRef;
   const step2Valid = !!draft.modelRef;
 
-  // Default override value, or the declared default.
-  const overrideValue = (o: OverrideDecl): OverrideValue => {
+  // The value an override holds from the user or the profile, before the
+  // wizard's own auto-injection. GPU-model selection reads this one: an
+  // injected RDMA resource pair is never a model name.
+  const declaredOverrideValue = (o: OverrideDecl): OverrideValue => {
     const held = draft.overrides[o.name];
     if (held !== undefined) return held;
     if (Array.isArray(o.default)) return o.default;
@@ -1603,7 +1605,7 @@ function DeployWizard({
   // picking MXC500 would still display only "metax".
   const selectedGpuModel = profile
     ? (profile.overrides
-        .map((o) => overrideValue(o))
+        .map((o) => declaredOverrideValue(o))
         .find((v): v is string => typeof v === "string" && profile.models.includes(v)) ?? null)
     : null;
 
@@ -1616,7 +1618,7 @@ function DeployWizard({
     if (!profile) return null;
     const scoped = profile.overrides
       .filter((o) => o.name.startsWith(`${name}_`) && o.name.endsWith("_model"))
-      .map((o) => overrideValue(o))
+      .map((o) => declaredOverrideValue(o))
       .find((v): v is string => typeof v === "string" && models.includes(v));
     if (scoped !== undefined) return scoped;
     return selectedGpuModel && models.includes(selectedGpuModel) ? selectedGpuModel : null;
@@ -1685,16 +1687,136 @@ function DeployWizard({
   };
 
   const allNodes = options?.nodes ?? [];
-  const overrideInput = (o: OverrideDecl) => (
-    <OverrideInput
-      key={o.name}
-      decl={o}
-      value={overrideValue(o)}
-      nodes={allNodes.filter((n) => nodeMatchesSelectedModel(o, n))}
-      anyNodes={allNodes.length > 0}
-      onChange={(v) => setDraft((prev) => ({ ...prev, overrides: { ...prev.overrides, [o.name]: v } }))}
-    />
-  );
+
+  // Whether one node can run a role's selected GPU model — the node picker's
+  // own filter, asked per role rather than per override.
+  const roleNodeMatches = (
+    name: string,
+    node: CreateOptionsResponse["nodes"][number],
+  ): boolean => {
+    const model = selectedRoleGpuModel(name);
+    if (!model) return true;
+    const vendor = roleVendor(name);
+    return !vendor || node.gpuModels?.[vendor] === model;
+  };
+
+  // The RDMA fabrics an extendedResources override can inject, with the count
+  // derived from the nodes the service may land on. The count is the Pod's
+  // share of the pool: Σ(rdma allocatable) × gpuPerPod ÷ Σ(gpu allocatable)
+  // over the nodes advertising that fabric — the whole node's devices when the
+  // Pod takes every GPU, half when it takes half. null means this is not an
+  // override the wizard can express, so the generic input stays.
+  const rdmaFabrics = (decl: OverrideDecl): RdmaFabric[] | null => {
+    if (!profile || !isExtendedResourcesOverride(decl)) return null;
+    const scoped = decl.name.endsWith("_extendedResources")
+      ? decl.name.slice(0, -"_extendedResources".length)
+      : null;
+    // A role-scoped override feeds one role; a service-level one feeds every
+    // GPU role. A CPU-only role has no gpuPerPod to scale from.
+    const roles = profile.roles.filter((r) =>
+      scoped ? r.name === scoped : (r.gpuPerPod ?? 0) > 0,
+    );
+    if (roles.length === 0) return null;
+    // One count is written to one override, so every role it feeds must agree
+    // on the vendor and the cards per Pod.
+    const vendors = new Set(roles.map((r) => roleVendor(r.name)));
+    const perPod = new Set(roles.map((r) => r.gpuPerPod));
+    if (vendors.size !== 1 || perPod.size !== 1) return null;
+    const vendor = [...vendors][0];
+    const gpuPerPod = [...perPod][0];
+    // A templated gpuPerPod (`{{ overrides.tpSize }}`) reaches this projection
+    // unresolved; without a concrete number there is nothing to scale by.
+    if (typeof vendor !== "string" || typeof gpuPerPod !== "number" || gpuPerPod <= 0) return null;
+    const eligible = allNodes.filter((n) => roles.every((r) => roleNodeMatches(r.name, n)));
+    const fabrics: RdmaFabric[] = [];
+    for (const fabric of RDMA_FABRICS) {
+      const nodes = eligible.filter((n) => (n.allocatable?.rdma[fabric.id] ?? 0) > 0);
+      if (nodes.length === 0) continue;
+      const rdma = nodes.reduce((sum, n) => sum + (n.allocatable?.rdma[fabric.id] ?? 0), 0);
+      const gpu = nodes.reduce((sum, n) => sum + (n.allocatable?.gpu[vendor] ?? 0), 0);
+      if (gpu <= 0) continue;
+      const value = Math.floor((rdma * gpuPerPod) / gpu);
+      if (value > 0) fabrics.push({ id: fabric.id, resource: fabric.resource, value });
+    }
+    return fabrics;
+  };
+
+  // The fabric the wizard injects without the user touching the field:
+  // InfiniBand when the nodes offer it, otherwise the only available fabric.
+  // A profile default is the site's own choice and wins; an empty default —
+  // "" or [] — is "nothing declared", so the wizard still picks.
+  const autoOverrideValue = (o: OverrideDecl): OverrideValue | undefined => {
+    if (draft.overrides[o.name] !== undefined) return undefined;
+    const declared = o.default;
+    const hasDefault = !(
+      declared === null ||
+      declared === undefined ||
+      declared === "" ||
+      (Array.isArray(declared) && declared.length === 0)
+    );
+    if (hasDefault) return undefined;
+    const fabrics = rdmaFabrics(o);
+    if (!fabrics) return undefined;
+    const preferred =
+      fabrics.find((f) => f.id === "infiniband") ?? (fabrics.length === 1 ? fabrics[0] : undefined);
+    return preferred ? fabricOverrideValue(o, preferred) : undefined;
+  };
+
+  // What an input shows and what the summary reports: the user's choice, else
+  // the wizard's auto-injected fabric, else the profile default.
+  const overrideValue = (o: OverrideDecl): OverrideValue => {
+    const auto = autoOverrideValue(o);
+    return auto !== undefined ? auto : declaredOverrideValue(o);
+  };
+
+  // The fabric chosen for the same scope as a nodeSelector override: a
+  // service-level selector follows extendedResources, a role-scoped one
+  // follows <role>_extendedResources and falls back to the service-level
+  // fabric (the PD profiles declare the fabric once for both roles). A node
+  // that does not advertise it cannot run the Pod, so it does not belong in
+  // the picker.
+  const selectedNodeFabric = (decl: OverrideDecl): RdmaFabricId | null => {
+    if (!profile || !isNodeSelectorOverride(decl)) return null;
+    const scoped = decl.name.endsWith("_nodeSelector")
+      ? decl.name.slice(0, -"_nodeSelector".length)
+      : null;
+    const ext =
+      (scoped && profile.overrides.find((o) => o.name === `${scoped}_extendedResources`)) ||
+      profile.overrides.find((o) => o.name === "extendedResources");
+    if (!ext) return null;
+    const fabric = rdmaFabricOf(overrideValue(ext));
+    return fabric === "" ? null : fabric;
+  };
+
+  const overrideInput = (o: OverrideDecl) => {
+    const fabric = selectedNodeFabric(o);
+    return (
+      // In PD separation the service-level extendedResources sits beside the
+      // role grid; give it the whole row there. A standard profile keeps the
+      // ordinary half row alongside its other overrides.
+      <Box
+        key={o.name}
+        sx={
+          o.name === "extendedResources" && profile?.servingMode === "pd-separation"
+            ? { gridColumn: "1 / -1" }
+            : undefined
+        }
+      >
+        <OverrideInput
+          decl={o}
+          value={overrideValue(o)}
+          nodes={allNodes.filter(
+            (n) =>
+              nodeMatchesSelectedModel(o, n) &&
+              (!fabric || (n.allocatable?.rdma[fabric] ?? 0) > 0),
+          )}
+          anyNodes={allNodes.length > 0}
+          fabrics={rdmaFabrics(o)}
+          onChange={(v) => setDraft((prev) => ({ ...prev, overrides: { ...prev.overrides, [o.name]: v } }))}
+        />
+      </Box>
+    );
+  };
 
   const next = () => {
     if (step === 1) {
@@ -1712,12 +1834,22 @@ function DeployWizard({
   const create = () => {
     setCreateBusy(true);
     setCreateError(null);
+    // Profile defaults stay implicit (the operator applies them), but a
+    // fabric the wizard auto-selected is the wizard's own injection: it must
+    // travel in spec.overrides.
+    const overrides = { ...draft.overrides };
+    if (profile) {
+      for (const o of profile.overrides) {
+        const auto = autoOverrideValue(o);
+        if (auto !== undefined) overrides[o.name] = auto;
+      }
+    }
     const body = {
       namespace: draft.namespace,
       name: draft.name.trim(),
       profileRef: draft.profileRef,
       modelRef: draft.modelRef,
-      overrides: draft.overrides,
+      overrides,
       route: { aigatewayRouter: draft.aigatewayRouter, modelName: draft.modelName.trim(), paths: draft.paths },
     };
     apiFetch("/api/inferenceservices", {
@@ -1982,7 +2114,7 @@ function DeployWizard({
                     ...(profile
                       ? profile.overrides.map((o) => {
                           const v = overrideValue(o);
-                          return [`${t("inf.deploy.override")} ${overrideDisplayName(o.name)}`, Array.isArray(v) ? v.join(", ") : String(v)] as [string, string];
+                          return [`${t("inf.deploy.override")} ${overrideDisplayName(o.name, t("inf.deploy.rdmaType"))}`, Array.isArray(v) ? v.join(", ") : String(v)] as [string, string];
                         })
                       : []),
                     [t("inf.deploy.route"), `${t("inf.params.published")} · ${draft.aigatewayRouter === AIGATEWAY_ROUTER_PRIVATE ? t("inf.deploy.aigatewayRouterPrivate") : t("inf.deploy.aigatewayRouterPublic")} · ${draft.modelName} · ${draft.paths.join(" ")}`],
@@ -2091,7 +2223,15 @@ function roleLabel(name: string): string {
 // label instead of an identifier: "prefill_metax_model" becomes "Prefill Metax
 // Model" and "cacheDitWarmup" becomes "Cache Dit Warmup". The raw name remains
 // the override key sent to the API and the data-od-id suffix.
-function overrideDisplayName(name: string): string {
+function overrideDisplayName(name: string, extendedResourcesLabel?: string): string {
+  // The extendedResources knob is the RDMA fabric choice; its CR field name
+  // is an implementation detail the reader should not have to decode.
+  if (
+    extendedResourcesLabel !== undefined &&
+    (name === "extendedResources" || name.endsWith("_extendedResources"))
+  ) {
+    return extendedResourcesLabel;
+  }
   return name
     .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
@@ -2099,6 +2239,58 @@ function overrideDisplayName(name: string): string {
     .filter(Boolean)
     .map((word) => word[0].toUpperCase() + word.slice(1))
     .join(" ");
+}
+
+// An extendedResources override carries the RDMA fabric as one name=count
+// pair. The resource names are the operator's defaults
+// (--rdma-ib-resource / --rdma-roce-resource); a site that renames them keeps
+// the free-text input rather than getting a picker that writes the wrong key.
+const RDMA_FABRICS = [
+  { id: "infiniband", resource: "rdma/ib_shared_devices" },
+  { id: "roce", resource: "rdma/roce_shared_devices" },
+] as const;
+type RdmaFabricId = (typeof RDMA_FABRICS)[number]["id"];
+
+/** One fabric the wizard can inject, with the count derived from the nodes. */
+interface RdmaFabric {
+  id: RdmaFabricId;
+  resource: string;
+  value: number;
+}
+
+function isExtendedResourcesOverride(decl: Pick<OverrideDecl, "name" | "type">): boolean {
+  return (
+    (decl.type === "string" || decl.type === "stringList") &&
+    (decl.name === "extendedResources" || decl.name.endsWith("_extendedResources"))
+  );
+}
+
+/**
+ * The fabric an extendedResources value names: "" for none, null when it names
+ * something the picker cannot represent (several pairs, another resource). The
+ * generic input takes over in the null case, exactly as it does for a
+ * multi-pair nodeSelector.
+ */
+function rdmaFabricOf(value: OverrideValue): "" | RdmaFabricId | null {
+  let raw: unknown = value;
+  if (Array.isArray(raw)) {
+    if (raw.length === 0) return "";
+    if (raw.length !== 1) return null;
+    raw = raw[0];
+  }
+  if (typeof raw !== "string") return null;
+  const pair = raw.trim();
+  if (pair === "") return "";
+  if (pair.includes(",")) return null;
+  const eq = pair.indexOf("=");
+  if (eq < 0) return null;
+  return RDMA_FABRICS.find((f) => f.resource === pair.slice(0, eq).trim())?.id ?? null;
+}
+
+/** The override value a fabric choice writes. */
+function fabricOverrideValue(decl: Pick<OverrideDecl, "type">, fabric: RdmaFabric): OverrideValue {
+  const pair = `${fabric.resource}=${fabric.value}`;
+  return decl.type === "stringList" ? [pair] : pair;
 }
 
 // A nodeSelector override pins one node. The wizard lists the cluster's
@@ -2147,6 +2339,7 @@ function OverrideInput({
   onChange,
   nodes,
   anyNodes,
+  fabrics,
 }: {
   decl: OverrideDecl;
   value: OverrideValue;
@@ -2154,6 +2347,8 @@ function OverrideInput({
   nodes: Array<{ name: string }>;
   /** Whether the cluster offered any node at all; `nodes` may be filtered to none. */
   anyNodes: boolean;
+  /** RDMA fabrics derived from the nodes; null for overrides this is not about. */
+  fabrics?: RdmaFabric[] | null;
 }) {
   const { t } = useI18n();
   // The picker is filtered to the role's selected GPU model; when that leaves
@@ -2164,12 +2359,46 @@ function OverrideInput({
       : decl.description ?? undefined;
   if (decl.type === "boolean") {
     return (
-      <WizField label={overrideDisplayName(decl.name)} hint={decl.description ?? undefined}>
+      <WizField label={overrideDisplayName(decl.name, t("inf.deploy.rdmaType"))} hint={decl.description ?? undefined}>
         <Switch checked={Boolean(value)} data-od-id={`override-${decl.name}`} onChange={(e) => onChange(e.target.checked)} />
       </WizField>
     );
   }
-  const label = `${overrideDisplayName(decl.name)}${decl.min !== null && decl.max !== null ? ` (${decl.min}–${decl.max})` : ""}`;
+  const label = `${overrideDisplayName(decl.name, t("inf.deploy.rdmaType"))}${decl.min !== null && decl.max !== null ? ` (${decl.min}–${decl.max})` : ""}`;
+  // extendedResources gets a fabric picker when the nodes advertise at least
+  // one. The picker lists only real fabrics — there is no "none" entry, and a
+  // profile with nothing to offer keeps the generic input, empty. The generic
+  // input also takes over when the current value is one the picker cannot
+  // express (several pairs, another resource, a fabric these nodes do not
+  // advertise), so a profile's own value is never silently replaced.
+  const fabric = fabrics && fabrics.length > 0 ? rdmaFabricOf(value) : null;
+  const fabricOffered =
+    fabric === "" || (fabric !== null && fabrics?.some((f) => f.id === fabric));
+  if (fabric !== null && fabrics && fabricOffered) {
+    const options = fabrics;
+    const fabricLabel = (id: RdmaFabricId): string => (id === "roce" ? "RoCE" : "InfiniBand");
+    return (
+      <WizField label={label} hint={decl.description ?? t("inf.deploy.rdmaHint")}>
+        <Select
+          size="small"
+          fullWidth
+          displayEmpty
+          value={fabric}
+          data-od-id={`override-${decl.name}`}
+          onChange={(e) => {
+            const chosen = options.find((f) => f.id === e.target.value);
+            if (chosen) onChange(fabricOverrideValue(decl, chosen));
+          }}
+        >
+          {options.map((f) => (
+            <MenuItem key={f.id} value={f.id}>
+              {fabricLabel(f.id)}
+            </MenuItem>
+          ))}
+        </Select>
+      </WizField>
+    );
+  }
   if (decl.type === "stringList") {
     const list = Array.isArray(value) ? value : [];
     const nodeNames = isNodeSelectorOverride(decl) ? pinnedNodes(value) : null;

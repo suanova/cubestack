@@ -26,11 +26,21 @@ function stubCluster() {
     items: [
       {
         metadata: { name: "worker-b", labels: { "metax-tech.com/gpu.product": "MXC550" } },
-        status: { conditions: [{ type: "Ready", status: "True" }] },
+        status: {
+          conditions: [{ type: "Ready", status: "True" }],
+          allocatable: { "metax-tech.com/gpu": "8", "rdma/roce_shared_devices": "100" },
+        },
       },
       {
         metadata: { name: "worker-a", labels: { "metax-tech.com/gpu.product": "MXC500" } },
-        status: { conditions: [{ type: "Ready", status: "True" }] },
+        status: {
+          conditions: [{ type: "Ready", status: "True" }],
+          allocatable: {
+            "metax-tech.com/gpu": "8",
+            "rdma/roce_shared_devices": "100",
+            "rdma/ib_shared_devices": "50",
+          },
+        },
       },
       { metadata: { name: "cordoned" }, spec: { unschedulable: true }, status: { conditions: [{ type: "Ready", status: "True" }] } },
       { metadata: { name: "tainted" }, spec: { taints: [{ effect: "NoSchedule" }] }, status: { conditions: [{ type: "Ready", status: "True" }] } },
@@ -108,8 +118,22 @@ describe("inference services create options route", () => {
     // scheduler could actually use are offered, in name order, each with the
     // product label the wizard filters by when a model is chosen.
     expect(body.nodes).toEqual([
-      { name: "worker-a", gpuModels: { metax: "MXC500" } },
-      { name: "worker-b", gpuModels: { metax: "MXC550" } },
+      {
+        name: "worker-a",
+        gpuModels: { metax: "MXC500" },
+        allocatable: {
+          gpu: { metax: 8 },
+          rdma: { roce: 100, infiniband: 50 },
+        },
+      },
+      {
+        name: "worker-b",
+        gpuModels: { metax: "MXC550" },
+        allocatable: {
+          gpu: { metax: 8 },
+          rdma: { roce: 100, infiniband: 0 },
+        },
+      },
     ]);
 
     expect(body.profiles).toHaveLength(1);

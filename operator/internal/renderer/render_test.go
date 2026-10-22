@@ -8,6 +8,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -203,6 +204,49 @@ var _ = Describe("Render", func() {
 		}))
 		// The input profile keeps the template; the render resolves a copy.
 		Expect(p.Spec.Roles[1].PodTemplate.Resources.ExtendedResources).To(Equal("{{ overrides.extendedResources }}"))
+	})
+
+	It("enables host networking on every role that requests the RoCE resource", func() {
+		p := renderProfile()
+		p.Spec.Overrides = append(p.Spec.Overrides, aiv1alpha1.Override{
+			Name:    overrideExtendedResources,
+			Type:    aiv1alpha1.OverrideTypeStringList,
+			Default: &apiextensionsv1.JSON{Raw: []byte(`[]`)},
+		})
+		p.Spec.Roles[1].PodTemplate.Resources = &aiv1alpha1.PodResources{
+			ExtendedResources: "{{ overrides.extendedResources }}",
+		}
+		decode := p.Spec.Roles[1].DeepCopy()
+		decode.Name = "decode"
+		p.Spec.Roles = append(p.Spec.Roles, *decode)
+
+		isvc := renderISVC()
+		isvc.Spec.Overrides[overrideExtendedResources] = apiextensionsv1.JSON{
+			Raw: []byte(`["rdma/roce_shared_devices=4"]`),
+		}
+		res := Render(isvc, p, renderModel(), nil)
+		Expect(res.Errors).To(BeEmpty())
+		Expect(res.Roles).To(HaveLen(3))
+		// Both GPU roles of the PD separation request RoCE.
+		for _, role := range res.Roles[1:] {
+			Expect(role.PodTemplate.HostNetwork).To(Equal(ptrTo(true)), "%s requests RoCE", role.Name)
+			Expect(role.PodTemplate.DNSPolicy).To(Equal(corev1.DNSClusterFirstWithHostNet), "%s requests RoCE", role.Name)
+		}
+		// The router requests no extended resource at all.
+		Expect(res.Roles[0].PodTemplate.HostNetwork).To(BeNil())
+		Expect(res.Roles[0].PodTemplate.DNSPolicy).To(BeEmpty())
+	})
+
+	It("leaves host networking alone when the role requests no RoCE", func() {
+		p := renderProfile()
+		p.Spec.Roles[1].PodTemplate.Resources = &aiv1alpha1.PodResources{
+			ExtendedResources: "rdma/ib_shared_devices=2",
+		}
+		res := Render(renderISVC(), p, renderModel(), nil)
+		Expect(res.Errors).To(BeEmpty())
+		Expect(res.Roles[1].ExtendedResources).To(Equal(map[string]int64{"rdma/ib_shared_devices": 2}))
+		Expect(res.Roles[1].PodTemplate.HostNetwork).To(BeNil())
+		Expect(res.Roles[1].PodTemplate.DNSPolicy).To(BeEmpty())
 	})
 
 	It("accepts an uppercase name part and a 63-byte name like Kubernetes does", func() {

@@ -1360,6 +1360,280 @@ describe("deploy wizard", () => {
     act(() => root.unmount());
   });
 
+  // The deploy wizard's last steps are the same in the RDMA tests below: pick
+  // the compatible model, advance, and create.
+  async function pickModelAndCreate() {
+    const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
+    const modelSelect = Array.from(step2.querySelectorAll('[role="combobox"]')).find((c) =>
+      (c.textContent ?? "").includes("选择模型版本"),
+    ) as HTMLElement;
+    await act(async () => {
+      modelSelect.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    });
+    const model = Array.from(document.body.querySelectorAll('[role="option"]')).find(
+      (o) => o.textContent === "deepseek-v4-flash-w8a8-v1",
+    ) as HTMLElement;
+    await act(async () => {
+      model.click();
+    });
+    await act(async () => {});
+    await act(async () => {
+      (Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent === "下一步") as HTMLElement).click();
+    });
+    await act(async () => {});
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="wizard-create"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+  }
+
+  /** A create-options payload whose one profile declares extendedResources. */
+  function extendedResourcesOptions(nodes: unknown[], gpuPerPod: number) {
+    return {
+      ...OPTIONS,
+      nodes,
+      profiles: [
+        {
+          ...OPTIONS.profiles[0],
+          servingMode: "standard",
+          roles: [{ name: "vllm", vendor: "metax", models: ["MXC500"], gpuPerPod }],
+          overrides: [
+            {
+              name: "extendedResources",
+              type: "stringList",
+              min: null,
+              max: null,
+              enum: null,
+              default: [],
+              description: null,
+            },
+          ],
+        },
+      ],
+    };
+  }
+
+  const rdmaNode = (name: string, gpu: number, roce: number, infiniband: number) => ({
+    name,
+    gpuModels: { metax: "MXC500" },
+    allocatable: { gpu: { metax: gpu }, rdma: { roce, infiniband } },
+  });
+
+  it("auto-injects the only RDMA fabric into extendedResources", async () => {
+    // Only RoCE is advertised, so the wizard picks it on its own and writes
+    // the Pod's share of the node's devices: 100 × 4 / 8 = 50.
+    const { container, root, calls } = renderWithBoth(
+      extendedResourcesOptions([rdmaNode("worker-a", 8, 100, 0)], 4),
+    );
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await fillNameAndGoToStep2();
+
+    const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
+    const picker = step2.querySelector('[data-od-id="override-extendedResources"]') as HTMLElement;
+    expect(selectText(picker)).toBe("RoCE");
+
+    await pickModelAndCreate();
+    expect((calls.find((c) => c.method === "POST")?.body as { overrides?: unknown }).overrides).toEqual({
+      extendedResources: ["rdma/roce_shared_devices=50"],
+    });
+
+    act(() => root.unmount());
+  });
+
+  it("defaults to InfiniBand when both RDMA fabrics are offered, and injects the chosen one", async () => {
+    const { container, root, calls } = renderWithBoth(
+      extendedResourcesOptions([rdmaNode("worker-a", 8, 100, 25)], 8),
+    );
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await fillNameAndGoToStep2();
+
+    const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
+    const picker = step2.querySelector('[data-od-id="override-extendedResources"]') as HTMLElement;
+    // Both fabrics exist: InfiniBand is the default.
+    expect(selectText(picker)).toBe("InfiniBand");
+
+    await act(async () => {
+      (picker.querySelector('[role="combobox"]') as HTMLElement).dispatchEvent(
+        new MouseEvent("mousedown", { bubbles: true }),
+      );
+    });
+    const offered = Array.from(document.body.querySelectorAll('[role="option"]')).map(
+      (o) => o.textContent ?? "",
+    );
+    // "No RDMA" is not an option: the field always names a fabric.
+    expect(offered).not.toContain("不使用 RDMA");
+    const roce = Array.from(document.body.querySelectorAll('[role="option"]')).find((o) =>
+      (o.textContent ?? "").includes("RoCE"),
+    );
+    expect(roce).toBeDefined();
+    await act(async () => {
+      (roce as HTMLElement).click();
+    });
+    await act(async () => {});
+    expect(selectText(picker)).toBe("RoCE");
+
+    await pickModelAndCreate();
+    expect((calls.find((c) => c.method === "POST")?.body as { overrides?: unknown }).overrides).toEqual({
+      extendedResources: ["rdma/roce_shared_devices=100"],
+    });
+
+    act(() => root.unmount());
+  });
+
+  it("sums the RDMA devices allocatable across every eligible node", async () => {
+    // (100 + 50) × 4 / (8 + 8) = 37.5, floored: a Pod must not ask for more
+    // device shares than the nodes can allocate.
+    const { container, root, calls } = renderWithBoth(
+      extendedResourcesOptions([rdmaNode("worker-a", 8, 100, 0), rdmaNode("worker-b", 8, 50, 0)], 4),
+    );
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await fillNameAndGoToStep2();
+
+    const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
+    // The dropdown names the fabric only; the derived count travels in the
+    // submitted override below.
+    expect(selectText(step2.querySelector('[data-od-id="override-extendedResources"]'))).toBe("RoCE");
+
+    await pickModelAndCreate();
+    expect((calls.find((c) => c.method === "POST")?.body as { overrides?: unknown }).overrides).toEqual({
+      extendedResources: ["rdma/roce_shared_devices=37"],
+    });
+
+    act(() => root.unmount());
+  });
+
+  it("keeps a non-RDMA extendedResources value in the free-text input", async () => {
+    // The picker only owns a value naming one known fabric; another resource
+    // (or several pairs) is the profile's own choice and must not be replaced.
+    const opts = extendedResourcesOptions([rdmaNode("worker-a", 8, 100, 0)], 8);
+    const profile = opts.profiles[0] as {
+      overrides: Array<Record<string, unknown>>;
+    };
+    profile.overrides[0].default = ["example.com/foo=1"];
+    const { container, root } = renderWithBoth(opts);
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await fillNameAndGoToStep2();
+
+    const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
+    const field = step2.querySelector('[data-od-id="override-extendedResources"]') as HTMLElement;
+    expect(field.querySelector('[role="combobox"]')).toBeNull();
+    expect((field.querySelector("input") as HTMLInputElement).value).toBe("example.com/foo=1");
+
+    act(() => root.unmount());
+  });
+
+  it("leaves extendedResources empty when no node advertises RDMA", async () => {
+    // With nothing to offer there is no picker and no value: the field stays
+    // empty and out of the request.
+    const { container, root, calls } = renderWithBoth(
+      extendedResourcesOptions([rdmaNode("worker-a", 8, 0, 0)], 8),
+    );
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await fillNameAndGoToStep2();
+
+    const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
+    const field = step2.querySelector('[data-od-id="override-extendedResources"]') as HTMLElement;
+    expect(field.querySelector('[role="combobox"]')).toBeNull();
+    expect((field.querySelector("input") as HTMLInputElement).value).toBe("");
+
+    await pickModelAndCreate();
+    expect((calls.find((c) => c.method === "POST")?.body as { overrides?: unknown }).overrides).toEqual({});
+
+    act(() => root.unmount());
+  });
+
+  it("filters the nodeSelector by the RDMA fabric chosen for the service", async () => {
+    // The operator pins the hostname and the fabric together; offering a node
+    // that does not advertise the chosen fabric is a Pod that can only stay
+    // Pending.
+    const opts = extendedResourcesOptions(
+      [rdmaNode("worker-roce", 8, 100, 0), rdmaNode("worker-ib", 8, 0, 25)],
+      8,
+    );
+    const profile = opts.profiles[0] as {
+      overrides: Array<Record<string, unknown>>;
+    };
+    // Role-scoped, as the PD profiles declare them; the fabric is declared
+    // once for the service, so the selector follows that value.
+    profile.overrides.push({
+      name: "vllm_nodeSelector",
+      type: "string",
+      min: null,
+      max: null,
+      enum: null,
+      default: "",
+      description: null,
+    });
+    const { container, root } = renderWithBoth(opts);
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await fillNameAndGoToStep2();
+
+    const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
+    const nodePicker = () => step2.querySelector('[data-od-id="override-vllm_nodeSelector"]') as HTMLElement;
+    const open = async (field: HTMLElement) => {
+      await act(async () => {
+        (field.querySelector('[role="combobox"]') as HTMLElement).dispatchEvent(
+          new MouseEvent("mousedown", { bubbles: true }),
+        );
+      });
+    };
+    const offered = () =>
+      Array.from(document.body.querySelectorAll('[role="option"]')).map((o) => o.textContent ?? "");
+
+    // InfiniBand is the default when it is offered, so the selector already
+    // narrows to the node that advertises it.
+    await open(nodePicker());
+    expect(offered()).toContain("worker-ib");
+    expect(offered()).not.toContain("worker-roce");
+
+    const chooseFabric = async (label: string) => {
+      await open(step2.querySelector('[data-od-id="override-extendedResources"]') as HTMLElement);
+      const option = Array.from(document.body.querySelectorAll('[role="option"]')).find((o) =>
+        (o.textContent ?? "").includes(label),
+      );
+      await act(async () => {
+        (option as HTMLElement).click();
+      });
+      await act(async () => {});
+    };
+
+    await chooseFabric("RoCE");
+    await open(nodePicker());
+    expect(offered()).toContain("worker-roce");
+    expect(offered()).not.toContain("worker-ib");
+
+    await chooseFabric("InfiniBand");
+    await open(nodePicker());
+    expect(offered()).toContain("worker-ib");
+    expect(offered()).not.toContain("worker-roce");
+
+    act(() => root.unmount());
+  });
+
   it("opens on the namespace the API names, and refuses a name taken there", async () => {
     // The wizard opens on `default` — not on whichever namespace sorts first —
     // and the field's message promises an already-taken check, which reads the

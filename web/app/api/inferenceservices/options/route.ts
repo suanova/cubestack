@@ -25,6 +25,30 @@ const GPU_MODEL_LABELS: Record<string, string> = {
   nvidia: "nvidia.com/gpu.product",
 };
 
+/** The GPU extended resource each vendor's device plugin advertises. */
+const GPU_RESOURCE_NAMES: Record<string, string> = {
+  metax: "metax-tech.com/gpu",
+  nvidia: "nvidia.com/gpu",
+};
+
+/**
+ * The RDMA shared-device resource per fabric. These are the operator's
+ * defaults (--rdma-ib-resource / --rdma-roce-resource); the portal cannot read
+ * another process's flags, so a site that renames them keeps the wizard's
+ * free-text input instead of the fabric picker.
+ */
+const RDMA_RESOURCE_NAMES = {
+  roce: "rdma/roce_shared_devices",
+  infiniband: "rdma/ib_shared_devices",
+} as const;
+
+/** A node's allocatable count for one resource; 0 when it does not offer it. */
+function allocatableCount(node: V1Node, resource: string): number {
+  const raw = node.status?.allocatable?.[resource];
+  const n = raw === undefined ? NaN : Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
 /** One node the wizard may pin a service to. */
 export interface NodeOption {
   name: string;
@@ -35,6 +59,15 @@ export interface NodeOption {
    * is not offered. A vendor whose label the node does not carry is absent.
    */
   gpuModels: Record<string, string>;
+  /**
+   * What a Pod could still request on this node, which the wizard turns into
+   * an extendedResources count. GPU entries are keyed by vendor; an absent or
+   * zero entry means the node does not advertise that resource.
+   */
+  allocatable: {
+    gpu: Record<string, number>;
+    rdma: { roce: number; infiniband: number };
+  };
 }
 
 /**
@@ -157,7 +190,22 @@ function offeredNodes(nodes: V1Node[]): NodeOption[] {
         const model = labels[label];
         if (model) gpuModels[vendor] = model;
       }
-      return { name: node.metadata?.name ?? "", gpuModels };
+      const gpu: Record<string, number> = {};
+      for (const [vendor, resource] of Object.entries(GPU_RESOURCE_NAMES)) {
+        const count = allocatableCount(node, resource);
+        if (count > 0) gpu[vendor] = count;
+      }
+      return {
+        name: node.metadata?.name ?? "",
+        gpuModels,
+        allocatable: {
+          gpu,
+          rdma: {
+            roce: allocatableCount(node, RDMA_RESOURCE_NAMES.roce),
+            infiniband: allocatableCount(node, RDMA_RESOURCE_NAMES.infiniband),
+          },
+        },
+      };
     })
     .filter((node) => node.name)
     .sort((a, b) => a.name.localeCompare(b.name));
