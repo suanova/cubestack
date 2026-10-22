@@ -781,9 +781,6 @@ func resolveExtendedResources(ctx *renderContext, roleName string, resources *ai
 	out := make(map[string]int64)
 	for item := range strings.SplitSeq(resolved, ",") {
 		item = strings.TrimSpace(item)
-		if item == "" {
-			continue
-		}
 		name, count, ok := strings.Cut(item, "=")
 		if !ok || name == "" || count == "" {
 			return nil, append(errs, Error{

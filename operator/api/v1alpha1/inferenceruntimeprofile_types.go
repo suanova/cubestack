@@ -17,6 +17,12 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"encoding/json"
+	"fmt"
+	"maps"
+	"slices"
+	"strings"
+
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -362,6 +368,41 @@ type PodResources struct {
 	// +optional
 	// +kubebuilder:validation:Pattern="^([^{}=]+=[1-9][0-9]*(,[^{}=]+=[1-9][0-9]*)*|[{]{2}[^{}]*[}]{2})$"
 	ExtendedResources string `json:"extendedResources,omitempty"`
+}
+
+// UnmarshalJSON accepts the map-shaped extendedResources written by profiles
+// created before the field became a string. The profile spec is immutable, so
+// such an object is only ever read back; canonicalizing the map here keeps the
+// controller's informer able to decode it without a conversion webhook. New
+// writes must use the string shape: the CRD schema rejects the map.
+func (r *PodResources) UnmarshalJSON(data []byte) error {
+	type plain PodResources
+	aux := struct {
+		ExtendedResources json.RawMessage `json:"extendedResources,omitempty"`
+		*plain
+	}{plain: (*plain)(r)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if len(aux.ExtendedResources) == 0 {
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(aux.ExtendedResources, &s); err == nil {
+		r.ExtendedResources = s
+		return nil
+	}
+	var legacy map[string]int64
+	if err := json.Unmarshal(aux.ExtendedResources, &legacy); err != nil {
+		return fmt.Errorf("extendedResources must be a name=count string or a name→count map: %w", err)
+	}
+	names := slices.Sorted(maps.Keys(legacy))
+	pairs := make([]string, 0, len(names))
+	for _, name := range names {
+		pairs = append(pairs, fmt.Sprintf("%s=%d", name, legacy[name]))
+	}
+	r.ExtendedResources = strings.Join(pairs, ",")
+	return nil
 }
 
 // PodSecurityContext is the supported subset of a Pod security context.

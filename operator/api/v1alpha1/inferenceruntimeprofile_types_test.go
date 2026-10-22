@@ -17,6 +17,8 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"encoding/json"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -41,11 +43,11 @@ const (
 	testRefNamespace      = "project-a"
 	testRefServiceName    = "dsv4-flash-pd"
 
-	testVolumeShmName    = "shm"
-	testMemoryMedium     = "Memory"
-	testShmMountPath     = "/dev/shm"
-	testIBHostPath       = "/dev/infiniband"
-	testModelMountPath   = "/workspace/model"
+	testVolumeShmName  = "shm"
+	testMemoryMedium   = "Memory"
+	testShmMountPath   = "/dev/shm"
+	testIBHostPath     = "/dev/infiniband"
+	testModelMountPath = "/workspace/model"
 
 	// testHostnameTopologyKey is the topology domain the podAntiAffinity specs
 	// spread across.
@@ -260,6 +262,28 @@ var _ = Describe("InferenceRuntimeProfile", func() {
 
 				Expect(k8sClient.Delete(ctx, irp)).To(Succeed())
 			}
+		})
+
+		It("decodes a legacy map-shaped extendedResources into the canonical string", func() {
+			// Profiles stored before the field became a string carry a map. The
+			// spec is immutable, so they are only ever read back; decoding the map
+			// keeps the informer able to sync without a conversion webhook.
+			var r PodResources
+			raw := []byte(`{"gpuPerPod":8,"extendedResources":{"rdma/roce_shared_devices":2,"rdma/ib_shared_devices":1}}`)
+			Expect(json.Unmarshal(raw, &r)).To(Succeed())
+			Expect(r.ExtendedResources).To(Equal("rdma/ib_shared_devices=1,rdma/roce_shared_devices=2"))
+
+			// The decoded object is written back in the string shape.
+			out, err := json.Marshal(r)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(out)).To(ContainSubstring(`"extendedResources":"rdma/ib_shared_devices=1,rdma/roce_shared_devices=2"`))
+		})
+
+		It("decodes a string-shaped extendedResources unchanged", func() {
+			var r PodResources
+			raw := []byte(`{"extendedResources":"{{ overrides.extendedResources }}"}`)
+			Expect(json.Unmarshal(raw, &r)).To(Succeed())
+			Expect(r.ExtendedResources).To(Equal("{{ overrides.extendedResources }}"))
 		})
 
 		It("accepts the templated scheduling fields and round-trips the spec", func() {

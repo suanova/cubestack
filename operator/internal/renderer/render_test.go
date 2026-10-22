@@ -261,6 +261,8 @@ var _ = Describe("Render", func() {
 		Entry("vendor GPU collision", "nvidia.com/gpu=2"),
 		Entry("reserved requests. prefix", "requests.example.com/foo=2"),
 		Entry("name part longer than 63 bytes", "example.com/"+strings.Repeat("a", 64)+"=1"),
+		Entry("trailing comma leaves an empty pair", "rdma/ib_shared_devices=2,"),
+		Entry("a comma-only value is not an empty declaration", ","),
 		Entry("duplicate name", "rdma/ib_shared_devices=2,rdma/ib_shared_devices=3"),
 	)
 
