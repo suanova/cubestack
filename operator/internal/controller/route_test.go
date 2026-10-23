@@ -237,22 +237,6 @@ func acceptRoute(name string) {
 	acceptAIServiceBackend(name)
 }
 
-// findOpenAIRuleIndex returns the index of one of this service's rules in a
-// shared OpenAI-paths HTTPRoute, or -1. The rule is identified by its backend
-// reference — this service's Backend, in this service's namespace.
-func findOpenAIRuleIndex(rules []gatewayv1.HTTPRouteRule, isvc *aiv1alpha1.InferenceService) int {
-	for i := range rules {
-		refs := rules[i].BackendRefs
-		if len(refs) != 1 || refs[0].Namespace == nil {
-			continue
-		}
-		if refs[0].Name == gatewayv1.ObjectName(backendName(isvc)) && string(*refs[0].Namespace) == isvc.Namespace {
-			return i
-		}
-	}
-	return -1
-}
-
 // sharedHTTPRoute returns the OpenAI-paths HTTPRoute paired with the named
 // catalog route, addressed in the gateway namespace.
 func sharedHTTPRoute(name aiv1alpha1.AIGatewayRouterName) *gatewayv1.HTTPRoute {
