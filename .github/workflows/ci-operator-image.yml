@@ -76,6 +76,7 @@ jobs:
         id: publish
         env:
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_APP_VERSION: ${{ steps.release.outputs.app-version }}
         run: |
           set -euo pipefail
           MANAGER=harbor.isuanova.com/suanova/cubestack-controller-manager
@@ -132,8 +133,8 @@ jobs:
           # pairing the controller's version sentinel cannot detect.
           for IMAGE in "${MANAGER}" "${ACTIVITY_AGENT}"; do
             if [ -n "${RELEASE_VERSION}" ]; then
-              docker tag "${IMAGE}:${SHA_TAG}" "${IMAGE}:${RELEASE_VERSION}"
-              docker push "${IMAGE}:${RELEASE_VERSION}"
+              docker tag "${IMAGE}:${SHA_TAG}" "${IMAGE}:${RELEASE_APP_VERSION}"
+              docker push "${IMAGE}:${RELEASE_APP_VERSION}"
               continue
             fi
             if [ "${MOVE_LATEST}" = "true" ]; then

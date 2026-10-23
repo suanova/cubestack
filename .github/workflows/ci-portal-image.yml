@@ -75,6 +75,7 @@ jobs:
         id: publish
         env:
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_APP_VERSION: ${{ steps.release.outputs.app-version }}
         run: |
           set -euo pipefail
           IMAGE=harbor.isuanova.com/suanova/cubestack-ui
@@ -88,8 +89,8 @@ jobs:
           # A release publishes the version it names and does not move `latest`,
           # which tracks main.
           if [ -n "${RELEASE_VERSION}" ]; then
-            docker tag "${IMAGE}:${SHA_TAG}" "${IMAGE}:${RELEASE_VERSION}"
-            docker push "${IMAGE}:${RELEASE_VERSION}"
+            docker tag "${IMAGE}:${SHA_TAG}" "${IMAGE}:${RELEASE_APP_VERSION}"
+            docker push "${IMAGE}:${RELEASE_APP_VERSION}"
             echo "latest_moved=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi

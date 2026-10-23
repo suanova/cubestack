@@ -153,6 +153,7 @@ jobs:
       - name: Build and push the image
         env:
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_APP_VERSION: ${{ steps.release.outputs.app-version }}
           IMAGE: ${{ matrix.image }}
         run: |
           set -euo pipefail
@@ -162,7 +163,7 @@ jobs:
           # tracks main. No commit-addressed tag here either: these are multi-arch
           # indexes, where a second tag costs a second full build.
           if [ -n "${RELEASE_VERSION}" ]; then
-            make -C images push-${IMAGE} PUSH_LATEST=0 TAG="${RELEASE_VERSION}"
+            make -C images push-${IMAGE} PUSH_LATEST=0 TAG="${RELEASE_APP_VERSION}"
             exit 0
           fi
 
