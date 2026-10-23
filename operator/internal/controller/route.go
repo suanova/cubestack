@@ -65,22 +65,30 @@ type routeCheck struct {
 // type, weight, priority and modelsOwnedBy are spelled explicitly so the API
 // server's defaults never read as drift.
 //
-// Only the OpenAI-schema AIServiceBackend carries traffic: the Agent Router's
-// ext_proc serves every published path through it — /v1/chat/completions,
-// /v1/responses and /v1/images pass through, /v1/messages is translated
-// Anthropic→OpenAI — so a single catalog rule per service covers the whole
-// surface. The plain OpenAI-paths HTTPRoute this operator used to maintain is
-// retired: it reached the Backend directly, bypassing the route-level ext_proc
-// configuration, and the listener-wide ext_proc then buffered every response
-// (streamed replies arrived as one block, and a 300s stream idle timeout cut
-// long generations). The Anthropic-schema AIServiceBackend is still created so
-// a future native-Anthropic endpoint has an object to point at, but no rule
-// references it.
+// Both AIServiceBackends carry traffic, each behind its own rule: the
+// Anthropic-schema one serves native Anthropic clients on /v1/messages (see
+// anthropicRuleFor), the OpenAI-schema one serves everything else —
+// /v1/chat/completions, /v1/completions, /v1/responses and
+// /v1/images/generations pass through, and /v1/messages without an
+// anthropic-version header is translated Anthropic→OpenAI. The plain
+// OpenAI-paths HTTPRoute this operator used to maintain is retired: it reached
+// the Backend directly, bypassing the route-level ext_proc configuration, and
+// the listener-wide ext_proc then buffered every response (streamed replies
+// arrived as one block, and a 300s stream idle timeout cut long generations).
 const (
 	envoyGatewayAPIGroup = "gateway.envoyproxy.io"
 	egBackendKind        = "Backend"
 	aiModelHeaderName    = "x-ai-eg-model"
-	catalogOwnedBy       = "CubeStack"
+	// anthropicVersionHeaderName is sent by every Anthropic SDK on every call
+	// and by no OpenAI client, so it tells the two client families apart
+	// without changing the request: native Anthropic traffic takes the
+	// Anthropic-schema backend, everything else the OpenAI one.
+	anthropicVersionHeaderName = "anthropic-version"
+	// anthropicVersionValue is the only value the Anthropic API defines for that
+	// header today; clients pinned to a future version string fall back to the
+	// translated OpenAI rule, which still serves them.
+	anthropicVersionValue = "2023-06-01"
+	catalogOwnedBy        = "CubeStack"
 	// catalogRuleMax is the AIGatewayRoute rule cap: the CRD allows at most 15
 	// rules (one slot is reserved for the controller's catch-all), so a shared
 	// route can hold at most this many published models.
@@ -211,7 +219,21 @@ func (r *InferenceServiceReconciler) desiredReferenceGrant(isvc *aiv1alpha1.Infe
 	return grant
 }
 
-// catalogRuleFor builds the one rule of the shared catalog route this service
+// catalogRuleLimits reads the per-service timeouts that ride on every rule the
+// service contributes, as the shared route is a single object.
+func catalogRuleLimits(isvc *aiv1alpha1.InferenceService) (timeout, idle int64) {
+	if isvc.Spec.Route != nil && isvc.Spec.Route.TimeoutSeconds != nil {
+		timeout = *isvc.Spec.Route.TimeoutSeconds
+	}
+	// 0 disables the idle cut: a long generation that occasionally pauses for
+	// longer than a fixed idle window would otherwise be killed mid-stream.
+	if isvc.Spec.Route != nil && isvc.Spec.Route.IdleTimeoutSeconds != nil {
+		idle = *isvc.Spec.Route.IdleTimeoutSeconds
+	}
+	return timeout, idle
+}
+
+// catalogRuleFor builds the OpenAI rule of the shared catalog route this service
 // contributes: a match on the catalog model name — set by the Agent Router's
 // ext_proc from the request body's "model" field and injected as the
 // x-ai-eg-model header — routing to the service's OpenAI-schema
@@ -223,16 +245,7 @@ func (r *InferenceServiceReconciler) desiredReferenceGrant(isvc *aiv1alpha1.Infe
 // timeouts and the owned-by tag ride on the rule, as the shared route is a
 // single object.
 func (r *InferenceServiceReconciler) catalogRuleFor(isvc *aiv1alpha1.InferenceService, modelName string) aigwv1beta1.AIGatewayRouteRule {
-	timeout := int64(0)
-	if isvc.Spec.Route != nil && isvc.Spec.Route.TimeoutSeconds != nil {
-		timeout = *isvc.Spec.Route.TimeoutSeconds
-	}
-	// 0 disables the idle cut: a long generation that occasionally pauses for
-	// longer than a fixed idle window would otherwise be killed mid-stream.
-	idle := int64(0)
-	if isvc.Spec.Route != nil && isvc.Spec.Route.IdleTimeoutSeconds != nil {
-		idle = *isvc.Spec.Route.IdleTimeoutSeconds
-	}
+	timeout, idle := catalogRuleLimits(isvc)
 	return aigwv1beta1.AIGatewayRouteRule{
 		Matches: []aigwv1beta1.AIGatewayRouteRuleMatch{{
 			Headers: []gatewayv1.HTTPHeaderMatch{{
@@ -248,6 +261,51 @@ func (r *InferenceServiceReconciler) catalogRuleFor(isvc *aiv1alpha1.InferenceSe
 			Weight:            ptr(int32(1)),
 			Priority:          ptr(uint32(0)),
 		}},
+		Timeouts:          &gatewayv1.HTTPRouteTimeouts{Request: ptr(gatewayv1.Duration(fmt.Sprintf("%ds", timeout)))},
+		StreamIdleTimeout: ptr(gatewayv1.Duration(fmt.Sprintf("%ds", idle))),
+		ModelsOwnedBy:     ptr(catalogOwnedBy),
+	}
+}
+
+// anthropicRuleFor builds the native-Anthropic sibling rule: the same catalog
+// model name, plus a requirement that the anthropic-version header is present —
+// every Anthropic SDK sends it on every call and no OpenAI client does, so the
+// two client families are told apart without touching the request. It routes to
+// the service's Anthropic-schema AIServiceBackend, so /v1/messages reaches a
+// backend speaking that wire format natively: thinking blocks and cache_control
+// markers survive, where the translated OpenAI path would drop them.
+//
+// The match must be the more specific of the pair: the generated HTTPRoute
+// keeps rule order and Envoy takes the first match, so this rule is appended
+// before the service's OpenAI rule. An Anthropic-shaped request that carries no
+// anthropic-version header falls through to that rule and is translated, which
+// is exactly what it got before this rule existed.
+func (r *InferenceServiceReconciler) anthropicRuleFor(isvc *aiv1alpha1.InferenceService, modelName string) aigwv1beta1.AIGatewayRouteRule {
+	timeout, idle := catalogRuleLimits(isvc)
+	return aigwv1beta1.AIGatewayRouteRule{
+		Matches: []aigwv1beta1.AIGatewayRouteRuleMatch{{
+			Headers: []gatewayv1.HTTPHeaderMatch{
+				{
+					Type:  ptr(gatewayv1.HeaderMatchExact),
+					Name:  gatewayv1.HTTPHeaderName(aiModelHeaderName),
+					Value: isvc.Spec.Route.ModelName,
+				},
+				{
+					Type:  ptr(gatewayv1.HeaderMatchExact),
+					Name:  gatewayv1.HTTPHeaderName(anthropicVersionHeaderName),
+					Value: anthropicVersionValue,
+				},
+			},
+		}},
+		BackendRefs: []aigwv1beta1.AIGatewayRouteRuleBackendRef{
+			{
+				Name:              anthropicServiceBackendName(isvc),
+				Namespace:         ptr(gatewayv1.Namespace(isvc.Namespace)),
+				ModelNameOverride: modelName,
+				Weight:            ptr(int32(1)),
+				Priority:          ptr(uint32(0)),
+			},
+		},
 		Timeouts:          &gatewayv1.HTTPRouteTimeouts{Request: ptr(gatewayv1.Duration(fmt.Sprintf("%ds", timeout)))},
 		StreamIdleTimeout: ptr(gatewayv1.Duration(fmt.Sprintf("%ds", idle))),
 		ModelsOwnedBy:     ptr(catalogOwnedBy),
@@ -396,12 +454,21 @@ func (r *InferenceServiceReconciler) desiredSharedRuleSet(ctx context.Context, r
 		}
 		claimed[svc.Spec.Route.ModelName] = true
 		if catalogPathsServed(svc) {
-			if len(set.ai) >= catalogRuleMax {
+			// The native-Anthropic rule comes first: both rules match the same
+			// model name and Envoy takes the first match, so the more specific
+			// one (model + anthropic-version) has to be listed ahead of the
+			// catch-all OpenAI rule.
+			rules := make([]aigwv1beta1.AIGatewayRouteRule, 0, 2)
+			if svc.Spec.Route.Exposes(aiv1alpha1.CatalogPathMessages) {
+				rules = append(rules, r.anthropicRuleFor(svc, modelName))
+			}
+			rules = append(rules, r.catalogRuleFor(svc, modelName))
+			if len(set.ai)+len(rules) > catalogRuleMax {
 				if isCurrent {
 					set.routeFull = true
 				}
 			} else {
-				set.ai = append(set.ai, r.catalogRuleFor(svc, modelName))
+				set.ai = append(set.ai, rules...)
 			}
 		}
 	}
@@ -739,7 +806,17 @@ func (r *InferenceServiceReconciler) checkRoute(ctx context.Context, isvc *aiv1a
 	if err := r.Get(ctx, client.ObjectKeyFromObject(sb), freshOpenAI); err != nil {
 		return routeErrAfterApply(check, err)
 	}
-	return sharedRouteAcceptance(check, fresh, freshOpenAI, isvc), nil
+	freshAnthropic := &aigwv1beta1.AIServiceBackend{}
+	if isvc.Spec.Route.Exposes(aiv1alpha1.CatalogPathMessages) {
+		freshAnthropic.ObjectMeta = metav1.ObjectMeta{
+			Name:      anthropicServiceBackendName(isvc),
+			Namespace: isvc.Namespace,
+		}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(freshAnthropic), freshAnthropic); err != nil {
+			return routeErrAfterApply(check, err)
+		}
+	}
+	return sharedRouteAcceptance(check, fresh, freshOpenAI, freshAnthropic, isvc), nil
 }
 
 // applyOwned creates the desired object, or updates it in place when a
@@ -802,7 +879,7 @@ func referenceGrantNeedsUpdate(existing, desired *gatewayv1.ReferenceGrant) bool
 // carries a single route-level Accepted condition — with many services in one
 // route, the per-service granularity lives on the AIServiceBackend, which the
 // Agent Router also accepts per object of the service.
-func sharedRouteAcceptance(check *routeCheck, route *aigwv1beta1.AIGatewayRoute, backend *aigwv1beta1.AIServiceBackend, isvc *aiv1alpha1.InferenceService) *routeCheck {
+func sharedRouteAcceptance(check *routeCheck, route *aigwv1beta1.AIGatewayRoute, backend, anthropicBackend *aigwv1beta1.AIServiceBackend, isvc *aiv1alpha1.InferenceService) *routeCheck {
 	if !catalogPathsServed(isvc) {
 		return check // nothing is published on the shared route
 	}
@@ -810,11 +887,35 @@ func sharedRouteAcceptance(check *routeCheck, route *aigwv1beta1.AIGatewayRoute,
 		check.Reason = RouteGatewayNotAccepted
 		return check
 	}
-	if aiObjectAccepted(route.Status.Conditions, route.Generation) && aiObjectAccepted(backend.Status.Conditions, backend.Generation) {
+	accepted := aiObjectAccepted(route.Status.Conditions, route.Generation) &&
+		aiObjectAccepted(backend.Status.Conditions, backend.Generation)
+	if isvc.Spec.Route.Exposes(aiv1alpha1.CatalogPathMessages) {
+		// The native-Anthropic rule is the only path /v1/messages with an
+		// anthropic-version header can take, so its own backend must be accepted
+		// as well; a rule without a resolvable backend rejects the whole route.
+		if catalogRuleIndexForRule(route.Spec.Rules, anthropicServiceBackendName(isvc)) < 0 {
+			check.Reason = RouteGatewayNotAccepted
+			return check
+		}
+		accepted = accepted && anthropicBackend.Name != "" &&
+			aiObjectAccepted(anthropicBackend.Status.Conditions, anthropicBackend.Generation)
+	}
+	if accepted {
 		return check // Reason stays "" — published and accepted.
 	}
 	check.Reason = RouteGatewayNotAccepted
 	return check
+}
+
+// catalogRuleIndexForRule returns the index of the rule whose first backendRef
+// carries the given name, or -1.
+func catalogRuleIndexForRule(rules []aigwv1beta1.AIGatewayRouteRule, backendName string) int {
+	for i := range rules {
+		if len(rules[i].BackendRefs) > 0 && string(rules[i].BackendRefs[0].Name) == backendName {
+			return i
+		}
+	}
+	return -1
 }
 
 // aiObjectAccepted reports whether the Agent Router controller accepted the

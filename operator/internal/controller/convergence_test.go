@@ -114,15 +114,20 @@ func acceptCatalogObjects(g Gomega, name string) {
 	}}
 	g.Expect(k8sClient.Status().Update(ctx, route)).To(Succeed())
 
-	// The service's own acceptance lives on its OpenAI-schema AIServiceBackend;
-	// no plain HTTPRoute takes part any more.
-	sb := &aigwv1beta1.AIServiceBackend{}
-	g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + testOpenAISuffix, Namespace: testNamespace}, sb)).To(Succeed())
-	sb.Status.Conditions = []metav1.Condition{{
-		Type: aigwv1beta1.ConditionTypeAccepted, Status: metav1.ConditionTrue, Reason: aiAcceptedReason,
-		LastTransitionTime: metav1.Now(), ObservedGeneration: sb.Generation,
-	}}
-	g.Expect(k8sClient.Status().Update(ctx, sb)).To(Succeed())
+	// The service's own acceptance lives on its AIServiceBackends — both the
+	// OpenAI one and the native-Anthropic sibling the /v1/messages rule points
+	// at; no plain HTTPRoute takes part any more.
+	for _, sbName := range []string{name + testOpenAISuffix, name + testAnthropicSuffix} {
+		sb := &aigwv1beta1.AIServiceBackend{}
+		if err := k8sClient.Get(ctx, client.ObjectKey{Name: sbName, Namespace: testNamespace}, sb); err != nil {
+			continue // a chat-only service publishes no Anthropic rule
+		}
+		sb.Status.Conditions = []metav1.Condition{{
+			Type: aigwv1beta1.ConditionTypeAccepted, Status: metav1.ConditionTrue, Reason: aiAcceptedReason,
+			LastTransitionTime: metav1.Now(), ObservedGeneration: sb.Generation,
+		}}
+		g.Expect(k8sClient.Status().Update(ctx, sb)).To(Succeed())
+	}
 }
 
 var _ = Describe("convergence", func() {

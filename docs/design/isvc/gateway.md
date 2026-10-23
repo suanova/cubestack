@@ -195,35 +195,51 @@ spec:
 **共享路由里的 rule**（operator 全量重建，见 D1）：
 
 ```yaml
-# AIGatewayRoute <可选路由> 的 spec.rules[]，每个暴露任一目录路径的模型一条
-- matches:
-    - headers: [{type: Exact, name: x-ai-eg-model, value: <route.modelName>}]
+# AIGatewayRoute <可选路由> 的 spec.rules[]：每个暴露任一目录路径的模型两条，
+# 顺序固定 —— 先 Anthropic 原生，再 OpenAI 兜底。
+- matches:                          # ① 原生 Anthropic：SDK 必带 anthropic-version
+    - headers:
+        - {type: Exact, name: x-ai-eg-model, value: <route.modelName>}
+        - {type: Exact, name: anthropic-version, value: 2023-06-01}
   backendRefs:
-    - name: <isvc>-backend          # OpenAI schema：四个路径都由它承接
-      namespace: <isvc.ns>          # 跨 ns → 需要上面的 ReferenceGrant
+    - name: <isvc>-anthropic         # Anthropic schema：/v1/messages 一族原样透传
+      namespace: <isvc.ns>
       modelNameOverride: <status.model.name>
       weight: 1
       priority: 0
   timeouts: {request: <timeoutSeconds>s}
   streamIdleTimeout: <idleTimeoutSeconds>s   # 默认 0s = 不掐断
   modelsOwnedBy: CubeStack
+- matches:                          # ② OpenAI：其余全部路径
+    - headers: [{type: Exact, name: x-ai-eg-model, value: <route.modelName>}]
+  backendRefs:
+    - name: <isvc>-backend           # OpenAI schema：chat/completions、completions、
+      namespace: <isvc.ns>           # responses、images 透传，/v1/messages 走翻译
+      modelNameOverride: <status.model.name>
+      weight: 1
+      priority: 0
+  timeouts: {request: <timeoutSeconds>s}
+  streamIdleTimeout: <idleTimeoutSeconds>s
+  modelsOwnedBy: CubeStack
 ```
 
 - **客户端不发 `x-ai-eg-model`**：header 由 Agent Router 的 ext_proc 从请求体 `model` 注入，这也是
-  `AIGatewayRoute` rule 能当目录用的前提。`/v1/messages` 由同一个 OpenAI-schema backend 承接，
-  ext_proc 做 Anthropic→OpenAI 请求翻译与流式响应翻译；`/v1/chat/completions`、`/v1/completions`、
-  `/v1/responses`、`/v1/images/generations` 透传。
-- **`schema: Anthropic` 的 `<isvc>-anthropic` 不再被共享路由引用**：它只支持 `/v1/messages` 一族，
-  接不了另外三个路径，因此共享 rule 一律指向 `<isvc>-backend`（OpenAI）。对象本身仍生成，留给
-  需要 Anthropic 原生出口的场景。
+  `AIGatewayRoute` rule 能当目录用的前提。
+- **两条 rule 的区分维度只能是 header**（rule 无 path 维度，生成的 HTTPRoute 恒为 `PathPrefix /`）。
+  因此原生 Anthropic 那条用 SDK 必带的 `anthropic-version: 2023-06-01` 作为额外匹配条件：Envoy 按
+  顺序取第一条命中，所以它必须排在同模型的 OpenAI rule 之前。客户端无需改任何东西 —— 用 Anthropic
+  SDK 就自动走原生后端，用 OpenAI SDK 就自动走 OpenAI 后端。
+- **`/v1/messages` 两条路都通**：带 `anthropic-version` 的走 `<isvc>-anthropic`（Anthropic 原生，
+  保留 thinking / cache_control 等 OpenAI schema 会丢的字段）；不带该头（裸 curl、或未来版本的
+  `anthropic-version`）回落 OpenAI rule，由 ext_proc 做 Anthropic→OpenAI 翻译。
 - **`modelNameOverride` = `status.model.name`**（引擎 served name；profile 契约
   `--served-model-name "{{ model.name }}"`）。作用：目录名与引擎名解耦——同一模型的不同版本
   （fp16 / w8a8）都能以各自的目录名共存，客户端始终用目录名。
-- **rule 定位键** = `backendRefs[0].(namespace, name)`：AIGatewayRoute 里是 `<isvc>-anthropic`，
-  HTTPRoute 里是 `<isvc>-endpoint`，与 rule 顺序无关。
-- **跨 namespace 引用**：AIGatewayRoute 的 rule 指向 `<isvc.ns>` 的 `<isvc>-anthropic`，需要
-  `<isvc>-grant`；HTTPRoute 的 rule 指向 `<isvc>-endpoint` Backend，由平台级
-  `cubestack-ai-gateway-backends` grant 覆盖。
+- **rule 定位键** = `backendRefs[0].(namespace, name)`：`<isvc>-anthropic` 或 `<isvc>-backend`，
+  与 rule 顺序无关。
+- **跨 namespace 引用**：两条 rule 都指向 `<isvc.ns>` 的 AIServiceBackend，需要 `<isvc>-grant`。
+- 已知副作用：`/v1/models` 由 controller 遍历 rule 生成，同模型出现两次（上表的 ① 也会被计入）。
+  `ExcludeFromModelsEndpoint` 字段 v1.2.0 才有，Go 依赖仍钉 v1.1.0 —— 升依赖后给 ① 置 true 即可消除。
 - 四个对象均 `SetControllerReference(isvc)`，标签沿用 `inferenceServiceLabelKey/profileLabelKey/
   managedByLabelKey`；端口复用现有 `endpointPort(endpoint.Internal)` 解析。共享对象不归某个
   ISVC 所有（owner 是平台），故用 **finalizer**（`isvc-catalog-finalizer`）在删除时触发一次
@@ -238,7 +254,7 @@ spec:
 
 - `route.timeoutSeconds` → `rules[].timeouts.request`（**总时长上限**），
   **默认从 60 改为 0 = 不设上限**。
-- **新增 `route.idleTimeoutSeconds`** → `rules[].streamIdleTimeout`（**无进展上限**），默认 300。
+- **新增 `route.idleTimeoutSeconds`** → `rules[].streamIdleTimeout`（**无进展上限**），**默认 0 = 不设上限**。
 - 语义文档必须写明：非流式请求在生成期间**零字节**，idle 计时同样在跑——idle 实际决定
   "非流式生成最长能多久"（默认 300s）；要更久就调大。流式则只要有字节流动就不受 idle 约束，
   受 request（默认不设）约束。
@@ -252,15 +268,15 @@ spec:
   自己的 rule，`RouteReady=False, reason=ModelNameConflict`。public 与 private 各自独立，
   同一目录名可同时存在于两条路由。
 - **容量上限**（两条共享对象各自有 CRD 上限，operator 在重建时逐个服务累加，放不下就整组跳过）：
-  - `AIGatewayRoute.spec.rules` 上限 15 条（每模型 1 条 `/v1/messages`）；
-  - `HTTPRoute.spec.rules` 上限 16 条（每模型每条选中的 OpenAI 路径 1 条：全选时 3 条/模型，
-    即最多 5 个模型）。
+  - `AIGatewayRoute.spec.rules` 上限 15 条，每模型 2 条（原生 Anthropic + OpenAI），
+    即最多 7 个模型；放不下时整组（2 条一起）跳过，不留半条；
+  - 共享 `HTTPRoute` 由 controller 从 `AIGatewayRoute` 生成，operator 不再单独占额度。
   当前服务因任一条放不下 → `RouteReady=False, reason=CatalogFull`。规模约束见 Q1。
-- **接受判定**：`RouteReady` 在暴露 `/v1/messages` 时要求 **所选共享 AIGatewayRoute
-  `Accepted=True`**、**本服务的 `<isvc>-anthropic` `Accepted=True`**，且本服务的 rule 仍在
-  路由里（缺一 → `GatewayNotAccepted`）；暴露任一 OpenAI 路径时还要求**共享 HTTPRoute 的
-  `parents[].Accepted`/`ResolvedRefs=True`**（缺一 → 同样 `GatewayNotAccepted`）。共享对象
-  只有 route 级条件，per-service 粒度落在 AIServiceBackend 上，Agent Router 亦逐对象接受它；
+- **接受判定**：`RouteReady` 要求 **所选共享 `AIGatewayRoute` `Accepted=True`**、**本服务的
+  `<isvc>-backend` 与 `<isvc>-anthropic` 两个 `AIServiceBackend` 均 `Accepted=True`**，且本服务的
+  rule 仍在路由里（缺一 → `GatewayNotAccepted`）。所有路径（含 `/v1/messages`）都走
+  `AIGatewayRoute`，不再校验共享 `HTTPRoute` 的 `parents[]`。共享对象只有 route 级条件，
+  per-service 粒度落在 AIServiceBackend 上，Agent Router 亦逐对象接受它；
   `EndpointReady` 前置不变（rule 生命周期仍跟随 Service：endpoint 抖动不删 rule，清空
   `aigatewayRouter` 才删）。
 - **降级**：

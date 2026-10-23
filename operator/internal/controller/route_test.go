@@ -130,6 +130,18 @@ func privateCatalogRoute() *aigwv1beta1.AIGatewayRoute {
 	return catalogRouteNamed(testPrivateCatalogRoute)
 }
 
+// ruleIndexByRef returns the index of the rule whose first backendRef carries
+// the given name, or -1. The shared route carries two rules per model — the
+// native-Anthropic one and the OpenAI one — so tests cannot index by position.
+func ruleIndexByRef(rules []aigwv1beta1.AIGatewayRouteRule, backendName string) int {
+	for i := range rules {
+		if len(rules[i].BackendRefs) > 0 && string(rules[i].BackendRefs[0].Name) == backendName {
+			return i
+		}
+	}
+	return -1
+}
+
 // ensureCatalogRoute persists the named shared route with no rules. The
 // platform owns the object; the specs only need it to exist so a published
 // service has a route to attach a rule to. It is reset to zero rules on every
@@ -346,15 +358,28 @@ var _ = Describe("checkRoute", func() {
 		backendGrant := &gatewayv1.ReferenceGrant{}
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKey{Name: "cubestack-httproute-" + name + "-endpoint", Namespace: testNamespace}, backendGrant))).To(BeTrue())
 
-		// The catalog rule targets the OpenAI-schema backend and leaves the
-		// stream idle timeout disabled.
+		// Both schemas are registered for the model: the native-Anthropic rule
+		// (model + anthropic-version) comes first, then the OpenAI rule that
+		// serves every other catalog path.
 		route := sharedCatalogRoute()
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
-		Expect(route.Spec.Rules).To(HaveLen(1))
-		Expect(route.Spec.Rules[0].Matches[0].Headers[0].Value).To(Equal(testCatalogModelName))
-		Expect(route.Spec.Rules[0].BackendRefs[0].Name).To(Equal(name + testOpenAISuffix))
-		Expect(route.Spec.Rules[0].BackendRefs[0].ModelNameOverride).To(Equal(testEngineModel))
-		Expect(string(*route.Spec.Rules[0].StreamIdleTimeout)).To(Equal("0s"))
+		Expect(route.Spec.Rules).To(HaveLen(2))
+		aiIdx := ruleIndexByRef(route.Spec.Rules, name+testAnthropicSuffix)
+		oaIdx := ruleIndexByRef(route.Spec.Rules, name+testOpenAISuffix)
+		Expect(aiIdx).To(Equal(0))
+		Expect(oaIdx).To(Equal(1))
+		anth := route.Spec.Rules[aiIdx]
+		Expect(anth.Matches[0].Headers).To(HaveLen(2))
+		Expect(anth.Matches[0].Headers[0].Value).To(Equal(testCatalogModelName))
+		Expect(string(anth.Matches[0].Headers[1].Name)).To(Equal("anthropic-version"))
+		Expect(anth.Matches[0].Headers[1].Value).To(Equal("2023-06-01"))
+		Expect(anth.BackendRefs[0].ModelNameOverride).To(Equal(testEngineModel))
+		Expect(string(*anth.StreamIdleTimeout)).To(Equal("0s"))
+		oa := route.Spec.Rules[oaIdx]
+		Expect(oa.Matches[0].Headers).To(HaveLen(1))
+		Expect(oa.Matches[0].Headers[0].Value).To(Equal(testCatalogModelName))
+		Expect(oa.BackendRefs[0].ModelNameOverride).To(Equal(testEngineModel))
+		Expect(string(*oa.StreamIdleTimeout)).To(Equal("0s"))
 
 		// No plain HTTPRoute is created next to it.
 		httpRoute := sharedHTTPRoute(testCatalogRoute)
@@ -409,8 +434,9 @@ var _ = Describe("checkRoute", func() {
 
 		private := privateCatalogRoute()
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(private), private)).To(Succeed())
-		Expect(private.Spec.Rules).To(HaveLen(1))
-		Expect(private.Spec.Rules[0].BackendRefs[0].Name).To(Equal(name + testOpenAISuffix))
+		Expect(private.Spec.Rules).To(HaveLen(2))
+		Expect(ruleIndexByRef(private.Spec.Rules, name+testAnthropicSuffix)).To(Equal(0))
+		Expect(ruleIndexByRef(private.Spec.Rules, name+testOpenAISuffix)).To(Equal(1))
 		public := sharedCatalogRoute()
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(public), public)).To(Succeed())
 		Expect(findCatalogRuleIndex(public.Spec.Rules, mustGetISVC(ctx, name))).To(Equal(-1))
@@ -515,20 +541,24 @@ var _ = Describe("checkRoute", func() {
 		Expect(err).NotTo(HaveOccurred())
 		route := sharedCatalogRoute()
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
-		Expect(route.Spec.Rules).To(HaveLen(1))
+		Expect(route.Spec.Rules).To(HaveLen(2))
 
-		// The other service reconciles: its own rule is added, the first one is
-		// kept.
+		// The other service reconciles: its own rules are added, the first
+		// pair is kept.
 		_, err = r.checkRoute(ctx, mustGetISVC(ctx, "route-mine"), routeProfile("p1"), readyEndpoint("route-mine"), testEngineModel)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
-		Expect(route.Spec.Rules).To(HaveLen(2))
-		mine := route.Spec.Rules[findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, "route-mine"))]
-		theirs := route.Spec.Rules[findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, "route-theirs"))]
-		Expect(mine.BackendRefs[0].Name).To(Equal("route-mine" + testOpenAISuffix))
+		Expect(route.Spec.Rules).To(HaveLen(4))
+		mine := route.Spec.Rules[ruleIndexByRef(route.Spec.Rules, "route-mine"+testOpenAISuffix)]
+		theirs := route.Spec.Rules[ruleIndexByRef(route.Spec.Rules, "route-theirs"+testOpenAISuffix)]
 		Expect(mine.Matches[0].Headers[0].Value).To(Equal(testCatalogModelName))
-		Expect(theirs.BackendRefs[0].Name).To(Equal("route-theirs" + testOpenAISuffix))
 		Expect(theirs.Matches[0].Headers[0].Value).To(Equal("theirs-model"))
+		// Each service's native-Anthropic rule sits immediately before its own
+		// OpenAI rule, so the specific match wins for that model.
+		mineAnth := route.Spec.Rules[ruleIndexByRef(route.Spec.Rules, "route-mine"+testAnthropicSuffix)]
+		Expect(mineAnth.Matches[0].Headers[0].Value).To(Equal(testCatalogModelName))
+		Expect(ruleIndexByRef(route.Spec.Rules, "route-mine"+testAnthropicSuffix) + 1).
+			To(Equal(ruleIndexByRef(route.Spec.Rules, "route-mine"+testOpenAISuffix)))
 
 		// The plain OpenAI-paths surface stays absent: every path rides on the
 		// shared AIGatewayRoute.
@@ -564,7 +594,10 @@ var _ = Describe("checkRoute", func() {
 		ensureSharedCatalogRoute()
 		// The cap is enforced while rebuilding the full rule set: the first
 		// catalogRuleMax services (oldest first) keep their /v1/messages rules.
-		for i := range catalogRuleMax {
+		// Each service now contributes two rules — native Anthropic first, then
+		// OpenAI — so the oldest catalogRuleMax/2 services fill the route and the
+		// next one needs two free slots it cannot get.
+		for i := range catalogRuleMax / 2 {
 			name := "route-cap-" + strconv.Itoa(i)
 			isvc := routeISVC(name, true)
 			isvc.Spec.Route.ModelName = "cap-model-" + strconv.Itoa(i)
@@ -582,7 +615,7 @@ var _ = Describe("checkRoute", func() {
 
 		route := sharedCatalogRoute()
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
-		Expect(route.Spec.Rules).To(HaveLen(catalogRuleMax))
+		Expect(route.Spec.Rules).To(HaveLen(2 * (catalogRuleMax / 2)))
 		Expect(findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, name))).To(Equal(-1))
 		// The overflow service is dropped from the only surface there is.
 		httpRoute := sharedHTTPRoute(testCatalogRoute)
@@ -608,7 +641,7 @@ var _ = Describe("checkRoute", func() {
 
 		route := sharedCatalogRoute()
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
-		Expect(route.Spec.Rules).To(HaveLen(1))
+		Expect(route.Spec.Rules).To(HaveLen(2))
 		Expect(findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, pending))).To(Equal(-1))
 		httpRoute := sharedHTTPRoute(testCatalogRoute)
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(httpRoute), httpRoute))).To(BeTrue())
@@ -618,7 +651,7 @@ var _ = Describe("checkRoute", func() {
 		_, err = r.checkRoute(ctx, mustGetISVC(ctx, readySvc), routeProfile(readySvc+"-prof"), readyEndpoint(readySvc), testEngineModel)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
-		Expect(route.Spec.Rules).To(HaveLen(2))
+		Expect(route.Spec.Rules).To(HaveLen(4))
 	})
 
 	It("does not create the shared surfaces when no Gateway name is configured", func() {
@@ -927,7 +960,7 @@ var _ = Describe("checkRoute", func() {
 		_, err = r.checkRoute(ctx, mustGetISVC(ctx, name), routeProfile(name+"-prof"), readyEndpoint(name), testEngineModel)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
-		Expect(route.Spec.Rules).To(HaveLen(2))
+		Expect(route.Spec.Rules).To(HaveLen(4))
 		Expect(route.Spec.Rules[findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, name))].Timeouts.Request).To(HaveValue(Equal(gatewayv1.Duration("30s"))))
 		Expect(route.Spec.Rules[findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, "route-update-other"))].Timeouts.Request).To(HaveValue(Equal(gatewayv1.Duration("60s"))))
 	})
