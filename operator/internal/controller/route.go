@@ -911,7 +911,7 @@ func sharedRouteAcceptance(check *routeCheck, route *aigwv1beta1.AIGatewayRoute,
 // carries the given name, or -1.
 func catalogRuleIndexForRule(rules []aigwv1beta1.AIGatewayRouteRule, backendName string) int {
 	for i := range rules {
-		if len(rules[i].BackendRefs) > 0 && string(rules[i].BackendRefs[0].Name) == backendName {
+		if len(rules[i].BackendRefs) > 0 && rules[i].BackendRefs[0].Name == backendName {
 			return i
 		}
 	}

@@ -135,7 +135,7 @@ func privateCatalogRoute() *aigwv1beta1.AIGatewayRoute {
 // native-Anthropic one and the OpenAI one — so tests cannot index by position.
 func ruleIndexByRef(rules []aigwv1beta1.AIGatewayRouteRule, backendName string) int {
 	for i := range rules {
-		if len(rules[i].BackendRefs) > 0 && string(rules[i].BackendRefs[0].Name) == backendName {
+		if len(rules[i].BackendRefs) > 0 && rules[i].BackendRefs[0].Name == backendName {
 			return i
 		}
 	}
