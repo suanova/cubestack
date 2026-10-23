@@ -60,10 +60,11 @@ type routeCheck struct {
 // Kinds, API groups and the fixed fields of the Agent Router catalog objects a
 // published service owns: the Envoy Gateway Backend naming the endpoint pool,
 // two AIServiceBackends declaring the upstream schema over that Backend (one
-// OpenAI, one Anthropic), and the ReferenceGrant authorising the shared catalog
-// route (in the Gateway's namespace) to reference either of them. The Backend
-// type, weight, priority and modelsOwnedBy are spelled explicitly so the API
-// server's defaults never read as drift.
+// OpenAI, one Anthropic), and the ReferenceGrant authorising both cross-namespace
+// hops: the shared catalog route (in the Gateway's namespace) referencing either
+// AIServiceBackend, and the child HTTPRoute it expands into referencing the
+// Backend. The Backend type, weight, priority and modelsOwnedBy are spelled
+// explicitly so the API server's defaults never read as drift.
 //
 // Both AIServiceBackends carry traffic, each behind its own rule: the
 // Anthropic-schema one serves native Anthropic clients on /v1/messages (see
@@ -186,21 +187,36 @@ func (r *InferenceServiceReconciler) desiredAIServiceBackendFor(isvc *aiv1alpha1
 }
 
 // desiredReferenceGrant builds the ReferenceGrant, in the service's namespace,
-// that authorises the shared catalog AIGatewayRoute (in the Gateway's
-// namespace) to reference this service's AIServiceBackends — the route's
-// backendRef is what crosses the namespace boundary. Both schemas are named so
-// the grant survives a switch between the OpenAI and Anthropic rules. The
-// Backend itself is referenced by the plain OpenAI-paths HTTPRoute, which the
-// platform's namespace-wide cubestack-ai-gateway-backends grant already covers.
+// that authorises every cross-namespace reference the catalog makes to this
+// service's objects. Two hops cross the boundary, and a ReferenceGrant allows
+// every (from, to) pair it lists, so one object carries both:
+//
+//   - the shared catalog AIGatewayRoute (in the Gateway's namespace) references
+//     this service's two AIServiceBackends — the route's backendRef;
+//   - the child HTTPRoute the Agent Router expands that route into (same
+//     namespace) references this service's Envoy Gateway Backend — it backs the
+//     AIServiceBackends, and without the grant the child route is accepted but
+//     ResolvedRefs=False/RefNotPermitted, so every request to the model fails.
+//
+// Both AIServiceBackends and the Backend are named, so a service's grant never
+// authorises another service's objects. The AIServiceBackend entries are what
+// keep the grant valid across a switch between the OpenAI and Anthropic rules.
 func (r *InferenceServiceReconciler) desiredReferenceGrant(isvc *aiv1alpha1.InferenceService) *gatewayv1.ReferenceGrant {
 	grant := &gatewayv1.ReferenceGrant{
 		ObjectMeta: metav1.ObjectMeta{Name: referenceGrantName(isvc), Namespace: isvc.Namespace, Labels: routeLabels(isvc)},
 		Spec: gatewayv1.ReferenceGrantSpec{
-			From: []gatewayv1.ReferenceGrantFrom{{
-				Group:     gatewayv1.Group(aigwv1beta1.GroupName),
-				Kind:      gatewayv1.Kind("AIGatewayRoute"),
-				Namespace: gatewayv1.Namespace(r.GatewayNamespace),
-			}},
+			From: []gatewayv1.ReferenceGrantFrom{
+				{
+					Group:     gatewayv1.Group(aigwv1beta1.GroupName),
+					Kind:      gatewayv1.Kind("AIGatewayRoute"),
+					Namespace: gatewayv1.Namespace(r.GatewayNamespace),
+				},
+				{
+					Group:     gatewayv1.Group(gatewayAPIGroup),
+					Kind:      gatewayv1.Kind("HTTPRoute"),
+					Namespace: gatewayv1.Namespace(r.GatewayNamespace),
+				},
+			},
 			To: []gatewayv1.ReferenceGrantTo{
 				{
 					Group: gatewayv1.Group(aigwv1beta1.GroupName),
@@ -211,6 +227,11 @@ func (r *InferenceServiceReconciler) desiredReferenceGrant(isvc *aiv1alpha1.Infe
 					Group: gatewayv1.Group(aigwv1beta1.GroupName),
 					Kind:  gatewayv1.Kind("AIServiceBackend"),
 					Name:  ptr(gatewayv1.ObjectName(anthropicServiceBackendName(isvc))),
+				},
+				{
+					Group: gatewayv1.Group(envoyGatewayAPIGroup),
+					Kind:  gatewayv1.Kind(egBackendKind),
+					Name:  ptr(gatewayv1.ObjectName(backendName(isvc))),
 				},
 			},
 		},

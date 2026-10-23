@@ -169,8 +169,11 @@ controller prerequisite below.
 
   Rules are matched on the `x-ai-eg-model` request header, which ext_proc
   derives from the request body's `model` field — clients do not send it.
-  Cross-namespace references to the per-service `AIServiceBackend` objects are
-  authorized by the per-service `ReferenceGrant` the operator creates.
+  Cross-namespace references are authorized by the per-service `ReferenceGrant`
+  the operator creates, which covers both hops the catalog makes into the
+  service's namespace: the shared route's reference to the `AIServiceBackend`s,
+  and the child `HTTPRoute` the Agent Router expands that route into
+  referencing the `Backend`. No platform-wide grant is assumed.
 
   The plain `HTTPRoute`s `cubestack-openai-paths` / `-private` are retired: the
   operator clears their rules (or deletes them when it created them). Path-based

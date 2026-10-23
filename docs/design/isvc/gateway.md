@@ -176,21 +176,26 @@ spec:
   schema: {name: Anthropic}
   backendRef: {group: gateway.envoyproxy.io, kind: Backend, name: <isvc>-endpoint}
 ---
-# 名称 <isvc>-grant：授权共享 AIGatewayRoute 跨 namespace 引用本服务的两个 AIServiceBackend
+# 名称 <isvc>-grant：授权两条跨 namespace 引用 —— 共享 AIGatewayRoute 引用本服务的两个
+# AIServiceBackend，以及 Agent Router 由该路由展开出的子 HTTPRoute 引用本服务的 Backend
 apiVersion: gateway.networking.k8s.io/v1
 kind: ReferenceGrant
 spec:
-  from: [{group: aigateway.envoyproxy.io, kind: AIGatewayRoute, namespace: <gateway.namespace>}]
+  from:
+    - {group: aigateway.envoyproxy.io, kind: AIGatewayRoute, namespace: <gateway.namespace>}
+    - {group: gateway.networking.k8s.io, kind: HTTPRoute, namespace: <gateway.namespace>}
   to:
     - {group: aigateway.envoyproxy.io, kind: AIServiceBackend, name: <isvc>-backend}
     - {group: aigateway.envoyproxy.io, kind: AIServiceBackend, name: <isvc>-anthropic}
+    - {group: gateway.envoyproxy.io, kind: Backend, name: <isvc>-endpoint}
 ```
 
 - **schema 是 AIServiceBackend 级别**，所以 Anthropic 出口必须每模型一个，不能与 OpenAI 共用；
   两者指向同一个 `Backend`。
-- 普通 `HTTPRoute → EG Backend` 的跨 namespace 引用由平台预装的
-  `ReferenceGrant/cubestack-ai-gateway-backends`（`from`=HTTPRoute@`<gateway.namespace>`，
-  `to`=Backend 全量）覆盖，**不需要**为每个 Backend 单独建 grant。
+- `HTTPRoute → EG Backend` 这一跳必须由**本服务自己的** grant 授权，不能再假设平台装了
+  全量 grant：Agent Router 把 AIGatewayRoute 展开成子 HTTPRoute 时，backendRef 指向本 ns 的
+  `Backend`，缺授权时路由 Accepted 但 `ResolvedRefs=False/RefNotPermitted`，请求全部 500。
+  `to` 带 `name` 所以只授权本服务的 Backend，不会连带授权别的服务。
 
 **共享路由里的 rule**（operator 全量重建，见 D1）：
 

@@ -348,15 +348,15 @@ var _ = Describe("checkRoute", func() {
 			Expect(sb.Spec.APISchema.Name).To(Equal(schema))
 			Expect(string(sb.Spec.BackendRef.Name)).To(Equal(name + "-endpoint"))
 		}
-		// The ReferenceGrant authorises the shared catalog route to cross into
-		// the service's namespace for either AIServiceBackend. The plain HTTPRoute
-		// relies on the platform's namespace-wide Backend grant instead, so no
-		// per-Backend grant is created.
+		// The ReferenceGrant authorises both cross-namespace hops: the shared
+		// catalog route to either AIServiceBackend, and the child HTTPRoute the
+		// Agent Router expands that route into to this service's Backend.
 		grant := &gatewayv1.ReferenceGrant{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-grant", Namespace: testNamespace}, grant)).To(Succeed())
-		Expect(grant.Spec.To).To(HaveLen(2))
-		backendGrant := &gatewayv1.ReferenceGrant{}
-		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKey{Name: "cubestack-httproute-" + name + "-endpoint", Namespace: testNamespace}, backendGrant))).To(BeTrue())
+		Expect(grant.Spec.To).To(HaveLen(3))
+		Expect(string(grant.Spec.To[2].Group)).To(Equal(envoyGatewayAPIGroup))
+		Expect(string(grant.Spec.To[2].Kind)).To(Equal(egBackendKind))
+		Expect(string(*grant.Spec.To[2].Name)).To(Equal(name + "-endpoint"))
 
 		// Both schemas are registered for the model: the native-Anthropic rule
 		// (model + anthropic-version) comes first, then the OpenAI rule that
@@ -876,6 +876,37 @@ var _ = Describe("checkRoute", func() {
 		Expect(findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, name))).To(Equal(-1))
 	})
 
+	It("gives the grant the same name-and-owner contract as the AIServiceBackends", func() {
+		// The grant is what authorises the child HTTPRoute to reach the
+		// Backend, so it must disappear with the service exactly like the
+		// AIServiceBackends do: a fixed name derived from the service and a
+		// controller ownerRef to it. Anything cluster-wide and unowned would
+		// outlive the service and keep authorising a backend that is gone.
+		// (The deletion itself is the API server's garbage collector, which
+		// envtest does not run, so this asserts the contract it acts on.)
+		ensureSharedCatalogRoute()
+		name := "route-cascade"
+		Expect(k8sClient.Create(ctx, routeISVC(name, true))).To(Succeed())
+		_, err := routeReconciler().checkRoute(ctx, mustGetISVC(ctx, name), routeProfile(name+"-prof"), readyEndpoint(name), testEngineModel)
+		Expect(err).NotTo(HaveOccurred())
+
+		live := mustGetISVC(ctx, name)
+		grant := &gatewayv1.ReferenceGrant{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-grant", Namespace: testNamespace}, grant)).To(Succeed())
+		Expect(grant.Name).To(Equal(referenceGrantName(live)))
+		Expect(grant.Spec.To).To(HaveLen(3))
+
+		sb := &aigwv1beta1.AIServiceBackend{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + testOpenAISuffix, Namespace: testNamespace}, sb)).To(Succeed())
+
+		// The same owner the AIServiceBackends carry: same kind, name and UID,
+		// controller=true — so the API server collects the grant on the same
+		// delete as the backends.
+		Expect(metav1.IsControlledBy(grant, live)).To(BeTrue())
+		Expect(metav1.IsControlledBy(sb, live)).To(BeTrue())
+		Expect(grant.OwnerReferences).To(Equal(sb.OwnerReferences))
+	})
+
 	It("keeps a finalizer another controller added concurrently", func() {
 		// The suite's manager reconciles every real object in the cluster, so a
 		// spec pinning a stale write must not share an object with it. This runs
@@ -1024,6 +1055,55 @@ var _ = Describe("checkRoute", func() {
 		_ = myRule
 	})
 
+	It("adds the Backend authorization to a ReferenceGrant created before it was needed", func() {
+		ensureSharedCatalogRoute()
+		name := "route-legacy-grant"
+		isvc := isvcForApply(name)
+		isvc.Spec.Route = &aiv1alpha1.RouteSpec{AIGatewayRouter: aiv1alpha1.AIGatewayRouterPublic, ModelName: "legacy-grant-model", TimeoutSeconds: ptrTo[int64](60)}
+		Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
+		// The shape every grant shipped before this fix has: the two
+		// AIServiceBackends and no Backend, which left the child HTTPRoute the
+		// Agent Router expands the route into unresolvable.
+		legacy := &gatewayv1.ReferenceGrant{
+			ObjectMeta: metav1.ObjectMeta{Name: name + "-grant", Namespace: testNamespace},
+			Spec: gatewayv1.ReferenceGrantSpec{
+				From: []gatewayv1.ReferenceGrantFrom{{
+					Group:     gatewayv1.Group("aigateway.envoyproxy.io"),
+					Kind:      gatewayv1.Kind("AIGatewayRoute"),
+					Namespace: gatewayv1.Namespace(testGatewayNamespace),
+				}},
+				To: []gatewayv1.ReferenceGrantTo{
+					{
+						Group: gatewayv1.Group("aigateway.envoyproxy.io"),
+						Kind:  gatewayv1.Kind("AIServiceBackend"),
+						Name:  ptrTo(gatewayv1.ObjectName(name + testOpenAISuffix)),
+					},
+					{
+						Group: gatewayv1.Group("aigateway.envoyproxy.io"),
+						Kind:  gatewayv1.Kind("AIServiceBackend"),
+						Name:  ptrTo(gatewayv1.ObjectName(name + testAnthropicSuffix)),
+					},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, legacy)).To(Succeed())
+		// A shipped grant carries the controller reference: the apply path only
+		// rewrites objects it controls.
+		Expect(ctrl.SetControllerReference(mustGetISVC(ctx, name), legacy, routeReconciler().Scheme)).To(Succeed())
+		Expect(k8sClient.Update(ctx, legacy)).To(Succeed())
+
+		_, err := routeReconciler().checkRoute(ctx, mustGetISVC(ctx, name), routeProfile(name+"-prof"), readyEndpoint(name), testEngineModel)
+		Expect(err).NotTo(HaveOccurred())
+
+		grant := &gatewayv1.ReferenceGrant{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-grant", Namespace: testNamespace}, grant)).To(Succeed())
+		Expect(grant.Spec.To).To(HaveLen(3))
+		Expect(string(grant.Spec.To[2].Group)).To(Equal(envoyGatewayAPIGroup))
+		Expect(string(grant.Spec.To[2].Kind)).To(Equal(egBackendKind))
+		Expect(string(*grant.Spec.To[2].Name)).To(Equal(name + "-endpoint"))
+		Expect(metav1.IsControlledBy(grant, mustGetISVC(ctx, name))).To(BeTrue())
+	})
+
 	It("does not report acceptance from a stale status after a spec update", func() {
 		ensureSharedCatalogRoute()
 		name := "route-stale"
@@ -1157,23 +1237,31 @@ var _ = Describe("desired catalog objects", func() {
 		Expect(metav1.IsControlledBy(sb, isvc)).To(BeTrue())
 	})
 
-	It("renders the ReferenceGrant authorising the shared catalog route to both AIServiceBackends", func() {
+	It("renders the ReferenceGrant authorising both cross-namespace hops to the catalog objects", func() {
 		isvc := routeISVC("catalog-isvc", true)
 		grant := routeReconciler().desiredReferenceGrant(isvc)
 
 		Expect(grant.Name).To(Equal("catalog-isvc-grant"))
 		Expect(grant.Namespace).To(Equal(testNamespace))
 		expectCatalogLabels(grant.Labels)
-		Expect(grant.Spec.From).To(HaveLen(1))
+		// The shared AIGatewayRoute references the AIServiceBackends; the child
+		// HTTPRoute the Agent Router expands it into references the Backend.
+		Expect(grant.Spec.From).To(HaveLen(2))
 		Expect(string(grant.Spec.From[0].Group)).To(Equal("aigateway.envoyproxy.io"))
 		Expect(string(grant.Spec.From[0].Kind)).To(Equal("AIGatewayRoute"))
 		Expect(string(grant.Spec.From[0].Namespace)).To(Equal(testGatewayNamespace))
-		Expect(grant.Spec.To).To(HaveLen(2))
+		Expect(string(grant.Spec.From[1].Group)).To(Equal("gateway.networking.k8s.io"))
+		Expect(string(grant.Spec.From[1].Kind)).To(Equal("HTTPRoute"))
+		Expect(string(grant.Spec.From[1].Namespace)).To(Equal(testGatewayNamespace))
+		Expect(grant.Spec.To).To(HaveLen(3))
 		for i, want := range []string{"catalog-isvc-backend", "catalog-isvc-anthropic"} {
 			Expect(string(grant.Spec.To[i].Group)).To(Equal("aigateway.envoyproxy.io"))
 			Expect(string(grant.Spec.To[i].Kind)).To(Equal("AIServiceBackend"))
 			Expect(string(*grant.Spec.To[i].Name)).To(Equal(want))
 		}
+		Expect(string(grant.Spec.To[2].Group)).To(Equal("gateway.envoyproxy.io"))
+		Expect(string(grant.Spec.To[2].Kind)).To(Equal("Backend"))
+		Expect(string(*grant.Spec.To[2].Name)).To(Equal("catalog-isvc-endpoint"))
 		Expect(metav1.IsControlledBy(grant, isvc)).To(BeTrue())
 	})
 
