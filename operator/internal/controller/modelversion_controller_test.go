@@ -284,14 +284,30 @@ var _ = Describe("ModelVersion controller", func() {
 			Expect(meta.FindStatusCondition(got.Status.Conditions, aiv1alpha1.ConditionStorageResolved)).To(BeNil())
 		})
 
-		It("does not manage StorageResolved for S3 storage", func() {
+		It("marks StorageResolved true for S3 storage with credentials configured", func() {
+			mv := validS3ModelVersion("mv-storage-s3-creds", "model-s3-credentials")
+			Expect(k8sClient.Create(ctx, mv)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, mv) }()
+
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.ModelVersion{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: mv.Name}, got)).To(Succeed())
+				cond := meta.FindStatusCondition(got.Status.Conditions, aiv1alpha1.ConditionStorageResolved)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+				g.Expect(cond.Reason).To(Equal("CredentialsConfigured"))
+			}, "15s", "200ms").Should(Succeed())
+		})
+
+		It("does not manage StorageResolved for anonymous S3 storage", func() {
 			mv := validS3ModelVersion("mv-storage-s3", "")
 			Expect(k8sClient.Create(ctx, mv)).To(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, mv) }()
 
 			// Wait until the controller has reconciled (InUse is written on
 			// the same reconcile), then confirm StorageResolved is absent:
-			// the storage-side integration owns it for S3.
+			// without credentialsRef the manual-testing phase leaves it to the
+			// storage-side integration.
 			Eventually(func(g Gomega) {
 				got := &aiv1alpha1.ModelVersion{}
 				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: mv.Name}, got)).To(Succeed())

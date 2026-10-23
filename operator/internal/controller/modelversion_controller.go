@@ -82,11 +82,12 @@ func (r *ModelVersionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 // setStorageResolvedCondition sets the StorageResolved condition. For Dynamic
 // storage the referenced StorageClass must exist; for HostPath storage it is
-// always True; for Static storage the condition is not managed here — it is set
-// by the storage-side integration (go-ceph getpath/quota checks, design §3.1).
-// In the manual-testing phase, the operator leaves a manually-patched
-// StorageResolved condition untouched. A transient lookup error is returned so
-// the reconcile is retried instead of leaving the condition stale.
+// always True; for S3 storage it is True once credentialsRef is configured. For
+// Static storage the condition is not managed here — it is set by the
+// storage-side integration (go-ceph getpath/quota checks, design §3.1). In the
+// manual-testing phase, the operator leaves a manually-patched StorageResolved
+// condition untouched. A transient lookup error is returned so the reconcile is
+// retried instead of leaving the condition stale.
 func (r *ModelVersionReconciler) setStorageResolvedCondition(ctx context.Context, conditions *[]metav1.Condition, mv *aiv1alpha1.ModelVersion) error {
 	switch mv.Spec.Storage.Strategy {
 	case aiv1alpha1.StorageStrategyHostPath:
@@ -98,11 +99,24 @@ func (r *ModelVersionReconciler) setStorageResolvedCondition(ctx context.Context
 		})
 		return nil
 
-	case aiv1alpha1.StorageStrategyStatic, aiv1alpha1.StorageStrategyS3:
-		// Static/S3: the storage-side integration manages this condition
-		// (getpath/quota for Static; prefix/credentials resolution for S3). In
-		// the manual-testing phase (no storage controller), the operator does
-		// not touch the condition — it may be patched manually.
+	case aiv1alpha1.StorageStrategyS3:
+		// In the manual-testing phase, S3 storage counts as resolved once its
+		// credentials Secret is configured; the full prefix/credentials check
+		// belongs to the storage-side integration (design §3.3).
+		if mv.Spec.Storage.S3.CredentialsRef != nil {
+			meta.SetStatusCondition(conditions, metav1.Condition{
+				Type:    aiv1alpha1.ConditionStorageResolved,
+				Status:  metav1.ConditionTrue,
+				Reason:  "CredentialsConfigured",
+				Message: fmt.Sprintf("S3 credentials Secret %q is configured", mv.Spec.Storage.S3.CredentialsRef.Name),
+			})
+		}
+		return nil
+
+	case aiv1alpha1.StorageStrategyStatic:
+		// Static: the storage-side integration manages this condition
+		// (getpath/quota). In the manual-testing phase (no storage controller),
+		// the operator does not touch the condition — it may be patched manually.
 		return nil
 
 	default: // Dynamic
