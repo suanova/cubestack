@@ -135,17 +135,18 @@
 
 - `spec.route.aigatewayRouter` 非空时语义为**发布到平台模型目录**。客户端寻址：统一入口 hostname +
   请求体 `model` 选模型；`Host` 恒定，模型名是参数。
-- **目录是平台预装、operator 全量维护的两对共享对象**（均在 `--gateway-namespace`）：
-  `AIGatewayRoute` `cubestack-ai-gateway` / `cubestack-ai-gateway-private`（承接 `/v1/messages`），
-  以及普通 `HTTPRoute` `cubestack-openai-paths` / `cubestack-openai-paths-private`（承接
-  `/v1/chat/completions`、`/v1/responses`、`/v1/images`）。ISVC 用 `spec.route.aigatewayRouter`
-  选择其一；operator 每次 reconcile 都用**全部已发布 ISVC** 重建这两条（对）对象的 `spec.rules`
-  ——**整体接管**：缺失时创建，存在时覆写（含手工加进去的 rule），不追加、不局部修改。
-  不再各自创建 per-service 的 AIGatewayRoute。
+- **目录是平台预装、operator 全量维护的一对共享对象**（均在 `--gateway-namespace`）：
+  `AIGatewayRoute` `cubestack-ai-gateway` / `cubestack-ai-gateway-private`（承接全部四个目录路径）。
+  ISVC 用 `spec.route.aigatewayRouter` 选择其一；operator 每次 reconcile 都用**全部已发布 ISVC**
+  重建这条对象的 `spec.rules` ——**整体接管**：缺失时创建，存在时覆写（含手工加进去的 rule），
+  不追加、不局部修改。不再各自创建 per-service 的 AIGatewayRoute。
+- **不再有普通 `HTTPRoute`**：`cubestack-openai-paths[-private]` 已退役。它的路径分流（按 path 直连
+  `Backend`）与 listener 级全量缓冲都会绕过 Agent Router，也无法与 `/v1/messages` 共存于同一
+  `AIGatewayRoute` rule（rule 只有 header 一种匹配维度）。现在全部路径都走 `AIGatewayRoute`，
+  命中同一个 OpenAI-schema backend，由 ext_proc 读请求体 `model` 注入 `x-ai-eg-model`。
 - `spec.route.paths` = 本服务在目录上暴露的路径（多选，CRD 枚举四个值）；未设置 = 全部路径，
-  显式空列表 = 不暴露任何路径。operator 只为选中的路径生成 rule。
-- `route.modelName` = **目录里的模型名**（客户端 `model` 字段要填的值，OpenAI 路径另需
-  `x-ai-eg-model` header），在**所选路由内**唯一（D4）。
+  显式空列表 = 不暴露任何路径。暴露任一非空路径就生成一条 rule（rule 不区分路径）。
+- `route.modelName` = **目录里的模型名**（客户端 `model` 字段要填的值），在**所选路由内**唯一（D4）。
 - 删除：per-model hostname `<modelName>.<gatewayDomain>`、`publicHostname()`、HTTPRoute 生成路径，以及
   `--gateway-domain` flag —— 它没有别的消费者：DevEnvironment 的暴露面是自己的 ListenerSet 与
   HTTPRoute 路径规则，不由网关域名推导。
@@ -194,33 +195,27 @@ spec:
 **共享路由里的 rule**（operator 全量重建，见 D1）：
 
 ```yaml
-# AIGatewayRoute <可选路由> 的 spec.rules[]，每个暴露 /v1/messages 的模型一条
+# AIGatewayRoute <可选路由> 的 spec.rules[]，每个暴露任一目录路径的模型一条
 - matches:
     - headers: [{type: Exact, name: x-ai-eg-model, value: <route.modelName>}]
   backendRefs:
-    - name: <isvc>-anthropic
+    - name: <isvc>-backend          # OpenAI schema：四个路径都由它承接
       namespace: <isvc.ns>          # 跨 ns → 需要上面的 ReferenceGrant
       modelNameOverride: <status.model.name>
       weight: 1
       priority: 0
   timeouts: {request: <timeoutSeconds>s}
-  streamIdleTimeout: <idleTimeoutSeconds>s
+  streamIdleTimeout: <idleTimeoutSeconds>s   # 默认 0s = 不掐断
   modelsOwnedBy: CubeStack
 ```
 
-```yaml
-# HTTPRoute <cubestack-openai-paths[-private]> 的 spec.rules[]：每个模型 × 每个选中的
-# OpenAI 路径一条（/v1/chat/completions、/v1/responses、/v1/images）
-- matches:
-    - path: {type: PathPrefix, value: /v1/chat/completions}
-      headers: [{type: Exact, name: x-ai-eg-model, value: <route.modelName>}]
-  backendRefs:
-    - {group: gateway.envoyproxy.io, kind: Backend, name: <isvc>-endpoint, namespace: <isvc.ns>, weight: 1}
-  timeouts: {request: <timeoutSeconds>s}
-```
-
-- **OpenAI 路径靠 `x-ai-eg-model` header 区分模型**：客户端必须显式发送该 header（普通 HTTPRoute
-  不会读请求体里的 `model`）。`/v1/messages` 走 AIGatewayRoute，由 Agent Router 解析请求体。
+- **客户端不发 `x-ai-eg-model`**：header 由 Agent Router 的 ext_proc 从请求体 `model` 注入，这也是
+  `AIGatewayRoute` rule 能当目录用的前提。`/v1/messages` 由同一个 OpenAI-schema backend 承接，
+  ext_proc 做 Anthropic→OpenAI 请求翻译与流式响应翻译；`/v1/chat/completions`、`/v1/completions`、
+  `/v1/responses`、`/v1/images/generations` 透传。
+- **`schema: Anthropic` 的 `<isvc>-anthropic` 不再被共享路由引用**：它只支持 `/v1/messages` 一族，
+  接不了另外三个路径，因此共享 rule 一律指向 `<isvc>-backend`（OpenAI）。对象本身仍生成，留给
+  需要 Anthropic 原生出口的场景。
 - **`modelNameOverride` = `status.model.name`**（引擎 served name；profile 契约
   `--served-model-name "{{ model.name }}"`）。作用：目录名与引擎名解耦——同一模型的不同版本
   （fp16 / w8a8）都能以各自的目录名共存，客户端始终用目录名。

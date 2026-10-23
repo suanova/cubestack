@@ -107,7 +107,7 @@ var _ = Describe("InferenceService", func() {
 			Expect(k8sClient.Delete(ctx, isvc)).To(Succeed())
 		})
 
-		It("defaults a route with no aigatewayRouter to unpublished, timeoutSeconds to 0 and idleTimeoutSeconds to 300", func() {
+		It("defaults a route with no aigatewayRouter to unpublished, timeoutSeconds to 0 and idleTimeoutSeconds to 0", func() {
 			isvc := validInferenceService("isvc-defaults")
 			isvc.Spec.Route = &RouteSpec{ModelName: "dsv4-flash"}
 
@@ -118,7 +118,7 @@ var _ = Describe("InferenceService", func() {
 			Expect(got.Spec.Route.AIGatewayRouter).To(BeEmpty())
 			Expect(got.Spec.Route.Published()).To(BeFalse())
 			Expect(*got.Spec.Route.TimeoutSeconds).To(Equal(int64(0)))
-			Expect(*got.Spec.Route.IdleTimeoutSeconds).To(Equal(int64(300)))
+			Expect(*got.Spec.Route.IdleTimeoutSeconds).To(Equal(int64(0)))
 
 			Expect(k8sClient.Delete(ctx, isvc)).To(Succeed())
 		})
@@ -243,9 +243,9 @@ var _ = Describe("InferenceService", func() {
 				"isvc-invalid-timeout-large",
 				func(s *InferenceServiceSpec) { s.Route.TimeoutSeconds = ptrTo(int64(86401)) },
 				"spec.route.timeoutSeconds"),
-			Entry("idleTimeoutSeconds zero",
-				"isvc-invalid-idle-zero",
-				func(s *InferenceServiceSpec) { *s.Route.IdleTimeoutSeconds = 0 },
+			Entry("idleTimeoutSeconds negative",
+				"isvc-invalid-idle-negative",
+				func(s *InferenceServiceSpec) { *s.Route.IdleTimeoutSeconds = -1 },
 				"spec.route.idleTimeoutSeconds"),
 			Entry("aigatewayRouter not a known catalog route",
 				"isvc-invalid-aigateway-router",

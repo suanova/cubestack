@@ -322,9 +322,10 @@ var _ = Describe("checkRoute", func() {
 		Expect(findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, name))).NotTo(Equal(-1))
 		Expect(string(route.Spec.ParentRefs[0].Name)).To(Equal(testGatewayName))
 
+		// The plain OpenAI-paths HTTPRoute stays absent: every published path
+		// rides on the AIGatewayRoute now.
 		httpRoute := sharedHTTPRoute(testCatalogRoute)
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(httpRoute), httpRoute)).To(Succeed())
-		Expect(httpRoute.Spec.Rules).To(HaveLen(len(catalogOpenAIPaths)))
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(httpRoute), httpRoute))).To(BeTrue())
 	})
 
 	It("creates the catalog objects and a rule in the shared route for a published service", func() {
@@ -361,25 +362,19 @@ var _ = Describe("checkRoute", func() {
 		backendGrant := &gatewayv1.ReferenceGrant{}
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKey{Name: "cubestack-httproute-" + name + "-endpoint", Namespace: testNamespace}, backendGrant))).To(BeTrue())
 
-		// The /v1/messages rule is in the shared AIGatewayRoute and targets the
-		// Anthropic-schema backend.
+		// The catalog rule targets the OpenAI-schema backend and leaves the
+		// stream idle timeout disabled.
 		route := sharedCatalogRoute()
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
 		Expect(route.Spec.Rules).To(HaveLen(1))
 		Expect(route.Spec.Rules[0].Matches[0].Headers[0].Value).To(Equal(testCatalogModelName))
-		Expect(route.Spec.Rules[0].BackendRefs[0].Name).To(Equal(name + testAnthropicSuffix))
+		Expect(route.Spec.Rules[0].BackendRefs[0].Name).To(Equal(name + testOpenAISuffix))
 		Expect(route.Spec.Rules[0].BackendRefs[0].ModelNameOverride).To(Equal(testEngineModel))
+		Expect(string(*route.Spec.Rules[0].StreamIdleTimeout)).To(Equal("0s"))
 
-		// The OpenAI paths are served by the shared plain HTTPRoute, one rule per
-		// selected path, each pointing at the service's Backend.
+		// No plain HTTPRoute is created next to it.
 		httpRoute := sharedHTTPRoute(testCatalogRoute)
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(httpRoute), httpRoute)).To(Succeed())
-		Expect(httpRoute.Spec.Rules).To(HaveLen(len(catalogOpenAIPaths)))
-		for _, rule := range httpRoute.Spec.Rules {
-			Expect(rule.Matches[0].Headers[0].Value).To(Equal(testCatalogModelName))
-			Expect(rule.BackendRefs[0].Name).To(Equal(gatewayv1.ObjectName(name + "-endpoint")))
-			Expect(string(*rule.BackendRefs[0].Namespace)).To(Equal(testNamespace))
-		}
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(httpRoute), httpRoute))).To(BeTrue())
 
 		// The Agent Router accepts; the next check reports the catalog entry ready.
 		acceptRoute(name)
@@ -400,19 +395,18 @@ var _ = Describe("checkRoute", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(check.Reason).To(Equal(RouteGatewayNotAccepted))
 
-		// No /v1/messages: the Agent Router route carries no rule for the service.
+		// A chat-only selection still owns one catalog rule: the AIGatewayRoute
+		// serves every published path through the OpenAI-schema backend.
 		route := sharedCatalogRoute()
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
-		Expect(findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, name))).To(Equal(-1))
+		Expect(findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, name))).NotTo(Equal(-1))
 
 		httpRoute := sharedHTTPRoute(testCatalogRoute)
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(httpRoute), httpRoute)).To(Succeed())
-		Expect(httpRoute.Spec.Rules).To(HaveLen(1))
-		Expect(*httpRoute.Spec.Rules[0].Matches[0].Path.Value).To(Equal(string(aiv1alpha1.CatalogPathChatCompletions)))
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(httpRoute), httpRoute))).To(BeTrue())
 
-		// Only the HTTPRoute gate applies: accepting it makes the entry ready
-		// without any AIServiceBackend acceptance.
+		// Readiness needs the shared route and the backend accepted.
 		acceptCatalogRoute(testCatalogRoute)
+		acceptAIServiceBackend(name)
 		check, err = r.checkRoute(ctx, mustGetISVC(ctx, name), routeProfile(name+"-prof"), readyEndpoint(name), testEngineModel)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(check.Reason).To(BeEmpty())
@@ -432,15 +426,13 @@ var _ = Describe("checkRoute", func() {
 		private := privateCatalogRoute()
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(private), private)).To(Succeed())
 		Expect(private.Spec.Rules).To(HaveLen(1))
-		Expect(private.Spec.Rules[0].BackendRefs[0].Name).To(Equal(name + testAnthropicSuffix))
+		Expect(private.Spec.Rules[0].BackendRefs[0].Name).To(Equal(name + testOpenAISuffix))
 		public := sharedCatalogRoute()
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(public), public)).To(Succeed())
 		Expect(findCatalogRuleIndex(public.Spec.Rules, mustGetISVC(ctx, name))).To(Equal(-1))
+		// The plain HTTPRoute surface is retired for both visibilities.
 		privateHTTP := sharedHTTPRoute(testPrivateCatalogRoute)
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(privateHTTP), privateHTTP)).To(Succeed())
-		Expect(findOpenAIRuleIndex(privateHTTP.Spec.Rules, mustGetISVC(ctx, name))).NotTo(Equal(-1))
-		// Only the selected route's surfaces are touched: the public HTTPRoute was
-		// never created for this service.
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(privateHTTP), privateHTTP))).To(BeTrue())
 		publicHTTP := sharedHTTPRoute(testCatalogRoute)
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(publicHTTP), publicHTTP))).To(BeTrue())
 
@@ -451,7 +443,7 @@ var _ = Describe("checkRoute", func() {
 		Expect(check.Reason).To(BeEmpty())
 	})
 
-	It("accepts the private surface attached to a separate private Gateway", func() {
+	It("reports ready on the private route without any plain HTTPRoute", func() {
 		ensureCatalogRoutes()
 		name := "route-private-gateway"
 		isvc := routeISVC(name, false)
@@ -462,13 +454,11 @@ var _ = Describe("checkRoute", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(check.Reason).To(Equal(RouteGatewayNotAccepted))
 
-		// The platform attaches the private surface to its own Gateway, which is
-		// not the configured public name. The operator owns only spec.rules, so
-		// the parent it has to verify is the one the route declares.
-		privateHTTP := sharedHTTPRoute(testPrivateCatalogRoute)
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(privateHTTP), privateHTTP)).To(Succeed())
-		privateHTTP.Spec.ParentRefs = []gatewayv1.ParentReference{{Name: gatewayv1.ObjectName(testGatewayName + "-private")}}
-		Expect(k8sClient.Update(ctx, privateHTTP)).To(Succeed())
+		// No plain HTTPRoute carries traffic for the private visibility either:
+		// accepting the private catalog route and the service's OpenAI-schema
+		// backend is what makes the entry ready.
+		retired := sharedHTTPRoute(testPrivateCatalogRoute)
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(retired), retired))).To(BeTrue())
 
 		acceptCatalogRoute(testPrivateCatalogRoute)
 		acceptAIServiceBackend(name)
@@ -551,17 +541,15 @@ var _ = Describe("checkRoute", func() {
 		Expect(route.Spec.Rules).To(HaveLen(2))
 		mine := route.Spec.Rules[findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, "route-mine"))]
 		theirs := route.Spec.Rules[findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, "route-theirs"))]
-		Expect(mine.BackendRefs[0].Name).To(Equal("route-mine-anthropic"))
+		Expect(mine.BackendRefs[0].Name).To(Equal("route-mine" + testOpenAISuffix))
 		Expect(mine.Matches[0].Headers[0].Value).To(Equal(testCatalogModelName))
-		Expect(theirs.BackendRefs[0].Name).To(Equal("route-theirs-anthropic"))
+		Expect(theirs.BackendRefs[0].Name).To(Equal("route-theirs" + testOpenAISuffix))
 		Expect(theirs.Matches[0].Headers[0].Value).To(Equal("theirs-model"))
 
-		// The OpenAI surface picks up both services as well, one rule per path.
+		// The plain OpenAI-paths surface stays absent: every path rides on the
+		// shared AIGatewayRoute.
 		httpRoute := sharedHTTPRoute(testCatalogRoute)
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(httpRoute), httpRoute)).To(Succeed())
-		Expect(httpRoute.Spec.Rules).To(HaveLen(2 * len(catalogOpenAIPaths)))
-		Expect(findOpenAIRuleIndex(httpRoute.Spec.Rules, mustGetISVC(ctx, "route-mine"))).NotTo(Equal(-1))
-		Expect(findOpenAIRuleIndex(httpRoute.Spec.Rules, mustGetISVC(ctx, "route-theirs"))).NotTo(Equal(-1))
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(httpRoute), httpRoute))).To(BeTrue())
 	})
 
 	It("reports ModelNameConflict for the later service claiming the same model name", func() {
@@ -585,8 +573,7 @@ var _ = Describe("checkRoute", func() {
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
 		Expect(findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, name))).To(Equal(-1))
 		httpRoute := sharedHTTPRoute(testCatalogRoute)
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(httpRoute), httpRoute)).To(Succeed())
-		Expect(findOpenAIRuleIndex(httpRoute.Spec.Rules, mustGetISVC(ctx, name))).To(Equal(-1))
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(httpRoute), httpRoute))).To(BeTrue())
 	})
 
 	It("reports CatalogFull when the shared route is at its rule cap", func() {
@@ -613,12 +600,9 @@ var _ = Describe("checkRoute", func() {
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
 		Expect(route.Spec.Rules).To(HaveLen(catalogRuleMax))
 		Expect(findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, name))).To(Equal(-1))
-		// The OpenAI-paths HTTPRoute caps at 16 rules, three per model, so earlier
-		// services fill it and the overflow service is dropped there too.
+		// The overflow service is dropped from the only surface there is.
 		httpRoute := sharedHTTPRoute(testCatalogRoute)
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(httpRoute), httpRoute)).To(Succeed())
-		Expect(len(httpRoute.Spec.Rules)).To(BeNumerically("<=", openAIPathsRuleMax))
-		Expect(findOpenAIRuleIndex(httpRoute.Spec.Rules, mustGetISVC(ctx, name))).To(Equal(-1))
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(httpRoute), httpRoute))).To(BeTrue())
 	})
 
 	It("stages only published services whose catalog objects exist", func() {
@@ -643,9 +627,7 @@ var _ = Describe("checkRoute", func() {
 		Expect(route.Spec.Rules).To(HaveLen(1))
 		Expect(findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, pending))).To(Equal(-1))
 		httpRoute := sharedHTTPRoute(testCatalogRoute)
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(httpRoute), httpRoute)).To(Succeed())
-		Expect(httpRoute.Spec.Rules).To(HaveLen(len(catalogOpenAIPaths)))
-		Expect(findOpenAIRuleIndex(httpRoute.Spec.Rules, mustGetISVC(ctx, pending))).To(Equal(-1))
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(httpRoute), httpRoute))).To(BeTrue())
 
 		// Its objects appear: the next rebuild picks it up.
 		persistCatalogObjects(pending)
@@ -674,10 +656,9 @@ var _ = Describe("checkRoute", func() {
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(httpRoute), httpRoute))).To(BeTrue())
 	})
 
-	It("publishes OpenAI-only paths without an installed AIGatewayRoute", func() {
-		// The Agent Router surface is only created when some service exposes
-		// /v1/messages. A service that selects only OpenAI paths must not wait
-		// for a shared AIGatewayRoute that nothing will ever create.
+	It("publishes an OpenAI-only selection through the shared catalog route", func() {
+		// Every published path rides on the AIGatewayRoute, so a chat-only
+		// selection creates the shared route and waits for it to be accepted.
 		name := "route-openai-only"
 		isvc := routeISVC(name, true)
 		isvc.Spec.Route.Paths = []aiv1alpha1.CatalogPath{aiv1alpha1.CatalogPathChatCompletions}
@@ -687,10 +668,12 @@ var _ = Describe("checkRoute", func() {
 		check, err := r.checkRoute(ctx, mustGetISVC(ctx, name), routeProfile(name+"-prof"), readyEndpoint(name), testEngineModel)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(check.Reason).To(Equal(RouteGatewayNotAccepted))
-		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(catalogRouteNamed(testCatalogRoute)), catalogRouteNamed(testCatalogRoute)))).To(BeTrue())
+		route := catalogRouteNamed(testCatalogRoute)
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
+		Expect(findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, name))).NotTo(Equal(-1))
 
-		// Only the OpenAI-paths gate applies; accepting the HTTPRoute is enough.
-		acceptOpenAIPathsRoute(testCatalogRoute)
+		// The shared route and the OpenAI-schema backend both accepted: live.
+		acceptRoute(name)
 		check, err = r.checkRoute(ctx, mustGetISVC(ctx, name), routeProfile(name+"-prof"), readyEndpoint(name), testEngineModel)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(check.Reason).To(BeEmpty())
@@ -950,7 +933,7 @@ var _ = Describe("checkRoute", func() {
 		myIdx := findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, name))
 		Expect(route.Spec.Rules[myIdx].Timeouts.Request).To(HaveValue(Equal(gatewayv1.Duration("60s"))))
 		theirsIdx := findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, "route-update-other"))
-		Expect(route.Spec.Rules[theirsIdx].BackendRefs[0].Name).To(Equal("route-update-other-anthropic"))
+		Expect(route.Spec.Rules[theirsIdx].BackendRefs[0].Name).To(Equal("route-update-other" + testOpenAISuffix))
 
 		// The in-cluster spec changes the timeout; the next pass rebuilds the set.
 		current := mustGetISVC(ctx, name)
@@ -991,9 +974,8 @@ var _ = Describe("checkRoute", func() {
 		myIdx := findCatalogRuleIndex(route.Spec.Rules, mustGetISVC(ctx, name))
 		myRule := route.Spec.Rules[myIdx]
 		routeRV := route.ResourceVersion
-		httpRoute := sharedHTTPRoute(testCatalogRoute)
-		stored(httpRoute, openAIPathsRouteName(testCatalogRoute), testGatewayNamespace)
-		httpRouteRV := httpRoute.ResourceVersion
+		// The retired plain HTTPRoute is not part of the stored set any more.
+		retired := sharedHTTPRoute(testCatalogRoute)
 
 		// A second pass must touch none of the objects or the rules: the shared
 		// routes' RVs are stable because nothing changed.
@@ -1013,8 +995,7 @@ var _ = Describe("checkRoute", func() {
 		Expect(afterGrant.ResourceVersion).To(Equal(grant.ResourceVersion))
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(route), route)).To(Succeed())
 		Expect(route.ResourceVersion).To(Equal(routeRV))
-		stored(httpRoute, openAIPathsRouteName(testCatalogRoute), testGatewayNamespace)
-		Expect(httpRoute.ResourceVersion).To(Equal(httpRouteRV))
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(retired), retired))).To(BeTrue())
 
 		// A genuine change is still drift: a different endpoint or schema must
 		// update, or the catalog would keep serving the old object after the
@@ -1199,34 +1180,14 @@ var _ = Describe("desired catalog objects", func() {
 			Name:  gatewayv1.HTTPHeaderName(aiModelHeaderName),
 			Value: testCatalogModelName, // the route.modelName routeISVC declares
 		}}))
-		Expect(rule.BackendRefs[0].Name).To(Equal("catalog-isvc-anthropic"))
+		Expect(rule.BackendRefs[0].Name).To(Equal("catalog-isvc" + testOpenAISuffix))
 		Expect(string(*rule.BackendRefs[0].Namespace)).To(Equal(testNamespace))
 		Expect(rule.BackendRefs[0].ModelNameOverride).To(Equal("qwen38-27b"))
 		Expect(rule.BackendRefs[0].Weight).To(HaveValue(Equal(int32(1))))
 		Expect(rule.BackendRefs[0].Priority).To(HaveValue(Equal(uint32(0))))
 		Expect(rule.Timeouts.Request).To(HaveValue(Equal(gatewayv1.Duration("60s"))))
-		Expect(rule.StreamIdleTimeout).To(HaveValue(Equal(gatewayv1.Duration("300s"))))
+		Expect(rule.StreamIdleTimeout).To(HaveValue(Equal(gatewayv1.Duration("0s"))))
 		Expect(rule.ModelsOwnedBy).To(HaveValue(Equal(catalogOwnedBy)))
-	})
-
-	It("renders the OpenAI-paths rule matched on the path and the model header", func() {
-		isvc := routeISVC("catalog-isvc", true)
-		rule := routeReconciler().openAIPathsRuleFor(isvc, aiv1alpha1.CatalogPathChatCompletions)
-
-		Expect(rule.Matches).To(HaveLen(1))
-		Expect(*rule.Matches[0].Path.Type).To(Equal(gatewayv1.PathMatchPathPrefix))
-		Expect(*rule.Matches[0].Path.Value).To(Equal("/v1/chat/completions"))
-		Expect(rule.Matches[0].Headers).To(Equal([]gatewayv1.HTTPHeaderMatch{{
-			Type:  ptrTo(gatewayv1.HeaderMatchExact),
-			Name:  gatewayv1.HTTPHeaderName(aiModelHeaderName),
-			Value: testCatalogModelName,
-		}}))
-		Expect(rule.BackendRefs).To(HaveLen(1))
-		Expect(*rule.BackendRefs[0].Group).To(Equal(gatewayv1.Group(envoyGatewayAPIGroup)))
-		Expect(*rule.BackendRefs[0].Kind).To(Equal(gatewayv1.Kind(egBackendKind)))
-		Expect(rule.BackendRefs[0].Name).To(Equal(gatewayv1.ObjectName("catalog-isvc-endpoint")))
-		Expect(string(*rule.BackendRefs[0].Namespace)).To(Equal(testNamespace))
-		Expect(rule.Timeouts.Request).To(HaveValue(Equal(gatewayv1.Duration("60s"))))
 	})
 
 	It("honours the declared timeouts in the rule", func() {

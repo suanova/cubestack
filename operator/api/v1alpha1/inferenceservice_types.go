@@ -66,16 +66,16 @@ var CatalogPaths = []CatalogPath{
 type RouteSpec struct {
 	// AIGatewayRouter selects the platform's shared AIGatewayRoute this
 	// service's catalog rule is attached to. The operator maintains that route
-	// (and the matching OpenAI-paths HTTPRoute) in full from all published
-	// services. Empty (or an absent route) means the service is not published
-	// and only provides a ClusterIP internal endpoint.
+	// in full from all published services. Empty (or an absent route) means the
+	// service is not published and only provides a ClusterIP internal endpoint.
 	// +optional
 	AIGatewayRouter AIGatewayRouterName `json:"aigatewayRouter,omitempty"`
 
 	// ModelName is the catalog model name: what clients send as the request
-	// body's "model" field (and the value of the x-ai-eg-model header used by
-	// the plain HTTPRoute). It is the identity of a published service and must
-	// be unique among services published to the same route.
+	// body's "model" field, which the Agent Router's ext_proc turns into the
+	// x-ai-eg-model header the shared route matches on. It is the identity of a
+	// published service and must be unique among services published to the same
+	// route.
 	// +optional
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$`
 	ModelName string `json:"modelName,omitempty"`
@@ -98,11 +98,12 @@ type RouteSpec struct {
 	TimeoutSeconds *int64 `json:"timeoutSeconds,omitempty"`
 
 	// IdleTimeoutSeconds cuts a request whose upstream sent no bytes for this
-	// long; defaults to 300. Non-streaming generations send nothing until the
-	// response completes, so this bounds them too.
+	// long; defaults to 0, which disables the cut. Non-streaming generations
+	// send nothing until the response completes, so a non-zero value bounds
+	// them too — at the cost of killing a long stream that pauses.
 	// +optional
-	// +kubebuilder:default:=300
-	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default:=0
+	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=86400
 	IdleTimeoutSeconds *int64 `json:"idleTimeoutSeconds,omitempty"`
 }
