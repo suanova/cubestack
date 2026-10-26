@@ -41,6 +41,11 @@ export interface AgentApproval {
   state: "pending" | "deciding" | "approved" | "rejected" | "stopped";
   /** Set when the decision POST failed; the card stays answerable. */
   error?: string;
+  /** Index of the block this card was raised after; -1 means before the first.
+   *  Recorded at arrival so the settled record stays beside the call it gated
+   *  instead of drifting to the end of the turn as later tools land. Undefined
+   *  for a card restored without a stream position. */
+  afterBlock?: number;
   /** The gateway's stamps for this approval, epoch ms. A session can hold
    *  several at once, and a card that came back from a reload has no arrival
    *  order to sit in, so createdAtMs is what orders them. */
@@ -54,6 +59,8 @@ export interface AgentQuestion {
   callId: string;
   questions: AgentQuestionItem[];
   state: AgentQuestionState;
+  /** Index of the block this card was raised after; see AgentApproval.afterBlock. */
+  afterBlock?: number;
   /** Local deadline in ms, derived from the event's remaining seconds. */
   deadline?: number;
   answers?: Record<string, string[]>;
@@ -141,6 +148,7 @@ export function newApproval(wire: {
   command?: string;
   level?: string;
   message?: string;
+  afterBlock?: number;
   createdAtMs?: number;
   expiresAtMs?: number;
 }): AgentApproval {
@@ -151,6 +159,7 @@ export function newApproval(wire: {
     level: wire.level,
     message: wire.message,
     state: "pending",
+    ...(wire.afterBlock !== undefined ? { afterBlock: wire.afterBlock } : {}),
     ...(wire.createdAtMs !== undefined ? { createdAtMs: wire.createdAtMs } : {}),
     ...(wire.expiresAtMs !== undefined ? { expiresAtMs: wire.expiresAtMs } : {}),
   };
@@ -205,6 +214,7 @@ export function applyAgentEvent(msg: AgentMsg, evt: AgentSseEvent, now: number =
             command: evt.command,
             level: evt.level,
             message: evt.message,
+            afterBlock: msg.blocks.length - 1,
             createdAtMs: evt.createdAtMs,
             expiresAtMs: evt.expiresAtMs,
           }),
@@ -233,7 +243,7 @@ export function applyAgentEvent(msg: AgentMsg, evt: AgentSseEvent, now: number =
           ...msg,
           questions: [
             ...msg.questions,
-            newQuestion(evt.callId, evt.question?.questions ?? [], evt.question?.timeoutSeconds, now),
+            newQuestion(evt.callId, evt.question?.questions ?? [], evt.question?.timeoutSeconds, now, msg.blocks.length - 1),
           ],
         },
         "tools",
@@ -370,11 +380,13 @@ export function newQuestion(
   questions: AgentQuestionItem[],
   timeoutSeconds: number | undefined,
   now: number,
+  afterBlock?: number,
 ): AgentQuestion {
   return {
     callId,
     questions,
     state: "pending",
+    ...(afterBlock !== undefined ? { afterBlock } : {}),
     // Derived from the remainder rather than an absolute deadline: the event
     // carries what is left, so a countdown does not depend on this browser's
     // clock agreeing with the API's.
