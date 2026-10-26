@@ -2,7 +2,7 @@ import type { V1Node } from "@kubernetes/client-node";
 
 import { getCoreClient, getCustomObjectsClient } from "@/lib/kubernetes";
 import { withAuth } from "@/lib/auth/guard";
-import { defaultNamespaceOf } from "@/lib/namespaces";
+import { defaultNamespaceOf, offeredNamespaces } from "@/lib/namespaces";
 
 // @kubernetes/client-node needs Node APIs (TLS, fs), not the Edge runtime.
 export const runtime = "nodejs";
@@ -237,10 +237,13 @@ export const GET = withAuth(async () => {
     const profiles: Profile[] = profileRes.items ?? [];
     const modelversions: ModelVersion[] = mvRes.items ?? [];
 
-    const names = (nsRes.items ?? [])
-      .map((ns) => ns.metadata?.name)
-      .filter((n): n is string => Boolean(n))
-      .sort();
+    // Filtered by the rule shared with the dev-environment wizard: this wizard
+    // used to offer every namespace in the cluster, the platform's own included.
+    const names = offeredNamespaces(
+      (nsRes.items ?? [])
+        .map((ns) => ns.metadata?.name)
+        .filter((n): n is string => Boolean(n)),
+    );
 
     const response: CreateOptionsResponse = {
       namespaces: names.map((name) => ({ name })),

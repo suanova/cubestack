@@ -1640,6 +1640,14 @@ function DetailPanel({ e, onAct }: { e: DevEnvironmentSummary; onAct: (e: DevEnv
 // start with a letter. Mirrored from the create route and the operator's
 // admission policy (config/vap/devenvironment_policy.yaml).
 const DNS_LABEL_RE = /^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$/;
+// The namespace select's "create a new one" entry. A name cannot carry an
+// underscore (the API server takes a DNS-1123 label), so it can never collide
+// with a namespace the cluster has, and it is never sent anywhere: `create()`
+// resolves it to the name the user typed before the request is built.
+const NEW_NAMESPACE = "__new__";
+// A Namespace's name is a DNS-1123 label, which is looser than the DNS-1035 rule
+// the environment's own name obeys: it may start with a digit.
+const NAMESPACE_RE = /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/;
 // spec.runtime.user's own validation, mirrored from the CRD's schema (Pattern
 // ^[a-z_][a-z0-9_-]*$ with MaxLength 32) and from the create route, so the
 // wizard cannot walk the user to a spec the API server would reject.
@@ -1880,7 +1888,23 @@ function CreateWizard({
 
   const setField = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft((prev) => ({ ...prev, [key]: value }));
 
+  // The select offers `default` plus "create a new one": the tenant namespaces
+  // the platform does not manage are not listed, because a denylist of the ones
+  // it does manage was always one install behind (issue #367). A namespace the
+  // user names here is created first, then the environment is created in it.
+  const [newNamespace, setNewNamespace] = useState(false);
+  const [newNamespaceName, setNewNamespaceName] = useState("");
+  const [namespaceError, setNamespaceError] = useState(false);
+  const newNamespaceValid = !newNamespace || NAMESPACE_RE.test(newNamespaceName.trim());
+  const effectiveNamespace = newNamespace ? newNamespaceName.trim() : draft.namespace;
+
   const changeNamespace = (namespace: string) => {
+    if (namespace === NEW_NAMESPACE) {
+      setNewNamespace(true);
+      return;
+    }
+    setNewNamespace(false);
+    setNamespaceError(false);
     setDraft((prev) => ({ ...prev, namespace }));
   };
 
@@ -1938,10 +1962,10 @@ function CreateWizard({
   // convenience: an environment created by someone else in the meantime is still
   // the server's to refuse, and its `nameTaken` is what the user then reads.
   const nameTaken = environments.some(
-    (e) => e.namespace === draft.namespace && e.name === draft.name.trim(),
+    (e) => e.namespace === effectiveNamespace && e.name === draft.name.trim(),
   );
   const nameValid = DNS_LABEL_RE.test(draft.name.trim()) && draft.name.trim().length > 0;
-  const step1Valid = nameValid && !nameTaken && !!draft.namespace && !!draft.image;
+  const step1Valid = nameValid && !nameTaken && !!effectiveNamespace && newNamespaceValid && !!draft.image;
   // Client-side validation mirrors the server (POST) rules so a user cannot
   // advance or submit out-of-range / fractional GPU or storage values. A card
   // count is only asked for, and only checked, when an accelerator is wanted:
@@ -2032,10 +2056,12 @@ function CreateWizard({
       if (!step1Valid) {
         setNameError(!nameValid || nameTaken);
         setImageError(!draft.image);
+        setNamespaceError(!effectiveNamespace || !newNamespaceValid);
         return;
       }
       setNameError(false);
       setImageError(false);
+      setNamespaceError(false);
     } else if (step === 2) {
       setGpuError(!gpuValid);
       setStorageError(!storageValid);
@@ -2068,11 +2094,12 @@ function CreateWizard({
     setEnvError(!envRowsValid);
     setPortError(!portRowsValid);
     setNodeNameError(!nodeNameValid);
-    if (!step2Valid || !step3Valid) return;
+    setNamespaceError(!effectiveNamespace || !newNamespaceValid);
+    if (!step1Valid || !step2Valid || !step3Valid) return;
     setCreateBusy(true);
     setCreateError(null);
     const body = {
-      namespace: draft.namespace,
+      namespace: effectiveNamespace,
       name: draft.name.trim(),
       type: draft.type,
       image: draft.image.trim(),
@@ -2142,15 +2169,33 @@ function CreateWizard({
           }
         : {}),
     };
-    apiFetch("/api/devenvironments", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    })
+    // The namespace first, then the environment in it: the wizard no longer
+    // offers a tenant namespace, so the one the user names here may not exist
+    // yet. The route answers 200 for one that does, which is what lets the same
+    // field deploy into an existing tenant namespace by name.
+    (newNamespace
+      ? apiFetch("/api/namespaces", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: effectiveNamespace }),
+        }).then(async (res) => {
+          if (res.ok) return;
+          const data = (await res.json().catch(() => ({}))) as ValidationErrorBody;
+          throw new Error(validationMessage(t, data, res.status, "dev"));
+        })
+      : Promise.resolve()
+    )
+      .then(() =>
+        apiFetch("/api/devenvironments", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }),
+      )
       .then(async (res) => {
         const data = (await res.json().catch(() => ({}))) as ValidationErrorBody & { name?: string };
         if (!res.ok) throw new Error(validationMessage(t, data, res.status, "dev"));
-        onCreated(draft.namespace, data.name ?? draft.name.trim());
+        onCreated(effectiveNamespace, data.name ?? draft.name.trim());
       })
       .catch((err: Error) => setCreateError(err.message))
       .finally(() => setCreateBusy(false));
@@ -2208,7 +2253,7 @@ function CreateWizard({
   // array rather than spreading, so the conditional rows stay [string, string].
   const summaryRows: Array<[string, string]> = [
     [t("dev.wizard.name"), draft.name.trim()],
-    [t("dev.wizard.namespace"), draft.namespace],
+    [t("dev.wizard.namespace"), effectiveNamespace],
     [t("dev.wizard.type"), draft.type],
     [t("dev.wizard.image"), draft.image],
     [t("dev.wizard.accelerator"), gpuRequested ? `${draft.gpuCount} × ${draft.accelerator}${draft.gpuModel ? ` · ${draft.gpuModel}` : ""}` : t("dev.wizard.accelerator.none")],
@@ -2288,12 +2333,37 @@ function CreateWizard({
                 <WizField label={t("dev.wizard.name")} hint={t("dev.wizard.nameHint")} error={nameError} errorText={t("dev.wizard.errName")}>
                   <TextField size="small" fullWidth autoFocus value={draft.name} onChange={(e) => setField("name", e.target.value)} placeholder="e.g. jupyter-nlp-ln" />
                 </WizField>
-                <WizField label={t("dev.wizard.namespace")}>
-                  <Select size="small" fullWidth data-od-id="wizard-namespace" value={draft.namespace} onChange={(e) => changeNamespace(e.target.value)}>
+                <WizField
+                  label={t("dev.wizard.namespace")}
+                  error={namespaceError}
+                  errorText={t("dev.wizard.errNamespaceName")}
+                >
+                  <Select
+                    size="small"
+                    fullWidth
+                    data-od-id="wizard-namespace"
+                    value={newNamespace ? NEW_NAMESPACE : draft.namespace}
+                    onChange={(e) => changeNamespace(e.target.value)}
+                  >
                     {options.namespaces.map((n) => (
                       <MenuItem key={n.name} value={n.name}>{n.name}</MenuItem>
                     ))}
+                    <MenuItem value={NEW_NAMESPACE} data-od-id="wizard-namespace-new">
+                      {t("dev.wizard.namespaceNew")}
+                    </MenuItem>
                   </Select>
+                  {newNamespace && (
+                    <TextField
+                      size="small"
+                      fullWidth
+                      autoFocus
+                      data-od-id="wizard-namespace-name"
+                      value={newNamespaceName}
+                      onChange={(e) => setNewNamespaceName(e.target.value)}
+                      placeholder={t("dev.wizard.namespaceNewPh")}
+                      sx={{ mt: "8px" }}
+                    />
+                  )}
                 </WizField>
                 <WizField
                   label={t("dev.wizard.type")}

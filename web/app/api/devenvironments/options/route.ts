@@ -3,9 +3,9 @@ import type { V1Node } from "@kubernetes/client-node";
 import { getCoreClient } from "@/lib/kubernetes";
 import { withAuth } from "@/lib/auth/guard";
 import { DEV_IMAGES } from "@/lib/devenvironments/images";
-// The configured/default/first rule, shared with the inference wizard: filtering
-// above has already confined "first" to a namespace that is not the platform's.
-import { defaultNamespaceOf } from "@/lib/namespaces";
+// The offer and configured/default/first rules, shared with the inference wizard
+// so the two consoles cannot answer them differently.
+import { defaultNamespaceOf, offeredNamespaces } from "@/lib/namespaces";
 
 // @kubernetes/client-node needs Node APIs (TLS, fs), not the Edge runtime.
 export const runtime = "nodejs";
@@ -39,31 +39,6 @@ export interface DevEnvImageOption {
   interface: "jupyter" | "ssh";
   /** The accelerator stack it carries; the wizard keeps it across a type change. */
   vendor: "cpu" | "nvidia" | "metax";
-}
-
-/**
- * Namespaces the wizard must not offer as a home for a development environment.
- *
- * The console cannot know every cluster's intent, but it can leave out what
- * Kubernetes reserves and what the platform itself installs into. Measured on a
- * live CubeStack install, the unfiltered list began "ai-gateway-system" — the
- * platform's own control-plane namespace — and the wizard preselected it, so an
- * untouched wizard would put a user's StatefulSet, PVC and Routes beside the
- * gateway. A platform installed elsewhere can name its namespace here.
- */
-const PLATFORM_NAMESPACES = new Set([
-  "ai-gateway-system", // Agent Router / AI Gateway control plane
-  "cubestack-system", // the operator, the portal and the task CRs
-  "envoy-gateway-system", // the Gateway API data plane
-  "lws-system", // LeaderWorkerSet, for multi-node inference
-  "metallb-system", // LoadBalancer address assignment
-  "metax-operator", // the Metax device stack
-  "rook-ceph", // the cluster's own storage
-]);
-
-/** Whether a namespace may be offered as a home for a development environment. */
-function offered(name: string): boolean {
-  return !name.startsWith("kube-") && !PLATFORM_NAMESPACES.has(name);
 }
 
 /** The vendors the wizard's accelerator select offers, in its own order. */
@@ -215,11 +190,11 @@ export const GET = withAuth(async () => {
     const core = getCoreClient();
     const nsRes = await core.listNamespace();
 
-    const names = (nsRes.items ?? [])
-      .map((ns) => ns.metadata?.name)
-      .filter((n): n is string => Boolean(n))
-      .filter(offered)
-      .sort();
+    const names = offeredNamespaces(
+      (nsRes.items ?? [])
+        .map((ns) => ns.metadata?.name)
+        .filter((n): n is string => Boolean(n)),
+    );
 
     let nodes: V1Node[] = [];
     try {
