@@ -85,13 +85,24 @@ jobs:
           done
           targets="${targets[*]}"
 
-          info=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json mergedAt,baseRefName)
+          info=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json mergedAt,baseRefName,headRefName,isCrossRepository)
           if [ "$(jq -r 'if .mergedAt then "true" else "false" end' <<<"$info")" != true ]; then
             reject "PR #$PR_NUMBER is not merged."
           fi
           base=$(jq -r .baseRefName <<<"$info")
           if [ "$base" != main ]; then
             reject "only PRs merged into main can be cherry-picked (this one targets '$base')."
+          fi
+
+          # The action drops any target equal to the head branch name, even when
+          # a fork's head branch only shares that name.
+          if [ "$(jq -r .isCrossRepository <<<"$info")" = true ]; then
+            head=$(jq -r .headRefName <<<"$info")
+            for branch in $targets; do
+              if [ "$branch" = "$head" ]; then
+                reject "'$branch' matches the head branch of this fork PR; the cherry-pick action would skip it."
+              fi
+            done
           fi
 
           # ls-remote avoids URL-encoding a branch name with slashes in an API path.
