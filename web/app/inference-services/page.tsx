@@ -86,36 +86,48 @@ const gpuRoleFacts = (s: InferenceServiceSummary) =>
   s.gpuRoles.length > 0
     ? s.gpuRoles
     : s.gpuPerPod
-      ? [{ name: "", gpuPerPod: s.gpuPerPod, model: s.gpuModel }]
+      ? [{ name: "", gpuPerPod: s.gpuPerPod, model: s.gpuModel, replicas: 1, groupSize: 0 }]
       : [];
 
-const gpuAmountText = (gpuPerPod: number, model: string | null): string =>
-  `${gpuPerPod} × ${model ?? "GPU"}`;
+const gpuAmountText = (cards: number, model: string | null): string => `${cards} × ${model ?? "GPU"}`;
 
-// The list's GPU resource column: the service's whole footprint. Roles asking
-// for the same cards on the same model collapse into one product — a PD
-// service whose prefill and decode each take 8 MXC550 reads "2 × 8 × MXC550" —
-// while roles on different models or card counts are listed per role.
+// The pods one replica runs: a LeaderWorkerSet replica is a group of groupSize
+// pods, while a Deployment replica is a single pod — which the API reports as
+// groupSize 0, the renderer's value for a role without a group.
+const podsPerReplica = (r: { groupSize: number }): number => Math.max(1, r.groupSize);
+
+// The cards one replica occupies: every pod in the group requests gpuPerPod.
+const gpuReplicaCards = (r: { gpuPerPod: number; groupSize: number }): number =>
+  r.gpuPerPod * podsPerReplica(r);
+
+// The cards every replica of the role occupies.
+const gpuRoleCards = (r: { gpuPerPod: number; groupSize: number; replicas: number }): number =>
+  gpuReplicaCards(r) * r.replicas;
+
+// The list's GPU resource column: the service's whole footprint — every card
+// every pod of every replica of every GPU role occupies. Roles on the same
+// model collapse into one product (a PD service whose prefill takes 8 MXC500
+// once and decode 8 MXC500 twice reads "24 × MXC500"); roles on different
+// models are listed per role.
 const gpuText = (s: InferenceServiceSummary): string => {
   const roles = gpuRoleFacts(s);
   if (roles.length === 0) return "—";
-  const [first] = roles;
-  const uniform = roles.every((r) => r.gpuPerPod === first.gpuPerPod && r.model === first.model);
-  if (!uniform) {
-    return roles.map((r) => `${roleLabel(r.name)} ${gpuAmountText(r.gpuPerPod, r.model)}`).join(" · ");
+  if (new Set(roles.map((r) => r.model)).size > 1) {
+    return roles.map((r) => `${roleLabel(r.name)} ${gpuAmountText(gpuRoleCards(r), r.model)}`).join(" · ");
   }
-  return roles.length > 1
-    ? `${roles.length} × ${gpuAmountText(first.gpuPerPod, first.model)}`
-    : gpuAmountText(first.gpuPerPod, first.model);
+  return gpuAmountText(
+    roles.reduce((cards, r) => cards + gpuRoleCards(r), 0),
+    roles[0].model,
+  );
 };
 
 // The detail card's per-replica row: one entry per GPU role, since each role is
-// its own workload.
+// its own workload, each measured per replica (the whole group).
 const gpuPerRoleText = (s: InferenceServiceSummary): string => {
   const roles = gpuRoleFacts(s);
   if (roles.length === 0) return "—";
-  if (roles.length === 1) return gpuAmountText(roles[0].gpuPerPod, roles[0].model);
-  return roles.map((r) => `${roleLabel(r.name)} ${gpuAmountText(r.gpuPerPod, r.model)}`).join(" · ");
+  if (roles.length === 1) return gpuAmountText(gpuReplicaCards(roles[0]), roles[0].model);
+  return roles.map((r) => `${roleLabel(r.name)} ${gpuAmountText(gpuReplicaCards(r), r.model)}`).join(" · ");
 };
 
 // One row per integer override the profile declares (decodeReplicas /
