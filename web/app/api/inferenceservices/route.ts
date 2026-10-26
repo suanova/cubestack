@@ -51,11 +51,14 @@ export interface InferenceServiceSummary {
   gpuModel: string | null;
   gpuPerPod: number | null;
   // Profile-derived GPU facts, one entry per GPU-carrying role: how many cards
-  // each pod requests and which accelerator model the role is pinned to. model
-  // is null when the role accepts any of the profile's declared models (a
-  // multi-model profile without a role-level pin). The list's GPU resource
-  // column sums these roles; a PD service reads "2 × 8 × MXC550".
-  gpuRoles: Array<{ name: string; gpuPerPod: number; model: string | null }>;
+  // each pod requests, which accelerator model the role is pinned to, and how
+  // many pods the role runs. model is null when the role accepts any of the
+  // profile's declared models (a multi-model profile without a role-level pin).
+  // replicas is the renderer's replica count and groupSize the LeaderWorkerSet
+  // pods per replica (0 for a Deployment, whose replica is one pod), so
+  // cards × groupSize × replicas is that role's whole footprint; the list's GPU
+  // resource column sums these roles.
+  gpuRoles: Array<{ name: string; gpuPerPod: number; model: string | null; replicas: number; groupSize: number }>;
   modelName: string | null;
   modelVersion: string | null;
   // override knobs declared by the profile, with the effective value (the
@@ -153,7 +156,11 @@ interface ProfileOverride {
 }
 interface ProfileRole {
   name?: string;
-  workload?: { kind?: string };
+  // replicas and group.size are int-or-string: the renderer resolves templates
+  // such as `{{ overrides.decodeReplicas }}` / `{{ overrides.groupSize }}` to
+  // the role's replica count and its LeaderWorkerSet pods per replica, and
+  // defaults an absent replicas field to 1.
+  workload?: { kind?: string; replicas?: number | string; group?: { size?: number | string } };
   // Effective accelerator (design §3.2): the role's own declaration replaces
   // the profile-level one wholesale.
   accelerator?: { vendor?: string; models?: string[] };
@@ -234,6 +241,51 @@ function roleGpuPerPod(
   if (typeof resolved !== "string" && typeof resolved !== "number") return null;
   const n = Number(resolved);
   return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+/**
+ * An int-or-string count the renderer resolves from an override template, or
+ * null when the field is absent (or names something no integer can resolve).
+ */
+function resolvedCount(
+  raw: number | string | undefined,
+  effective: Map<string, string | number | boolean | null>,
+): number | null {
+  if (raw === undefined) return null;
+  const ref = typeof raw === "string" ? OVERRIDE_REF.exec(raw.trim()) : null;
+  const resolved = ref ? effective.get(ref[1]) : raw;
+  const n = typeof resolved === "number" ? resolved : typeof resolved === "string" ? Number(resolved.trim()) : NaN;
+  return Number.isInteger(n) ? n : null;
+}
+
+/**
+ * The number of replicas a role runs. Mirrors the renderer's resolveReplicas:
+ * an absent field defaults to 1, and a templated field resolves against the
+ * service's effective overrides. A template that does not resolve fails the
+ * role in the renderer, so a service that renders at all has a concrete count;
+ * 1 keeps the footprint finite here rather than dropping the role's GPU facts.
+ */
+function roleReplicas(
+  role: ProfileRole,
+  effective: Map<string, string | number | boolean | null>,
+): number {
+  const n = resolvedCount(role.workload?.replicas, effective);
+  return n !== null && n >= 0 ? n : 1;
+}
+
+/**
+ * The number of pods one replica runs: the LeaderWorkerSet group size, which
+ * the renderer leaves at 0 for a Deployment (a replica there is one pod). Every
+ * pod in the group requests the role's gpuPerPod cards, so a replica's GPU
+ * footprint is gpuPerPod × groupSize, and the service's is that × replicas.
+ */
+function roleGroupSize(
+  role: ProfileRole,
+  effective: Map<string, string | number | boolean | null>,
+): number {
+  if (role.workload?.kind !== "LeaderWorkerSet" || role.workload.group === undefined) return 0;
+  const n = resolvedCount(role.workload.group.size, effective);
+  return n !== null && n >= 0 ? n : 0;
 }
 
 function num(v: unknown): number | null {
@@ -366,6 +418,8 @@ function project(
           name: role.name ?? "?",
           gpuPerPod,
           model: roleGpuModel(role, profile, effective),
+          replicas: roleReplicas(role, effective),
+          groupSize: roleGroupSize(role, effective),
         }))
     : [];
   // The single-model fields stay as a compact summary: every concrete model a

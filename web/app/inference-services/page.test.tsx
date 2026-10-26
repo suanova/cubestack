@@ -90,9 +90,10 @@ describe("inference services page", () => {
     expect(container.textContent).toContain("dsv4-pro-pd");
     expect(container.textContent).toContain("dsv4-flash-pd");
     expect(container.textContent).toContain("sglang");
-    // GPU 资源 is the service's whole footprint: two GPU roles, 8 cards each.
-    expect(container.textContent).toContain("2 × 8 × MXC500");
-    // The detail card breaks the same facts down per role.
+    // GPU 资源 is the service's whole footprint: prefill 8 cards × 1 replica
+    // plus decode 8 cards × 2 replicas.
+    expect(container.textContent).toContain("24 × MXC500");
+    // The detail card breaks the same facts down per role, per replica.
     expect(container.textContent).toContain("Prefill 8 × MXC500 · Decode 8 × MXC500");
     // Replicas render multi-line, one row per integer override the profile
     // declares (no hardcoded knob names), labelled as words rather than by the
@@ -113,6 +114,83 @@ describe("inference services page", () => {
     expect(container.querySelector('[data-od-id="metrics-empty"]')).not.toBeNull();
     expect(container.textContent).toContain("可调参数");
     expect(container.textContent).toContain("引擎参数");
+
+    act(() => root.unmount());
+  });
+
+  it("shows the whole GPU footprint, not one replica's share", async () => {
+    // A single-role service running 4 cards on 2 replicas occupies 8 cards. The
+    // list's GPU 资源 cell is the total; the detail card keeps the per-replica
+    // figure under its own label.
+    stubData([
+      inferenceServiceSummary({
+        name: "qwen38-27b",
+        gpuModel: "MXC550",
+        gpuPerPod: 4,
+        gpuRoles: [{ name: "vllm", gpuPerPod: 4, model: "MXC550", replicas: 2, groupSize: 1 }],
+        overrideNums: { replicas: 2, tpSize: 4 },
+        overrides: [{ name: "replicas", type: "integer", min: 1, max: 4, enum: null, current: 2, default: 1 }],
+      }),
+    ]);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    const row = container.querySelector('[data-od-id="svc-row-qwen38-27b"]') as HTMLElement;
+    expect(row.textContent).toContain("8 × MXC550");
+    // The detail card's row stays per replica, so the two numbers cannot drift.
+    const label = Array.from(container.querySelectorAll("span")).find((el) => el.textContent === "每副本 GPU");
+    expect(label).toBeDefined();
+    expect(label!.parentElement?.lastElementChild?.textContent).toBe("4 × MXC550");
+
+    act(() => root.unmount());
+  });
+
+  it("counts every pod of a LeaderWorkerSet replica", async () => {
+    // A multi-node profile runs a 2-pod group per replica, and each pod requests
+    // its own cards: 4 cards × 2 pods × 2 replicas = 16, while the detail card
+    // shows the group (8) as the per-replica figure.
+    stubData([
+      inferenceServiceSummary({
+        name: "dsv4-flash-multinode",
+        gpuModel: "MXC550",
+        gpuPerPod: 4,
+        gpuRoles: [{ name: "vllm", gpuPerPod: 4, model: "MXC550", replicas: 2, groupSize: 2 }],
+        overrideNums: { replicas: 2, groupSize: 2 },
+        overrides: [
+          { name: "replicas", type: "integer", min: 1, max: 4, enum: null, current: 2, default: 1 },
+          { name: "groupSize", type: "integer", min: 1, max: 8, enum: null, current: 2, default: 1 },
+        ],
+      }),
+    ]);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    const row = container.querySelector('[data-od-id="svc-row-dsv4-flash-multinode"]') as HTMLElement;
+    expect(row.textContent).toContain("16 × MXC550");
+    const label = Array.from(container.querySelectorAll("span")).find((el) => el.textContent === "每副本 GPU");
+    expect(label!.parentElement?.lastElementChild?.textContent).toBe("8 × MXC550");
+
+    act(() => root.unmount());
+  });
+
+  it("treats a Deployment replica as one pod", async () => {
+    // The API reports groupSize 0 for a role without a group; a replica there is
+    // a single pod, so the footprint must not collapse to zero.
+    stubData([
+      inferenceServiceSummary({
+        name: "tp8-deployment",
+        gpuModel: "MXC500",
+        gpuPerPod: 8,
+        gpuRoles: [{ name: "vllm", gpuPerPod: 8, model: "MXC500", replicas: 2, groupSize: 0 }],
+        overrideNums: { replicas: 2 },
+        overrides: [{ name: "replicas", type: "integer", min: 1, max: 4, enum: null, current: 2, default: 1 }],
+      }),
+    ]);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    const row = container.querySelector('[data-od-id="svc-row-tp8-deployment"]') as HTMLElement;
+    expect(row.textContent).toContain("16 × MXC500");
 
     act(() => root.unmount());
   });
