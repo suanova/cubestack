@@ -217,8 +217,10 @@ describe("inference services route", () => {
       gpuModel: "MXC500",
       gpuPerPod: 8,
       gpuRoles: [
-        { name: "prefill", gpuPerPod: 8, model: "MXC500" },
-        { name: "decode", gpuPerPod: 8, model: "MXC500" },
+        // LeaderWorkerSet roles whose profile declares no group: the renderer
+        // records groupSize 0, and the page counts such a replica as one pod.
+        { name: "prefill", gpuPerPod: 8, model: "MXC500", replicas: 1, groupSize: 0 },
+        { name: "decode", gpuPerPod: 8, model: "MXC500", replicas: 1, groupSize: 0 },
       ],
       // override knobs declared by the profile; effective value = user value, else default
       overrides: [
@@ -308,8 +310,8 @@ describe("inference services route", () => {
     const { GET } = await importRoute();
     const body = await (await GET(await authedGet(), undefined)).json();
     expect(body.items[0].gpuRoles).toEqual([
-      { name: "prefill", gpuPerPod: 8, model: "MXC500" },
-      { name: "decode", gpuPerPod: 8, model: "MXC550" },
+      { name: "prefill", gpuPerPod: 8, model: "MXC500", replicas: 1, groupSize: 0 },
+      { name: "decode", gpuPerPod: 8, model: "MXC550", replicas: 1, groupSize: 0 },
     ]);
     expect(body.items[0].gpuModel).toBe("MXC500 / MXC550");
   });
@@ -367,11 +369,82 @@ describe("inference services route", () => {
     const body = await (await GET(await authedGet(), undefined)).json();
     const tp4 = body.items.find((i: { name: string }) => i.name === "tp4");
     const dflt = body.items.find((i: { name: string }) => i.name === "default-tp");
-    expect(tp4.gpuRoles).toEqual([{ name: "vllm", gpuPerPod: 4, model: "MXC550" }]);
+    expect(tp4.gpuRoles).toEqual([{ name: "vllm", gpuPerPod: 4, model: "MXC550", replicas: 1, groupSize: 0 }]);
     expect(tp4.gpuPerPod).toBe(4);
     expect(tp4.gpuModel).toBe("MXC550");
     // No user value -> the profile's declared default applies.
-    expect(dflt.gpuRoles).toEqual([{ name: "vllm", gpuPerPod: 2, model: "MXC550" }]);
+    expect(dflt.gpuRoles).toEqual([{ name: "vllm", gpuPerPod: 2, model: "MXC550", replicas: 1, groupSize: 0 }]);
+  });
+
+  it("resolves a role's templated replica count and group size", async () => {
+    // A multi-node profile templates each role's replicas and group size from
+    // the service's overrides, and the renderer defaults an absent replicas
+    // field to 1. The projection must carry both counts, because the list's GPU
+    // resource column is a total footprint (cards × groupSize × replicas), not
+    // a per-replica or per-pod figure.
+    listClusterCustomObject.mockImplementation(({ plural }: { plural: string }) => {
+      if (plural === "inferenceservices") {
+        return Promise.resolve({
+          items: [
+            {
+              metadata: { name: "svc", namespace: "default" },
+              spec: { modelRef: "m", profileRef: "pd", overrides: { decodeReplicas: 3, groupSize: 2 } },
+            },
+          ],
+        });
+      }
+      if (plural === "inferenceruntimeprofiles") {
+        return Promise.resolve({
+          items: [
+            {
+              metadata: { name: "pd" },
+              spec: {
+                accelerator: { vendor: "metax", models: ["MXC550"] },
+                overrides: [
+                  { name: "prefillReplicas", type: "integer", default: 1 },
+                  { name: "decodeReplicas", type: "integer", default: 2 },
+                  { name: "groupSize", type: "integer", default: 1 },
+                ],
+                roles: [
+                  {
+                    name: "prefill",
+                    workload: { kind: "LeaderWorkerSet", replicas: "{{ overrides.prefillReplicas }}", group: { size: 1 } },
+                    podTemplate: { resources: { gpuPerPod: 8 } },
+                  },
+                  {
+                    name: "decode",
+                    workload: {
+                      kind: "LeaderWorkerSet",
+                      replicas: "{{ overrides.decodeReplicas }}",
+                      group: { size: "{{ overrides.groupSize }}" },
+                    },
+                    podTemplate: { resources: { gpuPerPod: 8 } },
+                  },
+                  {
+                    name: "aux",
+                    podTemplate: { resources: { gpuPerPod: 2 } },
+                  },
+                  { name: "router", workload: { kind: "Deployment" } },
+                ],
+              },
+            },
+          ],
+        });
+      }
+      return Promise.resolve({ items: [] });
+    });
+
+    const { GET } = await importRoute();
+    const body = await (await GET(await authedGet(), undefined)).json();
+    expect(body.items[0].gpuRoles).toEqual([
+      // No service value -> the profile default; the literal group size stays 1.
+      { name: "prefill", gpuPerPod: 8, model: "MXC550", replicas: 1, groupSize: 1 },
+      // The service's own values win: 8 cards × 2 pods × 3 replicas.
+      { name: "decode", gpuPerPod: 8, model: "MXC550", replicas: 3, groupSize: 2 },
+      // No workload at all -> one replica of one pod (groupSize 0, as the
+      // renderer records for a role without a group).
+      { name: "aux", gpuPerPod: 2, model: "MXC550", replicas: 1, groupSize: 0 },
+    ]);
   });
 
   it("uses a role's own accelerator for its GPU model", async () => {
@@ -430,9 +503,9 @@ describe("inference services route", () => {
     const { GET } = await importRoute();
     const body = await (await GET(await authedGet(), undefined)).json();
     expect(body.items[0].gpuRoles).toEqual([
-      { name: "prefill", gpuPerPod: 8, model: "MXC500" },
-      { name: "decode", gpuPerPod: 8, model: "H200" },
-      { name: "decode-unpinned", gpuPerPod: 8, model: "H200" },
+      { name: "prefill", gpuPerPod: 8, model: "MXC500", replicas: 1, groupSize: 0 },
+      { name: "decode", gpuPerPod: 8, model: "H200", replicas: 1, groupSize: 0 },
+      { name: "decode-unpinned", gpuPerPod: 8, model: "H200", replicas: 1, groupSize: 0 },
     ]);
   });
 
