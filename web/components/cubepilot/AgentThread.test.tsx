@@ -99,6 +99,36 @@ describe("AgentThread", () => {
     expect(blocks[2].textContent).toContain("使用率 71%。");
   });
 
+  it("draws a settled card where it was raised, not after the last tool", () => {
+    const blocks = [text("先查一下。"), tool({ callId: "c1" }), tool({ callId: "c2" }), text("完成了。")];
+    const msg = agentMsg(1, blocks, {
+      approvals: [{ callId: "a1", command: "kubectl delete pod x", state: "approved", afterBlock: 1 }],
+    });
+    const { container } = render([msg], S1);
+
+    // The approval gated c1, so its record sits between c1 and c2 — the tools
+    // that ran after it must not push it to the bottom of the turn.
+    const order = Array.from(container.querySelectorAll('[data-od-block], [data-od-id="approval-item"]')).map(
+      (el) => el.getAttribute("data-od-block") ?? "approval",
+    );
+    expect(order).toEqual(["text", "tool", "approval", "tool", "text"]);
+  });
+
+  it("draws a settled question where it was raised", () => {
+    const blocks = [text("先查一下。"), tool({ callId: "c1" }), tool({ callId: "c2" })];
+    const msg = agentMsg(1, blocks, {
+      questions: [
+        { callId: "q1", questions: [{ questionId: "x", question: "选哪个?" }], state: "answered", afterBlock: 0 },
+      ],
+    });
+    const { container } = render([msg], S1);
+
+    const order = Array.from(container.querySelectorAll('[data-od-block], [data-od-id="question-item"]')).map(
+      (el) => el.getAttribute("data-od-block") ?? "question",
+    );
+    expect(order).toEqual(["text", "question", "tool", "tool"]);
+  });
+
   it("derives a card's resting state: open while in flight, closed once it returns or the turn ends", () => {
     // In flight: open, so the command it is running is visible even though
     // nothing has come back yet.
