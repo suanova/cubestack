@@ -1014,13 +1014,13 @@ describe("create wizard", () => {
    * Render the page with both options endpoints stubbed. `rejectCreate` stands in
    * for a create the route refuses: the portal must render whatever it answers.
    */
-  function renderWithBoth(rejectCreate?: { status: number; body: unknown }) {
+  function renderWithBoth(rejectCreate?: { status: number; body: unknown }, opts: object = OPTIONS) {
     vi.stubGlobal(
       "fetch",
       vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url.includes("/options")) {
-          return Promise.resolve({ ok: true, status: 200, json: async () => OPTIONS });
+          return Promise.resolve({ ok: true, status: 200, json: async () => opts });
         }
         if (rejectCreate && init?.method === "POST") {
           return Promise.resolve({ ok: false, status: rejectCreate.status, json: async () => rejectCreate.body });
@@ -2223,6 +2223,23 @@ describe("create wizard", () => {
     // not there yet.
     expect(postUrls()).toEqual([withBasePath("/api/namespaces"), withBasePath("/api/devenvironments")]);
     expect(createdBody()).toMatchObject({ namespace: "team-a", name: "my-env" });
+
+    act(() => root.unmount());
+  });
+
+  it("shows a namespace error when no existing namespace is available", async () => {
+    const { container, root } = renderWithBoth(undefined, { ...OPTIONS, namespaces: [], defaultNamespace: null });
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="create-env-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    setInput(document.body.querySelector('input[placeholder="e.g. jupyter-nlp-ln"]') as HTMLInputElement, "my-env");
+    await nextStep();
+
+    expect(document.body.querySelector('[data-step="1"]')).not.toBeNull();
+    expect(document.body.textContent).toContain("命名空间名称不合法");
+    expect(postUrls()).toEqual([]);
 
     act(() => root.unmount());
   });

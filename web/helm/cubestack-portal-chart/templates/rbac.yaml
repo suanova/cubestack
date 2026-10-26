@@ -48,8 +48,8 @@ rules:
   # `default` alone rather than a list that had to be kept ahead of every
   # namespace the platform installs, so a tenant namespace is named and created
   # from the select before the DevEnvironment / InferenceService that lives in
-  # it. `get` is not granted — the route reads nothing back, and a namespace that
-  # already exists answers 409 to the create it does attempt.
+  # it. On a create conflict, list with a name field selector reads namespace
+  # metadata to distinguish tenant reuse from a managed namespace.
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["list", "create"]

@@ -1714,6 +1714,22 @@ describe("deploy wizard", () => {
     act(() => root.unmount());
   });
 
+  it("shows a namespace error when no existing namespace is available", async () => {
+    const { container, root, calls } = renderWithBoth({ ...OPTIONS, namespaces: [], defaultNamespace: null });
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await fillNameAndGoToStep2();
+
+    expect(document.body.querySelector('[data-step="1"]')).not.toBeNull();
+    expect(document.body.textContent).toContain("命名空间名称不合法");
+    expect(calls.filter((c) => c.method === "POST")).toEqual([]);
+
+    act(() => root.unmount());
+  });
+
   it("refuses to advance until the new namespace has a valid name", async () => {
     const { container, root } = renderWithBoth();
     await act(async () => {});

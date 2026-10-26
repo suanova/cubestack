@@ -34,13 +34,15 @@ function isConflict(err: unknown): boolean {
  * The wizards offer only `default` and this "create a new namespace" path, so
  * whatever the user types arrives here before the DevEnvironment or
  * InferenceService that lives in it. Answering 200 for a namespace that already
- * exists is what lets the same field reuse a tenant namespace, and keeps a
+ * exists and is a tenant namespace lets the same field reuse it, and keeps a
  * double-clicked submit from reporting a failure that did not happen.
  */
 export const POST = withAuth(async (req) => {
   try {
-    const body = (await req.json().catch(() => ({}))) as { name?: string };
-    const name = body.name?.trim() ?? "";
+    const body: unknown = await req.json().catch(() => ({}));
+    const name = typeof body === "object" && body !== null && "name" in body && typeof body.name === "string"
+      ? body.name.trim()
+      : "";
     if (!DNS_LABEL_RE.test(name)) {
       return Response.json({ error: "namespaceNameInvalid" }, { status: 400 });
     }
@@ -49,7 +51,23 @@ export const POST = withAuth(async (req) => {
       await getCoreClient().createNamespace({ body: { metadata: { name } } });
       return Response.json({ name });
     } catch (err) {
-      if (isConflict(err)) return Response.json({ name });
+      if (isConflict(err)) {
+        // Use the existing list permission to inspect authoritative metadata.
+        const namespaces = await getCoreClient().listNamespace({ fieldSelector: `metadata.name=${name}` });
+        const metadata = namespaces.items.find((ns) => ns.metadata?.name === name)?.metadata;
+        if (!metadata) throw new Error(`Namespace metadata unavailable: ${name}`);
+        if (
+          name.startsWith("kube-") ||
+          metadata.labels?.["app.kubernetes.io/managed-by"] ||
+          metadata.labels?.["ai.cubestack.io/managed-by"] ||
+          metadata.annotations?.["meta.helm.sh/release-name"] ||
+          metadata.annotations?.["meta.helm.sh/release-namespace"] ||
+          metadata.ownerReferences?.length
+        ) {
+          return Response.json({ error: "namespaceManaged", params: { name } }, { status: 409 });
+        }
+        return Response.json({ name });
+      }
       throw err;
     }
   } catch (err) {

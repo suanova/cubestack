@@ -2056,7 +2056,7 @@ function CreateWizard({
       if (!step1Valid) {
         setNameError(!nameValid || nameTaken);
         setImageError(!draft.image);
-        setNamespaceError(!newNamespaceValid);
+        setNamespaceError(!effectiveNamespace || !newNamespaceValid);
         return;
       }
       setNameError(false);
@@ -2094,7 +2094,7 @@ function CreateWizard({
     setEnvError(!envRowsValid);
     setPortError(!portRowsValid);
     setNodeNameError(!nodeNameValid);
-    setNamespaceError(!newNamespaceValid);
+    setNamespaceError(!effectiveNamespace || !newNamespaceValid);
     if (!step1Valid || !step2Valid || !step3Valid) return;
     setCreateBusy(true);
     setCreateError(null);

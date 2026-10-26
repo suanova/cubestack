@@ -1854,7 +1854,7 @@ function DeployWizard({
     if (step === 1) {
       if (!step1Valid) {
         setNameError(!nameValid || nameTaken);
-        setNamespaceError(!newNamespaceValid);
+        setNamespaceError(!effectiveNamespace || !newNamespaceValid);
         return;
       }
       setNameError(false);
@@ -1866,7 +1866,7 @@ function DeployWizard({
   };
 
   const create = () => {
-    setNamespaceError(!newNamespaceValid);
+    setNamespaceError(!effectiveNamespace || !newNamespaceValid);
     if (!step1Valid) return;
     setCreateBusy(true);
     setCreateError(null);
