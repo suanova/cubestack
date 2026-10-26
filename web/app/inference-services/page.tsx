@@ -1480,6 +1480,11 @@ function ConditionsCard({ s }: { s: InferenceServiceSummary }) {
 // ── deploy wizard ──────────────────────────────────────────────────────────
 
 const DNS_LABEL_RE = /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/;
+// The namespace select's "create a new one" entry. A name cannot carry an
+// underscore (the API server takes a DNS-1123 label), so it can never collide
+// with a namespace the cluster has, and it is never sent anywhere: `create()`
+// resolves it to the name the user typed before the request is built.
+const NEW_NAMESPACE = "__new__";
 
 interface DeployDraft {
   name: string;
@@ -1524,6 +1529,15 @@ function DeployWizard({
     paths: [...CATALOG_PATHS],
   });
   const [nameError, setNameError] = useState(false);
+  // The select offers `default` plus "create a new one": the tenant namespaces
+  // the platform does not manage are not listed, because a denylist of the ones
+  // it does manage was always one install behind (issue #367). A namespace the
+  // user names here is created first, then the service is created in it.
+  const [newNamespace, setNewNamespace] = useState(false);
+  const [newNamespaceName, setNewNamespaceName] = useState("");
+  const [namespaceError, setNamespaceError] = useState(false);
+  const newNamespaceValid = !newNamespace || DNS_LABEL_RE.test(newNamespaceName.trim());
+  const effectiveNamespace = newNamespace ? newNamespaceName.trim() : draft.namespace;
   const [createBusy, setCreateBusy] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
 
@@ -1580,16 +1594,34 @@ function DeployWizard({
   const setField = <K extends keyof DeployDraft>(key: K, value: DeployDraft[K]) =>
     setDraft((prev) => ({ ...prev, [key]: value }));
 
+  // Picking the select's last entry opens the new-namespace box instead of
+  // setting a namespace: the name is not known until it is typed, and until
+  // then the draft keeps the namespace it had, so nothing half-named is sent.
+  const changeNamespace = (namespace: string) => {
+    if (namespace === NEW_NAMESPACE) {
+      setNewNamespace(true);
+      return;
+    }
+    setNewNamespace(false);
+    setNamespaceError(false);
+    setField("namespace", namespace);
+  };
+
   // The field's message promises an already-taken check, so it makes one: the
   // namespace's services are already in hand (the table behind this dialog renders
   // them). The same name in another namespace is a different service. Losing the
   // race is still the server's to report — it answers `nameTaken`.
   const nameTaken = services.some(
-    (s) => s.namespace === draft.namespace && s.name === draft.name.trim(),
+    (s) => s.namespace === effectiveNamespace && s.name === draft.name.trim(),
   );
   const nameValid = DNS_LABEL_RE.test(draft.name.trim());
   const step1Valid =
-    nameValid && !nameTaken && draft.name.trim().length > 0 && !!draft.namespace && !!draft.profileRef;
+    nameValid &&
+    !nameTaken &&
+    draft.name.trim().length > 0 &&
+    !!effectiveNamespace &&
+    newNamespaceValid &&
+    !!draft.profileRef;
   const step2Valid = !!draft.modelRef;
 
   // The value an override holds from the user or the profile, before the
@@ -1834,9 +1866,11 @@ function DeployWizard({
     if (step === 1) {
       if (!step1Valid) {
         setNameError(!nameValid || nameTaken);
+        setNamespaceError(!effectiveNamespace || !newNamespaceValid);
         return;
       }
       setNameError(false);
+      setNamespaceError(false);
     } else if (step === 2 && !step2Valid) {
       return; // model is required to proceed
     }
@@ -1844,6 +1878,8 @@ function DeployWizard({
   };
 
   const create = () => {
+    setNamespaceError(!effectiveNamespace || !newNamespaceValid);
+    if (!step1Valid) return;
     setCreateBusy(true);
     setCreateError(null);
     // Profile defaults stay implicit (the operator applies them), but a
@@ -1857,22 +1893,40 @@ function DeployWizard({
       }
     }
     const body = {
-      namespace: draft.namespace,
+      namespace: effectiveNamespace,
       name: draft.name.trim(),
       profileRef: draft.profileRef,
       modelRef: draft.modelRef,
       overrides,
       route: { aigatewayRouter: draft.aigatewayRouter, modelName: draft.modelName.trim(), paths: draft.paths },
     };
-    apiFetch("/api/inferenceservices", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    })
+    // The namespace first, then the service in it: the wizard no longer offers
+    // a tenant namespace, so the one the user names here may not exist yet. The
+    // route answers 200 for one that does, which is what lets the same field
+    // deploy into an existing tenant namespace by name.
+    (newNamespace
+      ? apiFetch("/api/namespaces", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: effectiveNamespace }),
+        }).then(async (res) => {
+          if (res.ok) return;
+          const data = (await res.json().catch(() => ({}))) as ValidationErrorBody;
+          throw new Error(validationMessage(t, data, res.status, "inf"));
+        })
+      : Promise.resolve()
+    )
+      .then(() =>
+        apiFetch("/api/inferenceservices", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }),
+      )
       .then(async (res) => {
         const data = (await res.json().catch(() => ({}))) as ValidationErrorBody & { name?: string };
         if (!res.ok) throw new Error(validationMessage(t, data, res.status, "inf"));
-        onCreated(draft.namespace, data.name ?? draft.name.trim());
+        onCreated(effectiveNamespace, data.name ?? draft.name.trim());
       })
       .catch((err: Error) => setCreateError(err.message))
       .finally(() => setCreateBusy(false));
@@ -1952,12 +2006,37 @@ function DeployWizard({
                     placeholder="e.g. dsv4-flash-serve"
                   />
                 </WizField>
-                <WizField label={t("inf.deploy.namespace")}>
-                  <Select size="small" fullWidth data-od-id="deploy-namespace" value={draft.namespace} onChange={(e) => setField("namespace", e.target.value)}>
+                <WizField
+                  label={t("inf.deploy.namespace")}
+                  error={namespaceError}
+                  errorText={t("inf.deploy.errNamespaceName")}
+                >
+                  <Select
+                    size="small"
+                    fullWidth
+                    data-od-id="deploy-namespace"
+                    value={newNamespace ? NEW_NAMESPACE : draft.namespace}
+                    onChange={(e) => changeNamespace(e.target.value)}
+                  >
                     {(options?.namespaces ?? []).map((n) => (
                       <MenuItem key={n.name} value={n.name}>{n.name}</MenuItem>
                     ))}
+                    <MenuItem value={NEW_NAMESPACE} data-od-id="deploy-namespace-new">
+                      {t("inf.deploy.namespaceNew")}
+                    </MenuItem>
                   </Select>
+                  {newNamespace && (
+                    <TextField
+                      size="small"
+                      fullWidth
+                      autoFocus
+                      data-od-id="deploy-namespace-name"
+                      value={newNamespaceName}
+                      onChange={(e) => setNewNamespaceName(e.target.value)}
+                      placeholder={t("inf.deploy.namespaceNewPh")}
+                      sx={{ mt: "8px" }}
+                    />
+                  )}
                 </WizField>
                 <WizField label={t("inf.deploy.profile")} hint={profile ? profileSummary(profile) : undefined}>
                   <Select size="small" fullWidth value={draft.profileRef} onChange={(e) => setDraft((prev) => ({ ...prev, profileRef: e.target.value, modelRef: "", overrides: {} }))}>
@@ -2119,7 +2198,7 @@ function DeployWizard({
                 <Kvs
                   rows={[
                     [t("inf.deploy.name"), draft.name.trim()],
-                    [t("inf.deploy.namespace"), draft.namespace],
+                    [t("inf.deploy.namespace"), effectiveNamespace],
                     ["profileRef", draft.profileRef],
                     [t("inf.deploy.gpu"), gpuSummary],
                     ["modelRef", draft.modelRef],

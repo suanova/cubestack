@@ -43,10 +43,17 @@ metadata:
     app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
     helm.sh/chart: {{ include "cubestack-portal-chart.chart" . }}
 rules:
-  # Read namespaces and nodes for UI APIs (cluster-scoped core resources)
+  # Read namespaces for UI APIs (cluster-scoped core resources), and create one
+  # for the create wizards' "create a new namespace" entry: the wizards offer
+  # `default` alone rather than a list that had to be kept ahead of every
+  # namespace the platform installs, so a tenant namespace is named and created
+  # from the select before the DevEnvironment / InferenceService that lives in
+  # it. On a create conflict, list with a name field selector reads namespace
+  # metadata to distinguish tenant reuse from a managed namespace.
   - apiGroups: [""]
     resources: ["namespaces"]
-    verbs: ["list"]
+    verbs: ["list", "create"]
+  # Nodes, for the GPU models and the node pins the wizards offer.
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["list"]

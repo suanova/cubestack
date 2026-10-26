@@ -109,7 +109,10 @@ describe("inference services create options route", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
 
-    expect(body.namespaces.map((n: { name: string }) => n.name)).toContain("project-a");
+    // `default` alone: the wizard no longer offers the cluster's other
+    // namespaces, the platform's own included, and creates a tenant namespace
+    // from its own "create a new namespace" entry (issue #367).
+    expect(body.namespaces).toEqual([{ name: "default" }]);
     // The wizard opens on `default`, not on the first name alphabetically
     // ("default" sorts after "project-a" here, so this is a choice) and not on a
     // name the route has no business preferring.
@@ -189,12 +192,14 @@ describe("inference services create options route", () => {
     }
   });
 
-  it("opens on the first namespace only when there is no `default`", async () => {
+  it("names no default when the cluster has no `default` namespace", async () => {
     listNamespace.mockResolvedValue({ items: [{ metadata: { name: "project-a" } }, { metadata: { name: "project-llm" } }] });
     const { GET } = await import("./route");
     const res = await GET(await authedGet(), undefined);
-    // project-a sorts first, and `default` does not exist to be preferred.
-    expect((await res.json()).defaultNamespace).toBe("project-a");
+    // Only `default` is offered, so there is nothing to open on and nothing to
+    // fall back to: the wizard starts on its "create a new namespace" entry
+    // instead of on a namespace it never offered.
+    expect((await res.json()).defaultNamespace).toBeNull();
   });
 
   it("still serves the catalog when the node read is forbidden", async () => {

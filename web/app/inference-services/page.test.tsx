@@ -944,13 +944,13 @@ describe("deploy wizard", () => {
   });
 
   function renderWithBoth(opts: object = OPTIONS) {
-    const calls: Array<{ method: string; body: unknown }> = [];
+    const calls: Array<{ method: string; url: string; body: unknown }> = [];
     vi.stubGlobal(
       "fetch",
       vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         const method = init?.method ?? "GET";
-        calls.push({ method, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+        calls.push({ method, url, body: init?.body ? JSON.parse(String(init.body)) : undefined });
         if (url.includes("/options")) {
           return Promise.resolve({ ok: true, status: 200, json: async () => opts });
         }
@@ -1708,6 +1708,160 @@ describe("deploy wizard", () => {
     await open(nodePicker());
     expect(offered()).toContain("worker-ib");
     expect(offered()).not.toContain("worker-roce");
+
+    act(() => root.unmount());
+  });
+
+  it("creates the namespace it is given, then the service in it", async () => {
+    const { container, root, calls } = renderWithBoth();
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await fillNameAndGoToStep2();
+    // Back to step 1, where the namespace lives.
+    await act(async () => {
+      (Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent === "上一步") as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    // The select no longer lists the tenant namespaces the platform does not
+    // manage, so naming one is how a user gets a home of their own.
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="deploy-namespace"] [role="combobox"]') as HTMLElement).dispatchEvent(
+        new MouseEvent("mousedown", { bubbles: true }),
+      );
+    });
+    const createNew = Array.from(document.body.querySelectorAll('[role="option"]')).find(
+      (o) => o.textContent === "创建新命名空间",
+    );
+    expect(createNew).toBeDefined();
+    await act(async () => {
+      (createNew as HTMLElement).click();
+    });
+
+    const nameBox = document.body.querySelector('[data-od-id="deploy-namespace-name"] input') as HTMLInputElement;
+    expect(nameBox).not.toBeNull();
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
+      setter.call(nameBox, "team-a");
+      nameBox.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {});
+
+    // step 1 -> 2
+    await act(async () => {
+      (Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent === "下一步") as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    // Step 2 refuses to advance without a model version, so pick one.
+    const modelSelect = Array.from(document.body.querySelectorAll('[role="combobox"] [role="button"], [role="combobox"]')).find(
+      (c) => (c.textContent ?? "").includes("选择模型版本"),
+    ) as HTMLElement;
+    await act(async () => {
+      modelSelect.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    });
+    const model = Array.from(document.body.querySelectorAll('[role="option"]')).find(
+      (o) => o.textContent === "deepseek-v4-flash-w8a8-v1",
+    );
+    await act(async () => {
+      (model as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    // step 2 -> 3
+    await act(async () => {
+      (Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent === "下一步") as HTMLElement).click();
+    });
+    await act(async () => {});
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="wizard-create"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    // The namespace first: the service cannot be created in one that is not
+    // there yet.
+    expect(calls.filter((c) => c.method === "POST").map((c) => c.url)).toEqual([
+      expect.stringContaining("/api/namespaces"),
+      expect.stringContaining("/api/inferenceservices"),
+    ]);
+    expect(calls.filter((c) => c.method === "POST")[1].body).toMatchObject({ namespace: "team-a" });
+
+    act(() => root.unmount());
+  });
+
+  it("shows a namespace error when no existing namespace is available", async () => {
+    const { container, root, calls } = renderWithBoth({ ...OPTIONS, namespaces: [], defaultNamespace: null });
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await fillNameAndGoToStep2();
+
+    expect(document.body.querySelector('[data-step="1"]')).not.toBeNull();
+    expect(document.body.textContent).toContain("命名空间名称不合法");
+    expect(calls.filter((c) => c.method === "POST")).toEqual([]);
+
+    act(() => root.unmount());
+  });
+
+  it("refuses to advance until the new namespace has a valid name", async () => {
+    const { container, root } = renderWithBoth();
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="deploy-namespace"] [role="combobox"]') as HTMLElement).dispatchEvent(
+        new MouseEvent("mousedown", { bubbles: true }),
+      );
+    });
+    const createNew = Array.from(document.body.querySelectorAll('[role="option"]')).find(
+      (o) => o.textContent === "创建新命名空间",
+    );
+    await act(async () => {
+      (createNew as HTMLElement).click();
+    });
+
+    const nameBox = () =>
+      document.body.querySelector('[data-od-id="deploy-namespace-name"] input') as HTMLInputElement;
+    const setBox = async (value: string) => {
+      await act(async () => {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
+        setter.call(nameBox(), value);
+        nameBox().dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      await act(async () => {});
+    };
+    const next = async () => {
+      await act(async () => {
+        (Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent === "下一步") as HTMLElement).click();
+      });
+      await act(async () => {});
+    };
+
+    const nameInput = document.body.querySelector('input[placeholder="e.g. dsv4-flash-serve"]') as HTMLInputElement;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
+      setter.call(nameInput, "my-serve");
+      nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {});
+
+    // Empty, then an underscore: neither is a DNS-1123 label.
+    await next();
+    expect(document.body.textContent).toContain("命名空间名称不合法");
+    await setBox("team_a");
+    await next();
+    expect(document.body.textContent).toContain("基本信息");
+
+    await setBox("team-a");
+    await next();
+    expect(document.body.textContent).toContain("引擎与资源");
 
     act(() => root.unmount());
   });
