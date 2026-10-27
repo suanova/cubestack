@@ -338,6 +338,35 @@ jobs:
               handle.writelines(lines)
           PY
           fi
+      - name: Wait for the chart images to reach Harbor
+        working-directory: target
+        env:
+          APP_VERSION: ${{ steps.package.outputs.app-version }}
+        run: |
+          set -euo pipefail
+          [ -f test/e2e/images.txt ] || { echo "no preload list"; exit 0; }
+          images=$(grep -E "/${IMAGE}(-[^:[:space:]]+)?:${APP_VERSION}$" test/e2e/images.txt || true)
+          [ -n "$images" ] || { echo "no own images to wait for"; exit 0; }
+          echo "Waiting for:"; echo "$images"
+          deadline=$((SECONDS + 1800))
+          for image in $images; do
+            path=${image#*/}
+            project=${path%%/*}
+            repo_tag=${path#*/}
+            repo=${repo_tag%:*}
+            tag=${repo_tag##*:}
+            url="https://harbor.isuanova.com/api/v2.0/projects/${project}/repositories/${repo}/artifacts/${tag}"
+            until curl -fsS -o /dev/null "$url"; do
+              if [ "$SECONDS" -ge "$deadline" ]; then
+                echo "::error::timed out waiting for $image in Harbor"
+                exit 1
+              fi
+              echo "waiting for $image..."
+              sleep 30
+            done
+            echo "ready: $image"
+          done
+
       - name: Commit and push the branch
         id: commit
         working-directory: target
