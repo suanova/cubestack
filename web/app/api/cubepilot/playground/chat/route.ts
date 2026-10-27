@@ -1,9 +1,11 @@
 // /api/cubepilot/playground/chat — a real chat completion, proxied to the AI
-// Gateway's OpenAI-compatible POST /v1/chat/completions. The gateway's SSE
-// stream is passed straight through to the browser; the browser accumulates
-// the deltas. See lib/cubepilot/gateway.ts for base-URL resolution.
+// Gateway's OpenAI-compatible POST /v1/chat/completions. The platform has two
+// Gateways (public and private), so the request goes to whichever one lists
+// the requested model. The gateway's SSE stream is passed straight through to
+// the browser; the browser accumulates the deltas. See
+// lib/cubepilot/gateway.ts for base-URL resolution.
 
-import { gatewayFetch } from "@/lib/cubepilot/gateway";
+import { gatewayFetchForModel } from "@/lib/cubepilot/gateway";
 import { withAuth } from "@/lib/auth/guard";
 
 export const runtime = "nodejs";
@@ -53,7 +55,7 @@ export const POST = withAuth(async (req) => {
   if (maxTokens !== undefined) payload.max_tokens = maxTokens;
   let upstream: Response;
   try {
-    upstream = await gatewayFetch("/v1/chat/completions", {
+    upstream = await gatewayFetchForModel(model, "/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),

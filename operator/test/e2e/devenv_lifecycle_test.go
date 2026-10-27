@@ -41,7 +41,7 @@ import (
 // underneath them would make every other case's result depend on this family's
 // running order. So each group here brings up its own environment — on the
 // cheapest image, which for these questions is representative: stopping is the
-// platform's, and a bare `cpu-base-ssh` is the environment with the least in
+// platform's, and a bare `cpu-pytorch-ssh` is the environment with the least in
 // it to confuse the answer. G8 is the one exception, and brings up a notebook
 // because the type is the whole of what it asks about.
 
@@ -76,7 +76,7 @@ func describeLifecycle() {
 func describeStopStart() {
 	draftCase{
 		Name:     "lifecycle-stop-start",
-		Image:    devenv.MustImage("cpu-base-ssh"),
+		Image:    devenv.MustImage("cpu-pytorch-ssh"),
 		Identity: devenv.NonRoot,
 		Cases: func(open func() *devenv.Environment) {
 			It("G1 keeps the phase and the conditions in agreement while the environment starts",
@@ -312,7 +312,7 @@ func describeStopStart() {
 func describeHttpStop() {
 	draftCase{
 		Name:     "lifecycle-stop-http",
-		Image:    devenv.MustImage("cpu-base-jupyter"),
+		Image:    devenv.MustImage("cpu-pytorch-jupyter"),
 		Identity: devenv.NonRoot,
 		Shape: func(env *aiv1alpha1.DevEnvironment) {
 			// The HTTP route alone, so that the address can only go because the
@@ -408,7 +408,7 @@ func describeDeletion() {
 
 	draftCase{
 		Name:     "lifecycle-deleted",
-		Image:    devenv.MustImage("cpu-base-ssh"),
+		Image:    devenv.MustImage("cpu-pytorch-ssh"),
 		Identity: devenv.NonRoot,
 		Cases: func(open func() *devenv.Environment) {
 			It("G5 withdraws its routes, its port and its workload before it lets go",
@@ -525,7 +525,7 @@ func describeRetention() {
 
 	draftCase{
 		Name:     "lifecycle-retained",
-		Image:    devenv.MustImage("cpu-base-ssh"),
+		Image:    devenv.MustImage("cpu-pytorch-ssh"),
 		Identity: devenv.NonRoot,
 		Shape: func(want *aiv1alpha1.DevEnvironment) {
 			want.Spec.Storage.PVCRetention = aiv1alpha1.PVCRetentionRetain
@@ -592,6 +592,103 @@ func describeRetention() {
 	}.declare()
 }
 
+// describeIdle is G9: the environment nothing is happening in, and the platform
+// stopping it on its own clock.
+//
+// Its sidecar is the one image beyond the environment's own that the case needs
+// on the node: an idle timeout injects the activity agent, and helm-e2e-images
+// builds it while helm-e2e-images-load puts it there under the reference the
+// manager names. The sidecar's IfNotPresent policy — the manager's own — takes
+// that copy, so the kind shard runs this case with no registry round trip.
+func describeIdle() {
+	draftCase{
+		Name: "lifecycle-idle",
+		// The ssh image rather than a notebook: the only long-running process it
+		// leaves is sshd, which the agent is told to ignore, so the only thing
+		// that can reset the idle clock is the user — of which there is none.
+		Image:    devenv.MustImage("cpu-pytorch-ssh"),
+		Identity: devenv.NonRoot,
+		Shape: func(want *aiv1alpha1.DevEnvironment) {
+			// An hour, so nothing can stop the environment while it is coming
+			// up. The case lowers it once the environment is running.
+			want.Spec.Lifecycle = &aiv1alpha1.LifecycleSpec{IdleTimeout: 3600}
+		},
+		Cases: func(open func() *devenv.Environment) {
+			It("G9 stops an environment left idle, and marks it as the platform's stop",
+				Label(devenv.TierP1, devenv.LabelShard(devenv.ShardP2), devenv.LabelFamily("G")),
+				func(ctx SpecContext) {
+					env := open()
+					running(ctx, env)
+
+					// The sidecar the timeout is supposed to have injected,
+					// asserted before its absence could be misread as idleness.
+					// Without the agent the clock falls back to the pod's start
+					// time, and an environment nobody touched is idle by that
+					// measure too: the case would pass while testing none of
+					// what it names.
+					pod, err := env.Pod(ctx)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(pod.Spec.Containers).To(ContainElement(HaveField("Name", "activity-agent")),
+						"%s carries an idle timeout but no activity agent to judge it by", env.Name)
+
+					// Down to 45s now that the pod exists. This does not roll the
+					// pod: the timeout is the controller's own clock, not an
+					// argument to the sidecar — which is told only which ports to
+					// watch — so the pod template is unchanged. Setting it in
+					// Shape instead would race: an environment whose first
+					// reconcile is already older than its timeout can be stopped
+					// before any case observes it Running.
+					Expect(env.Patch(ctx, func(want *aiv1alpha1.DevEnvironment) {
+						want.Spec.Lifecycle.IdleTimeout = 45
+					})).To(Succeed())
+
+					// 45s of timeout plus the controller's one-minute idle check,
+					// with room for a slow reconcile. No traffic is sent in the
+					// meantime: an environment nobody is using is exactly the
+					// subject of the case.
+					Eventually(func() error { return env.Stopped(ctx) }).
+						WithTimeout(4*time.Minute).WithPolling(3*time.Second).
+						Should(Succeed(), "%s was never stopped for being idle", env.Name)
+
+					Expect(env.Refresh(ctx)).To(Succeed())
+					st := env.Object().Status
+					Expect(st.Phase.Reason).To(Equal(devenv.ReasonIdleTimeout),
+						"the phase reason after an idle stop, where a stop the user asked for "+
+							"reads %q", devenv.ReasonStopped)
+					ready := env.Condition(aiv1alpha1.ConditionReady)
+					Expect(ready).NotTo(BeNil(), "Ready is not recorded")
+					Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+					Expect(ready.Reason).To(Equal(devenv.ReasonIdleTimeout),
+						"the Ready reason after an idle stop")
+
+					// The distinction the mark exists for: the user never asked
+					// for this stop, so spec.running is what they left it at, and
+					// the annotations are what say the platform stopped it.
+					Expect(env.Object().Spec.Running).To(BeTrue(),
+						"an idle stop rewrote spec.running, so the platform has made the "+
+							"stop impossible to tell from one the user asked for")
+					annotations := env.Object().GetAnnotations()
+					Expect(annotations).To(HaveKeyWithValue(devenv.AutoStoppedAnnotation, "true"),
+						"the annotation that marks the stop as the platform's")
+					at := annotations[devenv.AutoStoppedAtAnnotation]
+					Expect(at).NotTo(BeEmpty(), "the annotation that records when it stopped")
+					_, err = time.Parse(time.RFC3339Nano, at)
+					Expect(err).NotTo(HaveOccurred(),
+						"%s reads %q", devenv.AutoStoppedAtAnnotation, at)
+
+					// The workload is gone, not merely unreported: Stopped with a
+					// pod still carrying the environment's label would be a
+					// stopped phase over a running environment.
+					Eventually(func() (int, error) {
+						pods, err := env.Pods(ctx)
+						return len(pods), err
+					}).WithTimeout(3*time.Minute).WithPolling(3*time.Second).
+						Should(BeZero(), "the pods still carrying %s", env.Name)
+				})
+		},
+	}.declare()
+}
+
 // --- the workspace marker -----------------------------------------------------
 
 // The file the lifecycle cases leave in the workspace and read back after a stop
@@ -650,10 +747,14 @@ func phaseAgreement(st aiv1alpha1.DevEnvironmentStatus) error {
 // --- lifecycle helpers --------------------------------------------------------
 
 // running waits for an environment to be up and usable.
+//
+// Polled no more slowly than BringUp does, for the same reason: the wait is for
+// the platform to finish, and a coarse poll is time added to every case that
+// stops and starts an environment.
 func running(ctx SpecContext, env *devenv.Environment) {
 	GinkgoHelper()
 	Eventually(func() error { return env.Ready(ctx) }).
-		WithTimeout(devenv.UpTimeout()).WithPolling(5*time.Second).
+		WithTimeout(devenv.UpTimeout()).WithPolling(2*time.Second).
 		Should(Succeed(), "%s never became running", env.Name)
 }
 

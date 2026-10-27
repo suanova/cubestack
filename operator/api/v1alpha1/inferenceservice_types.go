@@ -17,27 +17,77 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"slices"
+
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
+// AIGatewayRouterName names one of the platform's pre-installed shared
+// AIGatewayRoutes (Agent Router catalog surfaces).
+// +kubebuilder:validation:Enum=cubestack-ai-gateway;cubestack-ai-gateway-private
+type AIGatewayRouterName string
+
+const (
+	// AIGatewayRouterPublic is the public model catalog route.
+	AIGatewayRouterPublic AIGatewayRouterName = "cubestack-ai-gateway"
+	// AIGatewayRouterPrivate is the private model catalog route.
+	AIGatewayRouterPrivate AIGatewayRouterName = "cubestack-ai-gateway-private"
+)
+
+// CatalogPath is a client request path a published service exposes on the
+// platform's model catalog.
+// +kubebuilder:validation:Enum=/v1/chat/completions;/v1/responses;/v1/messages;/v1/images
+type CatalogPath string
+
+const (
+	// CatalogPathChatCompletions is the OpenAI chat-completions endpoint.
+	CatalogPathChatCompletions CatalogPath = "/v1/chat/completions"
+	// CatalogPathResponses is the OpenAI responses endpoint.
+	CatalogPathResponses CatalogPath = "/v1/responses"
+	// CatalogPathMessages is the Anthropic messages endpoint. It is served by
+	// the Agent Router (through the AIServiceBackend whose schema is Anthropic).
+	CatalogPathMessages CatalogPath = "/v1/messages"
+	// CatalogPathImages is the OpenAI images endpoint.
+	CatalogPathImages CatalogPath = "/v1/images"
+)
+
+// CatalogPaths are all supported catalog paths, in display order.
+var CatalogPaths = []CatalogPath{
+	CatalogPathChatCompletions,
+	CatalogPathResponses,
+	CatalogPathMessages,
+	CatalogPathImages,
+}
+
 // RouteSpec defines the public gateway route of the service: the platform
 // model catalog entry a published service joins.
 type RouteSpec struct {
-	// Publish exposes the service through the platform model catalog;
-	// defaults to false. Unpublished services only provide a ClusterIP
-	// internal endpoint.
+	// AIGatewayRouter selects the platform's shared AIGatewayRoute this
+	// service's catalog rule is attached to. The operator maintains that route
+	// in full from all published services. Empty (or an absent route) means the
+	// service is not published and only provides a ClusterIP internal endpoint.
 	// +optional
-	// +kubebuilder:default:=false
-	Publish bool `json:"publish,omitempty"`
+	AIGatewayRouter AIGatewayRouterName `json:"aigatewayRouter,omitempty"`
 
 	// ModelName is the catalog model name: what clients send as the request
-	// body's "model" field. It is the platform-wide identity of a published
-	// service and must be unique among published services.
+	// body's "model" field, which the Agent Router's ext_proc turns into the
+	// x-ai-eg-model header the shared route matches on. It is the identity of a
+	// published service and must be unique among services published to the same
+	// route.
 	// +optional
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$`
 	ModelName string `json:"modelName,omitempty"`
+
+	// Paths lists the client paths the catalog entry exposes. Unset means all
+	// supported paths; an explicitly empty list exposes none. The empty list
+	// must survive a round trip through a typed client, which omitempty would
+	// silently turn back into "unset" (all paths).
+	// +optional
+	// +kubebuilder:validation:MaxItems=4
+	// +listType=set
+	Paths []CatalogPath `json:"paths"`
 
 	// TimeoutSeconds caps the total duration of a request at the gateway,
 	// including every streamed chunk. 0 (the default) disables the cap.
@@ -48,13 +98,37 @@ type RouteSpec struct {
 	TimeoutSeconds *int64 `json:"timeoutSeconds,omitempty"`
 
 	// IdleTimeoutSeconds cuts a request whose upstream sent no bytes for this
-	// long; defaults to 300. Non-streaming generations send nothing until the
-	// response completes, so this bounds them too.
+	// long; defaults to 0, which disables the cut. Non-streaming generations
+	// send nothing until the response completes, so a non-zero value bounds
+	// them too — at the cost of killing a long stream that pauses.
 	// +optional
-	// +kubebuilder:default:=300
-	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default:=0
+	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=86400
 	IdleTimeoutSeconds *int64 `json:"idleTimeoutSeconds,omitempty"`
+}
+
+// Published reports whether the service requests a catalog entry.
+func (r *RouteSpec) Published() bool {
+	return r != nil && r.AIGatewayRouter != ""
+}
+
+// ExposedPaths returns the client paths the service publishes. An unset list
+// means every supported path (services created before the field existed); an
+// explicitly empty list means none.
+func (r *RouteSpec) ExposedPaths() []CatalogPath {
+	if r == nil {
+		return nil
+	}
+	if r.Paths == nil {
+		return CatalogPaths
+	}
+	return r.Paths
+}
+
+// Exposes reports whether the service publishes the given path.
+func (r *RouteSpec) Exposes(path CatalogPath) bool {
+	return slices.Contains(r.ExposedPaths(), path)
 }
 
 // InferenceServiceSpec defines the desired state of InferenceService.
@@ -155,7 +229,7 @@ type EndpointStatus struct {
 	// <isvc>-<role>.<namespace>.svc:8001.
 	Internal string `json:"internal"`
 
-	// Public is the public gateway endpoint; only present when publish is true.
+	// Public is the public gateway endpoint; only present when published.
 	// +optional
 	Public string `json:"public,omitempty"`
 }

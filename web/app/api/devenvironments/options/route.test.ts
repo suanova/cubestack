@@ -94,11 +94,13 @@ describe("GET /api/devenvironments/options", () => {
     delete process.env.CUBESTACK_DEFAULT_NAMESPACE;
   });
 
-  it("leaves the platform's own namespaces out of what it offers", async () => {
-    // The list measured on cs7, which the wizard used to present in full.
+  it("offers `default` alone, whatever else the cluster has", async () => {
+    // The list measured on cs7, plus the two namespaces the operator creates
+    // itself that the old denylist did not know about (issue #367).
     stubNamespaces([
       "ai-gateway-system",
       "cubestack-system",
+      "cuberouter",
       "default",
       "envoy-gateway-system",
       "kube-node-lease",
@@ -107,16 +109,17 @@ describe("GET /api/devenvironments/options", () => {
       "lws-system",
       "metallb-system",
       "metax-operator",
+      "monitoring",
       "project-a",
       "rook-ceph",
     ]);
 
     const body = await options();
-    // kube-* is Kubernetes' own; the rest is where the platform installs. A
-    // development environment is a StatefulSet, a PVC and Routes, and putting
-    // one in the platform's control plane is not a choice the wizard should
-    // offer — the portal's RBAC would allow it.
-    expect(body.namespaces).toEqual([{ name: "default" }, { name: "project-a" }]);
+    // A denylist of the platform's own namespaces was always one install
+    // behind — `monitoring` and `cuberouter` were offered on cs5 — so the
+    // wizard offers the one namespace that is always safe and creates the
+    // user's own from the select's "create a new namespace" entry.
+    expect(body.namespaces).toEqual([{ name: "default" }]);
   });
 
   it("opens on `default` rather than on whatever sorts first", async () => {
@@ -125,7 +128,7 @@ describe("GET /api/devenvironments/options", () => {
     const body = await options();
     // Sorted ascending, so the first entry is team-b and the alphabetically
     // first of all is a platform namespace — neither is the answer.
-    expect(body.namespaces.map((n) => n.name)).toEqual(["default", "project-a", "team-b"]);
+    expect(body.namespaces.map((n) => n.name)).toEqual(["default"]);
     expect(body.defaultNamespace).toBe("default");
   });
 
@@ -146,12 +149,13 @@ describe("GET /api/devenvironments/options", () => {
     expect((await options()).defaultNamespace).toBe("default");
   });
 
-  it("falls back to the first namespace it offers when there is no `default`", async () => {
+  it("names no default when the cluster has no `default` namespace", async () => {
     stubNamespaces(["kube-system", "project-a", "team-b"]);
 
-    // Confined by the filter to the user's own namespaces, so the fallback can
-    // no longer land in a platform namespace the way it used to.
-    expect((await options()).defaultNamespace).toBe("project-a");
+    // Confined by the filter to `default`, so there is nothing to open on and
+    // nothing to fall back to: the wizard starts on its "create a new
+    // namespace" entry instead of on a platform namespace the way it used to.
+    expect((await options()).defaultNamespace).toBeNull();
   });
 
   it("names no default when the cluster offers no namespace", async () => {
@@ -168,12 +172,12 @@ describe("GET /api/devenvironments/options", () => {
     // built for one interface cannot serve the other, and the pair a change moves
     // between is the vendor.
     expect(await images()).toEqual([
-      { tag: "harbor.isuanova.com/suanova/jupyter-minimal:latest", label: "suanova/jupyter-minimal · CPU · JupyterLab (jovyan)", user: "jovyan", runAsGroup: 100, interface: "jupyter", vendor: "cpu" },
-      { tag: "harbor.isuanova.com/suanova/ssh-ubuntu22.04:latest", label: "suanova/ssh-ubuntu22.04 · CPU · SSH (ubuntu)", user: "ubuntu", runAsGroup: undefined, interface: "ssh", vendor: "cpu" },
-      { tag: "harbor.isuanova.com/suanova/jupyter-cuda-pytorch:latest", label: "suanova/jupyter-cuda-pytorch · NVIDIA CUDA · JupyterLab (ubuntu)", user: "ubuntu", runAsGroup: undefined, interface: "jupyter", vendor: "nvidia" },
-      { tag: "harbor.isuanova.com/suanova/ssh-cuda-pytorch:latest", label: "suanova/ssh-cuda-pytorch · NVIDIA CUDA · SSH (ubuntu)", user: "ubuntu", runAsGroup: undefined, interface: "ssh", vendor: "nvidia" },
-      { tag: "harbor.isuanova.com/suanova/jupyter-maca-pytorch:latest", label: "suanova/jupyter-maca-pytorch · Metax MACA · JupyterLab (ubuntu)", user: "ubuntu", runAsGroup: undefined, interface: "jupyter", vendor: "metax" },
-      { tag: "harbor.isuanova.com/suanova/ssh-maca-pytorch:latest", label: "suanova/ssh-maca-pytorch · Metax MACA · SSH (ubuntu)", user: "ubuntu", runAsGroup: undefined, interface: "ssh", vendor: "metax" },
+      { tag: "harbor.isuanova.com/suanova/cpu-pytorch:latest", label: "suanova/cpu-pytorch · CPU · JupyterLab (ubuntu)", user: "ubuntu", runAsGroup: undefined, interface: "jupyter", vendor: "cpu" },
+      { tag: "harbor.isuanova.com/suanova/cpu-pytorch:latest", label: "suanova/cpu-pytorch · CPU · SSH (ubuntu)", user: "ubuntu", runAsGroup: undefined, interface: "ssh", vendor: "cpu" },
+      { tag: "harbor.isuanova.com/suanova/cuda-pytorch:latest", label: "suanova/cuda-pytorch · NVIDIA CUDA · JupyterLab (ubuntu)", user: "ubuntu", runAsGroup: undefined, interface: "jupyter", vendor: "nvidia" },
+      { tag: "harbor.isuanova.com/suanova/cuda-pytorch:latest", label: "suanova/cuda-pytorch · NVIDIA CUDA · SSH (ubuntu)", user: "ubuntu", runAsGroup: undefined, interface: "ssh", vendor: "nvidia" },
+      { tag: "harbor.isuanova.com/suanova/maca-pytorch:latest", label: "suanova/maca-pytorch · Metax MACA · JupyterLab (ubuntu)", user: "ubuntu", runAsGroup: undefined, interface: "jupyter", vendor: "metax" },
+      { tag: "harbor.isuanova.com/suanova/maca-pytorch:latest", label: "suanova/maca-pytorch · Metax MACA · SSH (ubuntu)", user: "ubuntu", runAsGroup: undefined, interface: "ssh", vendor: "metax" },
     ]);
   });
 
@@ -280,7 +284,7 @@ describe("GET /api/devenvironments/options", () => {
     // The models only narrow an accelerator request, so a principal without
     // `list nodes` — or a flaky read — must not take the whole wizard down: a
     // CPU environment is still creatable, and the select degrades to "any".
-    expect((await options()).namespaces).toEqual([{ name: "default" }, { name: "project-a" }]);
+    expect((await options()).namespaces).toEqual([{ name: "default" }]);
     expect(await gpuModels()).toEqual({ nvidia: [], metax: [] });
     // The pin comes off the same read, so it degrades the same way: "any" alone,
     // which is the environment stating no node rather than an error.

@@ -76,7 +76,9 @@ test.describe("inference services landing (mocked data)", () => {
     const pro = page.locator('[data-od-id="svc-row-dsv4-pro-pd"]');
     await expect(pro).toContainText("—");
     await expect(pro).toContainText("sglang");
-    await expect(pro).toContainText("8 × MXC500");
+    // GPU 资源 is the whole footprint: 8 cards × 1 prefill replica plus
+    // 8 cards × 2 decode replicas.
+    await expect(pro).toContainText("24 × MXC500");
     // Replicas render multi-line, one row per integer override the profile
     // declares, under the human-readable name the UI gives the knob.
     await expect(pro).toContainText("Prefill Replicas 1");

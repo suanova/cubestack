@@ -364,17 +364,15 @@ function AgentBubble({
   // read as the result disappearing.
   const settled = msg.phase === "done" && !msg.stopped && !msg.error && !msg.transportLost;
 
-  // What this turn was let through — the cards it settled — sits between the
-  // tool log and the closing answer, not under it. The reference draws them
-  // there (ChatThread.tsx: tool cards, the resolved confirm, the resolved
-  // questions, the superseded disclosure, then the answer panel), and it reads
-  // the right way round: a record of "this write was allowed" belongs to the
-  // work it permitted, not as a footnote to the conclusion. Putting it last also
-  // pushed the answer panel up the screen, which is what a user noticed.
-  //
-  // The dock carries a card only while it is open; the same components draw
-  // both, so a decided card looks the same in either place.
+  // What this turn was let through — the cards it settled — sits where it was
+  // raised, not after the last tool. The turn can run many more calls after an
+  // approval, and a record at the bottom no longer says which call it gated.
   const lastToolIndex = msg.blocks.reduce((acc, b, i) => (b.kind === "tool" ? i : acc), -1);
+  // A card restored from the pending read has no arrival position; keep it with
+  // the tool log, which is where every settled card used to go.
+  const fallbackSlot = lastToolIndex >= 0 ? lastToolIndex : msg.blocks.length - 1;
+  const slotOf = (afterBlock: number | undefined): number =>
+    Math.max(-1, Math.min(afterBlock ?? fallbackSlot, msg.blocks.length - 1));
   // Whether this bubble has anything to draw at all — its own blocks, a card it
   // settled, or a line about how the turn ended.
   const hasBody =
@@ -392,18 +390,23 @@ function AgentBubble({
   // no bubble; the header already says what it is waiting for.
   const showsThinking = msg.phase !== "done" && waitingOnUser([msg]) === null && !hasBody;
   if (!hasBody && !showsThinking) return null;
-  const settledCards = (
+  /** The settled cards that belong immediately after block `slot`. */
+  const cardsAfter = (slot: number) => (
     <>
-      {msg.approvals.filter(settledApproval).map((a) => (
-        <Box key={a.callId} sx={{ mt: "9px" }}>
-          <ApprovalCard approval={a} now={now} />
-        </Box>
-      ))}
-      {msg.questions.filter(settledQuestion).map((q) => (
-        <Box key={q.callId} sx={{ mt: "9px" }}>
-          <QuestionCard question={q} now={now} />
-        </Box>
-      ))}
+      {msg.approvals
+        .filter((a) => settledApproval(a) && slotOf(a.afterBlock) === slot)
+        .map((a) => (
+          <Box key={a.callId} sx={{ mt: "9px" }}>
+            <ApprovalCard approval={a} now={now} />
+          </Box>
+        ))}
+      {msg.questions
+        .filter((q) => settledQuestion(q) && slotOf(q.afterBlock) === slot)
+        .map((q) => (
+          <Box key={q.callId} sx={{ mt: "9px" }}>
+            <QuestionCard question={q} now={now} />
+          </Box>
+        ))}
     </>
   );
 
@@ -456,6 +459,7 @@ function AgentBubble({
           {t("cubepilot.chat.thinkingAgent")}
         </Box>
       ) : null}
+      {cardsAfter(-1)}
       {msg.blocks.map((b, bi) => {
         if (b.kind === "tool") {
           const running = !b.done && msg.phase !== "done";
@@ -472,60 +476,59 @@ function AgentBubble({
               <Box data-od-block="tool" sx={{ mt: bi > 0 ? "8px" : 0 }}>
                 <ToolCard block={b} running={running || parked} open={open} onToggle={() => onToggleTool(key, !open)} />
               </Box>
-              {bi === lastToolIndex ? settledCards : null}
+              {cardsAfter(bi)}
             </Fragment>
           );
         }
         const isPanel = ranTools && endsWithText && bi === lastTextIndex;
         return (
-          <Box key={bi} data-od-block="text" sx={{ mt: bi > 0 ? "8px" : 0 }}>
-            {b.superseded?.length ? (
-              <Box component="details" data-od-id="superseded" sx={{ mb: "6px" }}>
-                <Box component="summary" sx={{ ...monoSx, fontSize: 11, color: "text.secondary", cursor: "pointer" }}>
-                  {t("cubepilot.chat.earlier", { count: b.superseded.length })}
-                </Box>
-                {b.superseded.map((s, si) => (
-                  <Box key={si} sx={{ mt: "6px", fontSize: 12.5, color: "text.secondary", whiteSpace: "pre-wrap" }}>
-                    {s}
+          <Fragment key={bi}>
+            <Box data-od-block="text" sx={{ mt: bi > 0 ? "8px" : 0 }}>
+              {b.superseded?.length ? (
+                <Box component="details" data-od-id="superseded" sx={{ mb: "6px" }}>
+                  <Box component="summary" sx={{ ...monoSx, fontSize: 11, color: "text.secondary", cursor: "pointer" }}>
+                    {t("cubepilot.chat.earlier", { count: b.superseded.length })}
                   </Box>
-                ))}
-              </Box>
-            ) : null}
-            {isPanel ? (
-              <Box
-                sx={{
-                  border: "1px solid",
-                  borderRadius: "6px",
-                  p: "9px 11px",
-                  ...(settled
-                    ? { bgcolor: "var(--accent-soft)", borderColor: "color-mix(in oklch, var(--accent) 32%, var(--border))" }
-                    : { bgcolor: "var(--surface)", borderColor: "var(--border)" }),
-                }}
-              >
+                  {b.superseded.map((s, si) => (
+                    <Box key={si} sx={{ mt: "6px", fontSize: 12.5, color: "text.secondary", whiteSpace: "pre-wrap" }}>
+                      {s}
+                    </Box>
+                  ))}
+                </Box>
+              ) : null}
+              {isPanel ? (
                 <Box
                   sx={{
-                    ...monoSx,
-                    fontSize: 10,
-                    letterSpacing: "0.06em",
-                    textTransform: "uppercase",
-                    mb: "4px",
-                    color: settled ? "var(--accent-strong)" : "text.secondary",
+                    border: "1px solid",
+                    borderRadius: "6px",
+                    p: "9px 11px",
+                    ...(settled
+                      ? { bgcolor: "var(--accent-soft)", borderColor: "color-mix(in oklch, var(--accent) 32%, var(--border))" }
+                      : { bgcolor: "var(--surface)", borderColor: "var(--border)" }),
                   }}
                 >
-                  {settled ? t("cubepilot.chat.finalResult") : t("cubepilot.chat.reply")}
+                  <Box
+                    sx={{
+                      ...monoSx,
+                      fontSize: 10,
+                      letterSpacing: "0.06em",
+                      textTransform: "uppercase",
+                      mb: "4px",
+                      color: settled ? "var(--accent-strong)" : "text.secondary",
+                    }}
+                  >
+                    {settled ? t("cubepilot.chat.finalResult") : t("cubepilot.chat.reply")}
+                  </Box>
+                  <AgentMarkdown text={b.text} />
                 </Box>
+              ) : (
                 <AgentMarkdown text={b.text} />
-              </Box>
-            ) : (
-              <AgentMarkdown text={b.text} />
-            )}
-          </Box>
+              )}
+            </Box>
+            {cardsAfter(bi)}
+          </Fragment>
         );
       })}
-      {/* A turn with no tool blocks has no "after the last tool" to hang the
-          settled cards on; the end of the bubble is where they read as the
-          turn's own record. */}
-      {lastToolIndex < 0 ? settledCards : null}
     </Box>
   );
 }

@@ -11,6 +11,7 @@ const {
   listNamespace,
   createNamespacedSecret,
   listClusterCustomObject,
+  getNamespacedCustomObject,
   patchNamespacedCustomObject,
   createNamespacedCustomObject,
   deleteNamespacedCustomObject,
@@ -18,6 +19,7 @@ const {
   listNamespace: vi.fn(),
   createNamespacedSecret: vi.fn(),
   listClusterCustomObject: vi.fn(),
+  getNamespacedCustomObject: vi.fn(),
   patchNamespacedCustomObject: vi.fn(),
   createNamespacedCustomObject: vi.fn(),
   deleteNamespacedCustomObject: vi.fn(),
@@ -25,7 +27,7 @@ const {
 
 vi.mock("@/lib/kubernetes", () => ({
   getCoreClient: () => ({ listNamespace, createNamespacedSecret }),
-  getCustomObjectsClient: () => ({ listClusterCustomObject, patchNamespacedCustomObject, createNamespacedCustomObject, deleteNamespacedCustomObject }),
+  getCustomObjectsClient: () => ({ listClusterCustomObject, getNamespacedCustomObject, patchNamespacedCustomObject, createNamespacedCustomObject, deleteNamespacedCustomObject }),
 }));
 
 /** The cluster fixture mirrors the real KinD data: one running, one stopped env. */
@@ -41,7 +43,7 @@ function stubCluster() {
         },
         spec: {
           type: "jupyter",
-          image: "harbor.isuanova.com/suanova/jupyter-cuda-pytorch:latest",
+          image: "harbor.isuanova.com/suanova/cuda-pytorch:latest",
           running: true,
           resources: { gpu: { vendor: "nvidia", count: 2, model: "H200" }, cpu: "16", memory: "64Gi" },
           storage: { size: "200Gi", mountPath: "/home/ubuntu" },
@@ -85,6 +87,7 @@ function clearMocks() {
   listNamespace.mockClear();
   createNamespacedSecret.mockClear();
   listClusterCustomObject.mockClear();
+  getNamespacedCustomObject.mockClear();
   patchNamespacedCustomObject.mockClear();
   createNamespacedCustomObject.mockClear();
   deleteNamespacedCustomObject.mockClear();
@@ -113,7 +116,7 @@ describe("GET /api/devenvironments", () => {
       name: "jupyter-nlp-ln",
       namespace: "project-a",
       type: "jupyter",
-      image: "harbor.isuanova.com/suanova/jupyter-cuda-pytorch:latest",
+      image: "harbor.isuanova.com/suanova/cuda-pytorch:latest",
       running: true,
       resources: { gpu: { vendor: "nvidia", count: 2, model: "H200" }, cpu: "16", memory: "64Gi" },
       storage: { size: "200Gi", mountPath: "/home/ubuntu" },
@@ -283,10 +286,20 @@ describe("POST /api/devenvironments", () => {
     vi.restoreAllMocks();
   });
 
-  it("rejects a non-DNS-1123 name", async () => {
+  it("rejects a name that is not a DNS-1035 label", async () => {
     const { POST } = await importRoute();
     const res = await POST(await authedRequest({ method: "POST", body: JSON.stringify({ name: "Bad Name", namespace: "project-a", type: "jupyter", image: "img", accelerator: "nvidia", gpuCount: 1 }) }), undefined);
     expect(res.status).toBe(400);
+    expect(createNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
+  it("rejects a name starting with a digit", async () => {
+    // A DNS-1123 label admits it; a Service name does not, and the operator's
+    // admission policy follows the Service.
+    const { POST } = await importRoute();
+    const res = await POST(await authedRequest({ method: "POST", body: JSON.stringify({ name: "9lives", namespace: "project-a", type: "jupyter", image: "img", accelerator: "nvidia", gpuCount: 1 }) }), undefined);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "nameInvalid" });
     expect(createNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
@@ -344,7 +357,7 @@ describe("POST /api/devenvironments", () => {
           name: "jupyter-recsys",
           namespace: "project-a",
           type: "jupyter",
-          image: "harbor.isuanova.com/suanova/jupyter-cuda-pytorch:latest",
+          image: "harbor.isuanova.com/suanova/cuda-pytorch:latest",
           accelerator: "nvidia",
           gpuCount: 4,
           cpu: "64",
@@ -365,7 +378,7 @@ describe("POST /api/devenvironments", () => {
       metadata: { name: "jupyter-recsys", namespace: "project-a" },
       spec: {
         type: "jupyter",
-        image: "harbor.isuanova.com/suanova/jupyter-cuda-pytorch:latest",
+        image: "harbor.isuanova.com/suanova/cuda-pytorch:latest",
         running: true,
         resources: { gpu: { vendor: "nvidia", count: 4 }, cpu: "64", memory: "256Gi" },
         // Derived from the image, never sent by the client: the self-authored
@@ -452,22 +465,21 @@ describe("POST /api/devenvironments", () => {
     await POST(
       await authedRequest({
         method: "POST",
-        body: JSON.stringify({ name: "jovyan-env", namespace: "project-a", type: "jupyter", image: "harbor.isuanova.com/suanova/jupyter-minimal:latest" }),
+        body: JSON.stringify({ name: "cpu-env", namespace: "project-a", type: "jupyter", image: "harbor.isuanova.com/suanova/cpu-pytorch:latest" }),
       }),
       undefined,
     );
-    // The stock-derived image keeps docker-stacks' jovyan, whose gid (100) no
-    // other spec field implies — the platform default is 1000.
+    // Every shipped image runs as account ubuntu with the platform's default
+    // 1000:1000, so only the account is stated.
     expect(createNamespacedCustomObject.mock.calls[0][0].body.spec.runtime).toEqual({
-      user: "jovyan",
-      securityContext: { runAsGroup: 100 },
+      user: "ubuntu",
     });
 
     createNamespacedCustomObject.mockClear();
     await POST(
       await authedRequest({
         method: "POST",
-        body: JSON.stringify({ name: "ubuntu-env", namespace: "project-a", type: "ssh", image: "harbor.isuanova.com/suanova/ssh-ubuntu22.04:latest" }),
+        body: JSON.stringify({ name: "cuda-env", namespace: "project-a", type: "ssh", image: "harbor.isuanova.com/suanova/cuda-pytorch:latest" }),
       }),
       undefined,
     );
@@ -505,7 +517,7 @@ describe("POST /api/devenvironments", () => {
           name: "alice-env",
           namespace: "project-a",
           type: "jupyter",
-          image: "harbor.isuanova.com/suanova/jupyter-minimal:latest",
+          image: "harbor.isuanova.com/suanova/cpu-pytorch:latest",
           runtimeUser: "alice",
           runAsUser: 1500,
           runAsGroup: 1500,
@@ -523,7 +535,7 @@ describe("POST /api/devenvironments", () => {
     });
   });
 
-  it("keeps the image's gid when the client overrides only the uid", async () => {
+  it("keeps the catalog's account when the client overrides only the uid", async () => {
     createNamespacedCustomObject.mockResolvedValue({});
     listClusterCustomObject.mockResolvedValue({ items: [] });
     const { POST } = await importRoute();
@@ -531,18 +543,20 @@ describe("POST /api/devenvironments", () => {
       await authedRequest({
         method: "POST",
         body: JSON.stringify({
-          name: "jovyan-env",
+          name: "cuda-env",
           namespace: "project-a",
           type: "jupyter",
-          image: "harbor.isuanova.com/suanova/jupyter-minimal:latest",
+          image: "harbor.isuanova.com/suanova/cuda-pytorch:latest",
           runAsUser: 1500,
         }),
       }),
       undefined,
     );
+    // The shipped images run 1000:1000, so a uid on its own states no group —
+    // inventing one would move the workspace to a group the image does not use.
     expect(createNamespacedCustomObject.mock.calls[0][0].body.spec.runtime).toEqual({
-      user: "jovyan",
-      securityContext: { runAsUser: 1500, runAsGroup: 100 },
+      user: "ubuntu",
+      securityContext: { runAsUser: 1500 },
     });
   });
 
@@ -570,6 +584,58 @@ describe("POST /api/devenvironments", () => {
     // The controller serves "root" itself and reports spec.runtime.user as
     // overridden, so sending one would only describe a field it ignores.
     expect("user" in runtime).toBe(false);
+  });
+
+  it("writes spec.runtime.sudo when the account is granted passwordless sudo", async () => {
+    createNamespacedCustomObject.mockResolvedValue({});
+    listClusterCustomObject.mockResolvedValue({ items: [] });
+    const { POST } = await importRoute();
+    const res = await POST(
+      await authedRequest({
+        method: "POST",
+        body: JSON.stringify({
+          name: "sudo-env",
+          namespace: "project-a",
+          type: "ssh",
+          image: "harbor.isuanova.com/suanova/ssh-ubuntu22.04:latest",
+          runtimeUser: "ubuntu",
+          runAsUser: 1000,
+          runAsGroup: 1000,
+          sudo: true,
+        }),
+      }),
+      undefined,
+    );
+    expect(res.status).toBe(201);
+    expect(createNamespacedCustomObject.mock.calls[0][0].body.spec.runtime).toEqual({
+      user: "ubuntu",
+      securityContext: { runAsUser: 1000, runAsGroup: 1000 },
+      sudo: true,
+    });
+  });
+
+  it("drops sudo for a root environment, which already has the privilege", async () => {
+    createNamespacedCustomObject.mockResolvedValue({});
+    listClusterCustomObject.mockResolvedValue({ items: [] });
+    const { POST } = await importRoute();
+    await POST(
+      await authedRequest({
+        method: "POST",
+        body: JSON.stringify({
+          name: "root-sudo-env",
+          namespace: "project-a",
+          type: "ssh",
+          image: "harbor.isuanova.com/suanova/ssh-ubuntu22.04:latest",
+          runAsUser: 0,
+          runAsGroup: 0,
+          sudo: true,
+        }),
+      }),
+      undefined,
+    );
+    const runtime = createNamespacedCustomObject.mock.calls[0][0].body.spec.runtime;
+    expect(runtime.securityContext).toEqual({ runAsUser: 0, runAsGroup: 0 });
+    expect("sudo" in runtime).toBe(false);
   });
 
   it("rejects an account the CRD's schema would refuse", async () => {
@@ -763,7 +829,7 @@ describe("POST /api/devenvironments", () => {
           name: "ok-name",
           namespace: "project-a",
           type: "jupyter",
-          image: "harbor.isuanova.com/suanova/jupyter-minimal:latest",
+          image: "harbor.isuanova.com/suanova/cpu-pytorch:latest",
           env: [{ name: "HF_HOME", value: "/data/hf" }],
           command: 'python -m "my app"',
           args: '--port 8080 --name "a b"',
@@ -777,8 +843,7 @@ describe("POST /api/devenvironments", () => {
     // command and args are split by the same rule but land on different keys —
     // they override the image's ENTRYPOINT and its CMD respectively.
     expect(createNamespacedCustomObject.mock.calls[0][0].body.spec.runtime).toEqual({
-      user: "jovyan",
-      securityContext: { runAsGroup: 100 },
+      user: "ubuntu",
       env: [{ name: "HF_HOME", value: "/data/hf" }],
       command: ["python", "-m", "my app"],
       args: ["--port", "8080", "--name", "a b"],
@@ -1055,6 +1120,8 @@ describe("PATCH /api/devenvironments", () => {
     // the value when present and creates it when absent.
     expect(arg.body).toEqual([{ op: "add", path: "/spec/running", value: false }]);
     expect(arg.fieldManager).toBe("cubestack-web");
+    // Stopping has no mark to clear, so the read guard is not triggered.
+    expect(getNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
   it("patches an existing resource that omits spec.running (add creates the field)", async () => {
@@ -1062,6 +1129,9 @@ describe("PATCH /api/devenvironments", () => {
     // no `running` key; JSON-Patch `add` on the existing spec object creates
     // the member, so the same body works for resources that predate the field.
     patchNamespacedCustomObject.mockResolvedValue({});
+    // ssh-dataset-prep is not auto-stopped, so the mark is absent and the start
+    // sends only the running add — the same request as before the mark existed.
+    getNamespacedCustomObject.mockResolvedValue({ metadata: { annotations: {} } });
     const { PATCH } = await importRoute();
     const res = await PATCH(
       await authedRequest({ method: "PATCH", body: JSON.stringify({ namespace: "project-a", name: "ssh-dataset-prep", running: true }) }),
@@ -1071,6 +1141,36 @@ describe("PATCH /api/devenvironments", () => {
     const arg = patchNamespacedCustomObject.mock.calls[0][0];
     expect(arg.name).toBe("ssh-dataset-prep");
     expect(arg.body).toEqual([{ op: "add", path: "/spec/running", value: true }]);
+  });
+
+  it("clears the auto-stopped mark when starting an auto-stopped environment", async () => {
+    // Starting an auto-stopped environment requires clearing the mark, which is
+    // the whole of the stopped state. The mark is removed in the same request as
+    // the running add, so the controller wakes and the environment starts.
+    patchNamespacedCustomObject.mockResolvedValue({});
+    getNamespacedCustomObject.mockResolvedValue({
+      metadata: {
+        annotations: {
+          "ai.cubestack.io/auto-stopped": "true",
+          "ai.cubestack.io/auto-stopped-at": "2026-09-01T06:12:00Z",
+        },
+      },
+    });
+    const { PATCH } = await importRoute();
+    const res = await PATCH(
+      await authedRequest({ method: "PATCH", body: JSON.stringify({ namespace: "project-a", name: "jupyter-nlp-ln", running: true }) }),
+      undefined,
+    );
+    expect(res.status).toBe(200);
+    const arg = patchNamespacedCustomObject.mock.calls[0][0];
+    expect(arg.name).toBe("jupyter-nlp-ln");
+    // The mark is removed in the same request as the running add; the
+    // auto-stopped-at record is left untouched (it is the controller's own
+    // record of when it stopped the environment, and a floor under the idle clock).
+    expect(arg.body).toEqual([
+      { op: "add", path: "/spec/running", value: true },
+      { op: "remove", path: "/metadata/annotations/ai.cubestack.io~1auto-stopped" },
+    ]);
   });
 
   it("rejects a missing running boolean", async () => {

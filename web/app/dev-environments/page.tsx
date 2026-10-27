@@ -1421,9 +1421,9 @@ function SpecCard({ e }: { e: DevEnvironmentSummary }) {
     ]);
   }
   if (e.env.length) {
-    // The variables themselves are one block per environment: the literal
-    // values are masked behind one reveal, because the list that produced this
-    // panel deliberately does not carry them.
+    // The variables themselves are one block per environment: the list that
+    // produced this panel deliberately does not carry literal values, so the
+    // block fetches them for this environment when it opens.
     rows.push([t("dev.spec.env"), <EnvValues key="env" e={e} />]);
   }
   if (e.command.length) rows.push([t("dev.spec.command"), e.command.join(" ")]);
@@ -1441,84 +1441,75 @@ function SpecCard({ e }: { e: DevEnvironmentSummary }) {
 }
 
 /**
- * spec.runtime.env, one variable per line, with literal values masked until the
- * user asks for them.
+ * spec.runtime.env, one variable per line, with literal values shown as they are.
  *
  * The environment list is cluster-wide and carries only names (and valueFrom
  * sources): a literal value can be a credential, so it is fetched for this one
- * environment on demand. A valueFrom is shown by its source — the value itself
- * lives in a Secret or ConfigMap, not in the CR.
+ * environment when its detail opens. A valueFrom is shown by its source — the
+ * value itself lives in a Secret or ConfigMap, not in the CR.
  */
 function EnvValues({ e }: { e: DevEnvironmentSummary }) {
   const { t } = useI18n();
   const [values, setValues] = useState<Record<string, string> | null>(null);
-  const [revealed, setRevealed] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
   // Nothing to fetch when every entry is a reference: there are no literals.
   const hasLiteral = e.env.some((v) => v.hasValue);
+  // One request per mounted row. React's development StrictMode runs every
+  // effect twice (mount, simulated unmount, mount); sharing the in-flight
+  // promise keeps the second run from issuing another read — and lets the
+  // second run still apply the first one's answer, which a per-run
+  // cancellation flag alone would discard.
+  const requestRef = useRef<Promise<{ values: Record<string, string> } | { error: string }> | null>(null);
 
-  const load = async (): Promise<boolean> => {
-    if (values !== null) return true;
-    setBusy(true);
-    try {
-      const res = await apiFetch(
+  useEffect(() => {
+    if (!hasLiteral) return;
+    if (requestRef.current === null) {
+      requestRef.current = apiFetch(
         `/api/devenvironments/env-values?namespace=${encodeURIComponent(e.namespace)}&name=${encodeURIComponent(e.name)}`,
-      );
-      const body = (await res.json().catch(() => ({}))) as ValidationErrorBody & { values?: Record<string, string> };
-      if (!res.ok || !body.values) {
-        setError(validationMessage(t, body, res.status, "dev"));
-        return false;
-      }
-      setValues(body.values);
-      setError(null);
-      return true;
-    } catch {
-      setError(t("dev.err.envUnreadable"));
-      return false;
-    } finally {
-      setBusy(false);
+      )
+        .then(async (res) => {
+          const body = (await res.json().catch(() => ({}))) as ValidationErrorBody & { values?: Record<string, string> };
+          if (!res.ok || !body.values) {
+            return { error: validationMessage(t, body, res.status, "dev") };
+          }
+          return { values: body.values };
+        })
+        .catch(() => ({ error: t("dev.err.envUnreadable") }));
     }
-  };
+    let cancelled = false;
+    void requestRef.current.then((result) => {
+      if (cancelled) return;
+      if ("values" in result) {
+        setValues(result.values);
+        setError(null);
+      } else {
+        setError(result.error);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+    // `t` is rebuilt on every render by useI18n; the fetch is keyed to the
+    // environment alone.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasLiteral, e.namespace, e.name]);
 
   return (
-    <Box sx={{ display: "flex", alignItems: "flex-start", justifyContent: "flex-end", gap: "8px", minWidth: 0 }}>
-      <Box sx={{ display: "grid", justifyItems: "end", gap: "2px", minWidth: 0 }}>
-        {error ? (
-          <Box component="span" data-od-id="env-values-error" sx={{ color: STATUS_ERR }}>{error}</Box>
-        ) : null}
-        <Box component="span" data-od-id="env-values" sx={{ whiteSpace: "pre-line", overflowWrap: "anywhere", textAlign: "right" }}>
-          {e.env
-            .map((v) => {
-              if (v.valueFrom) return `${v.name} → ${v.valueFrom}`;
-              // A literal is masked until asked for; an entry with no value and
-              // no source is an empty value, not a dangling arrow.
-              const value = revealed && values ? values[v.name] : undefined;
-              return `${v.name}=${value ?? (v.hasValue ? SECRET_MASK : "")}`;
-            })
-            .join("\n")}
-        </Box>
-      </Box>
-      {hasLiteral ? (
-        <IconButton
-          data-od-id="env-values-toggle"
-          aria-label={revealed ? t("dev.spec.envHide") : t("dev.spec.envReveal")}
-          aria-pressed={revealed}
-          disabled={busy}
-          onClick={async () => {
-            if (revealed) {
-              setRevealed(false);
-              return;
-            }
-            // The mask stays if the values could not be read: the row says why.
-            if (values === null && !(await load())) return;
-            setRevealed(true);
-          }}
-          sx={{ p: 0, width: 20, height: 20, color: "var(--accent-strong)", "&:hover": { background: "transparent" } }}
-        >
-          <EyeIcon open={revealed} />
-        </IconButton>
+    <Box sx={{ display: "grid", justifyItems: "end", gap: "2px", minWidth: 0 }}>
+      {error ? (
+        <Box component="span" data-od-id="env-values-error" sx={{ color: STATUS_ERR }}>{error}</Box>
       ) : null}
+      <Box component="span" data-od-id="env-values" sx={{ whiteSpace: "pre-line", overflowWrap: "anywhere", textAlign: "right" }}>
+        {e.env
+          .map((v) => {
+            if (v.valueFrom) return `${v.name} → ${v.valueFrom}`;
+            // A literal's value arrives with the fetch above; until it lands,
+            // name the variable alone rather than pretending it is empty.
+            const value = values?.[v.name];
+            return value === undefined ? v.name : `${v.name}=${value}`;
+          })
+          .join("\n")}
+      </Box>
     </Box>
   );
 }
@@ -1645,7 +1636,18 @@ function DetailPanel({ e, onAct }: { e: DevEnvironmentSummary; onAct: (e: DevEnv
 
 // ── create wizard ────────────────────────────────────────────────────────────
 
-const DNS_LABEL_RE = /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/;
+// A DNS-1035 label: the name is the environment's Service name, which must
+// start with a letter. Mirrored from the create route and the operator's
+// admission policy (config/vap/devenvironment_policy.yaml).
+const DNS_LABEL_RE = /^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$/;
+// The namespace select's "create a new one" entry. A name cannot carry an
+// underscore (the API server takes a DNS-1123 label), so it can never collide
+// with a namespace the cluster has, and it is never sent anywhere: `create()`
+// resolves it to the name the user typed before the request is built.
+const NEW_NAMESPACE = "__new__";
+// A Namespace's name is a DNS-1123 label, which is looser than the DNS-1035 rule
+// the environment's own name obeys: it may start with a digit.
+const NAMESPACE_RE = /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/;
 // spec.runtime.user's own validation, mirrored from the CRD's schema (Pattern
 // ^[a-z_][a-z0-9_-]*$ with MaxLength 32) and from the create route, so the
 // wizard cannot walk the user to a spec the API server would reject.
@@ -1727,6 +1729,10 @@ interface Draft {
   // number field would turn an empty box into 0, and 0 is not a missing uid —
   // it is the request to run as root.
   runAsRoot: boolean;
+  // spec.runtime.sudo: passwordless sudo for the container's non-root account.
+  // Off by default; a root container already has the privilege, so the grant is
+  // neither offered nor sent when runAsRoot is on.
+  sudo: boolean;
   runtimeUser: string;
   runAsUser: string;
   runAsGroup: string;
@@ -1829,6 +1835,7 @@ function CreateWizard({
     idleCustom: false,
     idleMinutes: "",
     runAsRoot: false,
+    sudo: false,
     runtimeUser: "",
     runAsUser: String(PLATFORM_UID),
     runAsGroup: String(PLATFORM_GID),
@@ -1881,7 +1888,23 @@ function CreateWizard({
 
   const setField = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft((prev) => ({ ...prev, [key]: value }));
 
+  // The select offers `default` plus "create a new one": the tenant namespaces
+  // the platform does not manage are not listed, because a denylist of the ones
+  // it does manage was always one install behind (issue #367). A namespace the
+  // user names here is created first, then the environment is created in it.
+  const [newNamespace, setNewNamespace] = useState(false);
+  const [newNamespaceName, setNewNamespaceName] = useState("");
+  const [namespaceError, setNamespaceError] = useState(false);
+  const newNamespaceValid = !newNamespace || NAMESPACE_RE.test(newNamespaceName.trim());
+  const effectiveNamespace = newNamespace ? newNamespaceName.trim() : draft.namespace;
+
   const changeNamespace = (namespace: string) => {
+    if (namespace === NEW_NAMESPACE) {
+      setNewNamespace(true);
+      return;
+    }
+    setNewNamespace(false);
+    setNamespaceError(false);
     setDraft((prev) => ({ ...prev, namespace }));
   };
 
@@ -1939,10 +1962,10 @@ function CreateWizard({
   // convenience: an environment created by someone else in the meantime is still
   // the server's to refuse, and its `nameTaken` is what the user then reads.
   const nameTaken = environments.some(
-    (e) => e.namespace === draft.namespace && e.name === draft.name.trim(),
+    (e) => e.namespace === effectiveNamespace && e.name === draft.name.trim(),
   );
   const nameValid = DNS_LABEL_RE.test(draft.name.trim()) && draft.name.trim().length > 0;
-  const step1Valid = nameValid && !nameTaken && !!draft.namespace && !!draft.image;
+  const step1Valid = nameValid && !nameTaken && !!effectiveNamespace && newNamespaceValid && !!draft.image;
   // Client-side validation mirrors the server (POST) rules so a user cannot
   // advance or submit out-of-range / fractional GPU or storage values. A card
   // count is only asked for, and only checked, when an accelerator is wanted:
@@ -2033,10 +2056,12 @@ function CreateWizard({
       if (!step1Valid) {
         setNameError(!nameValid || nameTaken);
         setImageError(!draft.image);
+        setNamespaceError(!effectiveNamespace || !newNamespaceValid);
         return;
       }
       setNameError(false);
       setImageError(false);
+      setNamespaceError(false);
     } else if (step === 2) {
       setGpuError(!gpuValid);
       setStorageError(!storageValid);
@@ -2069,11 +2094,12 @@ function CreateWizard({
     setEnvError(!envRowsValid);
     setPortError(!portRowsValid);
     setNodeNameError(!nodeNameValid);
-    if (!step2Valid || !step3Valid) return;
+    setNamespaceError(!effectiveNamespace || !newNamespaceValid);
+    if (!step1Valid || !step2Valid || !step3Valid) return;
     setCreateBusy(true);
     setCreateError(null);
     const body = {
-      namespace: draft.namespace,
+      namespace: effectiveNamespace,
       name: draft.name.trim(),
       type: draft.type,
       image: draft.image.trim(),
@@ -2101,6 +2127,9 @@ function CreateWizard({
             runtimeUser: effectiveUser,
             runAsUser: Number(effectiveUid),
             runAsGroup: Number(effectiveGid),
+            // The grant follows the container's non-root account; a root
+            // environment already has the privilege and states nothing.
+            ...(draft.sudo ? { sudo: true } : {}),
           }),
       // Step 3's storage / runtime / network sections. Each is sent only when it
       // states something, so an untouched wizard describes exactly the
@@ -2140,15 +2169,33 @@ function CreateWizard({
           }
         : {}),
     };
-    apiFetch("/api/devenvironments", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    })
+    // The namespace first, then the environment in it: the wizard no longer
+    // offers a tenant namespace, so the one the user names here may not exist
+    // yet. The route answers 200 for one that does, which is what lets the same
+    // field deploy into an existing tenant namespace by name.
+    (newNamespace
+      ? apiFetch("/api/namespaces", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: effectiveNamespace }),
+        }).then(async (res) => {
+          if (res.ok) return;
+          const data = (await res.json().catch(() => ({}))) as ValidationErrorBody;
+          throw new Error(validationMessage(t, data, res.status, "dev"));
+        })
+      : Promise.resolve()
+    )
+      .then(() =>
+        apiFetch("/api/devenvironments", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }),
+      )
       .then(async (res) => {
         const data = (await res.json().catch(() => ({}))) as ValidationErrorBody & { name?: string };
         if (!res.ok) throw new Error(validationMessage(t, data, res.status, "dev"));
-        onCreated(draft.namespace, data.name ?? draft.name.trim());
+        onCreated(effectiveNamespace, data.name ?? draft.name.trim());
       })
       .catch((err: Error) => setCreateError(err.message))
       .finally(() => setCreateBusy(false));
@@ -2206,7 +2253,7 @@ function CreateWizard({
   // array rather than spreading, so the conditional rows stay [string, string].
   const summaryRows: Array<[string, string]> = [
     [t("dev.wizard.name"), draft.name.trim()],
-    [t("dev.wizard.namespace"), draft.namespace],
+    [t("dev.wizard.namespace"), effectiveNamespace],
     [t("dev.wizard.type"), draft.type],
     [t("dev.wizard.image"), draft.image],
     [t("dev.wizard.accelerator"), gpuRequested ? `${draft.gpuCount} × ${draft.accelerator}${draft.gpuModel ? ` · ${draft.gpuModel}` : ""}` : t("dev.wizard.accelerator.none")],
@@ -2222,7 +2269,7 @@ function CreateWizard({
       t("dev.wizard.identity"),
       draft.runAsRoot
         ? t("dev.wizard.identityRoot")
-        : t("dev.wizard.identityValue", { user: effectiveUser, uid: effectiveUid, gid: effectiveGid }),
+        : `${t("dev.wizard.identityValue", { user: effectiveUser, uid: effectiveUid, gid: effectiveGid })}${draft.sudo ? " · sudo" : ""}`,
     ],
   ];
   // Only what the user actually stated: a list of empty rows would bury the
@@ -2231,7 +2278,11 @@ function CreateWizard({
   if (filledPvcs.length) {
     summaryRows.push([t("dev.wizard.pvcs"), filledPvcs.map((r) => `${r.pvcName.trim()} → ${r.mountPath.trim()}`).join(" · ")]);
   }
-  if (filledEnvs.length) summaryRows.push([t("dev.wizard.envs"), filledEnvs.map((r) => r.name.trim()).join(" · ")]);
+  // Name and value, the same pair the user typed in the runtime section — a
+  // bare name would not say enough to confirm what is about to be created.
+  if (filledEnvs.length) {
+    summaryRows.push([t("dev.wizard.envs"), filledEnvs.map((r) => `${r.name.trim()}=${r.value}`).join(" · ")]);
+  }
   if (draft.command.trim()) summaryRows.push([t("dev.wizard.command"), draft.command.trim()]);
   if (draft.args.trim()) summaryRows.push([t("dev.wizard.args"), draft.args.trim()]);
   if (filledPorts.length) {
@@ -2282,12 +2333,37 @@ function CreateWizard({
                 <WizField label={t("dev.wizard.name")} hint={t("dev.wizard.nameHint")} error={nameError} errorText={t("dev.wizard.errName")}>
                   <TextField size="small" fullWidth autoFocus value={draft.name} onChange={(e) => setField("name", e.target.value)} placeholder="e.g. jupyter-nlp-ln" />
                 </WizField>
-                <WizField label={t("dev.wizard.namespace")}>
-                  <Select size="small" fullWidth data-od-id="wizard-namespace" value={draft.namespace} onChange={(e) => changeNamespace(e.target.value)}>
+                <WizField
+                  label={t("dev.wizard.namespace")}
+                  error={namespaceError}
+                  errorText={t("dev.wizard.errNamespaceName")}
+                >
+                  <Select
+                    size="small"
+                    fullWidth
+                    data-od-id="wizard-namespace"
+                    value={newNamespace ? NEW_NAMESPACE : draft.namespace}
+                    onChange={(e) => changeNamespace(e.target.value)}
+                  >
                     {options.namespaces.map((n) => (
                       <MenuItem key={n.name} value={n.name}>{n.name}</MenuItem>
                     ))}
+                    <MenuItem value={NEW_NAMESPACE} data-od-id="wizard-namespace-new">
+                      {t("dev.wizard.namespaceNew")}
+                    </MenuItem>
                   </Select>
+                  {newNamespace && (
+                    <TextField
+                      size="small"
+                      fullWidth
+                      autoFocus
+                      data-od-id="wizard-namespace-name"
+                      value={newNamespaceName}
+                      onChange={(e) => setNewNamespaceName(e.target.value)}
+                      placeholder={t("dev.wizard.namespaceNewPh")}
+                      sx={{ mt: "8px" }}
+                    />
+                  )}
                 </WizField>
                 <WizField
                   label={t("dev.wizard.type")}
@@ -2574,6 +2650,19 @@ function CreateWizard({
                 </WizSection>
 
                 <WizSection odId="sec-runtime" title={t("dev.wizard.runtime")} badge="runtime.env / args / command">
+                  <Box sx={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "12px", py: "8px" }}>
+                    <Box>
+                      <Box sx={{ fontSize: 12.5 }}>{t("dev.wizard.sudo")}</Box>
+                      <Box sx={{ fontSize: 11, color: "text.secondary", mt: "2px" }}>{t("dev.wizard.sudoHint")}</Box>
+                    </Box>
+                    <Switch
+                      size="small"
+                      checked={draft.sudo}
+                      disabled={draft.runAsRoot}
+                      onChange={(e) => setField("sudo", e.target.checked)}
+                      data-od-id="wizard-sudo"
+                    />
+                  </Box>
                   <WizField label={t("dev.wizard.envs")} hint={t("dev.wizard.envHint")} error={envError} errorText={t("dev.wizard.errEnv")}>
                     {draft.envs.map((r) => (
                       <Box key={r.id} sx={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: "8px", alignItems: "center", mb: "8px" }}>

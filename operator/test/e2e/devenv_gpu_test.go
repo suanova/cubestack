@@ -6,6 +6,9 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"math"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -90,38 +93,121 @@ type gpuVendor struct {
 
 	// tool is the vendor's own device tool, run inside the environment.
 	tool string
+
+	// reportedNames parses the tool's output into the device names it reported,
+	// which is what makes N2 an assertion about what the tool saw rather than
+	// about whether it answered at all. nil for a vendor whose output this
+	// repository has no sample of to parse against; that vendor keeps the older
+	// "something was printed" form until a sample is taken from its hardware.
+	reportedNames func(stdout string) []string
 }
 
 var gpuVendors = []gpuVendor{
 	{
-		device:       "nvidia",
-		vendor:       aiv1alpha1.AcceleratorVendorNvidia,
-		resource:     nvidiaGPU,
-		productLabel: nvidiaProduct,
-		image:        "cube-base-ssh",
-		tool:         "nvidia-smi -L",
+		device:        "nvidia",
+		vendor:        aiv1alpha1.AcceleratorVendorNvidia,
+		resource:      nvidiaGPU,
+		productLabel:  nvidiaProduct,
+		image:         "cuda-pytorch-ssh",
+		tool:          "nvidia-smi -L",
+		reportedNames: nvidiaReportedNames,
 	},
 	{
 		device:       "metax",
 		vendor:       aiv1alpha1.AcceleratorVendorMetax,
 		resource:     metaxGPU,
 		productLabel: metaxProduct,
-		image:        "maca-base-ssh",
+		image:        "maca-pytorch-ssh",
 		tool:         "mx-smi",
 	},
 }
 
-// deviceCountCommand is the device count as the image's own torch sees it.
+// nvidiaDeviceLine is one device as `nvidia-smi -L` prints it. Taken from the
+// RTX 5070 Ti this was first run against:
+//
+//	GPU 0: NVIDIA GeForce RTX 5070 Ti (UUID: GPU-25703a89-c55e-1f77-45ea-69c17b6553ae)
+//
+// The name is kept as a capture rather than split further: it is free text — a
+// model name, with spaces — and nothing in this family asks for anything inside
+// it beyond it being there.
+var nvidiaDeviceLine = regexp.MustCompile(`^GPU \d+: (.+) \(UUID: GPU-[0-9a-f-]+\)$`)
+
+// nvidiaReportedNames is the device names `nvidia-smi -L` reported, one per line.
+//
+// A line the pattern does not match contributes no name, so an answer that is not
+// a device listing counts as no device rather than as one.
+func nvidiaReportedNames(stdout string) []string {
+	var names []string
+	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
+		if m := nvidiaDeviceLine.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
+			names = append(names, m[1])
+		}
+	}
+	return names
+}
+
+// reportedDevices is the whole of what N2 accepts as a device being present.
+//
+// N5 negates this rather than restating it: the claim the pair makes is that the
+// device is what decides the tool's answer, so what has to hold is that N2's
+// predicate does not hold where nothing was allocated. Keeping the predicate in
+// one method is what makes that a property of the code instead of a comment
+// asking the next person to keep two copies in step.
+func (v gpuVendor) reportedDevices(res devenv.SSHResult) int {
+	if res.ExitCode != 0 {
+		return 0
+	}
+	if v.reportedNames == nil {
+		if strings.TrimSpace(res.Stdout) == "" {
+			return 0
+		}
+		return 1
+	}
+	return len(v.reportedNames(res.Stdout))
+}
+
+// deviceOpenCommand counts the devices the image's own torch sees, then opens one
+// and runs a matmul on it, printing both.
 //
 // `torch.cuda` rather than the vendor tool, because what this case is about is
 // the framework a user's code runs against, not the driver's own view of itself.
 // The MACA build is a port of the CUDA one, and whether that port mirrors
-// `torch.cuda` is the part of this case a real MACA node has to confirm: the
+// `torch.cuda` is the part of this a real MACA node has to confirm: the
 // catalogue's own MACA stack check imports torch and prints `torch.__version__`
 // and never touches a device API, so nothing in this repository settles it. If
 // the port does not mirror it, this fails with the interpreter's own error and
 // the finding is about the port rather than about the device.
-const deviceCountCommand = `python3 -c 'import torch; print(torch.cuda.device_count())'`
+//
+// The open is not decoration. `device_count()` reads the visible-device
+// configuration and opens nothing, so it can report the right count on an
+// environment whose account cannot open the device at all — that was #302 on
+// MetaX. `is_available()` and the matmul are what tell the two apart, and this
+// is a fresh process, so they are also the first real touch of the device: a
+// driver that cannot initialize says so here.
+const deviceOpenCommand = `python3 -c 'import torch; print(torch.cuda.device_count()); x = torch.randn(256, 256, device="cuda"); print(torch.cuda.is_available(), (x @ x).sum().item())'`
+
+// deviceProbeCommand reports the same three things about the image's own torch,
+// asked where the device is supposed to be absent: how many devices it sees,
+// whether CUDA is available, and whether a real allocation onto the device works.
+//
+// The last answer is the open attempt, and reporting it rather than letting it
+// raise is what keeps N5 from passing vacuously. In that environment
+// `deviceOpenCommand` is certain to fail at its matmul, and a failure is also what
+// a torch that cannot start at all produces — the exit code cannot tell the two
+// apart. This one exits 0 and prints one of exactly two things, so a torch that
+// never ran is a failed assertion rather than a satisfied one.
+const deviceProbeCommand = `python3 - <<'PY'
+import torch
+
+count = torch.cuda.device_count()
+available = torch.cuda.is_available()
+try:
+    torch.ones(1, device="cuda")
+    opened = True
+except Exception:
+    opened = False
+print(count, available, opened)
+PY`
 
 // int32Ptr is a pointer to n, for the optional spec fields that are pointers.
 func int32Ptr(n int64) *int32 {
@@ -247,24 +333,34 @@ func describeGPUVendor(v gpuVendor) {
 				It("N2 runs the vendor's own device tool", func(ctx SpecContext) {
 					env := open()
 
-					// Exit 0 and something printed, rather than a parsed line,
-					// because the two vendors mean different things by it and both
-					// mean something: nvidia-smi is injected by the container
-					// toolkit at start, so its running at all is the proof, while
-					// mx-smi is baked into the image and so is proved by answering
-					// rather than by existing. Parsing a device line would need a
-					// sample of each tool's output, and the MACA one is not in this
-					// repository to take.
-					out := sshOutput(ctx, env, v.tool)
-					Expect(strings.TrimSpace(out)).NotTo(BeEmpty(),
-						"%s exited 0 and reported nothing, which is not a device being present", v.tool)
+					// nvidia-smi is injected by the container toolkit at start,
+					// so its running at all proves driver, toolkit and device all
+					// reached the process; the parsed line is what turns "it
+					// answered" into "it saw the devices the spec asked for".
+					// mx-smi is baked into the image, so there its answering is
+					// the proof, and no sample of its output is in this repository
+					// to parse against — that vendor keeps the weaker form.
+					res := sshRun(ctx, env, v.tool)
+					Expect(v.reportedDevices(res)).To(Equal(int(gpuCount)),
+						"%s reported a different number of devices from the spec (exit %d).\nstdout:\n%s",
+						v.tool, res.ExitCode, res.Stdout)
 				})
 
-				It("N3 lets the image's torch count the device", func(ctx SpecContext) {
+				It("N3 lets the image's torch open the device", func(ctx SpecContext) {
 					env := open()
-					out := sshOutput(ctx, env, deviceCountCommand)
-					Expect(strings.TrimSpace(out)).To(Equal(fmt.Sprintf("%d", gpuCount)),
+					fields := strings.Fields(sshOutput(ctx, env, deviceOpenCommand))
+					Expect(fields).To(HaveLen(3),
+						"the torch in %s printed %q, not a count, an availability and a matmul result",
+						v.image, strings.Join(fields, " "))
+					Expect(fields[0]).To(Equal(fmt.Sprintf("%d", gpuCount)),
 						"the torch in %s counts a different number of devices from the spec", v.image)
+					Expect(fields[1]).To(Equal("True"),
+						"the torch in %s counts a device it cannot open", v.image)
+					sum, err := strconv.ParseFloat(fields[2], 64)
+					Expect(err).NotTo(HaveOccurred(),
+						"the matmul in %s printed %q, which is not a number", v.image, fields[2])
+					Expect(math.IsNaN(sum) || math.IsInf(sum, 0)).To(BeFalse(),
+						"the matmul in %s produced %v on the device it was given", v.image, sum)
 				})
 			},
 		}.declare()
@@ -401,17 +497,29 @@ func describeGPUVendorAbsent(v gpuVendor) {
 						// N2's predicate, negated — the coupling is the point
 						// rather than an accident. The claim under test is that
 						// the device is what decides N2's answer, so what has to
-						// hold is that N2's answer does not hold here; and an N2
-						// later tightened to a parsed output line has to tighten
-						// this with it, which one negation in one place makes hard
-						// to forget.
+						// hold is that N2's answer does not hold here; sharing
+						// `reportedDevices` is what keeps the two from drifting.
 						res := sshRun(ctx, env, v.tool)
-						Expect(res.ExitCode != 0 || strings.TrimSpace(res.Stdout) == "").To(BeTrue(),
-							"%s exited 0 and printed %d bytes in an environment that was allocated no device.\n"+
-								"That is what N2 accepts as a device being present, so N2 cannot tell the "+
-								"device from its absence and has to be tightened to a parsed line. "+
+						Expect(v.reportedDevices(res)).To(Equal(0),
+							"%s reported a device in an environment that was allocated none (exit %d).\n"+
 								"What the tool printed to stdout:\n%s",
-							v.tool, len(res.Stdout), res.Stdout)
+							v.tool, res.ExitCode, res.Stdout)
+
+						// N3's question — can the image's torch use a
+						// device? — asked where none was allocated. The
+						// allocation is attempted and reported rather than
+						// left to raise, because here it is meant to fail
+						// and a raise is also what a torch that cannot
+						// start produces; see deviceProbeCommand.
+						torch := sshRun(ctx, env, deviceProbeCommand)
+						Expect(torch.ExitCode).To(BeZero(),
+							"the torch in %s could not report device state in an environment that was allocated none "+
+								"(exit %d).\nWhat it printed to stdout:\n%s\nWhat it printed to stderr:\n%s",
+							v.image, torch.ExitCode, torch.Stdout, torch.Stderr)
+						Expect(strings.TrimSpace(torch.Stdout)).To(Equal("0 False False"),
+							"the torch in %s does not report zero devices, unavailable CUDA and a refused "+
+								"allocation where none was allocated.\nWhat it printed to stdout:\n%s",
+							v.image, torch.Stdout)
 					})
 			},
 		}.declare()
@@ -430,7 +538,7 @@ func describeGPUVendorAbsent(v gpuVendor) {
 func describeGPUShortfall() {
 	draftCase{
 		Name:     "gpu-shortfall",
-		Image:    devenv.MustImage("cube-base-ssh"),
+		Image:    devenv.MustImage("cuda-pytorch-ssh"),
 		Identity: devenv.NonRoot,
 		Shape: func(d *aiv1alpha1.DevEnvironment) {
 			// One more than the largest single node holds, which makes the request

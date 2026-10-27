@@ -20,6 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       operator: ${{ steps.filter.outputs.operator }}
+      devenv: ${{ steps.filter.outputs.devenv }}
       build: ${{ steps.select.outputs.build }}
       smoke: ${{ steps.select.outputs.smoke }}
       smoke-groups-json: ${{ steps.select.outputs.smoke-groups-json }}
@@ -51,6 +52,39 @@ jobs:
               - 'operator/**'
               - 'Makefile'
               - '.github/**'
+            # The deep DevEnvironment suite is the expensive job: three kind
+            # clusters, each with a full operator install, ~15 minutes of CI per
+            # PR. It runs on the DevEnvironment's own sources — the API types,
+            # the controller, the activity agent it installs, the suite and the
+            # harness that gates it — plus the build and CI it needs, and not on
+            # a PR that only touches another controller.
+            #
+            # The manager is one binary and the chart one artifact, so shared
+            # code (route.go, podspec.go, apply.go, internal/renderer), a chart
+            # template or RBAC change, and a dependency bump land here without
+            # matching this filter. The DevEnvironment's own CRD and VAP are
+            # named because they are the contract the suite asserts. test-e2e
+            # still installs that chart and runs helm-e2e-devenv-verify on every
+            # operator change, and is the guard for the rest; this suite is the
+            # deep one, so it runs when its own subject moves — on a pull request
+            # and on a push to main alike.
+            devenv:
+              - 'operator/api/v1alpha1/devenvironment*'
+              - 'operator/api/v1alpha1/conditions.go'
+              - 'operator/config/crd/bases/ai.cubestack.io_devenvironments.yaml'
+              - 'operator/config/vap/devenvironment_policy.yaml'
+              - 'operator/internal/controller/devenvironment*'
+              - 'operator/internal/controller/assets.go'
+              - 'operator/internal/activity/**'
+              - 'operator/test/e2e/assets/devenvironment.yaml'
+              - 'operator/test/e2e/devenv/**'
+              - 'operator/test/e2e/devenv_*_test.go'
+              - 'operator/test/e2e/e2e_suite_test.go'
+              - 'operator/hack/**'
+              - 'operator/Makefile'
+              - 'operator/Dockerfile*'
+              - '.github/actions/**'
+              - '.github/workflows/ci-operator.yml'
       - name: Work out which images this change reaches
         id: select
         # Shared with ci-images.yml, which derives its `:latest` gate from the same
@@ -149,7 +183,7 @@ jobs:
           persist-credentials: false
       - name: Reclaim disk space
         # The vendor bases are why this step exists, exactly as on a publishing leg. The CPU
-        # image is a fraction of one (`cpu-base` measures well under a gigabyte), so its leg
+        # image is a fraction of one (`cpu-pytorch` measures well under a gigabyte), so its leg
         # skips the 1m41s. `vendor` is the rule's, carried on the group it sized: one
         # derivation, so a smoke leg and a publish leg cannot come out sized differently.
         if: ${{ matrix.vendor }}
@@ -157,7 +191,7 @@ jobs:
       - name: Build and smoke the images this base group reaches
         # Every image is built for linux/amd64 and started as a throwaway container on
         # 127.0.0.1, so this needs neither a cluster nor registry credentials. The e2e
-        # exercises the cpu-base image alone and leaves the rest neither built nor pulled
+        # exercises the cpu-pytorch image alone and leaves the rest neither built nor pulled
         # (operator/Makefile), so this is the only job that covers them.
         #
         # Only the images the change reaches are built, which is what keeps a CPU-only
@@ -170,7 +204,7 @@ jobs:
           # One target per image rather than `smoke`, which builds all three: smoke.sh takes
           # one image per invocation, so naming the targets is how a subset is asked for.
           # The names are the selector's vocabulary, which is the Makefile's
-          # (`make -C images smoke-cpu-base`), and `matrix.images` is that vocabulary for this
+          # (`make -C images smoke-cpu-pytorch`), and `matrix.images` is that vocabulary for this
           # leg's base.
           targets=""
           for img in ${{ matrix.images }}; do
@@ -262,11 +296,14 @@ jobs:
 
   devenv-conformance:
     needs: changes
-    if: needs.changes.outputs.operator == 'true'
+    # Not `operator`: see the `devenv` filter, which names what this suite is
+    # about. A skipped run is a pass for `result` below; test-e2e still covers
+    # the happy path for every operator change.
+    if: needs.changes.outputs.devenv == 'true'
     permissions:
       contents: read
     runs-on: ubuntu-latest
-    # One shard is the operator install plus half of the suite. go test's own
+    # One shard is the operator install plus one leg of the suite. go test's own
     # -timeout of 60m is the real stop, panicking with a useful message; this is
     # the job's release past that plus the ~5m of work before it.
     timeout-minutes: 90
@@ -278,13 +315,17 @@ jobs:
       # One shard failing must not cancel the other's diagnosis.
       fail-fast: false
       matrix:
-        # The suite's two priority labels, which partition the CPU selection
-        # (96 and 84 specs today). A spec carrying neither belongs to no leg,
-        # so the split is a partition — see DEVENV_E2E_PRIORITY in
-        # operator/Makefile. Two clusters rather than one: the suite's
+        # The suite's three shards, which partition the CPU selection (96, 78
+        # and 9 specs today). A case runs in its tier's shard unless it names
+        # another — see DEVENV_E2E_PRIORITY in operator/Makefile and
+        # devenv.LabelShard. Three clusters rather than one: the suite's
         # namespace is per run, but the environments would share a node, and
-        # each leg already needs the whole operator install.
-        priority: [p0, p1]
+        # each leg already needs the whole operator install. p2 is the leg with
+        # slack: it holds the last-declared, slowest cases (isolation, idle
+        # stop, controller restart) so they do not set the wall time of p1, and
+        # family K runs there too, which keeps p0 — the leg the matrix fills —
+        # from being the long one.
+        priority: [p0, p1, p2]
     steps:
       - name: Clone the code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

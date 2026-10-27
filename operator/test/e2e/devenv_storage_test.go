@@ -147,7 +147,7 @@ func describeMountPath() {
 
 	draftCase{
 		Name:     "storage-mount-path",
-		Image:    devenv.MustImage("cpu-base-ssh"),
+		Image:    devenv.MustImage("cpu-pytorch-ssh"),
 		Identity: devenv.NonRoot,
 		Shape: func(want *aiv1alpha1.DevEnvironment) {
 			want.Spec.Storage.MountPath = pinned
@@ -293,7 +293,7 @@ func describeVolumes() {
 
 	draftCase{
 		Name:     "storage-volumes",
-		Image:    devenv.MustImage("cpu-base-ssh"),
+		Image:    devenv.MustImage("cpu-pytorch-ssh"),
 		Identity: devenv.NonRoot,
 		Shape:    shaped,
 		Prepare: func(ctx context.Context) error {
@@ -402,7 +402,7 @@ func loadVolumeMarkers(ctx context.Context, script, data, ro, sub string) error 
 			RestartPolicy: corev1.RestartPolicyNever,
 			Containers: []corev1.Container{{
 				Name:    "load",
-				Image:   devenv.MustImage("cpu-base-ssh").Ref(),
+				Image:   devenv.MustImage("cpu-pytorch-ssh").Ref(),
 				Command: []string{"sh", "-c", script},
 				// Root, because the image lands on its own account, which does not
 				// own the directory it would have to chmod.

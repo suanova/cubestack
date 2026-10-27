@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Cubestack jupyter launch chain, shared by all three family images: cpu-base, cube-base and
-# maca-base.
+# Cubestack jupyter launch chain, shared by all three family images: cpu-pytorch, cuda-pytorch and
+# maca-pytorch.
 #
 # This is the image CMD. common/entrypoint.sh has already started sshd when the operator mounted
 # the ssh host key, and hands off here (mode jupyter). No base ships a usable launcher — the

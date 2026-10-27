@@ -13,6 +13,7 @@ export function inferenceServiceSummary(
     profileRef: "metax-sglang-dsv4-pd",
     modelRef: "deepseek-v4-flash-w8a8-v1",
     published: true,
+    aigatewayRouter: "cubestack-ai-gateway",
     routeModelName: "dsv4-flash",
     timeoutSeconds: 0,
     idleTimeoutSeconds: 300,
@@ -23,8 +24,8 @@ export function inferenceServiceSummary(
     gpuModel: "MXC500",
     gpuPerPod: 8,
     gpuRoles: [
-      { name: "prefill", gpuPerPod: 8, model: "MXC500" },
-      { name: "decode", gpuPerPod: 8, model: "MXC500" },
+      { name: "prefill", gpuPerPod: 8, model: "MXC500", replicas: 1, groupSize: 1 },
+      { name: "decode", gpuPerPod: 8, model: "MXC500", replicas: 2, groupSize: 1 },
     ],
     modelName: null,
     modelVersion: null,
@@ -40,6 +41,7 @@ export function inferenceServiceSummary(
     roles: [],
     internalEndpoint: null,
     publicEndpoint: null,
+    privateGatewayEndpoint: null,
     metrics: null,
     ...overrides,
   };

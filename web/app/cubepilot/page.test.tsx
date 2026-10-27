@@ -1328,12 +1328,16 @@ describe("cubepilot page", () => {
     expect(model.disabled).toBe(false);
     expect(model.textContent).toContain("qwen38-27b");
     expect(model.textContent).not.toContain("cubestack/");
-    // One option per model the TEMPLATE'S PROVIDERS declare, valued as the ref
-    // the CR stores — the external provider's included. (The gateway serves
-    // "deepseek-v4-flash" as well, but no provider declares it, so it is not a
-    // choice: the providers are the catalog.)
-    expect(model.options.length).toBe(2);
-    expect(Array.from(model.options).map((o) => o.value)).toEqual(["cubestack/qwen38-27b", "deepseek/deepseek-chat"]);
+    // The platform provider's options are the LIVE catalog — both Gateways'
+    // models — valued as the ref the CR stores; the template's entry only holds
+    // what the last save wrote, and a save rewrites it. The external provider's
+    // model is there too.
+    expect(model.options.length).toBe(3);
+    expect(Array.from(model.options).map((o) => o.value)).toEqual([
+      "cubestack/qwen38-27b",
+      "cubestack/deepseek-v4-flash",
+      "deepseek/deepseek-chat",
+    ]);
 
     const external = container.querySelector('[data-od-id="cp-config-llm-src-external"]') as HTMLElement;
     act(() => external.click());
@@ -1341,6 +1345,38 @@ describe("cubepilot page", () => {
     // The provider key is the ref prefix, so the row reads provider/modelId.
     expect(row.textContent).toContain("deepseek");
     expect(row.textContent).toContain("deepseek/deepseek-chat");
+    act(() => root.unmount());
+  });
+
+  it("offers each Gateway's models under its own platform provider", async () => {
+    // The public and private catalogues are separate providers: each ref points
+    // at the endpoint that serves it, so one save cannot replace the other's
+    // models.
+    stubApi({
+      exists: true,
+      selectedModel: "cubestack-private/dsv4-api",
+      userInstructions: "",
+      providers: [
+        { name: "cubestack", endpoint: "http://pub.test:8080/v1", models: ["qwen38-27b"], origin: "system" },
+        { name: "cubestack-private", endpoint: "http://priv.test:8080/v1", models: ["dsv4-api"], origin: "system" },
+      ],
+      gatewayModels: ["qwen38-27b", "dsv4-api"],
+      gatewayProviders: [
+        { name: "cubestack", endpoint: "http://pub.test:8080/v1", models: ["qwen38-27b"] },
+        { name: "cubestack-private", endpoint: "http://priv.test:8080/v1", models: ["dsv4-api"] },
+      ],
+    });
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    const model = container.querySelector('[data-od-id="cp-config-model-select"]') as HTMLSelectElement;
+    expect(Array.from(model.options).map((o) => o.value)).toEqual(["cubestack/qwen38-27b", "cubestack-private/dsv4-api"]);
+    // The option labels stay bare ids: neither provider prefix is shown.
+    expect(model.textContent).not.toContain("cubestack/");
+    expect(model.textContent).not.toContain("cubestack-private/");
+    // The note names the endpoint that actually serves the selection.
+    const note = container.querySelector('[data-od-id="cp-config-model-note"]') as HTMLElement;
+    expect(note.textContent).toContain("http://priv.test:8080/v1");
     act(() => root.unmount());
   });
 

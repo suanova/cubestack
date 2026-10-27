@@ -14,6 +14,13 @@ export const dynamic = "force-dynamic";
 const GROUP = "ai.cubestack.io";
 const VERSION = "v1alpha1";
 const PLURAL_DEVENV = "devenvironments";
+// The idle auto-stop mark the operator sets on an environment it has idled out.
+// It is the whole of the stopped state: clearing it is what starts the environment
+// again, which is the client's job (spec.running stays true throughout). The
+// companion ai.cubestack.io/auto-stopped-at key is the controller's own record of
+// when it stopped the environment, and it is a floor under the idle clock — the
+// portal must not clear it.
+const AUTO_STOPPED_ANNOTATION = "ai.cubestack.io/auto-stopped";
 
 // The user's public keys, when the create request carries any: they are
 // written to a per-environment Secret (created after the CR, owned by it) and
@@ -66,8 +73,8 @@ export interface DevEnvironmentSummary {
   // ConfigMap, the source it reads. A literal value is not carried here — this
   // list spans every namespace and any authenticated caller can read it, and an
   // env value can be a credential. `hasValue` says one exists; the value itself
-  // is fetched for one environment at a time (see env-values/route.ts) and stays
-  // masked until asked for.
+  // is fetched for one environment at a time (see env-values/route.ts) when its
+  // detail panel opens.
   env: Array<{ name: string; hasValue: boolean; valueFrom: string | null }>;
   // spec.runtime.command and .args, as the argv they are. Both are projected in
   // full: neither can carry a credential the way an env value can.
@@ -149,13 +156,18 @@ interface DevEnvStatus {
   jupyterTokenSecret?: { name?: string; namespace?: string };
 }
 interface DevEnv {
-  metadata?: { name?: string; namespace?: string; creationTimestamp?: string };
+  metadata?: { name?: string; namespace?: string; creationTimestamp?: string; annotations?: Record<string, string> };
   spec?: DevEnvSpec;
   status?: DevEnvStatus;
 }
 
 function num(v: unknown): number {
   return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+
+/** RFC 6901 JSON Pointer escape for an object key used in a patch path. */
+function jsonPointerEscape(key: string): string {
+  return key.replace(/~/g, "~0").replace(/\//g, "~1");
 }
 
 /** Where a valueFrom env entry reads its value from, as one readable line. */
@@ -285,7 +297,11 @@ export const GET = withAuth(async () => {
 
 // ── create (POST) ────────────────────────────────────────────────────────────
 
-const DNS_LABEL_RE = /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/;
+// A DNS-1035 label, not a DNS-1123 one: name is the environment's Service name
+// and its workload label value, and the operator's admission policy refuses
+// anything a Service cannot be named (starting with a letter, at most 63
+// characters). Validating it here turns that refusal into a field error.
+const DNS_LABEL_RE = /^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$/;
 // spec.runtime.user's own validation, mirrored from the CRD
 // (operator/api/v1alpha1/devenvironment_types.go: it is MaxLength=32 with
 // Pattern ^[a-z_][a-z0-9_-]*$, enforced by the API server and nothing else).
@@ -409,6 +425,10 @@ interface CreateBody {
   runtimeUser?: string; // → spec.runtime.user
   runAsUser?: number; // → spec.runtime.securityContext.runAsUser
   runAsGroup?: number; // → spec.runtime.securityContext.runAsGroup
+  // spec.runtime.sudo: passwordless sudo for the container's account. Absent /
+  // false = no grant, the CRD's default, so only true is ever written. A root
+  // container already has the privilege, so it is dropped there.
+  sudo?: boolean;
   // Form-shaped where the UI is a single box, CR-named where the UI already
   // edits a CR leaf.
   mountPath?: string; // → spec.storage.mountPath (absent = derived)
@@ -750,6 +770,9 @@ export const POST = withAuth(async (req) => {
     const user = runAsRoot ? undefined : body.runtimeUser || published?.user;
     const runAsGroup = runAsRoot ? 0 : body.runAsGroup ?? published?.runAsGroup;
     const runAsUser = body.runAsUser;
+    // The grant follows the container's non-root account: root already has the
+    // privilege, so a request that states both is answered with root alone.
+    const sudo = !runAsRoot && body.sudo === true;
     const securityContext =
       runAsUser === undefined && runAsGroup === undefined
         ? undefined
@@ -760,6 +783,7 @@ export const POST = withAuth(async (req) => {
     const runtime =
       user === undefined &&
       securityContext === undefined &&
+      !sudo &&
       env.length === 0 &&
       command.length === 0 &&
       args.length === 0
@@ -767,6 +791,7 @@ export const POST = withAuth(async (req) => {
         : {
             ...(user !== undefined ? { user } : {}),
             ...(securityContext ? { securityContext } : {}),
+            ...(sudo ? { sudo } : {}),
             ...(env.length ? { env } : {}),
             ...(command.length ? { command } : {}),
             ...(args.length ? { args } : {}),
@@ -911,6 +936,15 @@ export const POST = withAuth(async (req) => {
  * rejected with a 400 decode error). The `add` operation replaces
  * `spec.running` when present and creates it when the resource omits it
  * (existing resources created before the field was added to the API).
+ *
+ * Starting an auto-stopped environment also clears its
+ * `ai.cubestack.io/auto-stopped` mark, which is the whole of the stopped
+ * state — the operator never writes `spec.running` itself, so without the
+ * clear the Start would change nothing and the controller would never wake.
+ * The mark is removed only when present, because a JSON-Patch `remove` on an
+ * absent path rejects the entire patch; the controller's own
+ * `ai.cubestack.io/auto-stopped-at` record is left untouched, since clearing
+ * it would re-introduce the idle re-mark the operator just fixed.
  */
 export const PATCH = withAuth(async (req) => {
   try {
@@ -919,14 +953,32 @@ export const PATCH = withAuth(async (req) => {
       return Response.json({ error: "namespace, name and running (boolean) are required" }, { status: 400 });
     }
     const co = getCustomObjectsClient();
+    const ops: Array<{ op: string; path: string; value?: unknown }> = [
+      // JSON-Patch `add`: replaces /spec/running when present, creates it when absent.
+      { op: "add", path: "/spec/running", value: body.running },
+    ];
+    if (body.running) {
+      // Starting an auto-stopped environment requires clearing the mark, which
+      // is the whole of the stopped state. A JSON-Patch `remove` on an absent
+      // path rejects the entire patch, so only clear it when it is actually there.
+      const current = (await co.getNamespacedCustomObject({
+        group: GROUP,
+        version: VERSION,
+        namespace: body.namespace,
+        plural: PLURAL_DEVENV,
+        name: body.name,
+      })) as DevEnv | undefined;
+      if (current?.metadata?.annotations?.[AUTO_STOPPED_ANNOTATION]) {
+        ops.push({ op: "remove", path: `/metadata/annotations/${jsonPointerEscape(AUTO_STOPPED_ANNOTATION)}` });
+      }
+    }
     await co.patchNamespacedCustomObject({
       group: GROUP,
       version: VERSION,
       namespace: body.namespace,
       plural: PLURAL_DEVENV,
       name: body.name,
-      // JSON-Patch `add`: replaces /spec/running when present, creates it when absent.
-      body: [{ op: "add", path: "/spec/running", value: body.running }],
+      body: ops,
       fieldManager: "cubestack-web",
     });
     return Response.json({ ok: true });

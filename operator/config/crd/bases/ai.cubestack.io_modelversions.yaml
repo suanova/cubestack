@@ -132,13 +132,15 @@ spec:
                         type: object
                       uri:
                         description: |-
-                          URI is the S3 prefix of the model data, <bucket>/<prefix>/<model>/<version>.
-                          The bucket must be non-empty: a bare "s3://" or a missing bucket
-                          ("s3:///path") has no addressable model store (design §3.1).
+                          URI optionally locates the S3 prefix of the model data,
+                          <bucket>/<prefix>/<model>/<version>. The bucket must be non-empty: a bare
+                          "s3://" or a missing bucket ("s3:///path") has no addressable model store
+                          (design §3.1). Omitted means the location is supplied per deployment (for
+                          example by an InferenceService override), keeping the cluster-scoped
+                          registry entry free of environment-specific addresses. A template that
+                          references {{ model.path }} then fails to render until a URI is set.
                         pattern: ^s3://[^/]+(/.*)?$
                         type: string
-                    required:
-                    - uri
                     type: object
                   static:
                     description: Static is the pre-provisioned PV configuration, required

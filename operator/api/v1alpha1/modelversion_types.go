@@ -90,11 +90,16 @@ type S3CredentialsRef struct {
 // model directly from the object prefix; the platform passes location and
 // identity only (design §3.1 S3 strategy).
 type S3Storage struct {
-	// URI is the S3 prefix of the model data, <bucket>/<prefix>/<model>/<version>.
-	// The bucket must be non-empty: a bare "s3://" or a missing bucket
-	// ("s3:///path") has no addressable model store (design §3.1).
+	// URI optionally locates the S3 prefix of the model data,
+	// <bucket>/<prefix>/<model>/<version>. The bucket must be non-empty: a bare
+	// "s3://" or a missing bucket ("s3:///path") has no addressable model store
+	// (design §3.1). Omitted means the location is supplied per deployment (for
+	// example by an InferenceService override), keeping the cluster-scoped
+	// registry entry free of environment-specific addresses. A template that
+	// references {{ model.path }} then fails to render until a URI is set.
+	// +optional
 	// +kubebuilder:validation:Pattern="^s3://[^/]+(/.*)?$"
-	URI string `json:"uri"`
+	URI string `json:"uri,omitempty"`
 
 	// CredentialsRef optionally names the credentials Secret in cubestack-system
 	// that the controller copies into the service namespace. Absent means

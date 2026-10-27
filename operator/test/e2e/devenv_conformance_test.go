@@ -152,7 +152,7 @@ func teardownDevEnvConformance() {
 // things.
 //
 // The report is by key and not by environment because that is the axis the
-// catalogue is asserted on: "cube-base-ssh was tested" is true of the key. The
+// catalogue is asserted on: "cuda-pytorch-ssh was tested" is true of the key. The
 // conflict is judged by reference instead, because two keys — a family's SSH and
 // Jupyter rows — run the same image, and a digest that moved between them is one
 // name for two artifacts whether or not either key saw it twice.
@@ -236,18 +236,18 @@ var environments = []struct {
 	image    devenv.Image
 	identity devenv.Identity
 }{
-	{devenv.MustImage("cpu-base-ssh"), devenv.NonRoot},     // S1
-	{devenv.MustImage("cpu-base-ssh"), devenv.Root},        // S2
-	{devenv.MustImage("cpu-base-jupyter"), devenv.NonRoot}, // J1, S3
-	{devenv.MustImage("cpu-base-jupyter"), devenv.Root},    // J2, S4
-	{devenv.MustImage("maca-base-ssh"), devenv.NonRoot},
-	{devenv.MustImage("maca-base-ssh"), devenv.Root},
-	{devenv.MustImage("maca-base-jupyter"), devenv.NonRoot},
-	{devenv.MustImage("maca-base-jupyter"), devenv.Root},
-	{devenv.MustImage("cube-base-ssh"), devenv.NonRoot},
-	{devenv.MustImage("cube-base-ssh"), devenv.Root},
-	{devenv.MustImage("cube-base-jupyter"), devenv.NonRoot},
-	{devenv.MustImage("cube-base-jupyter"), devenv.Root},
+	{devenv.MustImage("cpu-pytorch-ssh"), devenv.NonRoot},     // S1
+	{devenv.MustImage("cpu-pytorch-ssh"), devenv.Root},        // S2
+	{devenv.MustImage("cpu-pytorch-jupyter"), devenv.NonRoot}, // J1, S3
+	{devenv.MustImage("cpu-pytorch-jupyter"), devenv.Root},    // J2, S4
+	{devenv.MustImage("maca-pytorch-ssh"), devenv.NonRoot},
+	{devenv.MustImage("maca-pytorch-ssh"), devenv.Root},
+	{devenv.MustImage("maca-pytorch-jupyter"), devenv.NonRoot},
+	{devenv.MustImage("maca-pytorch-jupyter"), devenv.Root},
+	{devenv.MustImage("cuda-pytorch-ssh"), devenv.NonRoot},
+	{devenv.MustImage("cuda-pytorch-ssh"), devenv.Root},
+	{devenv.MustImage("cuda-pytorch-jupyter"), devenv.NonRoot},
+	{devenv.MustImage("cuda-pytorch-jupyter"), devenv.Root},
 }
 
 var _ = Describe("DevEnvironment conformance", Label(devenv.LabelConformance), Ordered, func() {
@@ -285,6 +285,19 @@ var _ = Describe("DevEnvironment conformance", Label(devenv.LabelConformance), O
 	// down where the device is missing, so the same tree runs everywhere.
 	describeGPU()
 	describeRDMA()
+	// Family P, which asks the cluster's CNI to enforce the isolation every
+	// environment's NetworkPolicy renders, and family G's idle case, whose
+	// sidecar image the kind e2e builds and loads itself (see helm-e2e-images).
+	//
+	// The three are last, and family S after the two, because this tree is
+	// Ordered: a failure skips everything declared after it. G9 is the case most
+	// likely to fail for a reason outside the controller — a registry without the
+	// agent image, a cluster that reads as idle differently — and S is the one
+	// case that leaves the platform changed if it does not finish, so nothing
+	// else may depend on either.
+	describeIsolation()
+	describeIdle()
+	describeControllerRestart()
 })
 
 // DescribeEnvironment declares the container for one (image, identity): the

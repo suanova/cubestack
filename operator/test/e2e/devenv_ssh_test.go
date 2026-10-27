@@ -132,7 +132,7 @@ func describeUserKeys() {
 
 	draftCase{
 		Name:     envName,
-		Image:    devenv.MustImage("cpu-base-ssh"),
+		Image:    devenv.MustImage("cpu-pytorch-ssh"),
 		Identity: devenv.NonRoot,
 		Prepare: func(ctx context.Context) error {
 			var err error
@@ -279,7 +279,7 @@ func describeUserKeys() {
 func describeHostKeyRepair() {
 	draftCase{
 		Name:     "ssh-host-key-repair",
-		Image:    devenv.MustImage("cpu-base-ssh"),
+		Image:    devenv.MustImage("cpu-pytorch-ssh"),
 		Identity: devenv.NonRoot,
 		Cases: func(open func() *devenv.Environment) {
 			It("I3 replaces a host key sshd cannot read, and rolls the workload onto it",
@@ -363,7 +363,7 @@ func describeHostKeyRepair() {
 func describeSSHWithdrawal() {
 	draftCase{
 		Name:     "ssh-withdrawn",
-		Image:    devenv.MustImage("cpu-base-jupyter"),
+		Image:    devenv.MustImage("cpu-pytorch-jupyter"),
 		Identity: devenv.NonRoot,
 		Cases: func(open func() *devenv.Environment) {
 			It("I4 withdraws the ssh endpoint and releases its port when the exposure is turned off",
@@ -489,7 +489,7 @@ func describeLiveRemovedEntry() {
 
 	draftCase{
 		Name:     envName,
-		Image:    devenv.MustImage("cpu-base-ssh"),
+		Image:    devenv.MustImage("cpu-pytorch-ssh"),
 		Identity: devenv.NonRoot,
 		Prepare: func(ctx context.Context) error {
 			var err error

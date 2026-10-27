@@ -17,6 +17,12 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"encoding/json"
+	"fmt"
+	"maps"
+	"slices"
+	"strings"
+
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -330,8 +336,8 @@ type ObjectFieldSelector struct {
 }
 
 // PodResources specifies CPU, memory and per-Pod GPU requests. The
-// extendedResources key/value constraints are L1 rules, enforced by the VAP
-// (cross-field map iteration is not expressible within the CRD CEL budget).
+// extendedResources pairs are validated at render time, after any override
+// placeholder resolves (L2).
 type PodResources struct {
 	// CPU is written to requests.cpu.
 	// +optional
@@ -347,14 +353,56 @@ type PodResources struct {
 	// +optional
 	GPUPerPod *intstr.IntOrString `json:"gpuPerPod,omitempty"`
 
-	// ExtendedResources lists additional extended resources, e.g.
-	// rdma/ib_shared_devices (the InfiniBand fabric; rdma/roce_shared_devices is
-	// the RoCE one, and the controller sets it itself for a DevEnvironment),
-	// written to both requests and limits like gpuPerPod. Keys must not collide
-	// with cpu, memory or the GPU extended resource of either supported vendor
-	// (handled by the fields above; L1 VAP).
+	// ExtendedResources lists additional extended resources, e.g. RDMA
+	// devices, written to both requests and limits like gpuPerPod. The value
+	// is a comma-separated list of "name=count" pairs, and may be a template
+	// referencing overrides, e.g. '{{ overrides.extendedResources }}'. Only
+	// overrides.* is allowed in this field: which extended resource a cluster
+	// advertises — an InfiniBand or a RoCE fabric, for example — is the site's
+	// fact, not the profile's. A stringList override supplies several pairs,
+	// one per entry. Each resolved pair is validated at render time: the name
+	// must be a domain-qualified extended resource name that does not collide
+	// with cpu, memory or the GPU resource of either supported vendor, and the
+	// count must be a positive integer. A bad pair fails the render with
+	// InvalidOverride, and an empty resolved value adds no resource.
 	// +optional
-	ExtendedResources map[string]int64 `json:"extendedResources,omitempty"`
+	// +kubebuilder:validation:Pattern="^([^{}=]+=[1-9][0-9]*(,[^{}=]+=[1-9][0-9]*)*|[{]{2}[^{}]*[}]{2})$"
+	ExtendedResources string `json:"extendedResources,omitempty"`
+}
+
+// UnmarshalJSON accepts the map-shaped extendedResources written by profiles
+// created before the field became a string. The profile spec is immutable, so
+// such an object is only ever read back; canonicalizing the map here keeps the
+// controller's informer able to decode it without a conversion webhook. New
+// writes must use the string shape: the CRD schema rejects the map.
+func (r *PodResources) UnmarshalJSON(data []byte) error {
+	type plain PodResources
+	aux := struct {
+		ExtendedResources json.RawMessage `json:"extendedResources,omitempty"`
+		*plain
+	}{plain: (*plain)(r)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if len(aux.ExtendedResources) == 0 {
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(aux.ExtendedResources, &s); err == nil {
+		r.ExtendedResources = s
+		return nil
+	}
+	var legacy map[string]int64
+	if err := json.Unmarshal(aux.ExtendedResources, &legacy); err != nil {
+		return fmt.Errorf("extendedResources must be a name=count string or a name→count map: %w", err)
+	}
+	names := slices.Sorted(maps.Keys(legacy))
+	pairs := make([]string, 0, len(names))
+	for _, name := range names {
+		pairs = append(pairs, fmt.Sprintf("%s=%d", name, legacy[name]))
+	}
+	r.ExtendedResources = strings.Join(pairs, ",")
+	return nil
 }
 
 // PodSecurityContext is the supported subset of a Pod security context.

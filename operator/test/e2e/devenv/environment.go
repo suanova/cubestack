@@ -79,9 +79,29 @@ const (
 	// The phase's reason is the same string — both come from reasonStopped.
 	ReasonStopped = "Stopped"
 
+	// ReasonIdleTimeout is the reason on the phase and on Ready when the
+	// platform stopped the environment itself, after spec.lifecycle.idleTimeout
+	// elapsed with no activity. It is a different string from ReasonStopped
+	// because the user did not ask for this stop: spec.running is untouched, and
+	// only the annotations below say what happened.
+	ReasonIdleTimeout = "IdleTimeout"
+
 	// ReasonDeleting is the phase reason while the environment is being torn
 	// down. The phase name for that state is aiv1alpha1.PhaseTerminating.
 	ReasonDeleting = "Deleting"
+)
+
+// The annotations the controller writes on an environment it stopped itself,
+// restated for the case that reads them. The mark is the contract: it is what
+// tells an idle stop apart from one a user asked for, and what a start has to
+// clear before the environment can run again.
+const (
+	// AutoStoppedAnnotation is "true" on an environment the platform stopped
+	// for idleness.
+	AutoStoppedAnnotation = "ai.cubestack.io/auto-stopped"
+
+	// AutoStoppedAtAnnotation is when it stopped, RFC3339Nano.
+	AutoStoppedAtAnnotation = "ai.cubestack.io/auto-stopped-at"
 )
 
 // The environment-variable names the controller owns, restated for the cases
@@ -174,7 +194,11 @@ const (
 	defaultPlatformNS  = "cubestack-system"
 	defaultPullSecret  = "harbor-credentials"
 	defaultUpTimeout   = 20 * time.Minute
-	upPollInterval     = 10 * time.Second
+	// How often BringUp asks whether the environment is ready. Short, because
+	// the answer is a read and the wait is the platform's own work: every
+	// second of poll granularity is a second added to each environment a leg
+	// brings up, and a leg brings them up one after another.
+	upPollInterval     = 2 * time.Second
 	namespaceRunLabel  = "e2e.cubestack.io/run"
 	namespaceRunLabelV = "devenv-conformance"
 )
@@ -425,13 +449,15 @@ func (s *Suite) TearDown(ctx context.Context) {
 // is label-safe and the repo is not — a Kubernetes object name may not carry a
 // slash, and the registry's naming is not this suite's to constrain.
 //
-// The dots go too. A DevEnvironment's name is a DNS-1123 subdomain, which allows
-// them, but the controller names a Service after the environment and a Service
-// name is DNS-1035, which does not — so a catalogue key carrying one would fail
-// every reconcile with "a DNS-1035 label must consist of lower case
-// alphanumeric characters or '-'". Measured, not read: an image key with a dot
-// failed that way, while the same run's dot-free key came up first try. The
-// current keys have none, so this is the rule rather than a repair.
+// The dots go too. A DevEnvironment's name must be a DNS-1035 label — the
+// admission policy refuses any other at create time
+// (config/vap/devenvironment_policy.yaml), because the controller names
+// the environment's Service and its workload label value after it, and neither
+// accepts a dot. Measured, not read: before that policy existed, an image key
+// with a dot made every reconcile fail with "a DNS-1035 label must consist of
+// lower case alphanumeric characters or '-'", while the same run's dot-free key
+// came up first try. The current keys have none, so this is the rule rather
+// than a repair.
 func EnvName(img Image, id Identity) string {
 	return fmt.Sprintf("e2e-%s-%s", strings.ReplaceAll(img.Key, ".", "-"), id)
 }

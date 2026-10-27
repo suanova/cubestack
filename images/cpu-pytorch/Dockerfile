@@ -1,4 +1,6 @@
-# Cubestack 'cpu-base' DevEnvironment image — the CPU family.
+# Cubestack 'cpu-pytorch' DevEnvironment image — the CPU family, carrying the CPU build of
+# PyTorch. The name is <accelerator>-<stack>: `cpu` says there is no accelerator, `pytorch` says
+# which framework the image bakes in (decision doc §5).
 #
 # Serves BOTH modes from one container, selected at run time by CUBSTACK_TYPE (which the
 # controller injects from spec.type, common/entrypoint.sh):
@@ -17,9 +19,10 @@
 # Build context MUST be images/ (not this directory) so common/ is COPYable, and the platform
 # must be named: the base is multi-arch, so a bare `docker build` resolves it to the *host*
 # architecture and an arm64 host would publish an arm64-only image.
-#   docker build --platform linux/amd64 -f cpu-base/Dockerfile \
-#     -t harbor.isuanova.com/suanova/cpu-base:<tag> images/
-#   (or: make -C images build-cpu-base)
+#   docker build --platform linux/amd64 -f cpu-pytorch/Dockerfile \
+#     --build-arg TORCH_VERSION=2.4.0 \
+#     -t harbor.isuanova.com/suanova/cpu-pytorch:py310-torch2.4-<tag> images/
+#   (or: make -C images build-cpu-pytorch)
 
 # Base: the Ubuntu release tag plus the digest of the platform registry's copy of it, which
 # is what the build resolves (BASE_ARGS, images/Makefile). The digest is there because the
@@ -46,22 +49,43 @@ RUN if [ -n "$APT_MIRROR" ]; then \
     fi
 
 ARG DEBIAN_FRONTEND=noninteractive
+# sudo is installed but grants nothing: it runs only for the accounts a sudoers rule
+# names, and the image names none. spec.runtime.sudo is what supplies the rule
+# (images/README.md, image-contract.md).
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
       openssh-server \
       python3 \
       python3-pip \
+      sudo \
       tini \
     && rm -rf /var/lib/apt/lists/*
 
+# PyTorch, the CPU build: the family's stack and the reason the image is named for it. Installed
+# from PyTorch's own CPU wheel index rather than from PyPI, whose linux wheel is the *CUDA* build
+# — the accelerator this family does not have, and several GB of it. TORCH_INDEX_URL overrides
+# the index for an offline/CN mirror; TORCH_VERSION has no default because images/Makefile reads
+# it to build the published tag, so a build that could not name its torch would publish a tag it
+# cannot back. It is a required build arg, not a floating latest.
+ARG TORCH_VERSION
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
+RUN python3 -m pip install --no-cache-dir \
+      --index-url "$TORCH_INDEX_URL" \
+      torch==${TORCH_VERSION}
+
 # JupyterLab onto the distribution's python: the base ships no notebook stack, and the
 # notebook kernel has to be the interpreter an ssh session and the launcher both reach.
+# numpy rides along: torch does not depend on it, but its array bridge does — importing torch
+# without numpy warns on every start and `Tensor.numpy()` fails — and the torch index above
+# does not carry it. It is held below 2 because torch 2.4.0 predates its official NumPy 2
+# support; the bridge does work against the 2.x that was current when this was built, but
+# leaving it floating would let a rebuild change the answer under an unchanged image tag.
 # pip's cache is dropped; the image carries the installed packages only.
 ARG PIP_INDEX_URL=""
 RUN set -eu; \
     pip_args=""; \
     if [ -n "$PIP_INDEX_URL" ]; then pip_args="--index-url $PIP_INDEX_URL"; fi; \
-    python3 -m pip install --no-cache-dir $pip_args jupyterlab
+    python3 -m pip install --no-cache-dir $pip_args jupyterlab 'numpy<2'
 
 # Platform account: literal 'ubuntu', uid/gid 1000, home /home/ubuntu — the same account,
 # group, and home every family image ships, so a DevEnvironment states it once

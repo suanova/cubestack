@@ -3,9 +3,9 @@ IMG ?= harbor.isuanova.com/suanova/cubestack-controller-manager:latest
 # activityAgentImage in internal/controller/assets.go: the image the idle-timeout
 # sidecar runs. Read out of the source for the same reason PERMISSION_INIT_IMAGE
 # is — what the controller names is what has to exist, and a second copy of the
-# reference here is one that can drift from it. The `latest` tag is mutable,
-# which is why the controller pins the sidecar's imagePullPolicy to Always and
-# carries a version sentinel in the StatefulSet hash.
+# reference here is one that can drift from it. The e2e builds this image and
+# loads it into the kind node under this reference; the sidecar's IfNotPresent
+# policy, the manager's own, then takes the node's copy.
 #
 # It names the reference twice: what docker-build-activity-agent tags and pushes,
 # and — through the build arg of the same name — what docker-build bakes into the
@@ -187,10 +187,10 @@ HELM_RELEASE ?= cubestack
 # The published-artifact claim moves with it: that the reference a deployment
 # pulls exists is the images-smoke job's, which builds the same tree and asserts
 # its contract. This flow is about the operator serving an environment.
-DEV_ENV_IMAGE ?= harbor.isuanova.com/suanova/cpu-base:e2e
+DEV_ENV_IMAGE ?= harbor.isuanova.com/suanova/cpu-pytorch:e2e
 # The tag images/Makefile builds the environment's image under. Kept apart from
 # DEV_ENV_IMAGE because that Makefile reads TAG for its own default reference,
-# which is overridden here by IMG_CPU_BASE.
+# which is overridden here by IMG_CPU_PYTORCH.
 DEV_ENV_IMAGE_TAG ?= e2e
 # The platform the kind node runs. A kind node matches the docker daemon's
 # architecture, which on an arm64 laptop is not the amd64 these images publish
@@ -364,12 +364,17 @@ helm-e2e-setup: ## Create the dedicated kind cluster for helm e2e if it does not
 # Split in two: everything below needs a docker daemon and nothing needs a cluster, so this
 # target can run while helm-e2e-setup is still building one. The loads are the only part
 # that needs the cluster and they live in helm-e2e-images-load, which waits for both halves
-# — which is what lets CI overlap the ~160s here with the cluster bootstrap by running
+# — which is what lets CI overlap the image builds here with the cluster bootstrap by running
 # `helm-e2e-install -j2`. Serially the pair is still correct: this is an ordering that
 # permits overlap, not one that requires it.
 .PHONY: helm-e2e-images
-helm-e2e-images: ## Build the manager, echo and environment images and pull the init container's image (needs a docker daemon, no cluster)
+helm-e2e-images: ## Build the manager, activity agent, echo and environment images and pull the init container's image (needs a docker daemon, no cluster)
 	$(MAKE) docker-build IMG=$(HELM_E2E_IMG) \
+		BASE_ARGS="$(call base_arg,GOLANG_BASE) $(call base_arg,DISTROLESS_BASE)"
+	# The idle-timeout sidecar, from the same tree and built to name the same
+	# reference docker-build just baked into the manager. Same bases and mirrors
+	# as the manager, because it is the same static Go build in a different image.
+	$(MAKE) docker-build-activity-agent \
 		BASE_ARGS="$(call base_arg,GOLANG_BASE) $(call base_arg,DISTROLESS_BASE)"
 	@if [ -f test/e2e/assets/echo/Dockerfile ]; then \
 		docker build --platform $(DEV_ENV_PLATFORM) $(call base_arg,PYTHON_BASE) \
@@ -387,12 +392,12 @@ helm-e2e-images: ## Build the manager, echo and environment images and pull the 
 	echo "Pulling $(PERMISSION_INIT_IMAGE) (busybox, for the workspace init container)..." ; \
 	$(CONTAINER_TOOL) pull --platform "$(DEV_ENV_PLATFORM)" "$(PERMISSION_INIT_IMAGE)"
 	# The environment's own image, built from this tree (see DEV_ENV_IMAGE). Only
-	# the cpu-base image is involved — the environment is a jupyter one, and the
+	# the cpu-pytorch image is involved — the environment is a jupyter one, and the
 	# same image serves ssh from the controller's CUBSTACK_TYPE, since its
 	# entrypoint starts sshd when the operator mounts the ssh material; the
 	# vendor images are neither built nor pulled.
-	$(MAKE) -C ../images build-cpu-base \
-		TAG=$(DEV_ENV_IMAGE_TAG) PLATFORM=$(DEV_ENV_PLATFORM) IMG_CPU_BASE=$(DEV_ENV_IMAGE)
+	$(MAKE) -C ../images build-cpu-pytorch \
+		TAG=$(DEV_ENV_IMAGE_TAG) PLATFORM=$(DEV_ENV_PLATFORM) IMG_CPU_PYTORCH=$(DEV_ENV_IMAGE)
 
 .PHONY: helm-e2e-images-load
 helm-e2e-images-load: helm-e2e-setup helm-e2e-images ## Load the built and pulled images into the kind cluster
@@ -402,6 +407,7 @@ helm-e2e-images-load: helm-e2e-setup helm-e2e-images ## Load the built and pulle
 		$(KIND) load docker-image $(ECHO_IMG) --name $(KIND_CLUSTER_HELM); \
 	fi
 	$(KIND) load docker-image $(HELM_E2E_IMG) --name $(KIND_CLUSTER_HELM)
+	$(KIND) load docker-image $(ACTIVITY_AGENT_IMAGE) --name $(KIND_CLUSTER_HELM)
 	$(KIND) load docker-image $(PERMISSION_INIT_IMAGE) --name $(KIND_CLUSTER_HELM)
 	$(KIND) load docker-image $(DEV_ENV_IMAGE) --name $(KIND_CLUSTER_HELM)
 
@@ -557,16 +563,29 @@ helm-e2e-devenv-verify: ## Create a real DevEnvironment and assert Jupyter and S
 # by this: E1 is refused before a workload is rendered and N4's pod is
 # unschedulable, so neither pulls.
 #
+# The idle-timeout case is included too. Its sidecar is a second image, so
+# helm-e2e-images builds it and helm-e2e-images-load puts it on the node under
+# the reference the manager names; the sidecar's IfNotPresent policy — the
+# manager's own — then takes that copy. No capability label is needed.
+#
+# The shard expressions. A spec runs in its tier's shard unless it carries a
+# shard label (devenv.LabelShard), which moves it; negating the other two is
+# what makes that a move rather than a copy into two shards at once.
+DEVENV_E2E_SHARD_p0 = (p0 || shard:p0) && !shard:p1 && !shard:p2
+DEVENV_E2E_SHARD_p1 = (p1 || shard:p1) && !shard:p0 && !shard:p2
+DEVENV_E2E_SHARD_p2 = (p2 || shard:p2) && !shard:p0 && !shard:p1
+
 # One line, because Ginkgo's tokenizer skips spaces but not a newline: a
 # backslash continuation would put one inside the filter.
-DEVENV_E2E_CPU_LABELS ?= devenv-conformance && !image:maca-base-ssh && !image:maca-base-jupyter && !image:cube-base-ssh && !image:cube-base-jupyter$(if $(DEVENV_E2E_PRIORITY), && $(DEVENV_E2E_PRIORITY))
+DEVENV_E2E_CPU_LABELS ?= devenv-conformance && !image:maca-pytorch-ssh && !image:maca-pytorch-jupyter && !image:cuda-pytorch-ssh && !image:cuda-pytorch-jupyter$(if $(DEVENV_E2E_PRIORITY), && $(DEVENV_E2E_SHARD_$(DEVENV_E2E_PRIORITY)))
 
-# Optional shard, `p0` or `p1`. Every spec in the selection above carries exactly
-# one of the two priority labels (96 and 84 of them today), so the two shards
-# partition it: CI runs one job per shard, in parallel, and the suite's wall time
-# is the longer half rather than the whole. Empty runs the selection in one pass.
-# A spec that carries neither priority belongs to no shard and would silently not
-# run, which is why the split is stated as a partition rather than a filter.
+# Optional shard, `p0`, `p1` or `p2`. Every spec in the selection above runs in
+# exactly one of them (96, 78 and 9 of them today), so the shards partition
+# it: CI runs one job per shard, in parallel, and the suite's wall time is the
+# longest leg rather than the whole. Empty runs the selection in one pass. A
+# spec that names no shard would silently not run, which is why the split is
+# stated as a partition rather than a filter; an unknown value here leaves the
+# filter unterminated, and Ginkgo refuses that rather than selecting nothing.
 DEVENV_E2E_PRIORITY ?=
 # go test's hard stop for that selection, and how long one environment gets to
 # reach Running. The latter is well under the suite's 20m default because the
@@ -592,8 +611,8 @@ DEV_ENV_IMAGE_REGISTRY ?= $(firstword $(subst /, ,$(DEV_ENV_IMAGE)))
 # Without this the target would run against whichever cluster the caller happens
 # to be on.
 #
-# DEVENV_E2E_PRIORITY narrows the selection to one shard (`p0` or `p1`); empty
-# means the whole selection. CI sets it once per parallel job.
+# DEVENV_E2E_PRIORITY narrows the selection to one shard (`p0`, `p1` or `p2`);
+# empty means the whole selection. CI sets it once per parallel job.
 .PHONY: helm-e2e-devenv-conformance
 helm-e2e-devenv-conformance: ## Run the CPU-image conformance cases against the helm-e2e kind cluster
 	@config=$$(mktemp); trap 'rm -f "$$config"' EXIT; \
@@ -644,7 +663,7 @@ helm-e2e-cleanup: ## Delete the dedicated kind cluster
 #
 #   DEVENV_E2E_LABELS='devenv-conformance && p0'
 #   DEVENV_E2E_LABELS='devenv-conformance && identity:root'
-#   DEVENV_E2E_LABELS='devenv-conformance && image:cpu-base-jupyter'
+#   DEVENV_E2E_LABELS='devenv-conformance && image:cpu-pytorch-jupyter'
 #
 # It duplicates the constants in test/e2e/devenv/labels.go, which a Makefile cannot
 # import. Keep the two adjacent in review and do not add a third copy.

@@ -107,12 +107,14 @@ const (
 	// workspace claim's root ownership before the environment starts.
 	permissionInitContainerName = "initialize-managed-volume"
 
-	// permissionInitImage is the image that container runs: the upstream busybox
-	// base, mirrored into the platform registry so nodes never reach Docker Hub.
-	// It is deliberately not the environment's own image — a bring-your-own image
-	// may be distroless, and the init container fails closed, so an image without
-	// a shell would leave the environment unable to start at all. An offline
-	// deployment mirrors it under the same name/host as its other images.
+	// permissionInitImage is the image the platform's init containers run: the
+	// upstream busybox base, mirrored into the platform registry so nodes never
+	// reach Docker Hub. It is deliberately not the environment's own image — a
+	// bring-your-own image may be distroless, and the init containers fail closed,
+	// so an image without a shell would leave the environment unable to start at
+	// all. An offline deployment mirrors it under the same name/host as its other
+	// images. ::desiredPermissionInitContainer and
+	// ::desiredSudoersInitContainer both use it.
 	permissionInitImage = "harbor.isuanova.com/mirrors/docker.io/library/busybox:1.38.0"
 
 	// activityAgentContainerName is the idle-timeout sidecar. It shares the pod's
@@ -122,12 +124,11 @@ const (
 	activityAgentContainerName = "activity-agent"
 
 	// activityAgentVersion is a sentinel nothing reads. It is part of the
-	// StatefulSet hash so that it is a value which, when changed, rolls the
-	// environments running the sidecar: a mutable image tag does not change the
-	// pod template, so without something to bump, a rebuilt agent would reach a
-	// running environment only when that environment happened to restart for
-	// some other reason — the one case where an agent bug stays fixed on paper
-	// and broken in the cluster.
+	// StatefulSet hash so that changing it rolls the environments running the
+	// sidecar — the way a rebuilt agent that reached the nodes under an
+	// unchanged tag is picked up, since the sidecar's IfNotPresent policy
+	// reuses the node's copy rather than pulling it again. A changed image
+	// reference is in the hash by itself (::stsSpecHash) and needs no bump.
 	activityAgentVersion = "1"
 
 	// activityAgentNameSuffix names the three objects that authorize the sidecar
@@ -164,6 +165,41 @@ const (
 	permissionInitPathEnv = "WORKSPACE_PATH"
 	permissionInitUIDEnv  = "WORKSPACE_UID"
 	permissionInitGIDEnv  = "WORKSPACE_GID"
+
+	// sudoersInitContainerName is the init container that writes the opt-in sudo
+	// grant (spec.runtime.sudo). It runs as root because the file sudo reads must
+	// be owned by root.
+	sudoersInitContainerName = "initialize-sudoers"
+
+	// sudoersVolumeName is the pod-local volume carrying the grant from that init
+	// container to the main container. EmptyDir rather than a Secret: the grant is
+	// derived from the spec, there is nothing to keep, and it must not outlive the
+	// pod.
+	sudoersVolumeName = "sudoers"
+
+	// sudoersInitMountPath is where the init container mounts that volume. The
+	// main container never sees the directory, only the one file below.
+	sudoersInitMountPath = "/sudoers"
+
+	// sudoersFileName is the grant's name inside the volume and, through subPath,
+	// in /etc/sudoers.d. Sudo ignores files whose names contain a dot or end in
+	// '~', so it carries neither.
+	sudoersFileName = "20-cubestack"
+
+	// sudoersFilePath is the single file the main container mounts. The image's
+	// own /etc/sudoers.d entries stay in place.
+	sudoersFilePath = "/etc/sudoers.d/20-cubestack"
+
+	// The variables sudoersInitScript reads. The uid is the effective container
+	// identity, not spec.runtime.user: sudo accepts a numeric uid, and the
+	// controller never learns which account the image gives that uid.
+	sudoersInitDirEnv = "SUDOERS_DIR"
+	sudoersInitUIDEnv = "SUDOERS_UID"
+
+	// initShell is the interpreter the init containers run their scripts with:
+	// the busybox image ::permissionInitImage names carries /bin/sh and nothing
+	// richer.
+	initShell = "/bin/sh"
 )
 
 // activityAgentImage is the image the idle-timeout sidecar runs, published from
@@ -230,6 +266,28 @@ else
 	echo "permission-init: $WORKSPACE_PATH already owned by $current"
 fi
 echo "permission-init: $WORKSPACE_PATH ready"
+`
+
+// sudoersInitScript writes the opt-in sudo grant into the pod-local volume.
+//
+// The rule names the uid numerically — sudo's User_List accepts #<uid> — rather
+// than an account name, because the controller never learns which account the
+// image gives that number. The image must still have a passwd entry for the uid
+// the container runs as: sudo refuses an invoking user it cannot resolve before
+// it reads any rule. There must be no space after the '#': " 1000" is then a
+// comment, and the file would grant nobody anything.
+//
+// The file is removed first because a retried init container runs with every
+// capability dropped: root without CAP_DAC_OVERRIDE cannot reopen a 0440 file
+// for writing, even one it owns. 0440 root:root is the mode sudo requires of a
+// drop-in, and the container writes as root, so the ownership is already right.
+// set -eu makes a missing variable or failed write stop the pod rather than
+// leave it running with no grant.
+const sudoersInitScript = `set -eu
+umask 077
+rm -f "$SUDOERS_DIR/20-cubestack"
+printf '#%s ALL=(ALL) NOPASSWD: ALL\n' "$SUDOERS_UID" > "$SUDOERS_DIR/20-cubestack"
+chmod 0440 "$SUDOERS_DIR/20-cubestack"
 `
 
 // modelKeyMain is the model key of the main model; model volumes are named

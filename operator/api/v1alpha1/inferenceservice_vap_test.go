@@ -42,7 +42,7 @@ const isvcVAPProbeName = "vap-probe-isvc"
 // asynchronously by the apiserver.
 func probeISVCVAPRejects() bool {
 	probe := validInferenceService(isvcVAPProbeName)
-	probe.Spec.Route = &RouteSpec{Publish: true}
+	probe.Spec.Route = &RouteSpec{AIGatewayRouter: AIGatewayRouterPublic}
 	err := k8sClient.Create(ctx, probe)
 	if err == nil {
 		Expect(k8sClient.Delete(ctx, probe)).To(Succeed())
@@ -92,24 +92,26 @@ var _ = Describe("InferenceService L1 admission", func() {
 			setupISVCVAP()
 			defer cleanupISVCVAP()
 
-			isvc := validInferenceService("published-no-name")
-			isvc.Spec.Route = &RouteSpec{Publish: true}
-			err := k8sClient.Create(ctx, isvc)
-			Expect(err).To(HaveOccurred())
-			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid error, got: %v", err)
-			Expect(err.Error()).To(ContainSubstring("route.modelName is required"))
+			for _, router := range []AIGatewayRouterName{AIGatewayRouterPublic, AIGatewayRouterPrivate} {
+				isvc := validInferenceService("published-no-name-" + string(router))
+				isvc.Spec.Route = &RouteSpec{AIGatewayRouter: router}
+				err := k8sClient.Create(ctx, isvc)
+				Expect(err).To(HaveOccurred())
+				Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid error, got: %v", err)
+				Expect(err.Error()).To(ContainSubstring("route.modelName is required"))
+			}
 		})
 
 		It("rejects updating a service to publish without route.modelName", func() {
 			isvc := validInferenceService("update-to-publish")
-			isvc.Spec.Route = &RouteSpec{Publish: false}
+			isvc.Spec.Route = &RouteSpec{}
 			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, isvc) }()
 
 			setupISVCVAP()
 			defer cleanupISVCVAP()
 
-			isvc.Spec.Route.Publish = true
+			isvc.Spec.Route.AIGatewayRouter = AIGatewayRouterPrivate
 			err := k8sClient.Update(ctx, isvc)
 			Expect(err).To(HaveOccurred())
 			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid error, got: %v", err)
@@ -130,7 +132,7 @@ var _ = Describe("InferenceService L1 admission", func() {
 			defer cleanupISVCVAP()
 
 			isvc := validInferenceService("unpublished-no-name")
-			isvc.Spec.Route = &RouteSpec{Publish: false}
+			isvc.Spec.Route = &RouteSpec{}
 			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, isvc)).To(Succeed())
 		})

@@ -90,9 +90,10 @@ describe("inference services page", () => {
     expect(container.textContent).toContain("dsv4-pro-pd");
     expect(container.textContent).toContain("dsv4-flash-pd");
     expect(container.textContent).toContain("sglang");
-    // GPU 资源 is the service's whole footprint: two GPU roles, 8 cards each.
-    expect(container.textContent).toContain("2 × 8 × MXC500");
-    // The detail card breaks the same facts down per role.
+    // GPU 资源 is the service's whole footprint: prefill 8 cards × 1 replica
+    // plus decode 8 cards × 2 replicas.
+    expect(container.textContent).toContain("24 × MXC500");
+    // The detail card breaks the same facts down per role, per replica.
     expect(container.textContent).toContain("Prefill 8 × MXC500 · Decode 8 × MXC500");
     // Replicas render multi-line, one row per integer override the profile
     // declares (no hardcoded knob names), labelled as words rather than by the
@@ -113,6 +114,134 @@ describe("inference services page", () => {
     expect(container.querySelector('[data-od-id="metrics-empty"]')).not.toBeNull();
     expect(container.textContent).toContain("可调参数");
     expect(container.textContent).toContain("引擎参数");
+
+    act(() => root.unmount());
+  });
+
+  it("shows the whole GPU footprint, not one replica's share", async () => {
+    // A single-role service running 4 cards on 2 replicas occupies 8 cards. The
+    // list's GPU 资源 cell is the total; the detail card keeps the per-replica
+    // figure under its own label.
+    stubData([
+      inferenceServiceSummary({
+        name: "qwen38-27b",
+        gpuModel: "MXC550",
+        gpuPerPod: 4,
+        gpuRoles: [{ name: "vllm", gpuPerPod: 4, model: "MXC550", replicas: 2, groupSize: 1 }],
+        overrideNums: { replicas: 2, tpSize: 4 },
+        overrides: [{ name: "replicas", type: "integer", min: 1, max: 4, enum: null, current: 2, default: 1 }],
+      }),
+    ]);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    const row = container.querySelector('[data-od-id="svc-row-qwen38-27b"]') as HTMLElement;
+    expect(row.textContent).toContain("8 × MXC550");
+    // The detail card's row stays per replica, so the two numbers cannot drift.
+    const label = Array.from(container.querySelectorAll("span")).find((el) => el.textContent === "每副本 GPU");
+    expect(label).toBeDefined();
+    expect(label!.parentElement?.lastElementChild?.textContent).toBe("4 × MXC550");
+
+    act(() => root.unmount());
+  });
+
+  it("counts every pod of a LeaderWorkerSet replica", async () => {
+    // A multi-node profile runs a 2-pod group per replica, and each pod requests
+    // its own cards: 4 cards × 2 pods × 2 replicas = 16, while the detail card
+    // shows the group (8) as the per-replica figure.
+    stubData([
+      inferenceServiceSummary({
+        name: "dsv4-flash-multinode",
+        gpuModel: "MXC550",
+        gpuPerPod: 4,
+        gpuRoles: [{ name: "vllm", gpuPerPod: 4, model: "MXC550", replicas: 2, groupSize: 2 }],
+        overrideNums: { replicas: 2, groupSize: 2 },
+        overrides: [
+          { name: "replicas", type: "integer", min: 1, max: 4, enum: null, current: 2, default: 1 },
+          { name: "groupSize", type: "integer", min: 1, max: 8, enum: null, current: 2, default: 1 },
+        ],
+      }),
+    ]);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    const row = container.querySelector('[data-od-id="svc-row-dsv4-flash-multinode"]') as HTMLElement;
+    expect(row.textContent).toContain("16 × MXC550");
+    const label = Array.from(container.querySelectorAll("span")).find((el) => el.textContent === "每副本 GPU");
+    expect(label!.parentElement?.lastElementChild?.textContent).toBe("8 × MXC550");
+
+    act(() => root.unmount());
+  });
+
+  it("treats a Deployment replica as one pod", async () => {
+    // The API reports groupSize 0 for a role without a group; a replica there is
+    // a single pod, so the footprint must not collapse to zero.
+    stubData([
+      inferenceServiceSummary({
+        name: "tp8-deployment",
+        gpuModel: "MXC500",
+        gpuPerPod: 8,
+        gpuRoles: [{ name: "vllm", gpuPerPod: 8, model: "MXC500", replicas: 2, groupSize: 0 }],
+        overrideNums: { replicas: 2 },
+        overrides: [{ name: "replicas", type: "integer", min: 1, max: 4, enum: null, current: 2, default: 1 }],
+      }),
+    ]);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    const row = container.querySelector('[data-od-id="svc-row-tp8-deployment"]') as HTMLElement;
+    expect(row.textContent).toContain("16 × MXC500");
+
+    act(() => root.unmount());
+  });
+
+  it("shows the profile's effective maxModelLen when the user did not override it", async () => {
+    // The runtime uses the profile default when spec.overrides omits the knob,
+    // so the details card must show that value rather than an empty placeholder.
+    stubData([
+      inferenceServiceSummary({
+        overrideNums: {},
+        overrides: [
+          { name: "maxModelLen", type: "integer", min: 4096, max: 262144, enum: null, current: 123456, default: 123456 },
+        ],
+      }),
+    ]);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    // Locate the row in the parameters card rather than searching the page:
+    // the replicas table renders the same integer, so a page-wide match would
+    // pass even if this card still showed "—".
+    const label = Array.from(container.querySelectorAll("span")).find((el) => el.textContent === "maxModelLen");
+    expect(label).toBeDefined();
+    expect(label!.parentElement?.lastElementChild?.textContent).toBe("123456");
+
+    act(() => root.unmount());
+  });
+
+  it("shows the private gateway's in-cluster address as the AI Gateway endpoint of a private service", async () => {
+    // The private catalog route has no public listener: a caller inside the
+    // cluster reaches it through the private gateway's Service, not the
+    // cluster's public catalog host — and not the model server's own address.
+    stubData([
+      inferenceServiceSummary({
+        aigatewayRouter: "cubestack-ai-gateway-private",
+        internalEndpoint: "dsv4-api.project-a.svc:8001",
+        publicEndpoint: "https://ai.cubestack.dev",
+        // The API resolves this from the private Gateway's dataplane Service.
+        privateGatewayEndpoint:
+          "http://envoy-envoy-gateway-system-cubestack-gateway-private-bbbbbbbb.envoy-gateway-system.svc:8080",
+      }),
+    ]);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    expect(container.textContent).toContain("集群内端点(AI Gateway)");
+    expect(container.textContent).toContain(
+      "http://envoy-envoy-gateway-system-cubestack-gateway-private-bbbbbbbb.envoy-gateway-system.svc:8080",
+    );
+    expect(container.textContent).toContain("dsv4-api.project-a.svc:8001");
+    expect(container.textContent).not.toContain("https://ai.cubestack.dev");
 
     act(() => root.unmount());
   });
@@ -591,6 +720,20 @@ describe("inference services page", () => {
     act(() => root.unmount());
   });
 
+  it("shows a sub-1 QPS with decimals instead of rounding it to zero", async () => {
+    const list = inferenceServiceList();
+    // ~3 requests a minute is a real rate, but Math.round would render it "0".
+    list[0].metrics = { qps: 0.048, p95: 412, tps: 1, spark: [0, 0.01, 0.05] };
+    stubData(list);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    expect(container.querySelector('[data-od-id="metrics-empty"]')).toBeNull();
+    expect(container.textContent).toContain("0.05");
+
+    act(() => root.unmount());
+  });
+
   it("prints every condition beside its pill, True ones included", async () => {
     stubData([
       inferenceServiceSummary({
@@ -801,13 +944,13 @@ describe("deploy wizard", () => {
   });
 
   function renderWithBoth(opts: object = OPTIONS) {
-    const calls: Array<{ method: string; body: unknown }> = [];
+    const calls: Array<{ method: string; url: string; body: unknown }> = [];
     vi.stubGlobal(
       "fetch",
       vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         const method = init?.method ?? "GET";
-        calls.push({ method, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+        calls.push({ method, url, body: init?.body ? JSON.parse(String(init.body)) : undefined });
         if (url.includes("/options")) {
           return Promise.resolve({ ok: true, status: 200, json: async () => opts });
         }
@@ -888,7 +1031,7 @@ describe("deploy wizard", () => {
     await act(async () => {});
   }
 
-  it("defaults the catalog model name to the service name when publish is enabled", async () => {
+  it("always publishes and defaults the catalog model name to the service name", async () => {
     const { container, root } = renderWithBoth();
     await act(async () => {});
     await act(async () => {
@@ -898,19 +1041,22 @@ describe("deploy wizard", () => {
     await fillNameAndGoToStep2();
 
     const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
-    const publish = step2.querySelector('input[type="checkbox"]') as HTMLInputElement;
-    await act(async () => {
-      publish.click();
-    });
-    await act(async () => {});
 
-    // The service name is a valid catalog name, so enabling publish fills the
-    // empty field with it rather than making the user retype it.
+    // Publishing is mandatory, so the catalog controls are always present; the
+    // request/idle timeout inputs are gone.
+    expect(step2.querySelector('[data-od-id="deploy-aigateway-router"]')).not.toBeNull();
+    expect(step2.querySelector('[data-od-id="deploy-catalog-paths"]')).not.toBeNull();
+    expect(step2.textContent).not.toContain("请求超时");
+    expect(step2.textContent).not.toContain("空闲超时");
+
+    // The service name is a valid catalog name, so the field follows it rather
+    // than making the user retype it.
     const modelName = () =>
       document.body.querySelector('[data-od-id="deploy-model-name"] input') as HTMLInputElement;
     expect(modelName().value).toBe("my-serve");
 
-    // A catalog name the user typed is theirs: cycling publish cannot clobber it.
+    // A catalog name the user typed is theirs: renaming the service leaves it
+    // alone.
     await act(async () => {
       const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
       setter.call(modelName(), "custom-model");
@@ -918,13 +1064,140 @@ describe("deploy wizard", () => {
     });
     await act(async () => {});
     await act(async () => {
-      publish.click();
+      (Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent === "上一步") as HTMLElement).click();
     });
+    await act(async () => {});
+    const nameInput = document.body.querySelector('input[placeholder="e.g. dsv4-flash-serve"]') as HTMLInputElement;
     await act(async () => {
-      publish.click();
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
+      setter.call(nameInput, "renamed-serve");
+      nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {});
+    await act(async () => {
+      (Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent === "下一步") as HTMLElement).click();
     });
     await act(async () => {});
     expect(modelName().value).toBe("custom-model");
+
+    act(() => root.unmount());
+  });
+
+  it("publishes to the private catalog route by default", async () => {
+    const { container, root, calls } = renderWithBoth();
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await fillNameAndGoToStep2();
+
+    const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
+
+    // Private visibility is the default.
+    const picker = step2.querySelector('[data-od-id="deploy-aigateway-router"] [role="combobox"]');
+    expect(selectText(picker)).toContain("cubestack-ai-gateway-private");
+
+    // A model is required to advance; pick the compatible one.
+    const modelSelect = Array.from(step2.querySelectorAll('[role="combobox"]')).find((c) =>
+      (c.textContent ?? "").includes("选择模型版本"),
+    ) as HTMLElement;
+    await act(async () => {
+      modelSelect.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    });
+    const model = Array.from(document.body.querySelectorAll('[role="option"]')).find(
+      (o) => o.textContent === "deepseek-v4-flash-w8a8-v1",
+    );
+    expect(model).toBeDefined();
+    await act(async () => {
+      (model as HTMLElement).click();
+    });
+    await act(async () => {});
+    await act(async () => {
+      (Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent === "下一步") as HTMLElement).click();
+    });
+    await act(async () => {});
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="wizard-create"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    expect(calls.find((c) => c.method === "POST")?.body).toMatchObject({
+      route: {
+        aigatewayRouter: "cubestack-ai-gateway-private",
+        modelName: "my-serve",
+        paths: ["/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/images"],
+      },
+    });
+
+    act(() => root.unmount());
+  });
+
+  it("publishes only the catalog paths that stay selected", async () => {
+    const { container, root, calls } = renderWithBoth();
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await fillNameAndGoToStep2();
+
+    const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
+
+    // Publishing starts with every supported path exposed.
+    const paths = step2.querySelector('[data-od-id="deploy-catalog-paths"]') as HTMLElement;
+    const combobox = paths.querySelector('[role="combobox"]') as HTMLElement;
+    const pathText = () => selectText(combobox);
+    expect(pathText()).toBe("/v1/chat/completions, /v1/responses, /v1/messages, /v1/images");
+
+    await act(async () => {
+      combobox.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    });
+    const pathOption = (label: string) =>
+      Array.from(document.body.querySelectorAll('[role="option"]')).find((o) => o.textContent === label) as HTMLElement;
+
+    // Drop /v1/responses.
+    await act(async () => {
+      pathOption("/v1/responses").click();
+    });
+    await act(async () => {});
+    expect(pathText()).toBe("/v1/chat/completions, /v1/messages, /v1/images");
+
+    // The last selected path cannot be removed: a published model exposes at
+    // least one.
+    for (const label of ["/v1/chat/completions", "/v1/messages", "/v1/images"]) {
+      await act(async () => {
+        pathOption(label).click();
+      });
+      await act(async () => {});
+    }
+    expect(pathText()).toBe("/v1/images");
+
+    const modelSelect = Array.from(step2.querySelectorAll('[role="combobox"]')).find((c) =>
+      (c.textContent ?? "").includes("选择模型版本"),
+    ) as HTMLElement;
+    await act(async () => {
+      modelSelect.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    });
+    const model = Array.from(document.body.querySelectorAll('[role="option"]')).find(
+      (o) => o.textContent === "deepseek-v4-flash-w8a8-v1",
+    );
+    await act(async () => {
+      (model as HTMLElement).click();
+    });
+    await act(async () => {});
+    await act(async () => {
+      (Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent === "下一步") as HTMLElement).click();
+    });
+    await act(async () => {});
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="wizard-create"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    expect(calls.find((c) => c.method === "POST")?.body).toMatchObject({
+      route: { paths: ["/v1/images"] },
+    });
 
     act(() => root.unmount());
   });
@@ -1161,6 +1434,434 @@ describe("deploy wizard", () => {
         nodeSelector: ["kubernetes.io/hostname=worker-a", "kubernetes.io/hostname=worker-b"],
       },
     });
+
+    act(() => root.unmount());
+  });
+
+  // The deploy wizard's last steps are the same in the RDMA tests below: pick
+  // the compatible model, advance, and create.
+  async function pickModelAndCreate() {
+    const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
+    const modelSelect = Array.from(step2.querySelectorAll('[role="combobox"]')).find((c) =>
+      (c.textContent ?? "").includes("选择模型版本"),
+    ) as HTMLElement;
+    await act(async () => {
+      modelSelect.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    });
+    const model = Array.from(document.body.querySelectorAll('[role="option"]')).find(
+      (o) => o.textContent === "deepseek-v4-flash-w8a8-v1",
+    ) as HTMLElement;
+    await act(async () => {
+      model.click();
+    });
+    await act(async () => {});
+    await act(async () => {
+      (Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent === "下一步") as HTMLElement).click();
+    });
+    await act(async () => {});
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="wizard-create"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+  }
+
+  /** A create-options payload whose one profile declares extendedResources. */
+  function extendedResourcesOptions(nodes: unknown[], gpuPerPod: number) {
+    return {
+      ...OPTIONS,
+      nodes,
+      profiles: [
+        {
+          ...OPTIONS.profiles[0],
+          servingMode: "standard",
+          roles: [{ name: "vllm", vendor: "metax", models: ["MXC500"], gpuPerPod }],
+          overrides: [
+            {
+              name: "extendedResources",
+              type: "stringList",
+              min: null,
+              max: null,
+              enum: null,
+              default: [],
+              description: null,
+            },
+          ],
+        },
+      ],
+    };
+  }
+
+  const rdmaNode = (name: string, gpu: number, roce: number, infiniband: number) => ({
+    name,
+    gpuModels: { metax: "MXC500" },
+    allocatable: { gpu: { metax: gpu }, rdma: { roce, infiniband } },
+  });
+
+  it("auto-injects the only RDMA fabric into extendedResources", async () => {
+    // Only RoCE is advertised, so the wizard picks it on its own and writes
+    // the Pod's share of the node's devices: 100 × 4 / 8 = 50.
+    const { container, root, calls } = renderWithBoth(
+      extendedResourcesOptions([rdmaNode("worker-a", 8, 100, 0)], 4),
+    );
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await fillNameAndGoToStep2();
+
+    const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
+    const picker = step2.querySelector('[data-od-id="override-extendedResources"]') as HTMLElement;
+    expect(selectText(picker)).toBe("RoCE");
+
+    await pickModelAndCreate();
+    expect((calls.find((c) => c.method === "POST")?.body as { overrides?: unknown }).overrides).toEqual({
+      extendedResources: ["rdma/roce_shared_devices=50"],
+    });
+
+    act(() => root.unmount());
+  });
+
+  it("defaults to InfiniBand when both RDMA fabrics are offered, and injects the chosen one", async () => {
+    const { container, root, calls } = renderWithBoth(
+      extendedResourcesOptions([rdmaNode("worker-a", 8, 100, 25)], 8),
+    );
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await fillNameAndGoToStep2();
+
+    const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
+    const picker = step2.querySelector('[data-od-id="override-extendedResources"]') as HTMLElement;
+    // Both fabrics exist: InfiniBand is the default.
+    expect(selectText(picker)).toBe("InfiniBand");
+
+    await act(async () => {
+      (picker.querySelector('[role="combobox"]') as HTMLElement).dispatchEvent(
+        new MouseEvent("mousedown", { bubbles: true }),
+      );
+    });
+    const offered = Array.from(document.body.querySelectorAll('[role="option"]')).map(
+      (o) => o.textContent ?? "",
+    );
+    // "No RDMA" is not an option: the field always names a fabric.
+    expect(offered).not.toContain("不使用 RDMA");
+    const roce = Array.from(document.body.querySelectorAll('[role="option"]')).find((o) =>
+      (o.textContent ?? "").includes("RoCE"),
+    );
+    expect(roce).toBeDefined();
+    await act(async () => {
+      (roce as HTMLElement).click();
+    });
+    await act(async () => {});
+    expect(selectText(picker)).toBe("RoCE");
+
+    await pickModelAndCreate();
+    expect((calls.find((c) => c.method === "POST")?.body as { overrides?: unknown }).overrides).toEqual({
+      extendedResources: ["rdma/roce_shared_devices=100"],
+    });
+
+    act(() => root.unmount());
+  });
+
+  it("sums the RDMA devices allocatable across every eligible node", async () => {
+    // (100 + 50) × 4 / (8 + 8) = 37.5, floored: a Pod must not ask for more
+    // device shares than the nodes can allocate.
+    const { container, root, calls } = renderWithBoth(
+      extendedResourcesOptions([rdmaNode("worker-a", 8, 100, 0), rdmaNode("worker-b", 8, 50, 0)], 4),
+    );
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await fillNameAndGoToStep2();
+
+    const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
+    // The dropdown names the fabric only; the derived count travels in the
+    // submitted override below.
+    expect(selectText(step2.querySelector('[data-od-id="override-extendedResources"]'))).toBe("RoCE");
+
+    await pickModelAndCreate();
+    expect((calls.find((c) => c.method === "POST")?.body as { overrides?: unknown }).overrides).toEqual({
+      extendedResources: ["rdma/roce_shared_devices=37"],
+    });
+
+    act(() => root.unmount());
+  });
+
+  it("keeps a non-RDMA extendedResources value in the free-text input", async () => {
+    // The picker only owns a value naming one known fabric; another resource
+    // (or several pairs) is the profile's own choice and must not be replaced.
+    const opts = extendedResourcesOptions([rdmaNode("worker-a", 8, 100, 0)], 8);
+    const profile = opts.profiles[0] as {
+      overrides: Array<Record<string, unknown>>;
+    };
+    profile.overrides[0].default = ["example.com/foo=1"];
+    const { container, root } = renderWithBoth(opts);
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await fillNameAndGoToStep2();
+
+    const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
+    const field = step2.querySelector('[data-od-id="override-extendedResources"]') as HTMLElement;
+    expect(field.querySelector('[role="combobox"]')).toBeNull();
+    expect((field.querySelector("input") as HTMLInputElement).value).toBe("example.com/foo=1");
+
+    act(() => root.unmount());
+  });
+
+  it("leaves extendedResources empty when no node advertises RDMA", async () => {
+    // With nothing to offer there is no picker and no value: the field stays
+    // empty and out of the request.
+    const { container, root, calls } = renderWithBoth(
+      extendedResourcesOptions([rdmaNode("worker-a", 8, 0, 0)], 8),
+    );
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await fillNameAndGoToStep2();
+
+    const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
+    const field = step2.querySelector('[data-od-id="override-extendedResources"]') as HTMLElement;
+    expect(field.querySelector('[role="combobox"]')).toBeNull();
+    expect((field.querySelector("input") as HTMLInputElement).value).toBe("");
+
+    await pickModelAndCreate();
+    expect((calls.find((c) => c.method === "POST")?.body as { overrides?: unknown }).overrides).toEqual({});
+
+    act(() => root.unmount());
+  });
+
+  it("filters the nodeSelector by the RDMA fabric chosen for the service", async () => {
+    // The operator pins the hostname and the fabric together; offering a node
+    // that does not advertise the chosen fabric is a Pod that can only stay
+    // Pending.
+    const opts = extendedResourcesOptions(
+      [rdmaNode("worker-roce", 8, 100, 0), rdmaNode("worker-ib", 8, 0, 25)],
+      8,
+    );
+    const profile = opts.profiles[0] as {
+      overrides: Array<Record<string, unknown>>;
+    };
+    // Role-scoped, as the PD profiles declare them; the fabric is declared
+    // once for the service, so the selector follows that value.
+    profile.overrides.push({
+      name: "vllm_nodeSelector",
+      type: "string",
+      min: null,
+      max: null,
+      enum: null,
+      default: "",
+      description: null,
+    });
+    const { container, root } = renderWithBoth(opts);
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await fillNameAndGoToStep2();
+
+    const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
+    const nodePicker = () => step2.querySelector('[data-od-id="override-vllm_nodeSelector"]') as HTMLElement;
+    const open = async (field: HTMLElement) => {
+      await act(async () => {
+        (field.querySelector('[role="combobox"]') as HTMLElement).dispatchEvent(
+          new MouseEvent("mousedown", { bubbles: true }),
+        );
+      });
+    };
+    const offered = () =>
+      Array.from(document.body.querySelectorAll('[role="option"]')).map((o) => o.textContent ?? "");
+
+    // InfiniBand is the default when it is offered, so the selector already
+    // narrows to the node that advertises it.
+    await open(nodePicker());
+    expect(offered()).toContain("worker-ib");
+    expect(offered()).not.toContain("worker-roce");
+
+    const chooseFabric = async (label: string) => {
+      await open(step2.querySelector('[data-od-id="override-extendedResources"]') as HTMLElement);
+      const option = Array.from(document.body.querySelectorAll('[role="option"]')).find((o) =>
+        (o.textContent ?? "").includes(label),
+      );
+      await act(async () => {
+        (option as HTMLElement).click();
+      });
+      await act(async () => {});
+    };
+
+    await chooseFabric("RoCE");
+    await open(nodePicker());
+    expect(offered()).toContain("worker-roce");
+    expect(offered()).not.toContain("worker-ib");
+
+    await chooseFabric("InfiniBand");
+    await open(nodePicker());
+    expect(offered()).toContain("worker-ib");
+    expect(offered()).not.toContain("worker-roce");
+
+    act(() => root.unmount());
+  });
+
+  it("creates the namespace it is given, then the service in it", async () => {
+    const { container, root, calls } = renderWithBoth();
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await fillNameAndGoToStep2();
+    // Back to step 1, where the namespace lives.
+    await act(async () => {
+      (Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent === "上一步") as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    // The select no longer lists the tenant namespaces the platform does not
+    // manage, so naming one is how a user gets a home of their own.
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="deploy-namespace"] [role="combobox"]') as HTMLElement).dispatchEvent(
+        new MouseEvent("mousedown", { bubbles: true }),
+      );
+    });
+    const createNew = Array.from(document.body.querySelectorAll('[role="option"]')).find(
+      (o) => o.textContent === "创建新命名空间",
+    );
+    expect(createNew).toBeDefined();
+    await act(async () => {
+      (createNew as HTMLElement).click();
+    });
+
+    const nameBox = document.body.querySelector('[data-od-id="deploy-namespace-name"] input') as HTMLInputElement;
+    expect(nameBox).not.toBeNull();
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
+      setter.call(nameBox, "team-a");
+      nameBox.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {});
+
+    // step 1 -> 2
+    await act(async () => {
+      (Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent === "下一步") as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    // Step 2 refuses to advance without a model version, so pick one.
+    const modelSelect = Array.from(document.body.querySelectorAll('[role="combobox"] [role="button"], [role="combobox"]')).find(
+      (c) => (c.textContent ?? "").includes("选择模型版本"),
+    ) as HTMLElement;
+    await act(async () => {
+      modelSelect.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    });
+    const model = Array.from(document.body.querySelectorAll('[role="option"]')).find(
+      (o) => o.textContent === "deepseek-v4-flash-w8a8-v1",
+    );
+    await act(async () => {
+      (model as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    // step 2 -> 3
+    await act(async () => {
+      (Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent === "下一步") as HTMLElement).click();
+    });
+    await act(async () => {});
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="wizard-create"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    // The namespace first: the service cannot be created in one that is not
+    // there yet.
+    expect(calls.filter((c) => c.method === "POST").map((c) => c.url)).toEqual([
+      expect.stringContaining("/api/namespaces"),
+      expect.stringContaining("/api/inferenceservices"),
+    ]);
+    expect(calls.filter((c) => c.method === "POST")[1].body).toMatchObject({ namespace: "team-a" });
+
+    act(() => root.unmount());
+  });
+
+  it("shows a namespace error when no existing namespace is available", async () => {
+    const { container, root, calls } = renderWithBoth({ ...OPTIONS, namespaces: [], defaultNamespace: null });
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await fillNameAndGoToStep2();
+
+    expect(document.body.querySelector('[data-step="1"]')).not.toBeNull();
+    expect(document.body.textContent).toContain("命名空间名称不合法");
+    expect(calls.filter((c) => c.method === "POST")).toEqual([]);
+
+    act(() => root.unmount());
+  });
+
+  it("refuses to advance until the new namespace has a valid name", async () => {
+    const { container, root } = renderWithBoth();
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="deploy-namespace"] [role="combobox"]') as HTMLElement).dispatchEvent(
+        new MouseEvent("mousedown", { bubbles: true }),
+      );
+    });
+    const createNew = Array.from(document.body.querySelectorAll('[role="option"]')).find(
+      (o) => o.textContent === "创建新命名空间",
+    );
+    await act(async () => {
+      (createNew as HTMLElement).click();
+    });
+
+    const nameBox = () =>
+      document.body.querySelector('[data-od-id="deploy-namespace-name"] input') as HTMLInputElement;
+    const setBox = async (value: string) => {
+      await act(async () => {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
+        setter.call(nameBox(), value);
+        nameBox().dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      await act(async () => {});
+    };
+    const next = async () => {
+      await act(async () => {
+        (Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent === "下一步") as HTMLElement).click();
+      });
+      await act(async () => {});
+    };
+
+    const nameInput = document.body.querySelector('input[placeholder="e.g. dsv4-flash-serve"]') as HTMLInputElement;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
+      setter.call(nameInput, "my-serve");
+      nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {});
+
+    // Empty, then an underscore: neither is a DNS-1123 label.
+    await next();
+    expect(document.body.textContent).toContain("命名空间名称不合法");
+    await setBox("team_a");
+    await next();
+    expect(document.body.textContent).toContain("基本信息");
+
+    await setBox("team-a");
+    await next();
+    expect(document.body.textContent).toContain("引擎与资源");
 
     act(() => root.unmount());
   });

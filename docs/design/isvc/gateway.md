@@ -8,8 +8,10 @@
 
 **做**:
 
-- `spec.route.publish: true` 的发布形态改为生成 Agent Router 三对象（EG `Backend` + `AIServiceBackend`
-  + `AIGatewayRoute`），删除 HTTPRoute 发布路径与 per-model hostname
+- `spec.route.aigatewayRouter` 非空的发布形态改为生成 Agent Router 对象（EG `Backend` + 两个
+  `AIServiceBackend` + 一个 `ReferenceGrant`），并由 operator 全量维护所选路由的共享
+  `AIGatewayRoute` 与共享 `HTTPRoute` 的 `spec.rules`；删除 HTTPRoute 发布路径与 per-model hostname
+- `spec.route.paths`（多选）声明本服务在目录上暴露的客户端路径（D2）
 - 修复网关超时语义：总时长上限与无进展上限分开（D3）
 - `route.modelName` 语义变为"目录模型名"，放宽校验（D7）
 - operator 配置面、RBAC、RouteReady 判定、api.md、web 展示同步
@@ -91,6 +93,7 @@
     ▼
   ④ 上游：Service <isvc>-<role> → Pod（vLLM）
     │   · timeoutSeconds → 总时长上限（默认 0 = 不设）；idleTimeoutSeconds → 无进展上限（默认 300s）
+    │   · 控制台不再提供这两个输入，创建时使用 CRD 默认值
     ▼
   ⑤ ext_proc（响应阶段）
     │   · 解析响应体提取 usage（流式需客户端带 stream_options.include_usage）
@@ -130,19 +133,26 @@
 
 ### D1 发布契约：目录替代 per-model hostname
 
-- `spec.route.publish: true` 语义变为**发布到平台模型目录**。客户端寻址：统一入口 hostname +
+- `spec.route.aigatewayRouter` 非空时语义为**发布到平台模型目录**。客户端寻址：统一入口 hostname +
   请求体 `model` 选模型；`Host` 恒定，模型名是参数。
-- **目录是一条平台预装的共享 `AIGatewayRoute`**（`--gateway-catalog-route`，默认
-  `cubestack-ai-gateway`，在 `--gateway-namespace`）：每个 published ISVC 往这条**单一路由**里
-  写一条 rule（D2），不再各自创建 per-service 的 AIGatewayRoute。operator 只**读/改**这条共享路由，
-  从不创建它——它是平台的部署前置条件，缺失时降级（D4）。
-- `route.modelName` = **目录里的模型名**（客户端 `model` 字段要填的值），平台级唯一（D4）。
+- **目录是平台预装、operator 全量维护的一对共享对象**（均在 `--gateway-namespace`）：
+  `AIGatewayRoute` `cubestack-ai-gateway` / `cubestack-ai-gateway-private`（承接全部四个目录路径）。
+  ISVC 用 `spec.route.aigatewayRouter` 选择其一；operator 每次 reconcile 都用**全部已发布 ISVC**
+  重建这条对象的 `spec.rules` ——**整体接管**：缺失时创建，存在时覆写（含手工加进去的 rule），
+  不追加、不局部修改。不再各自创建 per-service 的 AIGatewayRoute。
+- **不再有普通 `HTTPRoute`**：`cubestack-openai-paths[-private]` 已退役。它的路径分流（按 path 直连
+  `Backend`）与 listener 级全量缓冲都会绕过 Agent Router，也无法与 `/v1/messages` 共存于同一
+  `AIGatewayRoute` rule（rule 只有 header 一种匹配维度）。现在全部路径都走 `AIGatewayRoute`，
+  命中同一个 OpenAI-schema backend，由 ext_proc 读请求体 `model` 注入 `x-ai-eg-model`。
+- `spec.route.paths` = 本服务在目录上暴露的路径（多选，CRD 枚举四个值）；未设置 = 全部路径，
+  显式空列表 = 不暴露任何路径。暴露任一非空路径就生成一条 rule（rule 不区分路径）。
+- `route.modelName` = **目录里的模型名**（客户端 `model` 字段要填的值），在**所选路由内**唯一（D4）。
 - 删除：per-model hostname `<modelName>.<gatewayDomain>`、`publicHostname()`、HTTPRoute 生成路径，以及
   `--gateway-domain` flag —— 它没有别的消费者：DevEnvironment 的暴露面是自己的 ListenerSet 与
   HTTPRoute 路径规则，不由网关域名推导。
-- `publish: false` 语义不变（未发布，仅 ClusterIP 内部端点）。
+- `aigatewayRouter` 为空（或 `spec.route` 不存在）语义不变（未发布，仅 ClusterIP 内部端点）。
 
-### D2 生成对象（每个 published ISVC 三个，均在 ISVC namespace）+ 共享路由里的一条 rule
+### D2 生成对象（每个 published ISVC 四个，均在 ISVC namespace）+ 共享对象里的 rule
 
 ```yaml
 # 名称 <isvc>-endpoint；endpoints 用 FQDN 指向 endpoint role 的 Service（同 EG 官方示例）
@@ -159,23 +169,57 @@ spec:
   schema: {name: OpenAI}
   backendRef: {group: gateway.envoyproxy.io, kind: Backend, name: <isvc>-endpoint}
 ---
-# 名称 <isvc>-grant：授权平台 Gateway 跨 namespace 引用本服务的 AIServiceBackend
+# 名称 <isvc>-anthropic：同一个 Backend，Anthropic 方言（/v1/messages 用）
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: AIServiceBackend
+spec:
+  schema: {name: Anthropic}
+  backendRef: {group: gateway.envoyproxy.io, kind: Backend, name: <isvc>-endpoint}
+---
+# 名称 <isvc>-grant：授权两条跨 namespace 引用 —— 共享 AIGatewayRoute 引用本服务的两个
+# AIServiceBackend，以及 Agent Router 由该路由展开出的子 HTTPRoute 引用本服务的 Backend
 apiVersion: gateway.networking.k8s.io/v1
 kind: ReferenceGrant
 spec:
-  from: [{group: gateway.networking.k8s.io, kind: Gateway, namespace: <gateway.namespace>}]
-  to:   [{group: aigateway.envoyproxy.io, kind: AIServiceBackend, name: <isvc>-backend}]
+  from:
+    - {group: aigateway.envoyproxy.io, kind: AIGatewayRoute, namespace: <gateway.namespace>}
+    - {group: gateway.networking.k8s.io, kind: HTTPRoute, namespace: <gateway.namespace>}
+  to:
+    - {group: aigateway.envoyproxy.io, kind: AIServiceBackend, name: <isvc>-backend}
+    - {group: aigateway.envoyproxy.io, kind: AIServiceBackend, name: <isvc>-anthropic}
+    - {group: gateway.envoyproxy.io, kind: Backend, name: <isvc>-endpoint}
 ```
 
-**共享路由里追加的一条 rule**（operator 以乐观并发写回，只动自己这条）：
+- **schema 是 AIServiceBackend 级别**，所以 Anthropic 出口必须每模型一个，不能与 OpenAI 共用；
+  两者指向同一个 `Backend`。
+- `HTTPRoute → EG Backend` 这一跳必须由**本服务自己的** grant 授权，不能再假设平台装了
+  全量 grant：Agent Router 把 AIGatewayRoute 展开成子 HTTPRoute 时，backendRef 指向本 ns 的
+  `Backend`，缺授权时路由 Accepted 但 `ResolvedRefs=False/RefNotPermitted`，请求全部 500。
+  `to` 带 `name` 所以只授权本服务的 Backend，不会连带授权别的服务。
+
+**共享路由里的 rule**（operator 全量重建，见 D1）：
 
 ```yaml
-# 追加到 <gateway-catalog-route> 的 spec.rules[]
-- matches:
+# AIGatewayRoute <可选路由> 的 spec.rules[]：每个暴露任一目录路径的模型两条，
+# 顺序固定 —— 先 Anthropic 原生，再 OpenAI 兜底。
+- matches:                          # ① 原生 Anthropic：SDK 必带 anthropic-version
+    - headers:
+        - {type: Exact, name: x-ai-eg-model, value: <route.modelName>}
+        - {type: Exact, name: anthropic-version, value: 2023-06-01}
+  backendRefs:
+    - name: <isvc>-anthropic         # Anthropic schema：/v1/messages 一族原样透传
+      namespace: <isvc.ns>
+      modelNameOverride: <status.model.name>
+      weight: 1
+      priority: 0
+  timeouts: {request: <timeoutSeconds>s}
+  streamIdleTimeout: <idleTimeoutSeconds>s   # 默认 0s = 不掐断
+  modelsOwnedBy: CubeStack
+- matches:                          # ② OpenAI：其余全部路径
     - headers: [{type: Exact, name: x-ai-eg-model, value: <route.modelName>}]
   backendRefs:
-    - name: <isvc>-backend
-      namespace: <isvc.ns>          # 跨 ns → 需要上面的 ReferenceGrant
+    - name: <isvc>-backend           # OpenAI schema：chat/completions、completions、
+      namespace: <isvc.ns>           # responses、images 透传，/v1/messages 走翻译
       modelNameOverride: <status.model.name>
       weight: 1
       priority: 0
@@ -184,26 +228,38 @@ spec:
   modelsOwnedBy: CubeStack
 ```
 
+- **客户端不发 `x-ai-eg-model`**：header 由 Agent Router 的 ext_proc 从请求体 `model` 注入，这也是
+  `AIGatewayRoute` rule 能当目录用的前提。
+- **两条 rule 的区分维度只能是 header**（rule 无 path 维度，生成的 HTTPRoute 恒为 `PathPrefix /`）。
+  因此原生 Anthropic 那条用 SDK 必带的 `anthropic-version: 2023-06-01` 作为额外匹配条件：Envoy 按
+  顺序取第一条命中，所以它必须排在同模型的 OpenAI rule 之前。客户端无需改任何东西 —— 用 Anthropic
+  SDK 就自动走原生后端，用 OpenAI SDK 就自动走 OpenAI 后端。
+- **`/v1/messages` 两条路都通**：带 `anthropic-version` 的走 `<isvc>-anthropic`（Anthropic 原生，
+  保留 thinking / cache_control 等 OpenAI schema 会丢的字段）；不带该头（裸 curl、或未来版本的
+  `anthropic-version`）回落 OpenAI rule，由 ext_proc 做 Anthropic→OpenAI 翻译。
 - **`modelNameOverride` = `status.model.name`**（引擎 served name；profile 契约
   `--served-model-name "{{ model.name }}"`）。作用：目录名与引擎名解耦——同一模型的不同版本
   （fp16 / w8a8）都能以各自的目录名共存，客户端始终用目录名。
-- **rule 定位键** = `backendRefs[0].(namespace, name) == (<isvc.ns>, <isvc>-backend)`，与 rule name
-  / header value 无关——modelName 变更时定位稳定，且每服务唯一。
-- **跨 namespace 引用**：rule 在 `--gateway-namespace`（共享路由所在），backendRef 指向
-  `<isvc.ns>` 的 AIServiceBackend，跨 ns 需 `ReferenceGrant`（`from`=平台 Gateway，`to`=本服务
-  AIServiceBackend）。Backend 由同 ns 的 AIServiceBackend 引用，不跨 ns，无需授权。
-- 三对象均 `SetControllerReference(isvc)`，标签沿用 `inferenceServiceLabelKey/profileLabelKey/
-  managedByLabelKey`；端口复用现有 `endpointPort(endpoint.Internal)` 解析。共享路由不归本 ISVC
-  所有（owner 是平台），故用 **finalizer**（`isvc-catalog-rule`）在删除时移除本服务的 rule——三个
-  owned 对象随 ownerRef 级联，只有共享路由里的 rule 需显式移除。
-- **历史对象清理**：`publish` 为 true 或 false 时，若存在 owner 为本 ISVC 的 HTTPRoute
+- **rule 定位键** = `backendRefs[0].(namespace, name)`：`<isvc>-anthropic` 或 `<isvc>-backend`，
+  与 rule 顺序无关。
+- **跨 namespace 引用**：两条 rule 都指向 `<isvc.ns>` 的 AIServiceBackend，需要 `<isvc>-grant`。
+- 已知副作用：`/v1/models` 由 controller 遍历 rule 生成，同模型出现两次（上表的 ① 也会被计入）。
+  `ExcludeFromModelsEndpoint` 字段 v1.2.0 才有，Go 依赖仍钉 v1.1.0 —— 升依赖后给 ① 置 true 即可消除。
+- 四个对象均 `SetControllerReference(isvc)`，标签沿用 `inferenceServiceLabelKey/profileLabelKey/
+  managedByLabelKey`；端口复用现有 `endpointPort(endpoint.Internal)` 解析。共享对象不归某个
+  ISVC 所有（owner 是平台），故用 **finalizer**（`isvc-catalog-finalizer`）在删除时触发一次
+  全量重建——本服务的 rule 随重建消失；四个 owned 对象随 ownerRef 级联。
+- **历史对象清理**：无论是否设置 `aigatewayRouter`，若存在 owner 为本 ISVC 的 HTTPRoute
   `<isvc>-route`（旧原语产物），删除之（复用现有 delete-owned-route 分支；所有集群迁完后可删该分支）。
+- **切换路由**：`aigatewayRouter` 从 public 改为 private（或反向）时，所选路由（对）按全量规则
+  重建，另一条（对）也同步重建——它已不再包含本服务。两次写不是原子的，极端情况下会短暂同时
+  存在，reconcile 幂等收敛。取消发布、删除与 finalizer 同样对两条（对）路由做全量重建。
 
 ### D3 timeout 语义（本次修复）
 
 - `route.timeoutSeconds` → `rules[].timeouts.request`（**总时长上限**），
   **默认从 60 改为 0 = 不设上限**。
-- **新增 `route.idleTimeoutSeconds`** → `rules[].streamIdleTimeout`（**无进展上限**），默认 300。
+- **新增 `route.idleTimeoutSeconds`** → `rules[].streamIdleTimeout`（**无进展上限**），**默认 0 = 不设上限**。
 - 语义文档必须写明：非流式请求在生成期间**零字节**，idle 计时同样在跑——idle 实际决定
   "非流式生成最长能多久"（默认 300s）；要更久就调大。流式则只要有字节流动就不受 idle 约束，
   受 request（默认不设）约束。
@@ -212,22 +268,27 @@ spec:
 
 ### D4 唯一性、接受判定与降级
 
-- **唯一性**：只扫**共享路由**的 `spec.rules[]`（不再扫全平台 AIGatewayRoute），取
-  `matches[].headers[]` 中 `name == x-ai-eg-model` 的 value 与 `route.modelName` 比对；冲突保持
-  先占用者有效，本服务 `RouteReady=False, reason=ModelNameConflict`（沿用现语义）。
-- **容量上限**：共享路由 `spec.rules` CRD 上限 15 条（含 controller catch-all 预留后实为
-  15）；本服务的 rule 尚不存在且已达上限 → `RouteReady=False, reason=CatalogFull`（新 reason）。
-  规模约束：同时发布的模型 ≤15（Q1）。
-- **接受判定**：`RouteReady` 在 `publish: true` 时要求 **共享路由 `Accepted=True`** 且
-  **本服务的 `AIServiceBackend` `Accepted=True`**，且本服务的 rule 仍在共享路由里（三者缺一 →
-  `GatewayNotAccepted`）。共享路由只有一条 route 级 `Accepted` 条件（多服务共享一条路由，per-service
-  粒度落在 AIServiceBackend 上，Agent Router 亦逐对象接受它）；`EndpointReady` 前置不变
-  （rule 生命周期仍跟随 Service：endpoint 抖动不删 rule，关闭 publish 才删）。
+- **唯一性**：重建共享规则集时按创建时间（再按 namespace/name）排序，取
+  `route.modelName` 与每个服务比对；同名时**先占用者保留**，后来的服务在两条共享对象里都没有
+  自己的 rule，`RouteReady=False, reason=ModelNameConflict`。public 与 private 各自独立，
+  同一目录名可同时存在于两条路由。
+- **容量上限**（两条共享对象各自有 CRD 上限，operator 在重建时逐个服务累加，放不下就整组跳过）：
+  - `AIGatewayRoute.spec.rules` 上限 15 条，每模型 2 条（原生 Anthropic + OpenAI），
+    即最多 7 个模型；放不下时整组（2 条一起）跳过，不留半条；
+  - 共享 `HTTPRoute` 由 controller 从 `AIGatewayRoute` 生成，operator 不再单独占额度。
+  当前服务因任一条放不下 → `RouteReady=False, reason=CatalogFull`。规模约束见 Q1。
+- **接受判定**：`RouteReady` 要求 **所选共享 `AIGatewayRoute` `Accepted=True`**、**本服务的
+  `<isvc>-backend` 与 `<isvc>-anthropic` 两个 `AIServiceBackend` 均 `Accepted=True`**，且本服务的
+  rule 仍在路由里（缺一 → `GatewayNotAccepted`）。所有路径（含 `/v1/messages`）都走
+  `AIGatewayRoute`，不再校验共享 `HTTPRoute` 的 `parents[]`。共享对象只有 route 级条件，
+  per-service 粒度落在 AIServiceBackend 上，Agent Router 亦逐对象接受它；
+  `EndpointReady` 前置不变（rule 生命周期仍跟随 Service：endpoint 抖动不删 rule，清空
+  `aigatewayRouter` 才删）。
 - **降级**：
-  - 启动探测 aigateway CRD（同 `ServiceMonitorAvailable` 模式，探测一次）。缺失时 publish 请求 →
+  - 启动探测 aigateway CRD（同 `ServiceMonitorAvailable` 模式，探测一次）。缺失时发布请求 →
     `RouteReady=False, reason=AgentRouterUnavailable`（新 reason），其余条件与工作负载不受影响。
-  - **共享路由缺失**（平台未预装，operator 从不创建它）→ `RouteReady=False,
-    reason=CatalogRouteNotFound`（新 reason）。
+  - 共享对象缺失且没有规则可写 → 不创建空对象（`RouteReady` 停在 `GatewayNotAccepted`，
+    等平台或下一个发布的服务补上）。private 与 public 对称，没有额外前置条件。
   - **平台 Gateway 未配置**（`--gateway-name` 为空）→ `RouteReady=False,
     reason=GatewayNotConfigured`（沿用）。
 - `catalogHostname` 不再是发布门：它只决定 `status.endpoint.public` 是否展示（D6），空 = 不展示，
@@ -235,14 +296,12 @@ spec:
 
 ### D5 配置面
 
-- 新增 operator flag `--gateway-catalog-route`（默认 `cubestack-ai-gateway`），helm values
-  `gateway.catalogRoute`，走现有 `gateway.*` 接线方式；空值省略该 flag，由 manager 自身默认
-  （`cubestack-ai-gateway`）兜底——两者同为平台约定值，必须与平台预装的共享路由同名，
-  否则 `CatalogRouteNotFound`。
+- 目标路由由 CRD 枚举固定：`spec.route.aigatewayRouter` ∈ {`cubestack-ai-gateway`,
+  `cubestack-ai-gateway-private`}，两条共享路由与两条共享 HTTPRoute 都落在 `--gateway-namespace`；
+  operator 缺失时补建（无规则可写时不建空对象）。operator 不再有选择路由的 flag。
 - `--gateway-catalog-hostname`（`gateway.catalogHostname`）降级为**展示项**：只决定
   `status.endpoint.public` 是否展示，空 = 不展示；不再门控发布。
-- 验证集群取值：`catalogRoute=cubestack-ai-gateway`（在 `envoy-gateway-system`）、
-  `catalogHostname=ai.cubestack.dev`。
+- 验证集群取值：两条共享路由都在 `envoy-gateway-system`、`catalogHostname=ai.cubestack.dev`。
 
 ### D6 status 与 web
 
@@ -257,6 +316,7 @@ spec:
   （首字符字母数字，允许 `.` `_` `/` `-`，长度 ≤128）。删掉"单 label 以确保单级通配 TLS 覆盖"的约束理由。
 - `timeoutSeconds`：范围 0–86400（0 = 不设上限）。
 - `idleTimeoutSeconds`：新增，范围 1–86400，默认 300。
+- `paths`：新增，`MaxItems=4`、`listType=set`，枚举四个客户端路径；未设置 = 全部，空列表 = 不暴露。
 
 ### D8 平台 prerequisite（不进 operator）
 
@@ -273,18 +333,17 @@ spec:
 - go.mod 新增两个依赖：aigateway API（v1beta1，模块路径以 v1.1.0 为准）+ envoy gateway API
   （EG `Backend` 类型，以 EG v1.9.1 对应版本为准）。
 - RBAC（`make manifests` 从 kubebuilder 注释生成，helm chart 同步）：
-  - `aigatewayroutes`：`get/list/watch/update/patch`（**无 create/delete**——共享路由归平台所有，
-    operator 只改 rule）。
-  - `aiservicebackends`：`get/list/watch/create/update/patch/delete`（本服务 owned 对象）。
-  - `backends`：`get/list/watch/create/update/patch/delete`（本服务 owned 对象）。
-  - `referencegrants`（gateway.networking.k8s.io）：`get/list/watch/create/update/patch/delete`
-    （本服务 owned 的跨 ns 授权）。
+  - `aigatewayroutes`：`get/list/watch/create/update/patch`（**无 delete**——共享路由缺失时 operator
+    会补建，但从不删除它们）。
+  - `httproutes`、`aiservicebackends`、`backends`、`referencegrants`
+    （gateway.networking.k8s.io）：`get/list/watch/create/update/patch/delete`。
 - envtest 夹具两组 CRD（aigateway v1beta1、gateway.envoyproxy.io）+ ReferenceGrant CRD（gateway-api
   自带）；**同时保留 CRD 缺失的降级路径测试**。
-- `route_test.go` 覆盖：三对象 + rule 渲染、共享路由缺失（`CatalogRouteNotFound`）、rule 满
-  （`CatalogFull`）、modelName 冲突、接受判定（共享路由 + AIServiceBackend 双接受）、超时改只改本
-  rule 不动他人 rule、无漂移、publish=false 删三对象 + 删 rule、finalizer 删除删 rule、CRD 缺失
-  降级。
+- `route_test.go` 覆盖：四对象 + 两类 rule 渲染、共享对象缺失时创建、rule 满（`CatalogFull`，
+  AIGatewayRoute 15 条与 HTTPRoute 16 条两种上限）、modelName 冲突、按 `spec.route.paths`
+  只生成选中路径、接受判定（共享 AIGatewayRoute + `<isvc>-anthropic` + 共享 HTTPRoute parents）、
+  全量重建不动他人 rule、无漂移、清空 `aigatewayRouter` 删四对象 + 两条（对）路由都不留 rule、
+  public/private 选择与切换、finalizer 删除后重建、CRD 缺失降级。
 
 ## 4. 实施顺序
 
@@ -299,10 +358,10 @@ spec:
 
 ## 5. 交付物清单
 
-- operator：三个 owned 对象（Backend / AIServiceBackend / ReferenceGrant）+ 共享路由 rule
-  的乐观并发 upsert/删除 + 渲染/判定/降级逻辑（route.go 重写）、`--gateway-catalog-route` flag、
+- operator：四个 owned 对象（Backend / 两个 AIServiceBackend / 一个 ReferenceGrant）+ 两条（对）
+  共享对象的 rule 全量重建（乐观并发 + 无变化不写）+ 渲染/判定/降级逻辑（route.go 重写）、
   finalizer、RBAC、envtest CRD 夹具、单测
-- helm chart：`gateway.catalogRoute`（新增）+ `gateway.catalogHostname`（降级为展示）value + RBAC 规则
+- helm chart：`gateway.catalogHostname`（降级为展示）value + RBAC 规则（路由名来自 spec，不再有 value）
 - `docs/design/isvc/api.md` §3.3（route 字段表、RouteReady 语义与新增 reason、status 示例）与 §3.4（RBAC）更新
 - web：InferenceService 详情展示目录入口 + 模型名
 - 平台侧：CTP 清单（运维 SOP；Phase 0 手工 apply 的记录）
@@ -317,8 +376,8 @@ spec:
    先占用者不受影响。
 4. 降级：无 agent-router CRD 的集群（kind e2e）`RouteReady=False, reason=AgentRouterUnavailable`，
    其余条件与工作负载正常。
-   平台未预装共享路由 → `RouteReady=False, reason=CatalogRouteNotFound`；
-   已发布服务删除后共享路由里不留残留 rule（finalizer 生效）。
+   共享对象被手工删掉后，下一次 reconcile 用全部已发布服务重建；
+   已发布服务删除后两条共享对象里都不留残留 rule（finalizer 生效）。
 5. 大 prompt（≥50KB）经 CTP 通过 AI 路由。
 6. `make test` / `make lint` 绿；kind e2e 不回归。
 

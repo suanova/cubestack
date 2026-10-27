@@ -3,7 +3,7 @@
 #
 # __DEV_ENV_IMAGE__ is substituted by `make helm-e2e-devenv-verify` with the
 # environment image this job built from its own tree and loaded into the kind
-# cluster (`cpu-base:e2e`, the DEV_ENV_IMAGE default). The pod runs that loaded
+# cluster (`cpu-pytorch:e2e`, the DEV_ENV_IMAGE default). The pod runs that loaded
 # copy — the non-latest tag makes IfNotPresent take the node's image — so no
 # registry is consulted and the test exercises the commit under test rather than
 # whatever the registry last published.

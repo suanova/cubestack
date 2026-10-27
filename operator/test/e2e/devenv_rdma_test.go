@@ -119,7 +119,7 @@ func describeRDMAFabric(f rdmaFabric) {
 		// instead.
 		draftCase{
 			Name:     "rdma-" + f.device,
-			Image:    devenv.MustImage("cpu-base-ssh"),
+			Image:    devenv.MustImage("cpu-pytorch-ssh"),
 			Identity: devenv.NonRoot,
 			Shape: func(d *aiv1alpha1.DevEnvironment) {
 				d.Spec.Network = &aiv1alpha1.NetworkSpec{
@@ -170,7 +170,7 @@ func describeRDMAFabric(f rdmaFabric) {
 		// platform's. The same shape as E9 and N4, on a third resource.
 		draftCase{
 			Name:     "rdma-" + f.device + "-absent",
-			Image:    devenv.MustImage("cpu-base-ssh"),
+			Image:    devenv.MustImage("cpu-pytorch-ssh"),
 			Identity: devenv.NonRoot,
 			Shape: func(d *aiv1alpha1.DevEnvironment) {
 				d.Spec.Network = &aiv1alpha1.NetworkSpec{

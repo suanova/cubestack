@@ -61,11 +61,11 @@ import (
 const (
 	testDevImage      = "harbor.local/ai-images/base-cuda:11.8-pytorch2.2"
 	testBaseMacaImage = "harbor.local/ai-images/base-maca:1.0"
-	testCPUImage      = "harbor.isuanova.com/suanova/cpu-base:latest"
-	// testCubeBaseImage is the platform's own nvidia family image. Its name
-	// carries no "cuda" token, which is why the nvidia rule accepts the family
-	// name as well.
-	testCubeBaseImage = "harbor.isuanova.com/suanova/cube-base:26.08"
+	testCPUImage      = "harbor.isuanova.com/suanova/cpu-pytorch:latest"
+	// testCUDAPytorchImage is the platform's own nvidia family image. Its name
+	// carries the accelerator token the nvidia rule checks, as every family
+	// image's does.
+	testCUDAPytorchImage = "harbor.isuanova.com/suanova/cuda-pytorch:26.08"
 	// testMetaxImage is the mirror of the upstream Metax package: the metax token
 	// is `maca` in the package's own name, whatever registry path fronts it.
 	testMetaxImage = "harbor.isuanova.com/mirrors/cr.metax-tech.com/public-library/maca-pytorch:3.9.0.12-torch2.4-py310-ubuntu22.04-amd64"
@@ -78,6 +78,7 @@ const (
 	testMacaInPathImage   = "harbor.local/maca-images/minimal:latest"
 	testGPUResource       = "nvidia.com/gpu"
 	testDevEnvGatewayName = "test-gw"
+	testStorageSize       = "10Gi"
 	// testGatewayDataplaneNamespace is where the test Gateway's proxy pods run.
 	// It is deliberately not the Gateway's own namespace: they are separate
 	// deployments, and the ingress rule admits the former.
@@ -1511,6 +1512,43 @@ var _ = Describe("DevEnvironment object rendering and publishing", func() {
 				env.Spec.SchedulerName = testSchedulerName
 			})).NotTo(Equal(plain))
 		})
+
+		// spec.runtime.sudo is opt-in, and every environment that predates it holds
+		// false. The field is omitempty on the API type, so false serializes exactly
+		// as the absent field did and the whole cluster is not rolled on upgrade.
+		// Turning the grant on must move the digest: the pod gains an init
+		// container and a volume, and without the roll it would never pick them up.
+		It("digests the sudo grant as a change, and its false as absent", func() {
+			runtime := func(mut func(*aiv1alpha1.RuntimeSpec)) func(*aiv1alpha1.DevEnvironment) {
+				return func(env *aiv1alpha1.DevEnvironment) {
+					env.Spec.Runtime = &aiv1alpha1.RuntimeSpec{User: "ubuntu"}
+					mut(env.Spec.Runtime)
+				}
+			}
+			plain := hash(runtime(func(*aiv1alpha1.RuntimeSpec) {}))
+			Expect(hash(runtime(func(rt *aiv1alpha1.RuntimeSpec) { rt.Sudo = false }))).To(Equal(plain))
+			Expect(hash(runtime(func(rt *aiv1alpha1.RuntimeSpec) { rt.Sudo = true }))).NotTo(Equal(plain))
+		})
+
+		// The sidecar's reference is baked into the manager, so a release that
+		// names a new one moves nothing in the spec. Without it in the digest the
+		// early return in applyStatefulSet would leave every environment that
+		// carries the sidecar on the reference its previous manager baked in.
+		It("digests the sidecar's image reference, for the environments that carry it", func() {
+			idle := func(env *aiv1alpha1.DevEnvironment) {
+				env.Spec.Lifecycle = &aiv1alpha1.LifecycleSpec{IdleTimeout: 3600}
+			}
+			withAgent, withoutAgent := hash(idle), hash(nil)
+			original := activityAgentImage
+			DeferCleanup(func() { activityAgentImage = original })
+			// The commit-addressed reference a release bakes in, in place of the
+			// default `latest` a from-source manager keeps.
+			activityAgentImage = "harbor.isuanova.com/suanova/cubestack-activity-agent:0123abc"
+			Expect(hash(idle)).NotTo(Equal(withAgent))
+			// An environment the sidecar does not reach is not rolled by an image
+			// it never runs.
+			Expect(hash(nil)).To(Equal(withoutAgent))
+		})
 	})
 
 	Describe("rdmaResource", func() {
@@ -1579,10 +1617,10 @@ var _ = Describe("DevEnvironment object rendering and publishing", func() {
 				}
 			},
 			Entry("nvidia with a base-cuda image matches", testDevImage, nvidiaGPU(), true),
-			Entry("nvidia with a cube-base image matches", testCubeBaseImage, nvidiaGPU(), true),
+			Entry("nvidia with a cuda-pytorch image matches", testCUDAPytorchImage, nvidiaGPU(), true),
 			Entry("nvidia with a minimal image mismatches", testCPUImage, nvidiaGPU(), false),
 			Entry("nvidia with a base-maca image mismatches", testBaseMacaImage, nvidiaGPU(), false),
-			Entry("metax with a cube-base image mismatches", testCubeBaseImage, metaxGPU(), false),
+			Entry("metax with a cuda-pytorch image mismatches", testCUDAPytorchImage, metaxGPU(), false),
 			Entry("metax with a base-cuda image mismatches", testDevImage, metaxGPU(), false),
 			Entry("metax with a mirrored maca-pytorch image matches", testMetaxImage, metaxGPU(), true),
 			Entry("metax with an unqualified maca image matches", testBareMacaImage, metaxGPU(), true),
@@ -1996,6 +2034,80 @@ var _ = Describe("DevEnvironment object rendering and publishing", func() {
 				strings.Index(script, `chown -R "$WORKSPACE_UID`)
 			Expect(chmod).To(BeNumerically("<", chown),
 				"the chmod precedes the chown: see ::permissionInitScript")
+		})
+	})
+
+	Describe("desiredSudoersInitContainer", func() {
+		rt := func(sudo bool, user int64) *aiv1alpha1.RuntimeSpec {
+			return &aiv1alpha1.RuntimeSpec{
+				Sudo:            sudo,
+				SecurityContext: &aiv1alpha1.RuntimeSecurityContext{RunAsUser: ptrTo(user)},
+			}
+		}
+		initContainer := func(mut func(*aiv1alpha1.DevEnvironment)) corev1.Container {
+			env := &aiv1alpha1.DevEnvironment{
+				Spec: aiv1alpha1.DevEnvironmentSpec{
+					Type: aiv1alpha1.DevEnvironmentTypeSSH, Image: testDevImage,
+				},
+			}
+			if mut != nil {
+				mut(env)
+			}
+			return desiredSudoersInitContainer(env)
+		}
+
+		// The rule names the uid, not the account: sudoers' numeric form has no
+		// space after the '#', and an image need not have spec.runtime.user in its
+		// passwd for the container to run as it. A named rule would grant nothing
+		// whenever the two disagreed.
+		It("grants the uid the container runs as", func() {
+			c := initContainer(func(env *aiv1alpha1.DevEnvironment) {
+				env.Spec.Runtime = rt(true, 1001)
+			})
+			Expect(c.Env).To(ContainElements(
+				corev1.EnvVar{Name: sudoersInitDirEnv, Value: sudoersInitMountPath},
+				corev1.EnvVar{Name: sudoersInitUIDEnv, Value: "1001"},
+			))
+			script := c.Command[2]
+			Expect(script).To(ContainSubstring(
+				`printf '#%s ALL=(ALL) NOPASSWD: ALL\n' "$SUDOERS_UID"`))
+			Expect(script).To(ContainSubstring(`chmod 0440`))
+		})
+
+		// An init container that exits non-zero fails the pod, and the environment is
+		// never left running without the grant it asked for.
+		It("fails closed", func() {
+			Expect(initContainer(nil).Command[2]).To(HavePrefix("set -eu\n"))
+		})
+
+		// Retrying the init container is a fresh write into a 0440 file whose owner
+		// is the root that wrote it — with every capability dropped, that root may
+		// not reopen it for writing, so the stale file goes first.
+		It("removes the previous write before writing the grant", func() {
+			script := initContainer(nil).Command[2]
+			Expect(strings.Index(script, `rm -f "$SUDOERS_DIR/20-cubestack"`)).To(
+				BeNumerically("<", strings.Index(script, `printf '#%s`)))
+		})
+
+		// The rule has to be root-owned and unreadable-writable by anyone else, or
+		// sudo ignores it: root, with no capability at all, and a root filesystem
+		// that cannot be written.
+		It("runs as unprivileged root over a read-only root filesystem", func() {
+			sc := initContainer(nil).SecurityContext
+			Expect(sc.RunAsUser).To(Equal(ptrTo(int64(0))))
+			Expect(sc.RunAsGroup).To(Equal(ptrTo(int64(0))))
+			Expect(sc.RunAsNonRoot).To(Equal(ptrTo(false)))
+			Expect(sc.Privileged).To(Equal(ptrTo(false)))
+			Expect(sc.AllowPrivilegeEscalation).To(Equal(ptrTo(false)))
+			Expect(sc.ReadOnlyRootFilesystem).To(Equal(ptrTo(true)))
+			Expect(sc.Capabilities.Drop).To(ConsistOf(allCapabilities))
+			Expect(sc.Capabilities.Add).To(BeEmpty())
+		})
+
+		It("mounts the sudoers volume and no other", func() {
+			Expect(initContainer(nil).VolumeMounts).To(Equal([]corev1.VolumeMount{
+				{Name: sudoersVolumeName, MountPath: sudoersInitMountPath},
+			}))
 		})
 	})
 
@@ -2507,7 +2619,7 @@ var _ = Describe("DevEnvironment object rendering and publishing", func() {
 		// else the pod-level context holds is the seccomp spec's business.)
 		It("initializes the workspace claim from an init container, without an fsGroup", func() {
 			spec := render(func(env *aiv1alpha1.DevEnvironment) {
-				env.Spec.Storage = &aiv1alpha1.StorageSpec{Size: "10Gi"}
+				env.Spec.Storage = &aiv1alpha1.StorageSpec{Size: testStorageSize}
 			})
 			Expect(spec.SecurityContext.FSGroup).To(BeNil())
 			Expect(spec.InitContainers).To(HaveLen(1))
@@ -2521,7 +2633,7 @@ var _ = Describe("DevEnvironment object rendering and publishing", func() {
 
 		It("never mounts a referenced PVC into the init container", func() {
 			spec := render(func(env *aiv1alpha1.DevEnvironment) {
-				env.Spec.Storage = &aiv1alpha1.StorageSpec{Size: "10Gi"}
+				env.Spec.Storage = &aiv1alpha1.StorageSpec{Size: testStorageSize}
 				env.Spec.Volumes = []aiv1alpha1.VolumeMount{
 					{Name: "datasets", PVCName: "shared-dataset", MountPath: "/datasets", ReadOnly: true},
 				}
@@ -2536,8 +2648,83 @@ var _ = Describe("DevEnvironment object rendering and publishing", func() {
 			}))
 		})
 
+		// The grant is two halves that can only work together: an init container
+		// writes the rule into a volume the main container reads the one file from.
+		// Mounting the directory instead would hide the image's own sudoers.d
+		// entries, so it is the file, by subPath, and read-only.
+		It("grants passwordless sudo when the runtime asks for it", func() {
+			spec := render(func(env *aiv1alpha1.DevEnvironment) {
+				env.Spec.Runtime = &aiv1alpha1.RuntimeSpec{Sudo: true}
+			})
+			Expect(spec.InitContainers).To(HaveLen(1))
+			Expect(spec.InitContainers[0].Name).To(Equal(sudoersInitContainerName))
+			Expect(spec.Volumes).To(ContainElement(corev1.Volume{
+				Name:         sudoersVolumeName,
+				VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+			}))
+			Expect(spec.Containers[0].VolumeMounts).To(ContainElement(corev1.VolumeMount{
+				Name:      sudoersVolumeName,
+				MountPath: sudoersFilePath,
+				SubPath:   sudoersFileName,
+				ReadOnly:  true,
+			}))
+			// sudo is a setuid binary, so whatever the pod says about escalation
+			// holds for it: an explicit false would make the grant inert. The
+			// container keeps the default (unset, which Kubernetes reads as true).
+			Expect(spec.Containers[0].SecurityContext.AllowPrivilegeEscalation).To(BeNil())
+		})
+
+		// Off is the default and the common case, and an opt-out must render the pod
+		// the platform built before the field existed — no init container, no
+		// volume, no mount.
+		It("grants nothing when the runtime does not ask", func() {
+			for _, spec := range []corev1.PodSpec{
+				render(nil),
+				render(func(env *aiv1alpha1.DevEnvironment) {
+					env.Spec.Runtime = &aiv1alpha1.RuntimeSpec{Sudo: false}
+				}),
+			} {
+				Expect(spec.InitContainers).To(BeEmpty())
+				Expect(spec.Volumes).To(BeEmpty())
+				Expect(spec.Containers[0].VolumeMounts).To(BeEmpty())
+			}
+		})
+
+		// Root already runs any command it likes, so a rule for uid 0 serves no
+		// reader; the field is accepted and changes nothing rather than rendering a
+		// grant that could only weaken the report.
+		It("grants nothing to a root environment", func() {
+			spec := render(func(env *aiv1alpha1.DevEnvironment) {
+				env.Spec.Runtime = &aiv1alpha1.RuntimeSpec{
+					Sudo:            true,
+					SecurityContext: &aiv1alpha1.RuntimeSecurityContext{RunAsUser: ptrTo(int64(0))},
+				}
+			})
+			Expect(spec.InitContainers).To(BeEmpty())
+			Expect(spec.Volumes).To(BeEmpty())
+			Expect(spec.Containers[0].VolumeMounts).To(BeEmpty())
+		})
+
+		// The two init containers are independent, and the repair necessarily runs
+		// first: it establishes the workspace, which the grant does not touch. The
+		// order is fixed so a roll does not churn the template.
+		It("runs the workspace repair before the sudo grant", func() {
+			spec := render(func(env *aiv1alpha1.DevEnvironment) {
+				env.Spec.Storage = &aiv1alpha1.StorageSpec{Size: testStorageSize}
+				env.Spec.Runtime = &aiv1alpha1.RuntimeSpec{Sudo: true}
+			})
+			Expect(spec.InitContainers).To(HaveLen(2))
+			Expect(spec.InitContainers[0].Name).To(Equal(permissionInitContainerName))
+			Expect(spec.InitContainers[1].Name).To(Equal(sudoersInitContainerName))
+			// Neither init container sees a referenced PVC: only the platform's own
+			// workspace claim is theirs to touch.
+			Expect(spec.InitContainers[1].VolumeMounts).To(ConsistOf(corev1.VolumeMount{
+				Name: sudoersVolumeName, MountPath: sudoersInitMountPath,
+			}))
+		})
+
 		It("copies runtime command, args and env onto the container", func() {
-			command := []string{"/bin/sh"}
+			command := []string{initShell}
 			args := []string{"-c", "sleep infinity"}
 			runtimeEnv := []corev1.EnvVar{
 				{Name: "FOO", Value: "bar"},
@@ -3120,10 +3307,11 @@ var _ = Describe("DevEnvironment object rendering and publishing", func() {
 			s := spec.Containers[1]
 			Expect(s.Name).To(Equal(activityAgentContainerName))
 			Expect(s.Image).To(Equal(activityAgentImage))
-			// The image is a mutable tag, so a node that cached an older layer
-			// would keep running an older agent: only the pull policy makes a
-			// rebuilt agent reach a node that already has the tag.
-			Expect(s.ImagePullPolicy).To(Equal(corev1.PullAlways))
+			// The manager's policy, so the e2e's kind-loaded copy of this image
+			// is used rather than pulled from a registry the cluster cannot
+			// reach. A released manager names the commit-addressed reference CI
+			// published, so only a from-source build's `latest` can go stale.
+			Expect(s.ImagePullPolicy).To(Equal(corev1.PullIfNotPresent))
 			Expect(s.Args).To(Equal([]string{"--ports=8080"}))
 			// A probe is the one thing a sidecar must not have: a failing one
 			// makes the pod NotReady, and the environment with it.
@@ -4057,6 +4245,60 @@ var _ = Describe("DevEnvironment controller", func() {
 				g.Expect(sts.Spec.Template.Spec.Containers).To(HaveLen(1))
 				g.Expect(sts.Spec.Template.Spec.ShareProcessNamespace).To(BeNil())
 				g.Expect(sts.Spec.Template.Spec.ServiceAccountName).To(BeEmpty())
+			}, "15s", "200ms").Should(Succeed())
+		})
+
+		// The grant is delivered by an init container and a volume, so the pod has
+		// to roll onto them; and withdrawing it has to roll them away again — a
+		// workload keeping a sudoers file the spec no longer asks for would outlive
+		// the decision. The withdrawal returns the runtime to nil, which is the
+		// digest the environment started from.
+		It("rolls the StatefulSet when sudo is granted, and back when it is withdrawn", func() {
+			env := validDevEnvironment("de-sudo-roll")
+			Expect(k8sClient.Create(ctx, env)).To(Succeed())
+			defer deleteEnv(env.Name)
+
+			var before string
+			Eventually(func(g Gomega) {
+				sts := &appsv1.StatefulSet{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), sts)).To(Succeed())
+				before = sts.Annotations[stsSpecHashAnnotationKey]
+				g.Expect(before).NotTo(BeEmpty())
+				g.Expect(sts.Spec.Template.Spec.InitContainers).To(HaveLen(1))
+				g.Expect(sts.Spec.Template.Spec.InitContainers[0].Name).To(Equal(permissionInitContainerName))
+			}, "15s", "200ms").Should(Succeed())
+
+			updateEnvSpec(env.Name, func(e *aiv1alpha1.DevEnvironment) {
+				e.Spec.Runtime = &aiv1alpha1.RuntimeSpec{Sudo: true}
+			})
+
+			Eventually(func(g Gomega) {
+				sts := &appsv1.StatefulSet{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), sts)).To(Succeed())
+				g.Expect(sts.Annotations[stsSpecHashAnnotationKey]).NotTo(Equal(before))
+				g.Expect(sts.Spec.Template.Spec.InitContainers).To(HaveLen(2))
+				g.Expect(sts.Spec.Template.Spec.InitContainers[1].Name).To(Equal(sudoersInitContainerName))
+				g.Expect(sts.Spec.Template.Spec.Containers[0].VolumeMounts).To(ContainElement(corev1.VolumeMount{
+					Name:      sudoersVolumeName,
+					MountPath: sudoersFilePath,
+					SubPath:   sudoersFileName,
+					ReadOnly:  true,
+				}))
+			}, "15s", "200ms").Should(Succeed())
+
+			updateEnvSpec(env.Name, func(e *aiv1alpha1.DevEnvironment) {
+				e.Spec.Runtime = nil
+			})
+
+			Eventually(func(g Gomega) {
+				sts := &appsv1.StatefulSet{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), sts)).To(Succeed())
+				g.Expect(sts.Annotations[stsSpecHashAnnotationKey]).To(Equal(before))
+				g.Expect(sts.Spec.Template.Spec.InitContainers).To(HaveLen(1))
+				g.Expect(sts.Spec.Template.Spec.InitContainers[0].Name).To(Equal(permissionInitContainerName))
+				for _, v := range sts.Spec.Template.Spec.Volumes {
+					g.Expect(v.Name).NotTo(Equal(sudoersVolumeName))
+				}
 			}, "15s", "200ms").Should(Succeed())
 		})
 

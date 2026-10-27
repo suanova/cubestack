@@ -175,7 +175,16 @@ describe("applyAgentEvent — approvals", () => {
   it("records a pending approval", () => {
     const m = fold([pending]);
     expect(m.approvals).toEqual([
-      { callId: "a1", name: "exec", command: "kubectl delete pod x", level: "write", message: undefined, state: "pending" },
+      {
+        callId: "a1",
+        name: "exec",
+        command: "kubectl delete pod x",
+        level: "write",
+        message: undefined,
+        state: "pending",
+        // No block preceded it, so its record sits before the first one.
+        afterBlock: -1,
+      },
     ]);
   });
 
@@ -191,6 +200,21 @@ describe("applyAgentEvent — approvals", () => {
     expect(m.approvals[0].createdAtMs).toBe(1000);
     expect(m.approvals[0].expiresAtMs).toBe(60000);
     expect(m.approvals[1].createdAtMs).toBe(2000);
+  });
+
+  it("records the block it was raised after, so it can be drawn in place", () => {
+    // The card belongs next to the work it gates, not at the end of the turn:
+    // by the time it is decided the turn may have run many more tools, and a
+    // position recorded at arrival is the only thing that keeps it there.
+    const m = fold([
+      { type: "message_delta", sessionId: "s", delta: "先查一下。" },
+      { type: "tool_call", sessionId: "s", name: "exec", callId: "c1", arguments: { command: "kubectl get pods" } },
+      pending,
+      { type: "tool_call", sessionId: "s", name: "exec", callId: "c2", arguments: { command: "kubectl get svc" } },
+    ]);
+    // Two blocks (text, c1) existed when the approval arrived; later calls
+    // must not move it.
+    expect(m.approvals[0].afterBlock).toBe(1);
   });
 
   it("does not double an approval the turn already carries", () => {

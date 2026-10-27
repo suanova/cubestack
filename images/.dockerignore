@@ -9,9 +9,9 @@
 # Re-include the shared runtime logic and the image directories.
 !common
 !common/**
-!cpu-base
-!cpu-base/**
-!maca-base
-!maca-base/**
-!cube-base
-!cube-base/**
+!cpu-pytorch
+!cpu-pytorch/**
+!maca-pytorch
+!maca-pytorch/**
+!cuda-pytorch
+!cuda-pytorch/**

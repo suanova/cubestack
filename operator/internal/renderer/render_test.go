@@ -3,10 +3,12 @@ package renderer
 import (
 	"maps"
 	"strconv"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -15,10 +17,16 @@ import (
 )
 
 const (
-	overridePrefillReplicas  = "prefillReplicas"
-	overrideReplicaPlacement = "replicaPlacement"
-	overrideNodeSelector     = "nodeSelector"
-	bootstrapAsset           = "bootstrap"
+	overridePrefillReplicas   = "prefillReplicas"
+	overrideReplicaPlacement  = "replicaPlacement"
+	overrideNodeSelector      = "nodeSelector"
+	overrideExtendedResources = "extendedResources"
+	bootstrapAsset            = "bootstrap"
+	// extendedResourcesTemplate is the shipped declaration that forwards the
+	// override to the role's extended resources.
+	extendedResourcesTemplate = "{{ overrides.extendedResources }}"
+	// decodeRole is the second GPU role of a PD separation.
+	decodeRole = "decode"
 	// nodePoolLabel and nodePoolValue are the node-pool label pair the
 	// nodeSelector table entries pin a service to.
 	nodePoolLabel = "node-pool"
@@ -163,6 +171,149 @@ var _ = Describe("Render", func() {
 		Expect(res.Errors).To(HaveLen(1))
 		Expect(res.Errors[0].Reason).To(Equal(ReasonInvalidOverride))
 	})
+
+	It("parses a literal extendedResources list into a resource map", func() {
+		p := renderProfile()
+		p.Spec.Roles[1].PodTemplate.Resources = &aiv1alpha1.PodResources{
+			GPUPerPod:         ptrTo(intstr.FromInt32(8)),
+			ExtendedResources: "rdma/ib_shared_devices=2,example.com/foo=1",
+		}
+		res := Render(renderISVC(), p, renderModel(), nil)
+		Expect(res.Errors).To(BeEmpty())
+		Expect(res.Roles[1].ExtendedResources).To(Equal(map[string]int64{
+			"rdma/ib_shared_devices": 2,
+			"example.com/foo":        1,
+		}))
+	})
+
+	It("resolves a stringList override into several extended resource pairs", func() {
+		p := renderProfile()
+		p.Spec.Overrides = append(p.Spec.Overrides, aiv1alpha1.Override{
+			Name:    overrideExtendedResources,
+			Type:    aiv1alpha1.OverrideTypeStringList,
+			Default: &apiextensionsv1.JSON{Raw: []byte(`["rdma/ib_shared_devices=2"]`)},
+		})
+		p.Spec.Roles[1].PodTemplate.Resources = &aiv1alpha1.PodResources{
+			GPUPerPod:         ptrTo(intstr.FromInt32(8)),
+			ExtendedResources: extendedResourcesTemplate,
+		}
+		isvc := renderISVC()
+		isvc.Spec.Overrides[overrideExtendedResources] = apiextensionsv1.JSON{
+			Raw: []byte(`["rdma/roce_shared_devices=4","example.com/foo=1"]`),
+		}
+		res := Render(isvc, p, renderModel(), nil)
+		Expect(res.Errors).To(BeEmpty())
+		Expect(res.Roles[1].ExtendedResources).To(Equal(map[string]int64{
+			"rdma/roce_shared_devices": 4,
+			"example.com/foo":          1,
+		}))
+		// The input profile keeps the template; the render resolves a copy.
+		Expect(p.Spec.Roles[1].PodTemplate.Resources.ExtendedResources).To(Equal(extendedResourcesTemplate))
+	})
+
+	It("enables host networking on every role that requests the RoCE resource", func() {
+		p := renderProfile()
+		p.Spec.Overrides = append(p.Spec.Overrides, aiv1alpha1.Override{
+			Name:    overrideExtendedResources,
+			Type:    aiv1alpha1.OverrideTypeStringList,
+			Default: &apiextensionsv1.JSON{Raw: []byte(`[]`)},
+		})
+		p.Spec.Roles[1].PodTemplate.Resources = &aiv1alpha1.PodResources{
+			ExtendedResources: extendedResourcesTemplate,
+		}
+		decode := p.Spec.Roles[1].DeepCopy()
+		decode.Name = decodeRole
+		p.Spec.Roles = append(p.Spec.Roles, *decode)
+
+		isvc := renderISVC()
+		isvc.Spec.Overrides[overrideExtendedResources] = apiextensionsv1.JSON{
+			Raw: []byte(`["rdma/roce_shared_devices=4"]`),
+		}
+		res := Render(isvc, p, renderModel(), nil)
+		Expect(res.Errors).To(BeEmpty())
+		Expect(res.Roles).To(HaveLen(3))
+		// Both GPU roles of the PD separation request RoCE.
+		for _, role := range res.Roles[1:] {
+			Expect(role.PodTemplate.HostNetwork).To(Equal(ptrTo(true)), "%s requests RoCE", role.Name)
+			Expect(role.PodTemplate.DNSPolicy).To(Equal(corev1.DNSClusterFirstWithHostNet), "%s requests RoCE", role.Name)
+		}
+		// The router requests no extended resource at all.
+		Expect(res.Roles[0].PodTemplate.HostNetwork).To(BeNil())
+		Expect(res.Roles[0].PodTemplate.DNSPolicy).To(BeEmpty())
+	})
+
+	It("leaves host networking alone when the role requests no RoCE", func() {
+		p := renderProfile()
+		p.Spec.Roles[1].PodTemplate.Resources = &aiv1alpha1.PodResources{
+			ExtendedResources: "rdma/ib_shared_devices=2",
+		}
+		res := Render(renderISVC(), p, renderModel(), nil)
+		Expect(res.Errors).To(BeEmpty())
+		Expect(res.Roles[1].ExtendedResources).To(Equal(map[string]int64{"rdma/ib_shared_devices": 2}))
+		Expect(res.Roles[1].PodTemplate.HostNetwork).To(BeNil())
+		Expect(res.Roles[1].PodTemplate.DNSPolicy).To(BeEmpty())
+	})
+
+	It("accepts an uppercase name part and a 63-byte name like Kubernetes does", func() {
+		p := renderProfile()
+		longName := "example.com/" + strings.Repeat("a", 63)
+		p.Spec.Roles[1].PodTemplate.Resources = &aiv1alpha1.PodResources{
+			ExtendedResources: "rdma/HCA=1," + longName + "=1",
+		}
+		res := Render(renderISVC(), p, renderModel(), nil)
+		Expect(res.Errors).To(BeEmpty())
+		Expect(res.Roles[1].ExtendedResources).To(Equal(map[string]int64{"rdma/HCA": 1, longName: 1}))
+	})
+
+	It("adds no extended resource for an empty resolved value", func() {
+		p := renderProfile()
+		p.Spec.Overrides = append(p.Spec.Overrides, aiv1alpha1.Override{
+			Name:    overrideExtendedResources,
+			Type:    aiv1alpha1.OverrideTypeStringList,
+			Default: &apiextensionsv1.JSON{Raw: []byte(`[]`)},
+		})
+		p.Spec.Roles[1].PodTemplate.Resources = &aiv1alpha1.PodResources{
+			ExtendedResources: extendedResourcesTemplate,
+		}
+		res := Render(renderISVC(), p, renderModel(), nil)
+		Expect(res.Errors).To(BeEmpty())
+		Expect(res.Roles[1].ExtendedResources).To(BeNil())
+	})
+
+	It("rejects a variable outside overrides in extendedResources", func() {
+		p := renderProfile()
+		p.Spec.Roles[1].PodTemplate.Resources = &aiv1alpha1.PodResources{
+			ExtendedResources: "{{ model.name }}=2",
+		}
+		res := Render(renderISVC(), p, renderModel(), nil)
+		Expect(res.Errors).To(HaveLen(1))
+		Expect(res.Errors[0].Reason).To(Equal(ReasonPhaseViolation))
+	})
+
+	DescribeTable("rejects an invalid extendedResources declaration",
+		func(value string) {
+			p := renderProfile()
+			p.Spec.Roles[1].PodTemplate.Resources = &aiv1alpha1.PodResources{
+				ExtendedResources: value,
+			}
+			res := Render(renderISVC(), p, renderModel(), nil)
+			Expect(res.Errors).To(HaveLen(1))
+			Expect(res.Errors[0].Reason).To(Equal(ReasonInvalidOverride))
+		},
+		Entry("missing count", "rdma/ib_shared_devices"),
+		Entry("zero count", "rdma/ib_shared_devices=0"),
+		Entry("negative count", "rdma/ib_shared_devices=-1"),
+		Entry("non-integer count", "rdma/ib_shared_devices=two"),
+		Entry("name without a domain prefix", "ib_shared_devices=2"),
+		Entry("cpu collision", "cpu=2"),
+		Entry("memory collision", "memory=2"),
+		Entry("vendor GPU collision", "nvidia.com/gpu=2"),
+		Entry("reserved requests. prefix", "requests.example.com/foo=2"),
+		Entry("name part longer than 63 bytes", "example.com/"+strings.Repeat("a", 64)+"=1"),
+		Entry("trailing comma leaves an empty pair", "rdma/ib_shared_devices=2,"),
+		Entry("a comma-only value is not an empty declaration", ","),
+		Entry("duplicate name", "rdma/ib_shared_devices=2,rdma/ib_shared_devices=3"),
+	)
 
 	// gpuPrefill marks the prefill role as the GPU role of the fixture profile.
 	gpuPrefill := func(p *aiv1alpha1.InferenceRuntimeProfile) {
@@ -665,7 +816,7 @@ var _ = Describe("routeVars", func() {
 
 	It("defaults the timeouts of a route that declares none", func() {
 		// 0 disables the total-duration cap; the idle cap keeps its 300s default.
-		vars := routeVars(&aiv1alpha1.RouteSpec{Publish: true, ModelName: "flash"})
+		vars := routeVars(&aiv1alpha1.RouteSpec{AIGatewayRouter: aiv1alpha1.AIGatewayRouterPublic, ModelName: "flash"})
 		Expect(vars).To(HaveLen(4))
 		Expect(vars).To(HaveKeyWithValue("publish", "true"))
 		Expect(vars).To(HaveKeyWithValue("modelName", "flash"))
@@ -675,7 +826,7 @@ var _ = Describe("routeVars", func() {
 
 	It("renders the declared route values", func() {
 		route := &aiv1alpha1.RouteSpec{
-			Publish:            true,
+			AIGatewayRouter:    aiv1alpha1.AIGatewayRouterPrivate,
 			ModelName:          "qwen38-27b",
 			TimeoutSeconds:     ptrTo(int64(3600)),
 			IdleTimeoutSeconds: ptrTo(int64(120)),

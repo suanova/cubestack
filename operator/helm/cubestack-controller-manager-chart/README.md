@@ -84,7 +84,7 @@ controller prerequisite below.
 - **A Gateway, and the `ClientTrafficPolicy` that goes with it.** The chart
   creates neither. The manager boots without them (it only needs the gateway-api
   CRDs) and reports `RouteReady=False, reason=GatewayNotFound` for every
-  `spec.route.publish: true` service until the Gateway exists, but nothing the
+  `spec.route.aigatewayRouter` service until the Gateway exists, but nothing the
   operator publishes or exposes carries traffic without one. Create both before
   or after installing the chart — the operator picks them up either way:
 
@@ -150,8 +150,35 @@ controller prerequisite below.
   `ai-gateway-system`) running in the cluster, which provides the
   `AIGatewayRoute` / `AIServiceBackend` CRDs a published model catalog entry is
   written into. The manager degrades without it instead of failing: a service
-  with `spec.route.publish: true` reports `RouteReady=False,
+  with a non-empty `spec.route.aigatewayRouter` reports `RouteReady=False,
   reason=AgentRouterUnavailable` and no catalog entry is created.
+
+- The **two shared catalog routes**, in `gateway.namespace`: the
+  `AIGatewayRoute`s `cubestack-ai-gateway` (public) and
+  `cubestack-ai-gateway-private` (private) serve all four catalog paths —
+  `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`
+  and `/v1/images/generations` — through each service's OpenAI-schema
+  `AIServiceBackend`; the Agent Router's ext_proc translates `/v1/messages`
+  from Anthropic to OpenAI and back. Services select a visibility with
+  `spec.route.aigatewayRouter` and the paths they expose with
+  `spec.route.paths`. The operator creates either object when it is missing and
+  owns their `spec.rules` entirely: on every reconcile it rebuilds the rules
+  from every published service, so rules added by hand are overwritten. The
+  rule set caps the catalog at 15 models; a service that does not fit reports
+  `RouteReady=False, reason=CatalogFull`.
+
+  Rules are matched on the `x-ai-eg-model` request header, which ext_proc
+  derives from the request body's `model` field — clients do not send it.
+  Cross-namespace references are authorized by the per-service `ReferenceGrant`
+  the operator creates, which covers both hops the catalog makes into the
+  service's namespace: the shared route's reference to the `AIServiceBackend`s,
+  and the child `HTTPRoute` the Agent Router expands that route into
+  referencing the `Backend`. No platform-wide grant is assumed.
+
+  The plain `HTTPRoute`s `cubestack-openai-paths` / `-private` are retired: the
+  operator clears their rules (or deletes them when it created them). Path-based
+  plain routes bypassed the ext_proc model lookup and buffered whole responses,
+  so nothing is served through them any more.
 
 - The **upstream LeaderWorkerSet controller** running in the cluster, which
   provides the `leaderworkerset.x-k8s.io` / `disaggregatedset.x-k8s.io` CRDs
@@ -220,6 +247,30 @@ helm install cubestack ./helm/cubestack-controller-manager-chart -n cubestack-sy
   --create-namespace --set image.pullPolicy=Always
 ```
 
+### Replicas and scheduling
+
+`replicaCount` sets the manager Deployment's replica count. The manager is
+leader-elected, so a second replica is a hot standby rather than extra
+capacity: it serves nothing until the leader's lease expires, then takes over.
+One replica is a single point of failure; use 2 or more for an HA control
+plane:
+
+```bash
+helm install cubestack ./helm/cubestack-controller-manager-chart -n cubestack-system \
+  --create-namespace --set replicaCount=2
+```
+
+`nodeSelector`, `tolerations` and `affinity` are rendered into the manager pod
+spec when set, and omitted otherwise. `affinity` is how the platform's HA
+switch keeps replicas apart: it writes required hostname anti-affinity, which
+needs at least as many nodes as replicas or the extra pods stay `Pending`.
+
+```bash
+helm install cubestack ./helm/cubestack-controller-manager-chart -n cubestack-system \
+  --create-namespace --set replicaCount=2 \
+  --set-json 'affinity={"podAntiAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":[{"topologyKey":"kubernetes.io/hostname","labelSelector":{"matchLabels":{"control-plane":"controller-manager"}}}]}}'
+```
+
 ### Upgrading an existing release
 
 Helm installs the CRDs in this chart's `crds/` directory once, on `helm install`,
@@ -245,9 +296,9 @@ chart:
 
 ```bash
 helm show crds oci://harbor.isuanova.com/suanova/cubestack-controller-manager-chart \
-  --version 1.0.0 | kubectl apply --server-side -f -
+  --version 2.0.0 | kubectl apply --server-side -f -
 helm upgrade cubestack oci://harbor.isuanova.com/suanova/cubestack-controller-manager-chart \
-  --version 1.0.0 -n cubestack-system
+  --version 2.0.0 -n cubestack-system
 ```
 
 ### Upgrading from a chart that created the Gateway
@@ -325,11 +376,13 @@ kubectl -n envoy-gateway-system get envoyproxy
 
 ### Gateway configuration (publishing)
 
-`spec.route.publish: true` on an InferenceService publishes it into the Agent
-Router model catalog: the catalog objects of the service attach to the platform
-Gateway, which serves the shared catalog hostname. **The chart does not create
-that Gateway** — the platform does (Prerequisites), and this section is about
-pointing the operator at it. One HTTP listener on :80 that routes from any
+A non-empty `spec.route.aigatewayRouter` on an InferenceService publishes it
+into the Agent Router model catalog: `cubestack-ai-gateway` (public) or
+`cubestack-ai-gateway-private` (private). The catalog objects of the service
+attach to the platform Gateway, which serves the shared catalog hostname.
+**The chart does not create that Gateway or the two shared routes** — the
+platform does (Prerequisites), and this section is about pointing the operator
+at the Gateway. One HTTP listener on :80 that routes from any
 namespace may attach to, plus the `allowedListeners` opt-in the per-environment
 ListenerSets need (see the L4 section), is what the Gateway has to carry for the
 operator's objects to work.
@@ -364,20 +417,18 @@ Gateway API object, because the chart writes none:
   which is the convention but not necessarily where this platform put the
   Gateway, so the chart always renders it, under a `| default` guard — a release
   that rendered a bare flag is still pointed at `gateway.namespace`.
-- **Flags an empty value omits** — `name`, `catalogRoute`, `catalogHostname`,
+- **Flags an empty value omits** — `name`, `catalogHostname`,
   `dataplaneNamespace`. Omitting `catalogHostname` just leaves
-  `status.endpoint.public` unset (display only, no longer a publish gate);
+  `status.endpoint.public` unset (display only, not a publish gate);
   omitting `name` is not a switch either (see the table) — leave `name` set.
-  An emptied `catalogRoute` likewise falls back to the manager's own default,
-  `cubestack-ai-gateway`; publishing is on when it names a route the platform
-  has installed.
+  The catalog route is not a flag: it comes from each service's
+  `spec.route.aigatewayRouter`, and publishing is on when that route exists.
 
 | Key | Manager flag | Default | Notes |
 |---|---|---|---|
 | `gateway.name` | `--gateway-name` | `cubestack-gateway` | Names the platform's Gateway — the object the operator publishes through and attaches ListenerSets to. Leave it set. Empty = flag omitted, and the two controllers then disagree: publishing is off (`RouteReady=False`, `GatewayNotConfigured`), while the DevEnvironment controller falls back to the manager's own built-in name, `cubestack-gateway` — looked for in whatever namespace `gateway.namespace` gave it, since that flag renders either way. |
 | `gateway.namespace` | `--gateway-namespace` | `envoy-gateway-system` | Namespace of that Gateway object — **not** where its dataplane pods run (`dataplaneNamespace`). Always rendered. Must match where the platform created the Gateway; `envoy-gateway-system` is where Envoy Gateway and the `eg` class live, so it is the conventional home unless the Gateway was put elsewhere. |
-| `gateway.catalogRoute` | `--gateway-catalog-route` | `cubestack-ai-gateway` | Name of the platform's **pre-installed** shared `AIGatewayRoute` (in `gateway.namespace`) that published `InferenceService`s attach a rule to. The operator reads and edits a rule in this route but **never creates it**, so this must name the route the platform installs. A missing route degrades to `RouteReady=False`, `CatalogRouteNotFound`. Empty = flag omitted; the manager's own default, `cubestack-ai-gateway`, then applies. |
-| `gateway.catalogHostname` | `--gateway-catalog-hostname` | `""` | Empty = flag omitted. Display only: surfaced in `status.endpoint.public` so the Agent Router can advertise the catalog's host. It no longer gates publishing — publishing is on when the shared route and the platform Gateway are configured. |
+| `gateway.catalogHostname` | `--gateway-catalog-hostname` | `""` | Empty = flag omitted. Display only: surfaced in `status.endpoint.public` so the Agent Router can advertise the catalog's host. It does not gate publishing — publishing is on when the service's `spec.route.aigatewayRouter` names a route the platform installed. |
 | `gateway.dataplaneNamespace` | `--gateway-dataplane-namespace` | `envoy-gateway-system` | Names the namespace the Gateway's dataplane pods run in. **Not** a publishing switch. Two things read it: environment pods admit ingress from that Gateway, and the controller looks up the dataplane Service there to learn which port each listener is reachable on. Empty = flag omitted: environments stay default-deny inbound, and endpoint addresses fall back to assuming the listener port is the reachable one — true of a LoadBalancer or ClusterIP dataplane, not of a NodePort one. |
 
 `dataplaneNamespace` is the key here the **DevEnvironment** controller is
@@ -389,15 +440,17 @@ platform convention. Whether the port
 published for a listener is the listener's own port or the nodePort it was
 renumbered onto is decided by that class's `EnvoyProxy`, not by anything here.
 `name` and `namespace` reach that controller too, as the Gateway its ListenerSets
-attach to; `catalogRoute` and `catalogHostname` configure the
-InferenceService publishing path (`catalogRoute` names the route the operator
-edits a rule in, `catalogHostname` only surfaces the public address).
+attach to; `catalogHostname` configures the InferenceService publishing path
+(display only, it surfaces the public address). Each service's
+`spec.route.aigatewayRouter` chooses which pre-installed route the operator
+edits a rule in.
 
 The defaults are the platform convention — `cubestack-gateway` in
-`envoy-gateway-system`, with the shared route `cubestack-ai-gateway` in that
-namespace — so an install against a platform that followed the Prerequisites
-works out of the box: publishing is on as long as the platform has installed
-the shared route. Set the catalog hostname only to surface the public address
+`envoy-gateway-system`, with the shared routes `cubestack-ai-gateway` and
+`cubestack-ai-gateway-private` in that namespace — so an install against a
+platform that followed the Prerequisites works out of the box: publishing is on
+as long as the platform has installed the route a service selects. Set the
+catalog hostname only to surface the public address
 in `status.endpoint.public`:
 
 ```bash
@@ -421,9 +474,9 @@ upgrading.
 The kustomize deployment (`make deploy`) sets the same `--gateway-name` /
 `--gateway-namespace` args in `operator/config/manager/manager.yaml`, as
 literals rather than values: `cubestack-gateway` in `envoy-gateway-system`.
-`--gateway-catalog-route` is left to the manager's own default
-(`cubestack-ai-gateway`), so publishing is on as long as the platform installed
-the shared route; `--gateway-catalog-hostname` and `--gateway-dataplane-namespace`
+The catalog route is selected per service by `spec.route.aigatewayRouter`, so
+publishing is on as long as the platform installed the route a service selects;
+`--gateway-catalog-hostname` and `--gateway-dataplane-namespace`
 are left to your overlay there, so a kustomize install keeps environment pods
 default-deny inbound and surfaces no public address until a hostname is added.
 Like the chart, it creates

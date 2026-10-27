@@ -9,7 +9,7 @@
 CONTAINER_TOOL ?= docker
 
 # The architecture every published image must run on: the cluster's nodes are amd64, and the
-# machine building them may not be. The cpu-base family's Dockerfile starts from a multi-arch base,
+# machine building them may not be. The cpu-pytorch family's Dockerfile starts from a multi-arch base,
 # and without --platform `docker build` resolves that base to the *host* architecture — so a build
 # on an arm64 host publishes an arm64-only image and every amd64 node then fails to pull it ("no
 # match for platform in manifest"). Naming the platform makes the build independent of the host;
@@ -38,10 +38,10 @@ PLATFORMS_ARG = $(foreach p,$(PLATFORMS),--platform $(p))
 # push, which buildx supports.
 MACA_PLATFORM ?= linux/amd64
 
-# The cube-base image is single-platform for the same reason and by the same mechanism: its vendor base
+# The cuda-pytorch image is single-platform for the same reason and by the same mechanism: its vendor base
 # is published per architecture too — the mirror serves one linux/amd64 manifest — so there is no
 # arm64 layer to build an arm64 manifest from either. Kept out of PLATFORMS and named here.
-CUBE_PLATFORM ?= linux/amd64
+CUDA_PLATFORM ?= linux/amd64
 
 # Buildkit's provenance and SBOM attestations are off. Harbor rejects an index carrying
 # them with a 404 on the manifest PUT — "artifact ... not found" — even when every
@@ -50,9 +50,13 @@ CUBE_PLATFORM ?= linux/amd64
 # metadata a customer does not pull, so dropping them costs nothing.
 BUILDX_ATTEST = --provenance=false --sbom=false
 
-# Optional mirror overrides for CN/offline builds (empty = upstream).
-APT_MIRROR    ?=
-PIP_INDEX_URL ?=
+# Optional mirror overrides for CN/offline builds (empty = upstream). TORCH_INDEX_URL is
+# separate from PIP_INDEX_URL because the CPU image installs PyTorch from its own CPU wheel
+# index, which is not PyPI; empty keeps the Dockerfile's default
+# (https://download.pytorch.org/whl/cpu).
+APT_MIRROR     ?=
+PIP_INDEX_URL  ?=
+TORCH_INDEX_URL ?=
 
 # Base-image build args, defaulting to the platform registry's mirrored copies of the upstream
 # bases. Building from the platform's copy is what keeps the published image descended from
@@ -77,7 +81,7 @@ BASE_ARGS ?= \
 	--build-arg MACA_BASE=$(MACA_BASE) \
 	--build-arg CUDA_BASE=$(CUDA_BASE)
 
-# Base release of the cpu-base family image — the CPU image, built on plain ubuntu:<version>.
+# Base release of the cpu-pytorch family image — the CPU image, built on plain ubuntu:<version>.
 # It selects the build base and nothing else; it is looked up in UBUNTU_BASE_DIGESTS below, so
 # a release and its digest can never be chosen apart.
 UBUNTU_VERSION ?= 22.04
@@ -85,7 +89,7 @@ UBUNTU_VERSION ?= 22.04
 # The pinned base, one entry per supported Ubuntu release, as <version>=<digest of the
 # platform registry's copy>. A release with no entry has no base to build from: its tag would
 # carry another release's digest, which the build resolves — so it would either fail the pull
-# or build a release the image does not claim. `make build-cpu-base UBUNTU_VERSION=24.04`
+# or build a release the image does not claim. `make build-cpu-pytorch UBUNTU_VERSION=24.04`
 # stops in check-ubuntu-base instead, until 24.04 is mirrored and pinned here.
 UBUNTU_BASE_DIGESTS = 22.04=sha256:b8b6ee6aa931ecd9d0d952abc34dc0e5f7c6a30c6bb71b079fe399fde0329c02
 
@@ -103,7 +107,7 @@ UBUNTU_BASE = $(REGISTRY)/$(MIRROR_PROJECT)/docker.io/library/ubuntu:$(UBUNTU_VE
 # selects the base *and* is read for the tag, so a package bumped on its own would carry its name
 # onto the previous package's digest — and the digest is what the build resolves, so the published
 # reference would claim a package its layers do not come from. One entry per mirrored package; a
-# package with no entry stops in check-maca-base instead. Nothing mirrors the vendor bases, so the
+# package with no entry stops in check-maca-pytorch instead. Nothing mirrors the vendor bases, so the
 # entry is added by hand.
 MACA_PACKAGE = maca-pytorch:3.9.0.12-torch2.4-py310-ubuntu22.04-amd64
 MACA_BASE_DIGESTS = maca-pytorch:3.9.0.12-torch2.4-py310-ubuntu22.04-amd64=sha256:da5065e441290224914e5643f6cd39e46a927d58eb2d97c865263ddd87c37a49
@@ -119,7 +123,7 @@ MACA_BASE = $(REGISTRY)/$(MIRROR_PROJECT)/cr.metax-tech.com/public-library/$(MAC
 # CUDA_PACKAGE selects the base *and* is read for the tag, so a release bumped on its own would
 # carry its name onto the previous release's digest — and the digest is what the build resolves,
 # so the published reference would claim a release its layers do not come from. One entry per
-# mirrored release; a release with no entry stops in check-cuda-base instead. Nothing mirrors the
+# mirrored release; a release with no entry stops in check-cuda-pytorch instead. Nothing mirrors the
 # vendor bases, so the entry is added by hand.
 CUDA_PACKAGE = pytorch:26.08-py3
 CUDA_BASE_DIGESTS = pytorch:26.08-py3=sha256:ee619c9e16df23c5a7f6f79ff9a41ce3c6ea9f23a92a4833b59825bb056002cc
@@ -128,6 +132,7 @@ CUDA_BASE = $(REGISTRY)/$(MIRROR_PROJECT)/nvcr.io/nvidia/$(CUDA_PACKAGE)@$(CUDA_
 
 APT_MIRROR_ARG    = $(if $(APT_MIRROR),--build-arg APT_MIRROR=$(APT_MIRROR))
 PIP_INDEX_URL_ARG = $(if $(PIP_INDEX_URL),--build-arg PIP_INDEX_URL=$(PIP_INDEX_URL))
+TORCH_INDEX_URL_ARG = $(if $(TORCH_INDEX_URL),--build-arg TORCH_INDEX_URL=$(TORCH_INDEX_URL))
 
 # Publishing coordinates (decision doc §5). One name per image family: a build is tagged at the
 # reference it will be published under, and push publishes that same name plus :latest as
@@ -150,20 +155,35 @@ PROJECT  ?= suanova
 MIRROR_PROJECT ?= mirrors
 TAG      ?= $(shell git rev-parse --short HEAD 2>/dev/null)
 
-# One repository per accelerator family: the image carries the stack, and the mode (jupyter or
-# ssh) is chosen at run time by CUBSTACK_TYPE, so there is no image-per-mode axis any more.
+# One repository per (accelerator, stack) cell, named <accelerator>-<stack>. The mode (jupyter
+# or ssh) is chosen at run time by CUBSTACK_TYPE, so there is no image-per-mode axis; the stack
+# is baked in, because a framework is what the base is and two frameworks cannot share one
+# interpreter's pins.
 #
-# The CPU family is `cpu-base`: the name states the accelerator axis the vendor families name,
-# and says there is no vendor stack. It was `minimal` while the CPU image was described by its
-# size; the repository is named for what a user selects on, not for how small the image is. Its
-# base is plain ubuntu:<UBUNTU_VERSION> (above), which is a build detail the repository name does
-# not repeat.
-CPU_BASE_REPO = $(REGISTRY)/$(PROJECT)/cpu-base
-# The vendor families are named `maca-base` and `cube-base`: they carry the vendor's stack on
+# `cpu-pytorch` is the CPU cell: `cpu` says there is no accelerator (select it by omitting
+# spec.resources.gpu), `pytorch` says which framework it carries — the CPU build, from
+# TORCH_VERSION below. Its base is plain ubuntu:<UBUNTU_VERSION> (above) and plain python3, which
+# are build details the repository name does not repeat. It was `minimal` (named for its size)
+# and then `cpu-base`; `base` means "the family with no framework", which is not what this is.
+CPU_PYTORCH_REPO = $(REGISTRY)/$(PROJECT)/cpu-pytorch
+# The vendor families are named `maca-pytorch` and `cuda-pytorch`: they carry the vendor's stack on
 # top of the vendor base, and a base package bump (MACA_PACKAGE / CUDA_PACKAGE below) moves
 # the layers without moving the name.
-MACA_REPO   = $(REGISTRY)/$(PROJECT)/maca-base
-CUBE_REPO   = $(REGISTRY)/$(PROJECT)/cube-base
+MACA_REPO   = $(REGISTRY)/$(PROJECT)/maca-pytorch
+CUDA_REPO   = $(REGISTRY)/$(PROJECT)/cuda-pytorch
+
+# The CPU image's tag carries the stack axes it was built from, derived rather than typed for
+# the same reason the vendor tags are: a deployment naming this image should be able to tell
+# what it runs. There is no vendor release to read, so the axes come from the two build inputs
+# that fix the stack — TORCH_VERSION, read here so the tag cannot name a torch the image was
+# not built from, and CPU_PYTHON, which is ubuntu:22.04's python3 and has to move with
+# UBUNTU_VERSION above. The commit still ends the tag, so re-building the overlay on an
+# unchanged stack moves the reference instead of redefining it.
+TORCH_VERSION   ?= 2.4.0
+CPU_PYTHON      ?= py310
+TORCH_AXIS       = torch$(word 1,$(subst ., ,$(TORCH_VERSION))).$(word 2,$(subst ., ,$(TORCH_VERSION)))
+CPU_TAG_AXES     = $(CPU_PYTHON)-$(TORCH_AXIS)
+CPU_TAG         ?= $(CPU_TAG_AXES)-$(TAG)
 
 # The MACA image's tag carries the vendor axes a user picks between (decision doc §5), not only the
 # commit: this is the one base the platform does not choose, and the vendor package version is the
@@ -182,7 +202,7 @@ MACA_PKG_TORCH   = $(filter torch%,$(MACA_PKG_FIELDS))
 MACA_TAG_AXES    = $(MACA_PKG_VERSION)-$(MACA_PKG_PY)-$(MACA_PKG_TORCH)
 MACA_TAG        ?= $(MACA_TAG_AXES)-$(TAG)
 
-# The cube-base image's tag carries its vendor release for the same reason, and is derived the same way —
+# The cuda-pytorch image's tag carries its vendor release for the same reason, and is derived the same way —
 # but the NGC tag has a different shape, so the derivation is not the same one. `pytorch:26.08-py3`
 # encodes no torch axis: the release *is* the combination of python, torch and CUDA, pinned
 # together upstream, which is why the whole compatibility contract is the release. What is read out
@@ -190,17 +210,17 @@ MACA_TAG        ?= $(MACA_TAG_AXES)-$(TAG)
 # remaining field is dropped rather than appended: '-py3' names a python the release already
 # fixes, with one interpreter in the image for it to be ambiguous about.
 CUDA_PKG_VERSION = $(firstword $(subst -, ,$(lastword $(subst :, ,$(CUDA_PACKAGE)))))
-CUBE_TAG        ?= $(CUDA_PKG_VERSION)-$(TAG)
+CUDA_TAG        ?= $(CUDA_PKG_VERSION)-$(TAG)
 
-IMG_CPU_BASE ?= $(CPU_BASE_REPO):$(TAG)
+IMG_CPU_PYTORCH ?= $(CPU_PYTORCH_REPO):$(CPU_TAG)
 IMG_MACA    ?= $(MACA_REPO):$(MACA_TAG)
-IMG_CUBE    ?= $(CUBE_REPO):$(CUBE_TAG)
+IMG_CUDA    ?= $(CUDA_REPO):$(CUDA_TAG)
 
 # The moving publish tag: added by `make push`, never produced by `make build`, so a
 # local :latest means it came from a publish.
-LATEST_CPU_BASE = $(CPU_BASE_REPO):latest
+LATEST_CPU_PYTORCH = $(CPU_PYTORCH_REPO):latest
 LATEST_MACA    = $(MACA_REPO):latest
-LATEST_CUBE    = $(CUBE_REPO):latest
+LATEST_CUDA    = $(CUDA_REPO):latest
 
 # Whether `make push` also moves :latest. A caller that may not move it — CI, which
 # only moves :latest when the run's commit is still the head of main — passes
@@ -209,17 +229,17 @@ LATEST_CUBE    = $(CUBE_REPO):latest
 # whole index a second time. See .github/workflows/ci-images.yml.
 PUSH_LATEST ?= 1
 
-LATEST_ARG_CPU_BASE = $(if $(filter 1,$(PUSH_LATEST)),-t $(LATEST_CPU_BASE))
+LATEST_ARG_CPU_PYTORCH = $(if $(filter 1,$(PUSH_LATEST)),-t $(LATEST_CPU_PYTORCH))
 LATEST_ARG_MACA    = $(if $(filter 1,$(PUSH_LATEST)),-t $(LATEST_MACA))
-LATEST_ARG_CUBE    = $(if $(filter 1,$(PUSH_LATEST)),-t $(LATEST_CUBE))
+LATEST_ARG_CUDA    = $(if $(filter 1,$(PUSH_LATEST)),-t $(LATEST_CUDA))
 
-.PHONY: help check-tag check-platform check-platforms check-push-latest check-ubuntu-base check-maca-base check-cuda-base check-deps check-select build build-cpu-base build-maca-base build-cube-base \
-	smoke smoke-cpu-base smoke-maca-base smoke-cube-base push push-cpu-base push-maca-base push-cube-base retag-latest \
-	retag-latest-cpu-base retag-latest-maca-base retag-latest-cube-base
+.PHONY: help check-tag check-platform check-platforms check-push-latest check-ubuntu-base check-cpu-pytorch check-maca-pytorch check-cuda-pytorch check-deps check-select build build-cpu-pytorch build-maca-pytorch build-cuda-pytorch \
+	smoke smoke-cpu-pytorch smoke-maca-pytorch smoke-cuda-pytorch push push-cpu-pytorch push-maca-pytorch push-cuda-pytorch retag-latest \
+	retag-latest-cpu-pytorch retag-latest-maca-pytorch retag-latest-cuda-pytorch
 
 .DEFAULT_GOAL := help
 
-# Every build/smoke/push target funnels through build-cpu-base, build-maca-base or build-cube-base, so this
+# Every build/smoke/push target funnels through build-cpu-pytorch, build-maca-pytorch or build-cuda-pytorch, so this
 # is the one place a missing TAG has to be caught.
 check-tag:
 	@test -n "$(TAG)" || { \
@@ -262,7 +282,7 @@ check-push-latest:
 		   exit 1;; \
 	esac
 
-# UBUNTU_VERSION selects the base the cpu-base image is built from, so a release misspelled or not
+# UBUNTU_VERSION selects the base the cpu-pytorch image is built from, so a release misspelled or not
 # yet pinned would build against a tag carrying another release's digest — a base the image does
 # not claim. Only the defaulted BASE_ARGS is guarded — that one is this file's own pin, and the
 # lookup is what has to answer. A caller-supplied BASE_ARGS is the caller's own base, pinned or
@@ -273,6 +293,20 @@ check-ubuntu-base:
 		echo "                Add '<version>=sha256:<digest>' for the mirror's copy of that release, and" >&2; \
 		echo "                re-run operator/hack/mirror-e2e-images.sh if it is not mirrored yet." >&2; \
 		echo "                Or pass BASE_ARGS= to build FROM upstream, unpinned." >&2; \
+		exit 1; }
+
+# TORCH_VERSION is read for the tag too, and the derivation takes its first two fields — so a
+# value that does not parse would publish 'py310-torch.-<sha>', a tag claiming a framework
+# version it cannot name. Stop instead; the fix is TORCH_VERSION itself.
+check-cpu-pytorch:
+	@case "$(TORCH_VERSION)" in \
+		[0-9]*.[0-9]*) ;; \
+		*) echo "make -C images: TORCH_VERSION='$(TORCH_VERSION)' is not <major>.<minor>[.<patch>]." >&2; \
+		   echo "                The published tag is built from its first two fields." >&2; \
+		   exit 1;; \
+	esac
+	@test -n "$(CPU_PYTHON)" || { \
+		echo "make -C images: CPU_PYTHON is empty - name the interpreter axis (e.g. py310)." >&2; \
 		exit 1; }
 
 # MACA_TAG is read out of MACA_PACKAGE, so a vendor package whose tag carries only one of the two
@@ -286,7 +320,7 @@ check-ubuntu-base:
 # FROM upstream, and there is no upstream of a vendor base a build here reaches — which is what
 # the BASE_ARGS comment above says of MACA already. It would land the caller on a floating tag
 # in exactly the case this guard exists to stop.
-check-maca-base:
+check-maca-pytorch:
 	@test -n "$(MACA_PKG_VERSION)" && test -n "$(MACA_PKG_PY)" && test -n "$(MACA_PKG_TORCH)" || { \
 		echo "make -C images: cannot read the vendor axes out of MACA_PACKAGE=$(MACA_PACKAGE)." >&2; \
 		echo "                Expected <version>-torch<ver>-py<python>-<distro>-<arch>." >&2; \
@@ -297,7 +331,7 @@ check-maca-base:
 		echo "                then verify the digest against the mirror rather than the tag." >&2; \
 		exit 1; }
 
-# CUBE_TAG is read out of CUDA_PACKAGE too, and its derivation reads only the first field of the
+# CUDA_TAG is read out of CUDA_PACKAGE too, and its derivation reads only the first field of the
 # tag — so a re-tagged or renamed release whose version cannot be picked out would publish
 # '-<sha>', a name with no vendor release in it at all. Stop instead; the fix is the derivation
 # above.
@@ -305,9 +339,9 @@ check-maca-base:
 # The package also selects the base, so that lookup is checked the way check-ubuntu-base checks
 # its release — and likewise only for the defaulted BASE_ARGS: a caller who passed their own chose
 # their own base, and this file has nothing to check it against. The message differs from that
-# guard's in one respect, the same one check-maca-base differs in: `BASE_ARGS=` resolves FROM
+# guard's in one respect, the same one check-maca-pytorch differs in: `BASE_ARGS=` resolves FROM
 # upstream, and this base is a mirrored copy with no upstream a build here reaches.
-check-cuda-base:
+check-cuda-pytorch:
 	@test -n "$(CUDA_PKG_VERSION)" || { \
 		echo "make -C images: cannot read the vendor release out of CUDA_PACKAGE=$(CUDA_PACKAGE)." >&2; \
 		echo "                Expected <release>-py<python>, e.g. pytorch:26.08-py3." >&2; \
@@ -333,54 +367,55 @@ check-deps: ## Assert no Dockerfile reads from outside common/ and its own direc
 check-select: ## Run the image-selection rule's fixtures
 	hack/changed-images.test.sh
 
-build: build-cpu-base build-maca-base build-cube-base ## Build every image
+build: build-cpu-pytorch build-maca-pytorch build-cuda-pytorch ## Build every image
 
-build-cpu-base: check-tag check-platform check-ubuntu-base ## Build the CPU (cpu-base) image
-	$(CONTAINER_TOOL) build --platform "$(PLATFORM)" $(BASE_ARGS) $(APT_MIRROR_ARG) $(PIP_INDEX_URL_ARG) --build-arg UBUNTU_VERSION=$(UBUNTU_VERSION) \
-		-f cpu-base/Dockerfile -t $(IMG_CPU_BASE) .
+build-cpu-pytorch: check-tag check-platform check-ubuntu-base check-cpu-pytorch ## Build the CPU (cpu-pytorch) image
+	$(CONTAINER_TOOL) build --platform "$(PLATFORM)" $(BASE_ARGS) $(APT_MIRROR_ARG) $(PIP_INDEX_URL_ARG) $(TORCH_INDEX_URL_ARG) \
+		--build-arg UBUNTU_VERSION=$(UBUNTU_VERSION) --build-arg TORCH_VERSION=$(TORCH_VERSION) \
+		-f cpu-pytorch/Dockerfile -t $(IMG_CPU_PYTORCH) .
 
-# MACA_PLATFORM, not PLATFORM: the maca-base image has no arm64 base to build from, so it stays
-# amd64 on every host rather than following the platform the cpu-base image builds for.
-build-maca-base: check-tag check-maca-base ## Build the Metax (maca-base) image (linux/amd64 only)
+# MACA_PLATFORM, not PLATFORM: the maca-pytorch image has no arm64 base to build from, so it stays
+# amd64 on every host rather than following the platform the cpu-pytorch image builds for.
+build-maca-pytorch: check-tag check-maca-pytorch ## Build the Metax (maca-pytorch) image (linux/amd64 only)
 	$(CONTAINER_TOOL) build --platform "$(MACA_PLATFORM)" $(BASE_ARGS) $(APT_MIRROR_ARG) $(PIP_INDEX_URL_ARG) \
-		-f maca-base/Dockerfile -t $(IMG_MACA) .
+		-f maca-pytorch/Dockerfile -t $(IMG_MACA) .
 
-# CUBE_PLATFORM, for the same reason.
+# CUDA_PLATFORM, for the same reason.
 #
 # No PIP_INDEX_URL_ARG: this overlay installs nothing from pip — the NGC base carries its own
 # jupyter stack.
-build-cube-base: check-tag check-cuda-base ## Build the NVIDIA (cube-base) image (linux/amd64 only)
-	$(CONTAINER_TOOL) build --platform "$(CUBE_PLATFORM)" $(BASE_ARGS) $(APT_MIRROR_ARG) \
-		-f cube-base/Dockerfile -t $(IMG_CUBE) .
+build-cuda-pytorch: check-tag check-cuda-pytorch ## Build the NVIDIA (cuda-pytorch) image (linux/amd64 only)
+	$(CONTAINER_TOOL) build --platform "$(CUDA_PLATFORM)" $(BASE_ARGS) $(APT_MIRROR_ARG) \
+		-f cuda-pytorch/Dockerfile -t $(IMG_CUDA) .
 
 smoke: build ## Build and run the full local Docker smoke
-	IMG_CPU_BASE=$(IMG_CPU_BASE) IMG_MACA=$(IMG_MACA) IMG_CUBE=$(IMG_CUBE) hack/smoke.sh
+	IMG_CPU_PYTORCH=$(IMG_CPU_PYTORCH) IMG_MACA=$(IMG_MACA) IMG_CUDA=$(IMG_CUDA) hack/smoke.sh
 
-smoke-cpu-base: build-cpu-base ## Build and smoke only the cpu-base image
-	IMG_CPU_BASE=$(IMG_CPU_BASE) IMG_MACA=$(IMG_MACA) IMG_CUBE=$(IMG_CUBE) hack/smoke.sh --cpu-base
+smoke-cpu-pytorch: build-cpu-pytorch ## Build and smoke only the cpu-pytorch image
+	IMG_CPU_PYTORCH=$(IMG_CPU_PYTORCH) IMG_MACA=$(IMG_MACA) IMG_CUDA=$(IMG_CUDA) hack/smoke.sh --cpu-pytorch
 
-smoke-maca-base: build-maca-base ## Build and smoke only the Metax (maca-base) image
-	IMG_CPU_BASE=$(IMG_CPU_BASE) IMG_MACA=$(IMG_MACA) IMG_CUBE=$(IMG_CUBE) hack/smoke.sh --maca-base
+smoke-maca-pytorch: build-maca-pytorch ## Build and smoke only the Metax (maca-pytorch) image
+	IMG_CPU_PYTORCH=$(IMG_CPU_PYTORCH) IMG_MACA=$(IMG_MACA) IMG_CUDA=$(IMG_CUDA) hack/smoke.sh --maca-pytorch
 
-smoke-cube-base: build-cube-base ## Build and smoke only the NVIDIA (cube-base) image
-	IMG_CPU_BASE=$(IMG_CPU_BASE) IMG_MACA=$(IMG_MACA) IMG_CUBE=$(IMG_CUBE) hack/smoke.sh --cube-base
+smoke-cuda-pytorch: build-cuda-pytorch ## Build and smoke only the NVIDIA (cuda-pytorch) image
+	IMG_CPU_PYTORCH=$(IMG_CPU_PYTORCH) IMG_MACA=$(IMG_MACA) IMG_CUDA=$(IMG_CUDA) hack/smoke.sh --cuda-pytorch
 
-push: push-cpu-base push-maca-base push-cube-base ## Publish every image (TAG + :latest)
+push: push-cpu-pytorch push-maca-pytorch push-cuda-pytorch ## Publish every image (TAG + :latest)
 
-push-cpu-base: check-tag check-platforms check-push-latest check-ubuntu-base ## Publish the cpu-base image as a multi-arch index (TAG, and :latest unless PUSH_LATEST=0)
-	$(CONTAINER_TOOL) buildx build $(PLATFORMS_ARG) $(BUILDX_ATTEST) $(BASE_ARGS) $(APT_MIRROR_ARG) $(PIP_INDEX_URL_ARG) \
-		--build-arg UBUNTU_VERSION=$(UBUNTU_VERSION) \
-		-f cpu-base/Dockerfile -t $(IMG_CPU_BASE) $(LATEST_ARG_CPU_BASE) --push .
+push-cpu-pytorch: check-tag check-platforms check-push-latest check-ubuntu-base check-cpu-pytorch ## Publish the cpu-pytorch image as a multi-arch index (TAG, and :latest unless PUSH_LATEST=0)
+	$(CONTAINER_TOOL) buildx build $(PLATFORMS_ARG) $(BUILDX_ATTEST) $(BASE_ARGS) $(APT_MIRROR_ARG) $(PIP_INDEX_URL_ARG) $(TORCH_INDEX_URL_ARG) \
+		--build-arg UBUNTU_VERSION=$(UBUNTU_VERSION) --build-arg TORCH_VERSION=$(TORCH_VERSION) \
+		-f cpu-pytorch/Dockerfile -t $(IMG_CPU_PYTORCH) $(LATEST_ARG_CPU_PYTORCH) --push .
 
 # check-platforms would be checking PLATFORMS, which this target deliberately does not read;
 # MACA_PLATFORM is the whole of what it publishes, and PLATFORMS_ARG is what would break it.
-push-maca-base: check-tag check-maca-base check-push-latest ## Publish the Metax (maca-base) image (linux/amd64 only, TAG and :latest unless PUSH_LATEST=0)
+push-maca-pytorch: check-tag check-maca-pytorch check-push-latest ## Publish the Metax (maca-pytorch) image (linux/amd64 only, TAG and :latest unless PUSH_LATEST=0)
 	$(CONTAINER_TOOL) buildx build --platform "$(MACA_PLATFORM)" $(BUILDX_ATTEST) $(BASE_ARGS) $(APT_MIRROR_ARG) $(PIP_INDEX_URL_ARG) \
-		-f maca-base/Dockerfile -t $(IMG_MACA) $(LATEST_ARG_MACA) --push .
+		-f maca-pytorch/Dockerfile -t $(IMG_MACA) $(LATEST_ARG_MACA) --push .
 
-push-cube-base: check-tag check-cuda-base check-push-latest ## Publish the NVIDIA (cube-base) image (linux/amd64 only, TAG and :latest unless PUSH_LATEST=0)
-	$(CONTAINER_TOOL) buildx build --platform "$(CUBE_PLATFORM)" $(BUILDX_ATTEST) $(BASE_ARGS) $(APT_MIRROR_ARG) \
-		-f cube-base/Dockerfile -t $(IMG_CUBE) $(LATEST_ARG_CUBE) --push .
+push-cuda-pytorch: check-tag check-cuda-pytorch check-push-latest ## Publish the NVIDIA (cuda-pytorch) image (linux/amd64 only, TAG and :latest unless PUSH_LATEST=0)
+	$(CONTAINER_TOOL) buildx build --platform "$(CUDA_PLATFORM)" $(BUILDX_ATTEST) $(BASE_ARGS) $(APT_MIRROR_ARG) \
+		-f cuda-pytorch/Dockerfile -t $(IMG_CUDA) $(LATEST_ARG_CUDA) --push .
 
 # Repoint :latest at a TAG already in the registry rather than rebuilding: imagetools
 # writes an index naming the same manifests, so this cannot publish anything the build
@@ -391,15 +426,15 @@ push-cube-base: check-tag check-cuda-base check-push-latest ## Publish the NVIDI
 # the rest: the ref a skipped image would name is one this run never pushed, so its retag
 # would fail on a missing manifest, and a tag that another run published is that run's to
 # move. Defaults to every image, which is what a human means.
-RETAG ?= cpu-base maca-base cube-base
+RETAG ?= cpu-pytorch maca-pytorch cuda-pytorch
 
 retag-latest: $(addprefix retag-latest-,$(RETAG)) ## Repoint :latest at an already-published TAG (no rebuild; RETAG names the images)
-retag-latest-cpu-base: check-tag
-	$(CONTAINER_TOOL) buildx imagetools create -t $(LATEST_CPU_BASE) $(IMG_CPU_BASE)
-retag-latest-maca-base: check-tag
+retag-latest-cpu-pytorch: check-tag
+	$(CONTAINER_TOOL) buildx imagetools create -t $(LATEST_CPU_PYTORCH) $(IMG_CPU_PYTORCH)
+retag-latest-maca-pytorch: check-tag
 	$(CONTAINER_TOOL) buildx imagetools create -t $(LATEST_MACA) $(IMG_MACA)
-retag-latest-cube-base: check-tag
-	$(CONTAINER_TOOL) buildx imagetools create -t $(LATEST_CUBE) $(IMG_CUBE)
+retag-latest-cuda-pytorch: check-tag
+	$(CONTAINER_TOOL) buildx imagetools create -t $(LATEST_CUDA) $(IMG_CUDA)
 
 help: ## Show this help message
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \

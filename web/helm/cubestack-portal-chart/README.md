@@ -38,7 +38,8 @@ The following table lists the configurable parameters of the Portal chart and th
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `image.repository` | UI image repository | `harbor.isuanova.com/suanova/cubestack-ui` |
+| `image.registry` | Registry host the platform's images are published under (`CUBESTACK_DEV_IMAGE_REGISTRY` for the dev-environment catalog, whose images live in its `suanova` project) | `harbor.isuanova.com` |
+| `image.repository` | UI image name inside `image.registry` | `suanova/cubestack-ui` |
 | `image.tag` | UI image tag | `latest` |
 | `image.pullPolicy` | Image pull policy | `Always` |
 | `replicaCount` | Number of replicas | `1` |
@@ -128,7 +129,9 @@ Secret must use the same name. Without either source, the portal reports
 Authentication is the only access control the portal implements. Every htpasswd
 entry is a fully privileged portal user: a valid session can read cluster-wide
 and create/update/delete inference services and dev environments in any existing
-namespace the UI offers (profiles and model versions are read-only). Sessions
+namespace the UI offers, and create the namespace one lives in when the wizard's
+"create a new namespace" entry is used (profiles and model versions are
+read-only). Sessions
 carry only the username (no roles, no namespace scoping), so there is no way to
 grant a user write access to a subset of namespaces.
 
@@ -208,7 +211,7 @@ namespace only.
 The chart automatically creates namespaced and cluster-scoped RBAC:
 
 - `Role` + `RoleBinding`: `get` on the htpasswd Secret (`secrets.htpasswd.secretName`, `cubestack-htpasswd` by default) in the target namespace
-- `ClusterRole` + `ClusterRoleBinding`: `list` namespaces / nodes / services (the services rule is the AI Gateway discovery in `envoy-gateway-system`); `list` + `create` on Secrets, cluster-wide — the `list` (field-selected to one name) serves the connection card's Jupyter token and SSH private-key download, both of which read the Secret *the environment's own status points at* (never a name taken from the request), and the `create` writes the wizard's pasted public keys to the per-environment `<name>-ssh-user-keys` Secret — plus exactly the operator-CR verbs the UI calls, cluster-wide (the UI aggregates and writes across namespaces):
+- `ClusterRole` + `ClusterRoleBinding`: `list` + `create` namespaces (the `create` is the wizards' "create a new namespace" entry, which names a tenant namespace and creates it before the environment/service that lives in it), `list` nodes / services (the services rule is the AI Gateway discovery in `envoy-gateway-system`); `list` + `create` on Secrets, cluster-wide — the `list` (field-selected to one name) serves the connection card's Jupyter token and SSH private-key download, both of which read the Secret *the environment's own status points at* (never a name taken from the request), and the `create` writes the wizard's pasted public keys to the per-environment `<name>-ssh-user-keys` Secret — plus exactly the operator-CR verbs the UI calls, cluster-wide (the UI aggregates and writes across namespaces):
   - `inferenceservices`: create, get, list, patch
   - `devenvironments`: create, delete, list, patch
   - `inferenceruntimeprofiles`, `modelversions`: list

@@ -760,17 +760,21 @@ spec:
                               pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                               x-kubernetes-int-or-string: true
                             extendedResources:
-                              additionalProperties:
-                                format: int64
-                                type: integer
                               description: |-
-                                ExtendedResources lists additional extended resources, e.g.
-                                rdma/ib_shared_devices (the InfiniBand fabric; rdma/roce_shared_devices is
-                                the RoCE one, and the controller sets it itself for a DevEnvironment),
-                                written to both requests and limits like gpuPerPod. Keys must not collide
-                                with cpu, memory or the GPU extended resource of either supported vendor
-                                (handled by the fields above; L1 VAP).
-                              type: object
+                                ExtendedResources lists additional extended resources, e.g. RDMA
+                                devices, written to both requests and limits like gpuPerPod. The value
+                                is a comma-separated list of "name=count" pairs, and may be a template
+                                referencing overrides, e.g. '{{ overrides.extendedResources }}'. Only
+                                overrides.* is allowed in this field: which extended resource a cluster
+                                advertises — an InfiniBand or a RoCE fabric, for example — is the site's
+                                fact, not the profile's. A stringList override supplies several pairs,
+                                one per entry. Each resolved pair is validated at render time: the name
+                                must be a domain-qualified extended resource name that does not collide
+                                with cpu, memory or the GPU resource of either supported vendor, and the
+                                count must be a positive integer. A bad pair fails the render with
+                                InvalidOverride, and an empty resolved value adds no resource.
+                              pattern: ^([^{}=]+=[1-9][0-9]*(,[^{}=]+=[1-9][0-9]*)*|[{]{2}[^{}]*[}]{2})$
+                              type: string
                             gpuPerPod:
                               anyOf:
                               - type: integer

@@ -22,14 +22,39 @@ vi.mock("@/lib/kubernetes", () => ({
   }),
 }));
 
-const { gatewayCatalog, gatewayOpenAiBase } = vi.hoisted(() => ({ gatewayCatalog: vi.fn(), gatewayOpenAiBase: vi.fn() }));
-vi.mock("@/lib/cubepilot/gateway", () => ({ gatewayCatalog, gatewayOpenAiBase }));
+const { gatewayCatalogs, gatewayOpenAiBaseOf, platformProviderNameOf } = vi.hoisted(() => ({
+  gatewayCatalogs: vi.fn(),
+  gatewayOpenAiBaseOf: vi.fn(),
+  platformProviderNameOf: vi.fn(),
+}));
+// The config route reads every Gateway's catalogue (public and private), with
+// the base each one is reached at and the provider name each is written under.
+vi.mock("@/lib/cubepilot/gateway", () => ({
+  gatewayCatalogs,
+  gatewayOpenAiBaseOf,
+  platformProviderNameOf,
+}));
 
-/** The catalog the gateway serves, as the gateway module reports it. */
+/** The catalog a gateway serves, as the gateway module reports it. */
 const catalogOf = (...ids: string[]): GatewayModel[] => ids.map((id) => ({ id, ownedBy: "" }));
 
 /** The model API a save writes into the platform provider. */
-const MODEL_API = "http://ai-gateway.envoy-gateway-system.svc:18080/v1";
+const PUBLIC_BASE = "http://ai-gateway.envoy-gateway-system.svc:18080";
+const PRIVATE_BASE = "http://ai-gateway-private.envoy-gateway-system.svc:18080";
+const MODEL_API = `${PUBLIC_BASE}/v1`;
+const PRIVATE_API = `${PRIVATE_BASE}/v1`;
+const PRIVATE_GATEWAY = "cubestack-ai-gateway-private";
+
+/** One Gateway's catalogue: its name, base and the chat ids it answers for. */
+const gatewayOf = (name: string | undefined, url: string, ...ids: string[]) => ({
+  base: { name, url, via: "direct" as const },
+  models: catalogOf(...ids),
+});
+
+/** The single public Gateway most tests run against. */
+function serve(...ids: string[]): void {
+  gatewayCatalogs.mockResolvedValue([gatewayOf(undefined, PUBLIC_BASE, ...ids)]);
+}
 
 /** The ref a save writes: the platform provider key plus the first model the
  *  gateway serves. */
@@ -78,8 +103,11 @@ describe("/api/cubepilot/agent/config", () => {
     vi.clearAllMocks();
     // The gateway serves one model by default: a save selects it through the
     // platform provider, and the catalog lists it as a system entry.
-    gatewayCatalog.mockResolvedValue(catalogOf("qwen38-27b"));
-    gatewayOpenAiBase.mockResolvedValue(MODEL_API);
+    serve("qwen38-27b");
+    gatewayOpenAiBaseOf.mockImplementation((base: { url: string }) => `${base.url}/v1`);
+    platformProviderNameOf.mockImplementation((base: { name?: string }) =>
+      base.name === PRIVATE_GATEWAY ? "cubestack-private" : "cubestack",
+    );
   });
 
   afterEach(() => {
@@ -111,6 +139,7 @@ describe("/api/cubepilot/agent/config", () => {
         },
       ],
       gatewayModels: ["qwen38-27b"],
+      gatewayProviders: [{ name: "cubestack", endpoint: MODEL_API, models: ["qwen38-27b"] }],
       templateMissing: false,
     });
   });
@@ -173,8 +202,7 @@ describe("/api/cubepilot/agent/config", () => {
     // Two served models; the template is already current for both and defaults
     // to the one the caller picks, so only the instance is patched.
     const picked = "cubestack/glm-5.2-chat";
-    const served = [{ id: "qwen38-27b" }, { id: "glm-5.2-chat" }];
-    gatewayCatalog.mockResolvedValue(served.map((m) => ({ id: m.id, ownedBy: "" })));
+    serve("qwen38-27b", "glm-5.2-chat");
     const currentTmpl = {
       ...TEMPLATE_CR,
       spec: {
@@ -202,8 +230,7 @@ describe("/api/cubepilot/agent/config", () => {
 
     // The bare model id (no provider prefix) is accepted too.
     vi.clearAllMocks();
-    gatewayCatalog.mockResolvedValue(served.map((m) => ({ id: m.id, ownedBy: "" })));
-    gatewayOpenAiBase.mockResolvedValue(MODEL_API);
+    serve("qwen38-27b", "glm-5.2-chat");
     mockK8s(INSTANCE_CR, currentTmpl);
     patchNamespacedCustomObject.mockResolvedValue(INSTANCE_CR);
     const res2 = await PUT(
@@ -214,6 +241,90 @@ describe("/api/cubepilot/agent/config", () => {
     calls = patchNamespacedCustomObject.mock.calls as Array<[{ plural?: string; body?: unknown[] }]>;
     expect(calls).toHaveLength(1);
     expect(calls[0][0].body).toEqual([{ op: "add", path: "/spec/selectedModel", value: picked }]);
+  });
+
+  it("PUT: a model served only by the private Gateway gets its own provider entry", async () => {
+    // The two catalogues are separate Gateways and a provider has a single
+    // endpoint. The private model therefore gets the private Gateway's own
+    // entry: pointing the public one at the private endpoint (or the reverse)
+    // would replace another instance's catalogue.
+    gatewayCatalogs.mockResolvedValue([
+      gatewayOf(undefined, PUBLIC_BASE),
+      gatewayOf(PRIVATE_GATEWAY, PRIVATE_BASE, "qwen38-27b"),
+    ]);
+    mockK8s(INSTANCE_CR, { metadata: { name: "cubepilot" }, spec: { runtime: "OpenClaw" } });
+    patchNamespacedCustomObject.mockResolvedValue(INSTANCE_CR);
+    const res = await PUT(
+      await authedRequest({ method: "PUT", body: JSON.stringify({ config: { selectedModel: "qwen38-27b" } }) }),
+      undefined,
+    );
+    expect(res.status).toBe(200);
+    const calls = patchNamespacedCustomObject.mock.calls as Array<[{ plural?: string; body?: unknown[] }]>;
+    const template = calls.find((c) => c[0].plural === "agenttemplates");
+    expect(template?.[0].body).toEqual([
+      {
+        op: "add",
+        path: "/spec/providers",
+        value: [{ name: "cubestack-private", endpoint: PRIVATE_API, models: ["qwen38-27b"] }],
+      },
+      { op: "add", path: "/spec/defaultModel", value: "cubestack-private/qwen38-27b" },
+    ]);
+    const instance = calls.find((c) => c[0].plural === "agentinstances");
+    expect(instance?.[0].body).toEqual([
+      { op: "add", path: "/spec/selectedModel", value: "cubestack-private/qwen38-27b" },
+    ]);
+  });
+
+  it("PUT: an instructions-only save leaves the platform providers alone", async () => {
+    // The instance's stored selection may be served by the private Gateway while
+    // the public one is also up. Rewriting a provider entry here — the old code
+    // repointed the single shared entry at the first non-empty catalogue — would
+    // leave that selection pointing at an endpoint that no longer lists it.
+    gatewayCatalogs.mockResolvedValue([
+      gatewayOf(undefined, PUBLIC_BASE, "qwen38-27b"),
+      gatewayOf(PRIVATE_GATEWAY, PRIVATE_BASE, "dsv4-api"),
+    ]);
+    const privateTemplate = {
+      metadata: { name: "cubepilot" },
+      spec: {
+        runtime: "OpenClaw",
+        defaultModel: "cubestack-private/dsv4-api",
+        providers: [{ name: "cubestack-private", endpoint: PRIVATE_API, models: ["dsv4-api"] }],
+      },
+    };
+    const privateInstance = {
+      metadata: { name: "tester-cubepilot" },
+      spec: { owner: "tester", selectedModel: "cubestack-private/dsv4-api", userInstructions: "be terse" },
+    };
+    mockK8s(privateInstance, privateTemplate);
+    patchNamespacedCustomObject.mockResolvedValue(privateInstance);
+    const res = await PUT(
+      await authedRequest({ method: "PUT", body: JSON.stringify({ config: { userInstructions: "be brief" } }) }),
+      undefined,
+    );
+    expect(res.status).toBe(200);
+    const calls = patchNamespacedCustomObject.mock.calls as Array<[{ plural?: string; body?: unknown[] }]>;
+    expect(calls.map((c) => c[0].plural)).toEqual(["agentinstances"]);
+    expect(calls[0][0].body).toEqual([{ op: "add", path: "/spec/userInstructions", value: "be brief" }]);
+  });
+
+  it("GET: offers each Gateway's models under its own provider", async () => {
+    gatewayCatalogs.mockResolvedValue([
+      gatewayOf(undefined, PUBLIC_BASE, "qwen38-27b"),
+      gatewayOf(PRIVATE_GATEWAY, PRIVATE_BASE, "dsv4-api"),
+    ]);
+    mockK8s(null);
+    const body = (await (await GET(await authedGet(), undefined)).json()) as {
+      config: {
+        gatewayModels: string[];
+        gatewayProviders: Array<{ name: string; endpoint: string; models: string[] }>;
+      };
+    };
+    expect(body.config.gatewayModels).toEqual(["qwen38-27b", "dsv4-api"]);
+    expect(body.config.gatewayProviders).toEqual([
+      { name: "cubestack", endpoint: MODEL_API, models: ["qwen38-27b"] },
+      { name: "cubestack-private", endpoint: PRIVATE_API, models: ["dsv4-api"] },
+    ]);
   });
 
   it("PUT: a model from an external provider is accepted even though the gateway does not serve it", async () => {
@@ -271,7 +382,7 @@ describe("/api/cubepilot/agent/config", () => {
   it("PUT: a gateway id that itself contains a slash is still accepted as a bare id", async () => {
     // Models are namespaced on some gateways ("meta-llama/Llama-3"). Reading every
     // slash as a provider separator would refuse an id the gateway serves.
-    gatewayCatalog.mockResolvedValue(catalogOf("meta-llama/Llama-3"));
+    serve("meta-llama/Llama-3");
     mockK8s(INSTANCE_CR);
     patchNamespacedCustomObject.mockResolvedValue(INSTANCE_CR);
     const res = await PUT(
@@ -303,7 +414,7 @@ describe("/api/cubepilot/agent/config", () => {
     // without any AI Gateway installed. The platform provider is written FROM the
     // gateway, so with no gateway there is nothing to write — but that must not
     // refuse the selection the page actually offered.
-    gatewayCatalog.mockResolvedValue(catalogOf());
+    serve();
     mockK8s(INSTANCE_CR);
     patchNamespacedCustomObject.mockResolvedValue(INSTANCE_CR);
     const res = await PUT(
@@ -322,7 +433,7 @@ describe("/api/cubepilot/agent/config", () => {
   it("PUT: a prompt-only update is saved when the gateway serves nothing", async () => {
     // Instructions do not depend on the catalog: refusing them would block the
     // page entirely on a cluster that runs no gateway.
-    gatewayCatalog.mockResolvedValue(catalogOf());
+    serve();
     const external = {
       metadata: { name: "tester-cubepilot" },
       spec: { owner: "tester", selectedModel: "deepseek/deepseek-chat" },
@@ -345,7 +456,7 @@ describe("/api/cubepilot/agent/config", () => {
     // Nothing to select — no gateway and no template provider. The instance is
     // created without a selection rather than with an empty ref the CRD would
     // have to reject.
-    gatewayCatalog.mockResolvedValue(catalogOf());
+    serve();
     mockK8s(null, { metadata: { name: "cubepilot" }, spec: { runtime: "OpenClaw" } });
     createNamespacedCustomObject.mockResolvedValue({ metadata: { name: "tester-cubepilot" }, spec: { owner: "tester" } });
     const res = await PUT(
@@ -361,7 +472,7 @@ describe("/api/cubepilot/agent/config", () => {
   it("PUT: an explicit empty selection on a first save selects nothing", async () => {
     // "" is a clear, not an omission: picking the first model in the catalog for
     // it would silently override what the caller asked for.
-    gatewayCatalog.mockResolvedValue(catalogOf());
+    serve();
     mockK8s(null, {
       metadata: { name: "cubepilot" },
       spec: {
@@ -384,7 +495,7 @@ describe("/api/cubepilot/agent/config", () => {
     // The template's default is what every instance without its own selection
     // runs. A save that named no model must not repoint it at the first model of
     // the list just because this caller had none.
-    gatewayCatalog.mockResolvedValue(catalogOf());
+    serve();
     mockK8s(null, {
       metadata: { name: "cubepilot" },
       spec: {
@@ -414,7 +525,7 @@ describe("/api/cubepilot/agent/config", () => {
     // The template still lists the platform entry, but this save cannot rewrite it
     // from the gateway — accepting the ref would store a selection against a
     // provider entry this request cannot vouch for.
-    gatewayCatalog.mockResolvedValue(catalogOf());
+    serve();
     mockK8s(INSTANCE_CR);
     const res = await PUT(
       await authedRequest({ method: "PUT", body: JSON.stringify({ config: { selectedModel: SELECTED_MODEL } }) }),
@@ -434,7 +545,11 @@ describe("/api/cubepilot/agent/config", () => {
     expect(calls.map((c) => c[0].plural)).toEqual(["agentinstances"]);
   });
 
-  it("PUT: a moved model API rewrites the endpoint, the model list and drops a foreign credential", async () => {
+  it("PUT: a named selection rewrites a moved model API and drops a foreign credential", async () => {
+    // The save reconciles the entry of the Gateway the selection names. An
+    // instructions-only save does not: it must leave the shared entries alone,
+    // because the instance's stored selection may be served by another Gateway
+    // (see the instructions-only case above).
     mockK8s(INSTANCE_CR, {
       metadata: { name: "cubepilot" },
       spec: {
@@ -443,8 +558,15 @@ describe("/api/cubepilot/agent/config", () => {
       },
     });
     patchNamespacedCustomObject.mockResolvedValue(INSTANCE_CR);
-    await PUT(await authedRequest({ method: "PUT", body: JSON.stringify({ config: { userInstructions: "x" } }) }), undefined);
+    await PUT(
+      await authedRequest({
+        method: "PUT",
+        body: JSON.stringify({ config: { selectedModel: SELECTED_MODEL, userInstructions: "x" } }),
+      }),
+      undefined,
+    );
     const calls = patchNamespacedCustomObject.mock.calls as Array<[{ plural?: string; body?: unknown[] }]>;
+    expect(calls[0][0].plural).toBe("agenttemplates");
     expect(calls[0][0].body).toEqual([
       { op: "replace", path: "/spec/providers/0/endpoint", value: MODEL_API },
       { op: "replace", path: "/spec/providers/0/models", value: ["qwen38-27b"] },
@@ -456,7 +578,7 @@ describe("/api/cubepilot/agent/config", () => {
     // The platform provider is written from the resolved base AND the served ids;
     // without a base there is nothing to write, so the ids it would carry are not
     // offered — the template's own providers still are.
-    gatewayOpenAiBase.mockResolvedValue(null);
+    gatewayCatalogs.mockResolvedValue([]);
     mockK8s(INSTANCE_CR);
     const res = await PUT(
       await authedRequest({ method: "PUT", body: JSON.stringify({ config: { selectedModel: SELECTED_MODEL } }) }),
@@ -476,7 +598,7 @@ describe("/api/cubepilot/agent/config", () => {
 
   it("GET: a missing builtin template is reported, not silently empty", async () => {
     // No gateway models either: the assertion is about the template.
-    gatewayCatalog.mockResolvedValue(catalogOf());
+    serve();
     mockK8s(null, null);
     const body = (await (await GET(await authedGet(), undefined)).json()) as {
       config: { providers: unknown[]; templateMissing?: boolean };
@@ -486,7 +608,7 @@ describe("/api/cubepilot/agent/config", () => {
   });
 
   it("GET: the gateway catalog is reported separately from the template's providers", async () => {
-    gatewayCatalog.mockResolvedValue(catalogOf("qwen38-27b", "system-only"));
+    serve("qwen38-27b", "system-only");
     mockK8s(null);
     const body = (await (await GET(await authedGet(), undefined)).json()) as {
       config: { gatewayModels: string[]; providers: Array<{ name: string; origin?: string }> };

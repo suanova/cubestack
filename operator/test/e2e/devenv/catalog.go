@@ -54,7 +54,7 @@ type Image struct {
 	// is the registry's to decide anyway.
 	Key string
 
-	// Repo is the image path under the registry: "suanova/cpu-base" style,
+	// Repo is the image path under the registry: "suanova/cpu-pytorch" style,
 	// without the registry host or the tag.
 	Repo string
 
@@ -97,6 +97,12 @@ type Stack struct {
 	Command string
 }
 
+// torchProbe is the Stack command for every image that carries PyTorch: the
+// version an ssh session's python3 resolves. It is one constant because the
+// claim is the same one on each family — that image's torch, on that image's
+// interpreter.
+const torchProbe = `python3 -c 'import torch; print(torch.__version__)'`
+
 // Ref is the image reference to pull: <registry>/<repo>:<tag>, with the registry
 // and tag overridable through the environment.
 func (i Image) Ref() string {
@@ -126,35 +132,40 @@ func (i Image) Ref() string {
 // multi-gigabyte pull rather than after it.
 var Images = []Image{
 	{
-		Key:     "cpu-base-ssh",
-		Repo:    "suanova/cpu-base",
+		Key:     "cpu-pytorch-ssh",
+		Repo:    "suanova/cpu-pytorch",
 		Type:    aiv1alpha1.DevEnvironmentTypeSSH,
 		Account: ubuntuAccount,
 		UID:     1000,
 		GID:     1000,
 		Home:    ubuntuHome,
-		// No stack: the cpu-base image is ubuntu:22.04 with sshd and JupyterLab, and
-		// a session that reaches the workspace is what it is for — not a vendor
-		// toolchain.
+		// torch is the stack the family is named for, installed into the
+		// distribution's python — the same interpreter an ssh session gets, so the
+		// probe is one import.
+		Stack: Stack{
+			Name:    "CPU torch",
+			Command: torchProbe,
+		},
 	},
 	{
-		Key:     "cpu-base-jupyter",
-		Repo:    "suanova/cpu-base",
+		Key:     "cpu-pytorch-jupyter",
+		Repo:    "suanova/cpu-pytorch",
 		Type:    aiv1alpha1.DevEnvironmentTypeJupyter,
 		Account: ubuntuAccount,
 		UID:     1000,
 		GID:     1000,
 		Home:    ubuntuHome,
-		// JupyterLab is the stack here, on the image's one interpreter — the same
-		// interpreter the notebook kernel and the ssh session have to agree on.
+		// The family is named for PyTorch, so both it and JupyterLab are probed, on
+		// the image's one interpreter — the same interpreter the notebook kernel and
+		// the ssh session have to agree on.
 		Stack: Stack{
-			Name:    "jupyterlab",
-			Command: `python3 -c 'import jupyterlab; print(jupyterlab.__version__)'`,
+			Name:    "jupyterlab and CPU torch",
+			Command: `python3 -c 'import jupyterlab; print(jupyterlab.__version__)' && ` + torchProbe,
 		},
 	},
 	{
-		Key:     "maca-base-jupyter",
-		Repo:    "suanova/maca-base",
+		Key:     "maca-pytorch-jupyter",
+		Repo:    "suanova/maca-pytorch",
 		Type:    aiv1alpha1.DevEnvironmentTypeJupyter,
 		Account: ubuntuAccount,
 		UID:     1000,
@@ -165,12 +176,12 @@ var Images = []Image{
 		// succeeds is the whole of the claim.
 		Stack: Stack{
 			Name:    "MACA torch",
-			Command: `python3 -c 'import torch; print(torch.__version__)'`,
+			Command: torchProbe,
 		},
 	},
 	{
-		Key:     "maca-base-ssh",
-		Repo:    "suanova/maca-base",
+		Key:     "maca-pytorch-ssh",
+		Repo:    "suanova/maca-pytorch",
 		Type:    aiv1alpha1.DevEnvironmentTypeSSH,
 		Account: ubuntuAccount,
 		UID:     1000,
@@ -178,12 +189,12 @@ var Images = []Image{
 		Home:    ubuntuHome,
 		Stack: Stack{
 			Name:    "MACA torch",
-			Command: `python3 -c 'import torch; print(torch.__version__)'`,
+			Command: torchProbe,
 		},
 	},
 	{
-		Key:     "cube-base-jupyter",
-		Repo:    "suanova/cube-base",
+		Key:     "cuda-pytorch-jupyter",
+		Repo:    "suanova/cuda-pytorch",
 		Type:    aiv1alpha1.DevEnvironmentTypeJupyter,
 		Account: ubuntuAccount,
 		UID:     1000,
@@ -198,8 +209,8 @@ var Images = []Image{
 		},
 	},
 	{
-		Key:     "cube-base-ssh",
-		Repo:    "suanova/cube-base",
+		Key:     "cuda-pytorch-ssh",
+		Repo:    "suanova/cuda-pytorch",
 		Type:    aiv1alpha1.DevEnvironmentTypeSSH,
 		Account: ubuntuAccount,
 		UID:     1000,

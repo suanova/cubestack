@@ -5,20 +5,21 @@ See `docs/design/devenv-images/decision.md` for the sourcing/composition decisio
 `docs/design/devenv-images/image-contract.md` for the runtime contract, and
 `operator/internal/controller/devenvironment_controller.go` for the authoritative behaviour.
 
-## One image per accelerator family
+## One image per (accelerator, stack) cell
 
-There are **three** images, one per accelerator family, and each serves **both** runtime modes:
+The repositories are named `<accelerator>-<stack>` (decision doc §5.1). There are **three** images
+today — the `pytorch` cell of each accelerator — and each serves **both** runtime modes:
 
-- `cpu-base` — the CPU family, built on `ubuntu:22.04`;
-- `maca-base` — the Metax/MACA family, on a vendor MACA base;
-- `cube-base` — the NVIDIA family, on NVIDIA's NGC PyTorch base.
+- `cpu-pytorch` — CPU, built on `ubuntu:22.04`, with the CPU build of PyTorch;
+- `maca-pytorch` — Metax/MACA, on a vendor MACA base with its `torch+metax`;
+- `cuda-pytorch` — NVIDIA, on NVIDIA's NGC PyTorch base.
 
-The split is by accelerator, not by mode, because the mode is a **runtime** decision:
+The split is by accelerator and stack, not by mode, because the mode is a **runtime** decision:
 `spec.type` is injected by the controller as `CUBSTACK_TYPE`, and `common/entrypoint.sh`
 runs JupyterLab or sshd from it. Before this, each family shipped two images that differed only
-in a baked mode — 42.80 GiB of images in the offline package, where the merged set is 21.2 GiB
-(10.56 + 10.57 + 0.09 GiB, the CPU image measured on 2026-10-19). That matters because an offline
-install ships every image; the merge cuts the naive
+in a baked mode — 42.80 GiB of images in the offline package, where the merged set is about 21.4 GiB
+(10.56 + 10.57 + 0.32 GiB, the CPU image measured with its PyTorch build). That matters because an
+offline install ships every image; the merge cuts the naive
 per-image package in half, and it removes the image-per-mode axis from the catalog, CI and docs.
 (Unique-layer deduplication in the bundle itself is still #128's job.)
 
@@ -28,21 +29,25 @@ every one of them: account `ubuntu`, uid/gid **1000:1000**, home and workdir **`
 
 | Image | Base | Account (uid:gid) | Home / workspace | Modes | Exposes |
 |-------|------|-------------------|------------------|-------|---------|
-| `harbor.isuanova.com/suanova/cpu-base` | `ubuntu:22.04` | `ubuntu` 1000:1000 | `/home/ubuntu` | jupyter + ssh | jupyter `8888`, ssh `2222` |
-| `harbor.isuanova.com/suanova/maca-base` | `maca-pytorch:3.9.0.12-torch2.4-py310-ubuntu22.04-amd64` (mirror of `cr.metax-tech.com/public-library/…`) | `ubuntu` 1000:1000 | `/home/ubuntu` | jupyter + ssh | jupyter `8888`, ssh `2222` |
-| `harbor.isuanova.com/suanova/cube-base` | `pytorch:26.08-py3` (mirror of `nvcr.io/nvidia/pytorch`) | `ubuntu` 1000:1000 | `/home/ubuntu` | jupyter + ssh | jupyter `8888`, ssh `2222` |
+| `harbor.isuanova.com/suanova/cpu-pytorch` | `ubuntu:22.04` | `ubuntu` 1000:1000 | `/home/ubuntu` | jupyter + ssh | jupyter `8888`, ssh `2222` |
+| `harbor.isuanova.com/suanova/maca-pytorch` | `maca-pytorch:3.9.0.12-torch2.4-py310-ubuntu22.04-amd64` (mirror of `cr.metax-tech.com/public-library/…`) | `ubuntu` 1000:1000 | `/home/ubuntu` | jupyter + ssh | jupyter `8888`, ssh `2222` |
+| `harbor.isuanova.com/suanova/cuda-pytorch` | `pytorch:26.08-py3` (mirror of `nvcr.io/nvidia/pytorch`) | `ubuntu` 1000:1000 | `/home/ubuntu` | jupyter + ssh | jupyter `8888`, ssh `2222` |
 
 The repositories the old images were published under keep their existing tags; they are simply
-no longer published. A pinned `spec.image` keeps pulling. That includes `suanova/minimal`, this
-family's name before it was `cpu-base`: the repository is named for the accelerator family it
-serves, as the other two are, rather than for how small the image is.
+no longer published. A pinned `spec.image` keeps pulling. That includes `suanova/minimal` (this
+family's original name) and `suanova/cpu-base` (its name in #336): the repository is named for the
+accelerator and stack it serves, as the other two are, rather than for how small the image is.
 
-`cpu-base` is the thinnest overlay but no longer a bare ssh server: it is `ubuntu:22.04` plus
-`openssh-server`, `python3`/`pip`, `tini`, and **JupyterLab from pip on the system interpreter**,
-with the shared launcher as its CMD. It replaces both `ssh-ubuntu22.04` (plain ssh) and
-`jupyter-minimal` (stock-derived, with the `jovyan` 1000:100 and `/home/jovyan` layout).
+`cpu-pytorch` is the thinnest overlay but no longer a bare ssh server: it is `ubuntu:22.04` plus
+`openssh-server`, `python3`/`pip`, `sudo`, `tini`, the **CPU build of PyTorch**, **numpy** (torch's
+array bridge) and **JupyterLab on the system interpreter**, with the shared launcher as its CMD.
+Torch comes from PyTorch's own
+`download.pytorch.org/whl/cpu` index rather than PyPI, whose linux wheel is the CUDA build this
+family does not have; `TORCH_INDEX_URL` overrides that index for an offline mirror. It replaces
+both `ssh-ubuntu22.04` (plain ssh) and `jupyter-minimal` (stock-derived, with the `jovyan` 1000:100
+and `/home/jovyan` layout).
 
-`maca-base` is the same platform layer on a very different base: a vendor GPU base is not a
+`maca-pytorch` is the same platform layer on a very different base: a vendor GPU base is not a
 distro, so the platform layer there is the whole of it. The base runs as **root** (no
 `config.User`), has no `ENTRYPOINT` at all (`Cmd: ["/bin/bash"]`, so it exits immediately), no
 sshd, no jupyter, and no non-root account — the account is the platform's even though the base
@@ -52,7 +57,7 @@ this Dockerfile puts `/opt/conda/bin` on `PATH` itself before installing Jupyter
 publishes one architecture per tag (the `-amd64` suffix is part of the package name, not a
 multi-arch index), so this image is **amd64-only** — see Platform.
 
-`cube-base` is the **thinnest overlay here**: the base is not a bare vendor SDK but a
+`cuda-pytorch` is the **thinnest overlay here**: the base is not a bare vendor SDK but a
 distribution built for the purpose, so it already ships the account (`ubuntu`, uid/gid 1000, home
 `/home/ubuntu` — the platform's own default layout, so the Dockerfile inherits it rather than
 creating it), one python with torch installed into it, JupyterLab on that same interpreter, and a
@@ -65,7 +70,7 @@ vendor's `ENTRYPOINT` (`/opt/nvidia/nvidia_entrypoint.sh`: banners, then the GPU
 diagnostics, then `exec "$@"`) is displaced by the platform's, losing no mechanism the runtime
 needs.
 
-`cube-base` is **amd64-only** like `maca-base`, though for the opposite reason: the MACA
+`cuda-pytorch` is **amd64-only** like `maca-pytorch`, though for the opposite reason: the MACA
 vendor publishes one architecture per tag, while this base reaches us as a **mirror whose
 manifest lists `linux/amd64` alone**. Both therefore build and publish on their own platform
 variable — see Platform. The base's GPU-side properties are the same kind of thing as MACA's and
@@ -81,9 +86,9 @@ three, that is the same statement every time:
 
 | Image | `spec.runtime.user` | `spec.runtime.securityContext` | Workspace mount |
 |-------|--------------------|-------------------------------|-----------------|
-| `cpu-base` | `ubuntu` | *(omit — 1000:1000 is already the platform default)* | `/home/ubuntu` (derived) |
-| `maca-base` | `ubuntu` | *(omit — 1000:1000)* | `/home/ubuntu` (derived) |
-| `cube-base` | `ubuntu` | *(omit — 1000:1000)* | `/home/ubuntu` (derived) |
+| `cpu-pytorch` | `ubuntu` | *(omit — 1000:1000 is already the platform default)* | `/home/ubuntu` (derived) |
+| `maca-pytorch` | `ubuntu` | *(omit — 1000:1000)* | `/home/ubuntu` (derived) |
+| `cuda-pytorch` | `ubuntu` | *(omit — 1000:1000)* | `/home/ubuntu` (derived) |
 
 What the controller derives when a field is omitted
 (`operator/internal/controller/devenvironment_controller.go`, `resolveMountPath` / `runtimeUser`):
@@ -104,8 +109,8 @@ on every environment with a workspace claim, so no image has to infer it (see Ru
 
 A GPU image additionally has to be requested as one: the brand gate runs only when an environment asks
 for a vendor, and it requires the image's name to carry that vendor's token (`cuda` or the
-platform family name `cube-base` for `nvidia`, `maca` for `metax`) — both vendor image names do,
-so `spec.resources.gpu.vendor: metax` reaches `maca-base` and `nvidia` reaches `cube-base`. The gate is not what keeps a CPU environment off
+platform family name `cuda-pytorch` for `nvidia`, `maca` for `metax`) — both vendor image names do,
+so `spec.resources.gpu.vendor: metax` reaches `maca-pytorch` and `nvidia` reaches `cuda-pytorch`. The gate is not what keeps a CPU environment off
 them either: an environment with no `gpu` block skips the check, and the reason not to point one at a
 vendor image is that its stack exists for the GPU.
 
@@ -125,6 +130,12 @@ vendor image is that its stack exists for the GPU.
   port without `CAP_NET_BIND_SERVICE`, so no image needs that capability granted. The platform's
   Service carries `port: 22` → `targetPort: 2222`, which is invisible to users — the ssh endpoint is
   published through the Gateway's TCP listener pool, not on 22 either way.
+- All three images **install `sudo` and grant nothing**: sudo runs only for accounts a sudoers rule
+  names, and the images name none. `spec.runtime.sudo: true` is what makes the account able to run
+  commands as root inside the container — the controller writes the rule by uid and mounts it, so the
+  image needs no change and an environment that does not ask is exactly as it was. A root environment
+  already holds the privilege and renders no grant. See `image-contract.md`, Elevation, and
+  `decision.md` Gap E.
 - ssh is enabled by the presence of the mounted host key file — images ship no host keys of their own,
   and there is no key staging (see the mount contract below). In `ssh` mode a missing host key fails
   the container start rather than falling back to another mode; in `jupyter` mode it simply means no
@@ -275,8 +286,8 @@ make -C images build     # every image, tagged $(REGISTRY)/$(PROJECT)/<image>:$(
 make -C images smoke     # build + local Docker smoke (no cluster)
 ```
 
-Per-image: `make -C images build-cpu-base` / `smoke-cpu-base`, `build-maca-base` / `smoke-maca-base`,
-`build-cube-base` / `smoke-cube-base`.
+Per-image: `make -C images build-cpu-pytorch` / `smoke-cpu-pytorch`, `build-maca-pytorch` / `smoke-maca-pytorch`,
+`build-cuda-pytorch` / `smoke-cuda-pytorch`.
 
 The smoke runs throwaway containers on `127.0.0.1` (ephemeral ports, fake ssh Secrets under
 `mktemp -d`) and exercises each image **five ways**, because the mode is now per environment:
@@ -301,19 +312,24 @@ The smoke runs throwaway containers on `127.0.0.1` (ephemeral ports, fake ssh Se
   one the spec declares, and *runs in* it (the server's cwd, which a new terminal inherits). The
   family-specific checks ride along: the vendor stack has to be reachable by the account in both
   modes.
+- **elevation** — the image's `sudo` is installed, refuses an account no rule names (which is the
+  image as shipped), and elevates uid 1000 to root once the controller's rule is written inside the
+  container, passes `visudo`, and is mode `0440`. The rule is written by a root container and used by
+  a uid-1000 `docker exec`, the same split the operator's init container and main container are; a
+  host-side bind mount would not do, because sudo requires the drop-in to be owned by root.
 
 Docker has no `subPath`, so the smoke reproduces the mount contract with bind mounts — the host key
 as a file, the authorized keys as a directory holding a single `authorized_keys` entry (the shape the
 operator's `items` mapping produces); see the fidelity note under Trade-offs. A family-specific
 assertion is added where the base makes one meaningful:
 
-- **`maca-base`** — the vendor stack under `/opt/maca` is **readable by uid 1000** (checkable
+- **`maca-pytorch`** — the vendor stack under `/opt/maca` is **readable by uid 1000** (checkable
   without a GPU, and the risk that would otherwise surface only on a node: the base was built as
   root, and a library the account cannot read fails at runtime with no build-time signal), the
   default `python3` is the vendor interpreter under `/opt/conda`, it imports the vendor torch, and
   `jupyter` resolves into that same `bin` directory. Whether the *driver* works on a Metax node is
   not covered here.
-- **`cube-base`** — the base's own contribution asserted by **running** it rather than by reading
+- **`cuda-pytorch`** — the base's own contribution asserted by **running** it rather than by reading
   the filesystem, which is what the base's shape allows: the account's own `python3` imports torch,
   and a notebook **cell** lands on that same interpreter. The second half is worth the machinery: the
   base's kernelspec names a bare `python`, which jupyter_client rewrites to the *server's*
@@ -330,18 +346,18 @@ a given node's driver is the same node-side question the MACA image leaves open 
 ### Publish
 
 Each image has **one name**: `make build` tags it at the reference it is published under,
-`$(REGISTRY)/$(PROJECT)/<image>:$(TAG)`, defaulting to `harbor.isuanova.com/suanova/...` and the short
-commit SHA — plus, for the vendor images, the axes their base is chosen on (decision doc §5).
-`push` adds `:latest` to that same name rather than introducing a
-second one, and publishes it as **one multi-arch index per image** covering `$(PLATFORMS)` — except
-the two vendor images, which publish a single-platform index (see Platform):
+`$(REGISTRY)/$(PROJECT)/<image>:<stack axes>-$(TAG)` — `py310-torch2.4` for the CPU image,
+`3.9.0.12-py310-torch2.4` for MACA, `26.08` for CUDA — defaulting to `harbor.isuanova.com/suanova/...`
+and the short commit SHA (decision doc §5.2). `push` adds `:latest` to that same name rather than
+introducing a second one, and publishes it as **one multi-arch index per image** covering
+`$(PLATFORMS)` — except the two vendor images, which publish a single-platform index (see Platform):
 
 ```bash
 docker login harbor.isuanova.com              # once — the Makefile never authenticates
 make -C images push                           # publish every image
-make -C images push-cpu-base    TAG=20260910
-make -C images push-maca-base  # maca-base:3.9.0.12-py310-torch2.4-<sha>
-make -C images push-cube-base  # cube-base:26.08-<sha>
+make -C images push-cpu-pytorch   # cpu-pytorch:py310-torch2.4-<sha>
+make -C images push-maca-pytorch  # maca-pytorch:3.9.0.12-py310-torch2.4-<sha>
+make -C images push-cuda-pytorch  # cuda-pytorch:26.08-<sha>
 make -C images push PLATFORMS=linux/amd64     # narrow back to one platform
 ```
 
@@ -359,16 +375,17 @@ publish.
 traceable, non-floating reference. It names the **last commit, not the working tree** — commit before
 publishing, or the tag will not describe the built content — and it is resolved per make invocation, so
 a commit landing after `make smoke` would have `make push` publish a tag nothing accepted; pass an
-explicit TAG. §5 gives the release schemes per image — `cpu-base` on its `TAG` (a SHA, or a date you
-choose), `maca-base` on `<maca-version>-py<python>-torch<ver>`, and `cube-base` on
-`<ngc-release>-<sha>` — the families
-version on different axes, hence the per-target form. Neither vendor's axes are a `TAG` the caller
-passes: `MACA_TAG` reads them out of `MACA_PACKAGE` and `CUBE_TAG` its release out of `CUDA_PACKAGE`,
-so a tag cannot name a base the image was not built from, and `TAG` still ends it — re-building an
-overlay on an unchanged base moves the reference rather than redefining it. There is one axis for CUDA
+explicit TAG. §5.2 gives the release schemes per image — `py<python>-torch<ver>-<sha>` for
+`cpu-pytorch`, `<maca-version>-py<python>-torch<ver>-<sha>` for `maca-pytorch`, and
+`<ngc-release>-<sha>` for `cuda-pytorch` — the families
+version on different axes, hence the per-target form. None of those axes is a `TAG` the caller
+passes: `CPU_TAG` reads `CPU_PYTHON` and `TORCH_VERSION`, `MACA_TAG` reads them out of
+`MACA_PACKAGE`, and `CUDA_TAG` its release out of `CUDA_PACKAGE`,
+so a tag cannot name a stack the image was not built from, and `TAG` still ends it — re-building an
+overlay on an unchanged stack moves the reference rather than redefining it. There is one axis for CUDA
 rather than three because the NGC release pins python, torch and CUDA together, so naming it names all
-of them. Both vendor targets refuse to publish (`check-maca-base` / `check-cuda-base`) if a base bump
-lands a package tag the axes cannot be read from.
+of them. Every target refuses to publish (`check-cpu-pytorch` / `check-maca-pytorch` /
+`check-cuda-pytorch`) if an input bump lands a version the tag axes cannot be read from.
 
 A deployment tracking `:latest` follows the newest publish while a pinned one keeps its SHA/release
 tag; publishing an older commit therefore moves `:latest` backwards, which is expected for a moving
@@ -397,19 +414,19 @@ the non-native platform. Both flows drop buildx's provenance and SBOM attestatio
 index carrying them with a 404 on the manifest PUT even though every manifest it references resolves on
 its own.
 
-`maca-base` and `cube-base` sit outside both flows' platform choice, on the same grounds: neither
+`maca-pytorch` and `cuda-pytorch` sit outside both flows' platform choice, on the same grounds: neither
 vendor base has an arm64 manifest to build from — the MACA vendor publishes one architecture per tag,
-the NVIDIA mirror lists `linux/amd64` alone — so `build-maca-base` always passes `$(MACA_PLATFORM)` and
-`build-cube-base` always passes `$(CUBE_PLATFORM)`, both defaulting to `linux/amd64`, rather than
+the NVIDIA mirror lists `linux/amd64` alone — so `build-maca-pytorch` always passes `$(MACA_PLATFORM)` and
+`build-cuda-pytorch` always passes `$(CUDA_PLATFORM)`, both defaulting to `linux/amd64`, rather than
 `$(PLATFORM)`; their push targets publish that one platform rather than `$(PLATFORMS)`, which is a
 single-platform index buildx supports. They are the images whose architecture is a property of the
 image rather than of the host or the platform list, and each vendor image has its own variable for it:
-`MACA_PLATFORM=` / `CUBE_PLATFORM=` are what move them, and `PLATFORMS=` does not reach them.
+`MACA_PLATFORM=` / `CUDA_PLATFORM=` are what move them, and `PLATFORMS=` does not reach them.
 
 Verify what a registry received rather than assuming the build host's architecture:
 
 ```bash
-docker buildx imagetools inspect --raw harbor.isuanova.com/suanova/cpu-base:latest
+docker buildx imagetools inspect --raw harbor.isuanova.com/suanova/cpu-pytorch:latest
 ```
 
 ### Overrides / mirror builds (CN or offline)
@@ -451,10 +468,10 @@ make -C images build
 `ca-certificates`, so rewriting its sources to an `https` mirror before that fails InRelease
 verification.
 
-`IMG_CPU_BASE` / `IMG_MACA` / `IMG_CUBE` override the
-output tags (`MACA_TAG` / `CUBE_TAG` the axes the vendor images derive); `BASE_ARGS` the base images
+`IMG_CPU_PYTORCH` / `IMG_MACA` / `IMG_CUDA` override the
+output tags (`CPU_TAG` / `MACA_TAG` / `CUDA_TAG` the axes each image derives); `BASE_ARGS` the base images
 (above); `CONTAINER_TOOL` overrides `docker` (e.g. `podman`); `PLATFORM` the build/smoke architecture,
-`PLATFORMS` what `push` publishes, and `MACA_PLATFORM` / `CUBE_PLATFORM` the one architecture each
+`PLATFORMS` what `push` publishes, and `MACA_PLATFORM` / `CUDA_PLATFORM` the one architecture each
 vendor image builds and publishes for (see Platform).
 
 ## Layout
@@ -467,11 +484,11 @@ images/
     jupyter/start-jupyter.sh  every family's CMD: the launcher none of the bases ships
     sshd/10-devenv.conf    sshd_config.d drop-in; @SSH_USER@ login account, @SSH_ENV@ session env
     sshd/install-dropin.sh fills both placeholders in, or fails the build
-  cpu-base/
-    Dockerfile             the CPU family: plain ubuntu:22.04 + python3, JupyterLab, sshd
-  maca-base/
+  cpu-pytorch/
+    Dockerfile             the CPU family: plain ubuntu:22.04 + python3, the CPU torch build, JupyterLab, sshd
+  maca-pytorch/
     Dockerfile             platform layer on the Metax MACA vendor base
-  cube-base/
+  cuda-pytorch/
     Dockerfile             platform layer on the NVIDIA NGC PyTorch base
   hack/smoke.sh            local acceptance smoke (both modes per image)
 ```
@@ -497,7 +514,7 @@ you is the family one. The smoke asserts both.
 The second is `@SSH_ENV@`, the `NAME=value` pairs for the drop-in's single `SetEnv`. Each Dockerfile
 names the variables its session needs and the installer reads their values out of the build shell's
 environment — the **image's own** by the time it runs, the base's plus whatever the overlay has set,
-which is how `maca-base` gets `/opt/conda/bin` onto a session's `PATH` (see Trade-offs). A
+which is how `maca-pytorch` gets `/opt/conda/bin` onto a session's `PATH` (see Trade-offs). A
 placeholder is needed at all because sshd's `SetEnv` *replaces* a session's environment rather than
 adding to it, so a literal does not extend an image's environment, it hides it; and no one literal fits
 every family, since the CPU image needs only its own `PATH` while each vendor base's session has to
@@ -519,7 +536,7 @@ the session environment back and compares it to the container's own variable by 
 - The merge makes the **mode** a runtime property: one image per family is built and shipped, and
   `CUBSTACK_TYPE` (controller-injected from `spec.type`) picks the arm. The property that has to
   keep holding is the ssh arm's *absence* of a notebook — asserted from the process table, not from
-  a missing binary, because `cube-base` ships JupyterLab and could start it.
+  a missing binary, because `cuda-pytorch` ships JupyterLab and could start it.
 - sshd binds the unprivileged `2222`, so the images need **no capability at all** — design Gap B
   (`NET_BIND_SERVICE`) is closed by port choice rather than by granting a privilege. Two things follow:
   the operator must set the Service's `targetPort` to `2222` (#173), and a local smoke cannot validate
@@ -527,7 +544,7 @@ the session environment back and compares it to the container's own variable by 
   so a container there can bind `:22` with no capability, while a pod's own netns defaults to `1024`.
 - All three images run at the platform default uid/gid 1000:1000, so no environment needs a
   `securityContext.runAsGroup` override.
-- `maca-base` inherits two properties of the vendor base worth knowing before it is trusted.
+- `maca-pytorch` inherits two properties of the vendor base worth knowing before it is trusted.
   Its **driver** is baked
   into the base (`/opt/mxdriver`) while a Metax node may inject its own; which one wins is untested, and
   the local smoke cannot answer it — that needs a node advertising `metax-tech.com/gpu`. And its python
@@ -537,7 +554,7 @@ the session environment back and compares it to the container's own variable by 
   Dockerfile puts `/opt/conda/bin` on `PATH` itself — without that, a notebook cell or a
   non-interactive `ssh host 'python3 …'` reaches the interpreter with no torch while an interactive
   session works.
-- `cube-base` inherits a different base and with it a different set of unknowns. Its **account is
+- `cuda-pytorch` inherits a different base and with it a different set of unknowns. Its **account is
   the base's**, not the platform's — uid/gid 1000 `ubuntu` at `/home/ubuntu` happens to be exactly the
   layout this family wants, which is why the Dockerfile inherits it instead of creating it, and why a
   base that named its account differently would be a build failure rather than a quiet mismatch. Its

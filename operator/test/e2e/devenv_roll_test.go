@@ -42,7 +42,7 @@ const rollProbePortName = "roll-probe-tcp"
 func describeRoll() {
 	draftCase{
 		Name:     "roll-edits",
-		Image:    devenv.MustImage("cpu-base-jupyter"),
+		Image:    devenv.MustImage("cpu-pytorch-jupyter"),
 		Identity: devenv.NonRoot,
 		Cases: func(open func() *devenv.Environment) {
 			It("L1 rolls the workload onto the image a spec edit names",

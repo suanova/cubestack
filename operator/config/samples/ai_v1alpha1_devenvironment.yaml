@@ -6,7 +6,7 @@ metadata:
 spec:
   # Core (flat) fields
   type: jupyter                # container type: jupyter / ssh / vscode
-  image: harbor.local/ai-images/cube-base:26.08
+  image: harbor.local/ai-images/cuda-pytorch:26.08
   running: true                # desired running state
 
   # Compute / resources
@@ -15,7 +15,7 @@ spec:
     # which vendor, and optionally which of that vendor's models. Omit the block
     # entirely for a CPU-only environment — the pod then carries no GPU resource
     # at all, and the image brand is not checked, which is how the CPU-only
-    # environments on the cpu-base family image are used. There is no count of 0:
+    # environments on the cpu-pytorch family image are used. There is no count of 0:
     # an absent block is the only way to ask for none.
     gpu:
       vendor: nvidia             # nvidia (nvidia.com/gpu) / metax (metax-tech.com/gpu)
@@ -148,10 +148,14 @@ spec:
   runtime:
     # The account the container runs as — the one the image's sshd serves, and the
     # account the ssh endpoint advertises. Omit it for the platform default "user";
-    # set it to the image's own account: all three family images (cpu-base,
-    # cube-base, maca-base) create "ubuntu" at uid/gid 1000, which is also what
+    # set it to the image's own account: all three family images (cpu-pytorch,
+    # cuda-pytorch, maca-pytorch) create "ubuntu" at uid/gid 1000, which is also what
     # the platform default states.
     user: ubuntu
+    # Passwordless sudo for that account, so it can install system packages.
+    # Off by default: the images include sudo but grant it only when asked.
+    # An environment running as root needs no grant. See spec.runtime.sudo.
+    # sudo: true
     env:
       - name: MODEL_REPO
         value: /models/llama3-8b

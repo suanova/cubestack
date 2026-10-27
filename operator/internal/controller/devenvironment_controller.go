@@ -306,6 +306,14 @@ const (
 	// rolled for a variable it is never given.
 	cubstackTypeEnvVersion = "cubstack-type-env-1"
 
+	// sudoersVersion names the shape of the opt-in sudo grant (spec.runtime.sudo;
+	// see desiredInitContainers). Runtime already carries the field, so toggling it
+	// moves the hash; this sentinel covers a change to the mechanism itself — the
+	// script, the file's mode, the init image — which the spec does not carry. An
+	// environment that is not granted sudo contributes nothing (::stsSpecHash), so
+	// only the others are rolled.
+	sudoersVersion = "sudoers-1"
+
 	// defaultRuntimeUser is the account an environment logs in as when
 	// spec.runtime.user names none; it is also the account the platform's base
 	// images conventionally use.
@@ -1024,13 +1032,11 @@ func gatewayAPICRDInstalled(mgr ctrl.Manager, kind string) (bool, error) {
 // brandRule is vendor's image-naming rule (design §4.2): the predicate an image
 // reference has to satisfy, and the phrase naming it in a mismatch message.
 //
-// The rule is the vendor's own token — "cuda" for nvidia, "maca" for metax —
-// anywhere in the reference. nvidia products are self-built, so the rule also
-// accepts the platform's family name "cube-base"; metax products are mirrored
-// from the upstream Metax library under each package's own name: maca,
-// maca-pytorch, maca-tensorflow. The rules stay the same shape, so the gate
-// reads as one question — does the image name its vendor? — rather than a
-// different check per vendor.
+// The rule is the accelerator token the platform names its own images by —
+// "cuda" for nvidia, "maca" for metax — anywhere in the reference. One token,
+// because the family images and the vendor packages share it (`cuda-pytorch`,
+// `maca-pytorch`), so the gate reads as one question — does the image name its
+// accelerator? — rather than a different check per vendor.
 //
 // Like vendorResource it is total, and for the same reason: an unresolvable
 // vendor resolves to the metax rule rather than falling out of the switch and
@@ -1040,10 +1046,8 @@ func gatewayAPICRDInstalled(mgr ctrl.Manager, kind string) (bool, error) {
 func brandRule(vendor aiv1alpha1.AcceleratorVendor) (matches func(image string) bool, want string) {
 	switch vendor {
 	case aiv1alpha1.AcceleratorVendorNvidia:
-		return func(image string) bool {
-				return strings.Contains(image, "cuda") || strings.Contains(image, "cube-base")
-			},
-			`an image containing "cuda" or "cube-base"`
+		return func(image string) bool { return strings.Contains(image, "cuda") },
+			`an image containing "cuda"`
 	default:
 		return func(image string) bool { return strings.Contains(image, "maca") },
 			`an image containing "maca"`
@@ -1457,7 +1461,7 @@ func desiredPermissionInitContainer(env *aiv1alpha1.DevEnvironment) corev1.Conta
 	return corev1.Container{
 		Name:    permissionInitContainerName,
 		Image:   permissionInitImage,
-		Command: []string{"/bin/sh", "-c", permissionInitScript},
+		Command: []string{initShell, "-c", permissionInitScript},
 		Env: []corev1.EnvVar{
 			{Name: permissionInitPathEnv, Value: permissionInitMountPath},
 			{Name: permissionInitUIDEnv, Value: strconv.FormatInt(*sc.RunAsUser, 10)},
@@ -1478,6 +1482,95 @@ func desiredPermissionInitContainer(env *aiv1alpha1.DevEnvironment) corev1.Conta
 			{Name: workspaceClaimName, MountPath: permissionInitMountPath},
 		},
 	}
+}
+
+// sudoGranted reports whether the pod should carry the opt-in sudo grant. It is
+// false unless spec.runtime.sudo asks for it and the container runs as a
+// positive uid: root can already run any command, so the grant would change
+// nothing there, and a rule for uid 0 has no reader to serve.
+func sudoGranted(env *aiv1alpha1.DevEnvironment) bool {
+	if env.Spec.Runtime == nil || !env.Spec.Runtime.Sudo {
+		return false
+	}
+	sc := desiredSecurityContext(env.Spec.Runtime)
+	return sc.RunAsUser != nil && *sc.RunAsUser > 0
+}
+
+// desiredSudoersInitContainer writes the opt-in grant into the pod's sudoers
+// volume. It runs as root because sudo refuses a drop-in root does not own,
+// with every capability dropped and a read-only root filesystem: writing one
+// file into a volume that root owns needs neither. What it runs is
+// ::sudoersInitScript.
+func desiredSudoersInitContainer(env *aiv1alpha1.DevEnvironment) corev1.Container {
+	uid := *desiredSecurityContext(env.Spec.Runtime).RunAsUser
+	return corev1.Container{
+		Name:    sudoersInitContainerName,
+		Image:   permissionInitImage,
+		Command: []string{initShell, "-c", sudoersInitScript},
+		Env: []corev1.EnvVar{
+			{Name: sudoersInitDirEnv, Value: sudoersInitMountPath},
+			{Name: sudoersInitUIDEnv, Value: strconv.FormatInt(uid, 10)},
+		},
+		SecurityContext: &corev1.SecurityContext{
+			RunAsUser:                ptr(int64(0)),
+			RunAsGroup:               ptr(int64(0)),
+			RunAsNonRoot:             ptr(false),
+			Privileged:               ptr(false),
+			AllowPrivilegeEscalation: ptr(false),
+			ReadOnlyRootFilesystem:   ptr(true),
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{allCapabilities},
+			},
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: sudoersVolumeName, MountPath: sudoersInitMountPath},
+		},
+	}
+}
+
+// sudoersVolumeMounts is the main container's half of the grant: the one file,
+// not the directory, mounted read-only where sudo reads it. The image's own
+// /etc/sudoers.d entries stay in place, and the account cannot rewrite its own
+// grant.
+func sudoersVolumeMounts(env *aiv1alpha1.DevEnvironment) []corev1.VolumeMount {
+	if !sudoGranted(env) {
+		return nil
+	}
+	return []corev1.VolumeMount{{
+		Name:      sudoersVolumeName,
+		MountPath: sudoersFilePath,
+		SubPath:   sudoersFileName,
+		ReadOnly:  true,
+	}}
+}
+
+// sudoersVolumes is the pod volume both halves share. EmptyDir because the
+// grant is derived from the spec and the init container rewrites it on every
+// start; there is nothing worth surviving the pod.
+func sudoersVolumes(env *aiv1alpha1.DevEnvironment) []corev1.Volume {
+	if !sudoGranted(env) {
+		return nil
+	}
+	return []corev1.Volume{{
+		Name: sudoersVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{},
+		},
+	}}
+}
+
+// desiredInitContainers assembles the pod's init containers in a fixed order:
+// the workspace repair first, then the opt-in sudo grant. The two are
+// independent, and an environment that asks for neither gets none at all.
+func desiredInitContainers(env *aiv1alpha1.DevEnvironment) []corev1.Container {
+	var initContainers []corev1.Container
+	if env.Spec.Storage != nil {
+		initContainers = append(initContainers, desiredPermissionInitContainer(env))
+	}
+	if sudoGranted(env) {
+		initContainers = append(initContainers, desiredSudoersInitContainer(env))
+	}
+	return initContainers
 }
 
 // jupyterTokenPodAnnotations returns the pod-template annotations derived from
@@ -2128,6 +2221,7 @@ func (r *DevEnvironmentReconciler) desiredPodSpec(env *aiv1alpha1.DevEnvironment
 		}
 		container.VolumeMounts = append(container.VolumeMounts, mount)
 	}
+	container.VolumeMounts = append(container.VolumeMounts, sudoersVolumeMounts(env)...)
 	if sshExposed(env) {
 		// The images read the ssh material in place — no staging, no copy, no
 		// chmod (images/README.md). The host key is one file at a path sshd fixes,
@@ -2197,11 +2291,9 @@ func (r *DevEnvironmentReconciler) desiredPodSpec(env *aiv1alpha1.DevEnvironment
 		podSpec.HostNetwork = true
 		podSpec.DNSPolicy = corev1.DNSClusterFirstWithHostNet
 	}
-	if env.Spec.Storage != nil {
-		// The workspace claim is the platform's storage for this environment; a
-		// referenced PVC is not, and is never mounted into the init container.
-		podSpec.InitContainers = []corev1.Container{desiredPermissionInitContainer(env)}
-	}
+	// The workspace claim is the platform's storage for this environment; a
+	// referenced PVC is not, and is never mounted into either init container.
+	podSpec.InitContainers = desiredInitContainers(env)
 	for _, v := range env.Spec.Volumes {
 		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
 			Name: v.Name,
@@ -2210,6 +2302,7 @@ func (r *DevEnvironmentReconciler) desiredPodSpec(env *aiv1alpha1.DevEnvironment
 			},
 		})
 	}
+	podSpec.Volumes = append(podSpec.Volumes, sudoersVolumes(env)...)
 	if sshExposed(env) {
 		// A Secret volume materialises its files root-owned, and OpenSSH's
 		// private-key check fires only on a file owned by the uid reading it
@@ -2326,12 +2419,13 @@ func (r *DevEnvironmentReconciler) desiredActivityAgent(env *aiv1alpha1.DevEnvir
 	return corev1.Container{
 		Name:  activityAgentContainerName,
 		Image: activityAgentImage,
-		// Always, because the reference above is not guaranteed to be immutable:
-		// a manager built without one names the agent's default `latest` tag, and
-		// a cached layer under a mutable tag is a rebuilt agent that no node ever
-		// picks up. Pulling every time costs a manifest request next to the image
-		// layers the node already holds.
-		ImagePullPolicy: corev1.PullAlways,
+		// IfNotPresent, the policy the chart gives the manager: an image the node
+		// already holds is used without a registry round trip, which is how the
+		// kind e2e runs this sidecar beside the manager's own. A manager built
+		// from source names the default `latest` tag, and a node that cached an
+		// older copy keeps it until the node's copy is replaced; released builds
+		// name the commit-addressed reference CI publishes, which cannot go stale.
+		ImagePullPolicy: corev1.PullIfNotPresent,
 		Args:            []string{"--ports=" + strings.Join(watched, ",")},
 		// The pod's own identity, so the agent needs no flag and no guess about
 		// which pod it is in. Both come from the downward API rather than from
@@ -3172,11 +3266,28 @@ func (r *DevEnvironmentReconciler) stsSpecHash(env *aiv1alpha1.DevEnvironment) s
 		// environments that predate the agent digest exactly as they did before it
 		// existed and are not rolled on upgrade.
 		ActivityAgent string `json:"activityAgent,omitempty"`
+		// ActivityAgentImage is ::activityAgentImage, and is empty for every
+		// environment that carries no sidecar. The sentinel above covers a change
+		// to how the sidecar is delivered; this covers the reference itself, which
+		// is a build-time constant nothing in the spec moves. Left out, a manager
+		// that names a new reference would find the digest unchanged and return
+		// early, leaving every environment that carries the sidecar on the
+		// reference the previous manager baked in.
+		ActivityAgentImage string `json:"activityAgentImage,omitempty"`
 		// ServiceAccount is the account the pod template names, and is empty for
 		// every environment that runs under the namespace's default. It is the one
 		// pod-spec field here that is neither the spec nor a constant, so nothing
 		// else in this input would move if it were re-pointed.
 		ServiceAccount string `json:"serviceAccount,omitempty"`
+		// Sudoers is ::sudoersVersion, and is empty for every environment that is
+		// not granted sudo. Runtime above already carries the opt-in, so the bit
+		// moving is what rolls an environment onto the grant; this stands for the
+		// rest of the shape — the init container and the mount — which the input
+		// cannot see, so a change to how the grant is delivered bumps the version
+		// and rolls the environments that hold it. The empty string is omitted
+		// rather than hashed, so the environments that hold no grant digest
+		// exactly as they did before the mechanism existed.
+		Sudoers string `json:"sudoers,omitempty"`
 	}
 	var rdma *rdmaTemplate
 	if name, hostNetwork := r.rdmaResource(env); name != "" {
@@ -3206,13 +3317,22 @@ func (r *DevEnvironmentReconciler) stsSpecHash(env *aiv1alpha1.DevEnvironment) s
 	if _, ok := containerTypeEnv(env); ok {
 		typeEnv = cubstackTypeEnvVersion
 	}
-	// Both empty unless the environment asks for an idle timeout, so the
+	// Empty unless the environment is granted sudo, so the environments that are
+	// not — every one that predates the field, and every root one, which needs no
+	// grant — digest exactly as they did before the mechanism existed.
+	sudoers := ""
+	if sudoGranted(env) {
+		sudoers = sudoersVersion
+	}
+	// All three empty unless the environment asks for an idle timeout, so the
 	// environments that ask for none — every one that predates the sidecar —
 	// digest exactly as they did before it existed.
 	activityAgent := ""
+	activityAgentRef := ""
 	serviceAccount := ""
 	if activityAgentEnabled(env) {
 		activityAgent = activityAgentVersion
+		activityAgentRef = activityAgentImage
 		serviceAccount = activityAgentServiceAccountName(env)
 	}
 	h := sha256.New()
@@ -3236,7 +3356,9 @@ func (r *DevEnvironmentReconciler) stsSpecHash(env *aiv1alpha1.DevEnvironment) s
 		RDMA:                  rdma,
 		ShareProcessNamespace: activityAgentEnabled(env),
 		ActivityAgent:         activityAgent,
+		ActivityAgentImage:    activityAgentRef,
 		ServiceAccount:        serviceAccount,
+		Sudoers:               sudoers,
 	}))
 	return fmt.Sprintf("sha256:%x", h.Sum(nil))
 }

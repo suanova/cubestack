@@ -109,7 +109,7 @@ runs:
         # `vendor` is what sizes a leg: the disk reclaim and the long timeout belong to the
         # images built on a vendor base, which unpack to tens of GB each against the ~31 GB
         # a standard runner has free on /, where the CPU image is a fraction of that
-        # (`cpu-base` measures well under a gigabyte).
+        # (`cpu-pytorch` measures well under a gigabyte).
         #
         # Asked of the rule rather than compiled in here. `vendor` is exactly "this image is
         # not built on the CPU base", which the rule already holds in the same row that names

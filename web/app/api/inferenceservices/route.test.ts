@@ -58,7 +58,7 @@ function stubCluster() {
               modelRef: "deepseek-v4-flash-w8a8-v1",
               profileRef: "metax-sglang-dsv4-pd",
               overrides: { decodeReplicas: 2, prefillReplicas: 1, maxModelLen: 131072 },
-              route: { modelName: "dsv4-flash", publish: true, timeoutSeconds: 0, idleTimeoutSeconds: 300 },
+              route: { aigatewayRouter: "cubestack-ai-gateway", modelName: "dsv4-flash", timeoutSeconds: 0, idleTimeoutSeconds: 300 },
             },
             // No status: the controller has not reconciled yet.
           },
@@ -72,7 +72,7 @@ function stubCluster() {
               modelRef: "deepseek-v4-pro-w8a8-v1",
               profileRef: "metax-sglang-dsv4-pd",
               overrides: { decodeReplicas: 2, prefillReplicas: 1, maxModelLen: 131072 },
-              route: { modelName: "dsv4-pro", publish: true, timeoutSeconds: 0, idleTimeoutSeconds: 300 },
+              route: { aigatewayRouter: "cubestack-ai-gateway", modelName: "dsv4-pro", timeoutSeconds: 0, idleTimeoutSeconds: 300 },
             },
           },
         ],
@@ -206,6 +206,7 @@ describe("inference services route", () => {
       profileRef: "metax-sglang-dsv4-pd",
       modelRef: "deepseek-v4-flash-w8a8-v1",
       published: true,
+      aigatewayRouter: "cubestack-ai-gateway",
       routeModelName: "dsv4-flash",
       timeoutSeconds: 0,
       idleTimeoutSeconds: 300,
@@ -216,8 +217,10 @@ describe("inference services route", () => {
       gpuModel: "MXC500",
       gpuPerPod: 8,
       gpuRoles: [
-        { name: "prefill", gpuPerPod: 8, model: "MXC500" },
-        { name: "decode", gpuPerPod: 8, model: "MXC500" },
+        // LeaderWorkerSet roles whose profile declares no group: the renderer
+        // records groupSize 0, and the page counts such a replica as one pod.
+        { name: "prefill", gpuPerPod: 8, model: "MXC500", replicas: 1, groupSize: 0 },
+        { name: "decode", gpuPerPod: 8, model: "MXC500", replicas: 1, groupSize: 0 },
       ],
       // override knobs declared by the profile; effective value = user value, else default
       overrides: [
@@ -307,10 +310,141 @@ describe("inference services route", () => {
     const { GET } = await importRoute();
     const body = await (await GET(await authedGet(), undefined)).json();
     expect(body.items[0].gpuRoles).toEqual([
-      { name: "prefill", gpuPerPod: 8, model: "MXC500" },
-      { name: "decode", gpuPerPod: 8, model: "MXC550" },
+      { name: "prefill", gpuPerPod: 8, model: "MXC500", replicas: 1, groupSize: 0 },
+      { name: "decode", gpuPerPod: 8, model: "MXC550", replicas: 1, groupSize: 0 },
     ]);
     expect(body.items[0].gpuModel).toBe("MXC500 / MXC550");
+  });
+
+  it("resolves a templated gpuPerPod against the effective overrides", async () => {
+    // Some profiles grant a pod as many GPUs as the engine's tensor-parallel
+    // size: gpuPerPod is `{{ overrides.tpSize }}` rather than a literal. The
+    // list must resolve it (service value, else profile default) instead of
+    // dropping the role — otherwise a serving service shows no GPU resources.
+    listClusterCustomObject.mockImplementation(({ plural }: { plural: string }) => {
+      if (plural === "inferenceservices") {
+        return Promise.resolve({
+          items: [
+            {
+              metadata: { name: "tp4", namespace: "default", creationTimestamp: "2026-09-02T00:00:00Z" },
+              spec: { modelRef: "m", profileRef: "metax-vllm-tp", overrides: { tpSize: 4 } },
+            },
+            {
+              metadata: { name: "default-tp", namespace: "default", creationTimestamp: "2026-09-01T00:00:00Z" },
+              spec: { modelRef: "m", profileRef: "metax-vllm-tp" },
+            },
+          ],
+        });
+      }
+      if (plural === "inferenceruntimeprofiles") {
+        return Promise.resolve({
+          items: [
+            {
+              metadata: { name: "metax-vllm-tp" },
+              spec: {
+                engine: { name: "vllm" },
+                accelerator: { vendor: "metax", models: ["MXC500", "MXC550"] },
+                overrides: [
+                  { name: "tpSize", type: "integer", default: 2, enum: [2, 4, 8] },
+                  { name: "metax_model", type: "string", default: "MXC550" },
+                ],
+                roles: [
+                  {
+                    name: "vllm",
+                    podTemplate: {
+                      nodeSelector: { "metax-tech.com/gpu.product": "{{ overrides.metax_model }}" },
+                      resources: { gpuPerPod: "{{ overrides.tpSize }}" },
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        });
+      }
+      return Promise.resolve({ items: [] });
+    });
+
+    const { GET } = await importRoute();
+    const body = await (await GET(await authedGet(), undefined)).json();
+    const tp4 = body.items.find((i: { name: string }) => i.name === "tp4");
+    const dflt = body.items.find((i: { name: string }) => i.name === "default-tp");
+    expect(tp4.gpuRoles).toEqual([{ name: "vllm", gpuPerPod: 4, model: "MXC550", replicas: 1, groupSize: 0 }]);
+    expect(tp4.gpuPerPod).toBe(4);
+    expect(tp4.gpuModel).toBe("MXC550");
+    // No user value -> the profile's declared default applies.
+    expect(dflt.gpuRoles).toEqual([{ name: "vllm", gpuPerPod: 2, model: "MXC550", replicas: 1, groupSize: 0 }]);
+  });
+
+  it("resolves a role's templated replica count and group size", async () => {
+    // A multi-node profile templates each role's replicas and group size from
+    // the service's overrides, and the renderer defaults an absent replicas
+    // field to 1. The projection must carry both counts, because the list's GPU
+    // resource column is a total footprint (cards × groupSize × replicas), not
+    // a per-replica or per-pod figure.
+    listClusterCustomObject.mockImplementation(({ plural }: { plural: string }) => {
+      if (plural === "inferenceservices") {
+        return Promise.resolve({
+          items: [
+            {
+              metadata: { name: "svc", namespace: "default" },
+              spec: { modelRef: "m", profileRef: "pd", overrides: { decodeReplicas: 3, groupSize: 2 } },
+            },
+          ],
+        });
+      }
+      if (plural === "inferenceruntimeprofiles") {
+        return Promise.resolve({
+          items: [
+            {
+              metadata: { name: "pd" },
+              spec: {
+                accelerator: { vendor: "metax", models: ["MXC550"] },
+                overrides: [
+                  { name: "prefillReplicas", type: "integer", default: 1 },
+                  { name: "decodeReplicas", type: "integer", default: 2 },
+                  { name: "groupSize", type: "integer", default: 1 },
+                ],
+                roles: [
+                  {
+                    name: "prefill",
+                    workload: { kind: "LeaderWorkerSet", replicas: "{{ overrides.prefillReplicas }}", group: { size: 1 } },
+                    podTemplate: { resources: { gpuPerPod: 8 } },
+                  },
+                  {
+                    name: "decode",
+                    workload: {
+                      kind: "LeaderWorkerSet",
+                      replicas: "{{ overrides.decodeReplicas }}",
+                      group: { size: "{{ overrides.groupSize }}" },
+                    },
+                    podTemplate: { resources: { gpuPerPod: 8 } },
+                  },
+                  {
+                    name: "aux",
+                    podTemplate: { resources: { gpuPerPod: 2 } },
+                  },
+                  { name: "router", workload: { kind: "Deployment" } },
+                ],
+              },
+            },
+          ],
+        });
+      }
+      return Promise.resolve({ items: [] });
+    });
+
+    const { GET } = await importRoute();
+    const body = await (await GET(await authedGet(), undefined)).json();
+    expect(body.items[0].gpuRoles).toEqual([
+      // No service value -> the profile default; the literal group size stays 1.
+      { name: "prefill", gpuPerPod: 8, model: "MXC550", replicas: 1, groupSize: 1 },
+      // The service's own values win: 8 cards × 2 pods × 3 replicas.
+      { name: "decode", gpuPerPod: 8, model: "MXC550", replicas: 3, groupSize: 2 },
+      // No workload at all -> one replica of one pod (groupSize 0, as the
+      // renderer records for a role without a group).
+      { name: "aux", gpuPerPod: 2, model: "MXC550", replicas: 1, groupSize: 0 },
+    ]);
   });
 
   it("uses a role's own accelerator for its GPU model", async () => {
@@ -369,9 +503,9 @@ describe("inference services route", () => {
     const { GET } = await importRoute();
     const body = await (await GET(await authedGet(), undefined)).json();
     expect(body.items[0].gpuRoles).toEqual([
-      { name: "prefill", gpuPerPod: 8, model: "MXC500" },
-      { name: "decode", gpuPerPod: 8, model: "H200" },
-      { name: "decode-unpinned", gpuPerPod: 8, model: "H200" },
+      { name: "prefill", gpuPerPod: 8, model: "MXC500", replicas: 1, groupSize: 0 },
+      { name: "decode", gpuPerPod: 8, model: "H200", replicas: 1, groupSize: 0 },
+      { name: "decode-unpinned", gpuPerPod: 8, model: "H200", replicas: 1, groupSize: 0 },
     ]);
   });
 
@@ -774,6 +908,8 @@ describe("inference services create (POST)", () => {
         overrides: { decodeReplicas: 4, prefillReplicas: 2, groupSize: 2 },
       },
     });
+    // An unpublished service omits route entirely so the CRD defaults apply.
+    expect(call.body.spec).not.toHaveProperty("route");
   });
 
   it("creates a service with a stringList override", async () => {
@@ -926,7 +1062,7 @@ describe("inference services create (POST)", () => {
     expect(createNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
-  it("creates a published service with a catalog model name and the timeout defaults", async () => {
+  it("creates a service published to the public catalog route", async () => {
     const { POST } = await importRoute();
     const res = await POST(
       await buildPost({
@@ -936,7 +1072,13 @@ describe("inference services create (POST)", () => {
         modelRef: "deepseek-v4-flash-w8a8-v1",
         // A catalog model name is not a hostname segment: mixed case and "/"
         // are legal, while DNS_LABEL_RE would reject both.
-        route: { publish: true, modelName: "Qwen3.8-27B/instruct" },
+        route: {
+          aigatewayRouter: "cubestack-ai-gateway",
+          modelName: "Qwen3.8-27B/instruct",
+          // The CRD list is a set: a repeated path is deduped and the order is
+          // canonical, so the operator's generated rules stay stable.
+          paths: ["/v1/messages", "/v1/chat/completions", "/v1/messages"],
+        },
       }),
       undefined,
     );
@@ -945,16 +1087,18 @@ describe("inference services create (POST)", () => {
     expect(createNamespacedCustomObject.mock.calls[0][0].body).toMatchObject({
       spec: {
         route: {
-          publish: true,
+          aigatewayRouter: "cubestack-ai-gateway",
           modelName: "Qwen3.8-27B/instruct",
-          timeoutSeconds: 0, // 0 = no total-duration cap (the operator default)
-          idleTimeoutSeconds: 300, // no-progress cap
+          paths: ["/v1/chat/completions", "/v1/messages"],
         },
       },
     });
+    // The console no longer sets timeouts: the CRD defaults apply.
+    expect(createNamespacedCustomObject.mock.calls[0][0].body.spec.route).not.toHaveProperty("timeoutSeconds");
+    expect(createNamespacedCustomObject.mock.calls[0][0].body.spec.route).not.toHaveProperty("idleTimeoutSeconds");
   });
 
-  it("keeps the route timeouts the client sent", async () => {
+  it("creates a service published to the private catalog route", async () => {
     const { POST } = await importRoute();
     const res = await POST(
       await buildPost({
@@ -962,14 +1106,92 @@ describe("inference services create (POST)", () => {
         name: "ok-name",
         profileRef: "metax-sglang-dsv4-pd",
         modelRef: "deepseek-v4-flash-w8a8-v1",
-        route: { publish: true, modelName: "dsv4-flash", timeoutSeconds: 3600, idleTimeoutSeconds: 60 },
+        route: { aigatewayRouter: "cubestack-ai-gateway-private", modelName: "dsv4-flash", paths: ["/v1/responses"] },
       }),
       undefined,
     );
     expect(res.status).toBe(201);
     expect(createNamespacedCustomObject.mock.calls[0][0].body).toMatchObject({
-      spec: { route: { publish: true, timeoutSeconds: 3600, idleTimeoutSeconds: 60 } },
+      spec: {
+        route: {
+          aigatewayRouter: "cubestack-ai-gateway-private",
+          modelName: "dsv4-flash",
+          paths: ["/v1/responses"],
+        },
+      },
     });
+  });
+
+  it("rejects an unknown catalog path", async () => {
+    const { POST } = await importRoute();
+    const res = await POST(
+      await buildPost({
+        namespace: "project-a",
+        name: "ok-name",
+        profileRef: "metax-sglang-dsv4-pd",
+        modelRef: "deepseek-v4-flash-w8a8-v1",
+        route: { aigatewayRouter: "cubestack-ai-gateway", modelName: "dsv4-flash", paths: ["/v1/embeddings"] },
+      }),
+      undefined,
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "routePathsInvalid" });
+    expect(createNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
+  it("rejects route paths that are not an array", async () => {
+    // The body is untrusted JSON: a null or a bare string must be a validation
+    // error, not a TypeError escaping into the 500 handler.
+    const { POST } = await importRoute();
+    for (const paths of [null, "/v1/messages"]) {
+      const res = await POST(
+        await buildPost({
+          namespace: "project-a",
+          name: "ok-name",
+          profileRef: "metax-sglang-dsv4-pd",
+          modelRef: "deepseek-v4-flash-w8a8-v1",
+          route: { aigatewayRouter: "cubestack-ai-gateway", modelName: "dsv4-flash", paths },
+        }),
+        undefined,
+      );
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ error: "routePathsInvalid" });
+    }
+    expect(createNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
+  it("rejects a published service that exposes no path", async () => {
+    const { POST } = await importRoute();
+    const res = await POST(
+      await buildPost({
+        namespace: "project-a",
+        name: "ok-name",
+        profileRef: "metax-sglang-dsv4-pd",
+        modelRef: "deepseek-v4-flash-w8a8-v1",
+        route: { aigatewayRouter: "cubestack-ai-gateway", modelName: "dsv4-flash", paths: [] },
+      }),
+      undefined,
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "routePathsRequired" });
+    expect(createNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unknown catalog route", async () => {
+    const { POST } = await importRoute();
+    const res = await POST(
+      await buildPost({
+        namespace: "project-a",
+        name: "ok-name",
+        profileRef: "metax-sglang-dsv4-pd",
+        modelRef: "deepseek-v4-flash-w8a8-v1",
+        route: { aigatewayRouter: "cubestack-ai-gateway-other", modelName: "dsv4-flash" },
+      }),
+      undefined,
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "aigatewayRouterInvalid" });
+    expect(createNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
   it("rejects a publish route without a valid modelName", async () => {
@@ -982,36 +1204,11 @@ describe("inference services create (POST)", () => {
           name: "ok-name",
           profileRef: "metax-sglang-dsv4-pd",
           modelRef: "deepseek-v4-flash-w8a8-v1",
-          route: { publish: true, modelName },
+          route: { aigatewayRouter: "cubestack-ai-gateway", modelName },
         }),
         undefined,
       );
       expect(res.status, `modelName ${JSON.stringify(modelName)}`).toBe(400);
-      expect(createNamespacedCustomObject).not.toHaveBeenCalled();
-    }
-  });
-
-  it("rejects route timeouts outside the operator's ranges", async () => {
-    const { POST } = await importRoute();
-    const cases: Array<Record<string, number>> = [
-      { timeoutSeconds: -1 },
-      { timeoutSeconds: 86401 },
-      { idleTimeoutSeconds: 0 },
-      { idleTimeoutSeconds: 86401 },
-    ];
-    for (const timeouts of cases) {
-      createNamespacedCustomObject.mockClear();
-      const res = await POST(
-        await buildPost({
-          namespace: "project-a",
-          name: "ok-name",
-          profileRef: "metax-sglang-dsv4-pd",
-          modelRef: "deepseek-v4-flash-w8a8-v1",
-          route: { publish: true, modelName: "dsv4-flash", ...timeouts },
-        }),
-        undefined,
-      );
-      expect(res.status, JSON.stringify(timeouts)).toBe(400);
       expect(createNamespacedCustomObject).not.toHaveBeenCalled();
     }
   });

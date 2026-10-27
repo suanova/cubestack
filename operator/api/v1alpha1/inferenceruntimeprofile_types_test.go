@@ -17,6 +17,8 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"encoding/json"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -41,12 +43,11 @@ const (
 	testRefNamespace      = "project-a"
 	testRefServiceName    = "dsv4-flash-pd"
 
-	testVolumeShmName    = "shm"
-	testMemoryMedium     = "Memory"
-	testShmMountPath     = "/dev/shm"
-	testIBHostPath       = "/dev/infiniband"
-	testModelMountPath   = "/workspace/model"
-	testRDMAResourceName = "rdma/ib_shared_devices"
+	testVolumeShmName  = "shm"
+	testMemoryMedium   = "Memory"
+	testShmMountPath   = "/dev/shm"
+	testIBHostPath     = "/dev/infiniband"
+	testModelMountPath = "/workspace/model"
 
 	// testHostnameTopologyKey is the topology domain the podAntiAffinity specs
 	// spread across.
@@ -234,7 +235,7 @@ var _ = Describe("InferenceRuntimeProfile", func() {
 				{Name: "dshm", At: testShmMountPath, EmptyDir: &EmptyDirVolume{Medium: testMemoryMedium, SizeLimit: ptrTo(resource.MustParse("8Gi"))}},
 				{Name: "ib", At: testIBHostPath, HostPath: &HostPathVolume{Path: testIBHostPath}},
 			}
-			irp.Spec.Roles[1].PodTemplate.Resources.ExtendedResources = map[string]int64{testRDMAResourceName: 2}
+			irp.Spec.Roles[1].PodTemplate.Resources.ExtendedResources = "rdma/ib_shared_devices=2"
 
 			Expect(k8sClient.Create(ctx, irp)).To(Succeed())
 
@@ -243,6 +244,46 @@ var _ = Describe("InferenceRuntimeProfile", func() {
 			Expect(got.Spec).To(Equal(irp.Spec))
 
 			Expect(k8sClient.Delete(ctx, irp)).To(Succeed())
+		})
+
+		It("accepts literal and templated extendedResources and round-trips them", func() {
+			for _, value := range []string{
+				"rdma/ib_shared_devices=2,example.com/foo=1",
+				"{{ overrides.extendedResources }}",
+			} {
+				irp := validInferenceRuntimeProfile("irp-extended-resources")
+				irp.Spec.Roles[1].PodTemplate.Resources.ExtendedResources = value
+
+				Expect(k8sClient.Create(ctx, irp)).To(Succeed())
+
+				got := &InferenceRuntimeProfile{}
+				Expect(k8sClient.Get(ctx, client.ObjectKey{Name: irp.Name}, got)).To(Succeed())
+				Expect(got.Spec.Roles[1].PodTemplate.Resources.ExtendedResources).To(Equal(value))
+
+				Expect(k8sClient.Delete(ctx, irp)).To(Succeed())
+			}
+		})
+
+		It("decodes a legacy map-shaped extendedResources into the canonical string", func() {
+			// Profiles stored before the field became a string carry a map. The
+			// spec is immutable, so they are only ever read back; decoding the map
+			// keeps the informer able to sync without a conversion webhook.
+			var r PodResources
+			raw := []byte(`{"gpuPerPod":8,"extendedResources":{"rdma/roce_shared_devices":2,"rdma/ib_shared_devices":1}}`)
+			Expect(json.Unmarshal(raw, &r)).To(Succeed())
+			Expect(r.ExtendedResources).To(Equal("rdma/ib_shared_devices=1,rdma/roce_shared_devices=2"))
+
+			// The decoded object is written back in the string shape.
+			out, err := json.Marshal(r)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(out)).To(ContainSubstring(`"extendedResources":"rdma/ib_shared_devices=1,rdma/roce_shared_devices=2"`))
+		})
+
+		It("decodes a string-shaped extendedResources unchanged", func() {
+			var r PodResources
+			raw := []byte(`{"extendedResources":"{{ overrides.extendedResources }}"}`)
+			Expect(json.Unmarshal(raw, &r)).To(Succeed())
+			Expect(r.ExtendedResources).To(Equal("{{ overrides.extendedResources }}"))
 		})
 
 		It("accepts the templated scheduling fields and round-trips the spec", func() {
@@ -508,6 +549,24 @@ var _ = Describe("InferenceRuntimeProfile", func() {
 					s.NodeSelector = "{{ overrides.nodeSelector }} {{ overrides.other }}"
 				},
 				"spec.nodeSelector"),
+			Entry("extendedResources without a count",
+				"irp-invalid-extended-resources-no-count",
+				func(s *InferenceRuntimeProfileSpec) {
+					s.Roles[1].PodTemplate.Resources.ExtendedResources = "rdma/ib_shared_devices"
+				},
+				"spec.roles[1].podTemplate.resources.extendedResources"),
+			Entry("extendedResources with a zero count",
+				"irp-invalid-extended-resources-zero",
+				func(s *InferenceRuntimeProfileSpec) {
+					s.Roles[1].PodTemplate.Resources.ExtendedResources = "rdma/ib_shared_devices=0"
+				},
+				"spec.roles[1].podTemplate.resources.extendedResources"),
+			Entry("extendedResources with more than one placeholder",
+				"irp-invalid-extended-resources-template",
+				func(s *InferenceRuntimeProfileSpec) {
+					s.Roles[1].PodTemplate.Resources.ExtendedResources = "{{ overrides.extendedResources }} {{ overrides.other }}"
+				},
+				"spec.roles[1].podTemplate.resources.extendedResources"),
 			Entry("probe without httpGet or tcpSocket",
 				"irp-invalid-probe-no-action",
 				func(s *InferenceRuntimeProfileSpec) {

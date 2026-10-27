@@ -15,7 +15,7 @@ permissions: {}
 
 # One job per image, chosen by the rule both workflows ask
 # (images/hack/changed-images.sh), because the images are independent: no Dockerfile
-# reads across them, so a merge that changes only images/cpu-base/** cannot change what is
+# reads across them, so a merge that changes only images/cpu-pytorch/** cannot change what is
 # in the MACA image. Running one job for several images made every such merge pull the
 # 10.5 GiB vendor base on its way to publishing images it could not have altered.
 #
@@ -96,7 +96,7 @@ jobs:
       - name: Reclaim disk space
         # The vendor images are why this step exists: each unpacks to tens of GB against
         # the ~31 GB a standard runner has free on /. The CPU image is a fraction of that
-        # (`cpu-base` measures well under a gigabyte), so its leg skips the 1m41s.
+        # (`cpu-pytorch` measures well under a gigabyte), so its leg skips the 1m41s.
         if: ${{ matrix.vendor }}
         uses: ./.github/actions/reclaim-disk
       - name: Smoke the image before publishing it
@@ -153,6 +153,7 @@ jobs:
       - name: Build and push the image
         env:
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_APP_VERSION: ${{ steps.release.outputs.app-version }}
           IMAGE: ${{ matrix.image }}
         run: |
           set -euo pipefail
@@ -162,7 +163,7 @@ jobs:
           # tracks main. No commit-addressed tag here either: these are multi-arch
           # indexes, where a second tag costs a second full build.
           if [ -n "${RELEASE_VERSION}" ]; then
-            make -C images push-${IMAGE} PUSH_LATEST=0 TAG="${RELEASE_VERSION}"
+            make -C images push-${IMAGE} PUSH_LATEST=0 TAG="${RELEASE_APP_VERSION}"
             exit 0
           fi
 
@@ -198,3 +199,44 @@ jobs:
           # this image and nothing else: the other three were not pushed here, so asking
           # for them would fail on a manifest that does not exist.
           make -C images retag-latest TAG="${TAG}" RETAG="${IMAGE}"
+
+  notify-installer:
+    # One dispatch for the whole matrix: component dev-lab refreshes all six
+    # dev-lab rows; unchanged digests are skipped by the installer.
+    needs: [changes, build-push-image]
+    if: "!cancelled() && github.ref_type == 'branch' && needs.changes.outputs.build != '' && needs.build-push-image.result == 'success'"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - name: Create an installation token for cubestack-installer
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.SUANOVA_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.SUANOVA_BOT_APP_PRIVATE_KEY }}
+          owner: suanova
+          repositories: cubestack-installer
+          permission-contents: write
+      - name: Dispatch refresh-latest-offline
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          SOURCE_REPO: suanova/cubestack
+          COMPONENT: dev-lab
+        run: |
+          set -euo pipefail
+          payload="$(jq -nc \
+            --arg r "${SOURCE_REPO}" --arg c "${COMPONENT}" \
+            --arg s "${GITHUB_SHA}" \
+            --arg u "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            '{event_type:"refresh-latest-offline",client_payload:{source_repo:$r,component:$c,sha:$s,run_url:$u}}')"
+          for i in 1 2 3; do
+            if printf '%s' "${payload}" | gh api --method POST \
+                repos/suanova/cubestack-installer/dispatches --input -; then
+              exit 0
+            fi
+            sleep $((i * 5))
+          done
+          echo "::error::repository_dispatch failed after 3 attempts"
+          exit 1

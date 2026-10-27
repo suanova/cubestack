@@ -71,6 +71,42 @@ Images ship no host keys and no authorized keys.
 - A **root sshd needs `/run/sshd`** (privilege separation directory). Every first-party Dockerfile
   creates it; an image that does not cannot serve a root environment.
 
+## Elevation (`spec.runtime.sudo`)
+
+`spec.runtime.sudo: true` (default `false`) lets the environment's account run commands as root
+**inside the container**. Every first-party image installs `sudo` and grants nothing: the binary runs
+only for accounts a sudoers rule names, and the images name none. The account therefore cannot
+install system packages, write outside what it owns, or run `apt-get` until the environment asks for
+the grant.
+
+What the controller renders when the field is true and the container runs as a positive uid:
+
+| Piece | Value |
+|---|---|
+| volume | `emptyDir` named `sudoers` |
+| init container | `initialize-sudoers`: root, every capability dropped, read-only root filesystem |
+| rule | `#<uid> ALL=(ALL) NOPASSWD: ALL` in `<volume>/20-cubestack`, mode `0440` |
+| mount | that one file at `/etc/sudoers.d/20-cubestack`, `subPath`, read-only |
+
+- The rule names the **uid the container runs as**, not `spec.runtime.user`: sudoers' numeric-user
+  form is `#<uid>` with no space. It is written inside the pod rather than kept in a Secret: it is
+  derived from the spec, holds nothing secret, and must not outlive the pod.
+- An environment that runs as root (`runAsUser: 0`) already holds the privilege, so the field renders
+  nothing there. `false` is the default and renders the pod exactly as it was before the field
+  existed.
+- The main container's `allowPrivilegeEscalation` stays unset (Kubernetes' default, true): `sudo` is a
+  setuid binary, so an explicit `false` would make the grant inert.
+- The grant is confined to the container: it adds no capability to the pod beyond the container's own
+  set, and needs no change to the namespace's Pod Security Standard. The exception is a RoCE
+  environment (`spec.network.rdmaEnabled: true` with `rdmaType: roce`), which runs in the node's
+  network namespace: root there holds `NET_RAW` and `NET_BIND_SERVICE` in that namespace, exactly as
+  a root environment already does. See `decision.md` Gap E.
+
+A **bring-your-own image** that a spec grants elevation to must ship `sudo`, read
+`/etc/sudoers.d` (every Ubuntu/Debian image does), and have a passwd entry for the uid the container
+runs as: `sudo` refuses an invoking uid it cannot resolve, before it reads any rule. The controller
+writes the rule but cannot install the binary or the account.
+
 ## Ports
 
 | Mode | Container port | Service |
@@ -85,13 +121,19 @@ controller probes only the one `spec.type` selects.
 
 | Image | Base | Platforms |
 |---|---|---|
-| `cpu-base` | `ubuntu:22.04` | `linux/amd64`, `linux/arm64` (multi-arch index) |
-| `cube-base` | NVIDIA NGC PyTorch (`nvcr.io/nvidia/pytorch:<release>-py3`, mirrored) | `linux/amd64` |
-| `maca-base` | Metax MACA (`public-library/maca-pytorch:…`, mirrored) | `linux/amd64` |
+| `cpu-pytorch` | `ubuntu:22.04` | `linux/amd64`, `linux/arm64` (multi-arch index) |
+| `cuda-pytorch` | NVIDIA NGC PyTorch (`nvcr.io/nvidia/pytorch:<release>-py3`, mirrored) | `linux/amd64` |
+| `maca-pytorch` | Metax MACA (`public-library/maca-pytorch:…`, mirrored) | `linux/amd64` |
 
 The vendor bases publish one architecture only, so their images do too. A registry must receive the
 platform the nodes run; verify with `docker buildx imagetools inspect --raw <ref>` rather than
 assuming the build host's architecture.
+
+Every first-party image bakes PyTorch on the interpreter its sessions resolve — the CPU image
+installs the CPU build from `download.pytorch.org/whl/cpu`, the vendor images keep the one their
+base ships. The image name states the stack (decision doc §5.1), so a session can rely on `import
+torch` working without naming a framework. JupyterLab is on that same interpreter, so the notebook
+kernel and an ssh session never disagree about which Python — and which torch — they see.
 
 ## Notes for bring-your-own images
 

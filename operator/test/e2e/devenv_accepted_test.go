@@ -75,7 +75,7 @@ func describeAccepted() {
 
 			draftCase{
 				Name:     "accepted-refused-brand",
-				Image:    devenv.MustImage("cube-base-jupyter"),
+				Image:    devenv.MustImage("cuda-pytorch-jupyter"),
 				Identity: devenv.NonRoot,
 				Shape: func(d *aiv1alpha1.DevEnvironment) {
 					// The CUDA image asked for as a Metax one. The controller
@@ -120,7 +120,7 @@ func describeAccepted() {
 
 			draftCase{
 				Name:     "accepted-refused-notebook-args",
-				Image:    devenv.MustImage("cpu-base-jupyter"),
+				Image:    devenv.MustImage("cpu-pytorch-jupyter"),
 				Identity: devenv.NonRoot,
 				Shape: func(d *aiv1alpha1.DevEnvironment) {
 					// A NOTEBOOK_ARGS the controller cannot read. It has to
@@ -164,7 +164,7 @@ func describeAccepted() {
 
 			draftCase{
 				Name:     "accepted-token-override",
-				Image:    devenv.MustImage("cpu-base-jupyter"),
+				Image:    devenv.MustImage("cpu-pytorch-jupyter"),
 				Identity: devenv.NonRoot,
 				Shape: func(d *aiv1alpha1.DevEnvironment) {
 					d.Spec.Runtime.Env = append(d.Spec.Runtime.Env,
@@ -214,7 +214,7 @@ func describeAccepted() {
 
 			draftCase{
 				Name:     "accepted-user-override",
-				Image:    devenv.MustImage("cpu-base-ssh"),
+				Image:    devenv.MustImage("cpu-pytorch-ssh"),
 				Identity: devenv.Root,
 				Shape: func(d *aiv1alpha1.DevEnvironment) {
 					// A user field on a root environment. It is not refused —
@@ -248,7 +248,7 @@ func describeAccepted() {
 
 			draftCase{
 				Name:     "accepted-launcher-env-override",
-				Image:    devenv.MustImage("cpu-base-jupyter"),
+				Image:    devenv.MustImage("cpu-pytorch-jupyter"),
 				Identity: devenv.Root,
 				Shape: func(d *aiv1alpha1.DevEnvironment) {
 					// The launcher settings a client might state for a root
@@ -297,7 +297,7 @@ func describeAccepted() {
 
 			draftCase{
 				Name:     "accepted-home-override",
-				Image:    devenv.MustImage("cpu-base-ssh"),
+				Image:    devenv.MustImage("cpu-pytorch-ssh"),
 				Identity: devenv.NonRoot,
 				Shape: func(d *aiv1alpha1.DevEnvironment) {
 					// A HOME that disagrees with where the workspace is mounted.
@@ -358,7 +358,7 @@ func describeAccepted() {
 
 			draftCase{
 				Name:     "accepted-notebook-args-override",
-				Image:    devenv.MustImage("cpu-base-jupyter"),
+				Image:    devenv.MustImage("cpu-pytorch-jupyter"),
 				Identity: devenv.NonRoot,
 				Shape: func(d *aiv1alpha1.DevEnvironment) {
 					// The base_url the controller owns, declared by the spec,
@@ -409,7 +409,7 @@ func describeAccepted() {
 
 			draftCase{
 				Name:     "accepted-unschedulable",
-				Image:    devenv.MustImage("cpu-base-ssh"),
+				Image:    devenv.MustImage("cpu-pytorch-ssh"),
 				Identity: devenv.NonRoot,
 				Shape: func(d *aiv1alpha1.DevEnvironment) {
 					// More than any node in a test cluster has, so the pod is

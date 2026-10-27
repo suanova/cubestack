@@ -38,7 +38,7 @@ func describeStack(open func() *devenv.Environment, img devenv.Image, identity d
 	It("F1 runs the notebook as the image's own group",
 		Label(devenv.TierP1, devenv.LabelFamily("F")), func(ctx SpecContext) {
 			env := open()
-			if img.Key != "cpu-base-jupyter" {
+			if img.Key != "cpu-pytorch-jupyter" {
 				Skip("the launcher is one program shared by all three families; the CPU image is its representative")
 			}
 			if identity != devenv.NonRoot {
@@ -96,7 +96,7 @@ func describeStack(open func() *devenv.Environment, img devenv.Image, identity d
 	It("F3 lands a CUDA notebook on the interpreter a session gets",
 		Label(devenv.TierP1, devenv.LabelFamily("F")), func(ctx SpecContext) {
 			env := open()
-			if !strings.Contains(img.Key, "cube-base") {
+			if !strings.Contains(img.Key, "cuda-pytorch") {
 				Skip("this image carries no CUDA stack")
 			}
 			interp := torchInterpreter(ctx, env)
@@ -119,7 +119,7 @@ func describeStack(open func() *devenv.Environment, img devenv.Image, identity d
 	It("F4 puts the CUDA toolkit and torch's libraries on the session",
 		Label(devenv.TierP1, devenv.LabelFamily("F")), func(ctx SpecContext) {
 			env := open()
-			if !strings.Contains(img.Key, "cube-base") {
+			if !strings.Contains(img.Key, "cuda-pytorch") {
 				Skip("this image carries no CUDA stack")
 			}
 			sess := sshReady(ctx, env)

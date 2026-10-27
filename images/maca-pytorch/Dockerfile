@@ -1,4 +1,4 @@
-# Cubestack 'maca-base' DevEnvironment image — the Metax family.
+# Cubestack 'maca-pytorch' DevEnvironment image — the Metax family.
 #
 # Serves BOTH modes from one container, selected at run time by CUBSTACK_TYPE (which the
 # controller injects from spec.type, common/entrypoint.sh):
@@ -9,10 +9,10 @@
 # One image rather than two is what keeps the offline package small: the ssh sibling omitted the
 # JupyterLab pip step and baked a mode, which CUBSTACK_TYPE now states at run time.
 #
-# Unlike the cube-base image this is not stock-native: the vendor base ships no launcher, no sshd,
+# Unlike the cuda-pytorch image this is not stock-native: the vendor base ships no launcher, no sshd,
 # no non-root account, and no ENTRYPOINT at all (config.User is unset, so it would run as root and
 # its CMD is a bare /bin/bash that exits immediately). So this Dockerfile adds the platform
-# layer the cpu-base family image defines — account ubuntu 1000:1000 with $HOME=/home/ubuntu,
+# layer the cpu-pytorch family image defines — account ubuntu 1000:1000 with $HOME=/home/ubuntu,
 # openssh-server, the shared entrypoint — on top of the vendor's own python/torch/MACA stack,
 # inherited as the base published it except for PATH, which the overlay corrects so that `python3`
 # is the interpreter that owns the vendor torch (see below). The account is not a preference: the
@@ -24,9 +24,9 @@
 #   authorized_keys      -> /run/ssh/authorized_keys        (platform keys, directory mount)
 #
 # Build context MUST be images/ (not this directory) so common/ is COPYable.
-#   docker build --platform linux/amd64 -f maca-base/Dockerfile \
-#     -t harbor.isuanova.com/suanova/maca-base:<tag> images/
-#   (or: make -C images build-maca)
+#   docker build --platform linux/amd64 -f maca-pytorch/Dockerfile \
+#     -t harbor.isuanova.com/suanova/maca-pytorch:<tag> images/
+#   (or: make -C images build-maca-pytorch)
 
 # The platform registry's mirrored copy of the vendor package, which is what a bare `docker build`
 # resolves. Every published build substitutes the same reference pinned by digest through BASE_ARGS
@@ -49,9 +49,13 @@ RUN if [ -n "$APT_MIRROR" ]; then \
     fi
 
 ARG DEBIAN_FRONTEND=noninteractive
+# sudo is installed but grants nothing: it runs only for the accounts a sudoers rule
+# names, and the image names none. spec.runtime.sudo is what supplies the rule
+# (images/README.md, image-contract.md).
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
       openssh-server \
+      sudo \
       tini \
     && rm -rf /var/lib/apt/lists/*
 

@@ -7,9 +7,14 @@ description: >-
 outputs:
   version:
     description: >-
-      The release version — the tag without its leading `v` — or empty when this
-      run was not a tag push.
+      The release version — the tag without its leading `v`, for the Helm chart
+      version — or empty when this run was not a tag push.
     value: ${{ steps.resolve.outputs.version }}
+  app-version:
+    description: >-
+      The tag as pushed, with its leading `v`, for the image tag and chart
+      appVersion — or empty when this run was not a tag push.
+    value: ${{ steps.resolve.outputs.app-version }}
 
 runs:
   using: composite
@@ -23,6 +28,7 @@ runs:
         # A branch push publishes its rolling tags instead; empty is the answer.
         if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
           echo "version=" >> "${GITHUB_OUTPUT}"
+          echo "app-version=" >> "${GITHUB_OUTPUT}"
           exit 0
         fi
 
@@ -39,4 +45,12 @@ runs:
           exit 1
         fi
 
+        # Docker image tags are capped at 128 characters; the images Makefile
+        # prefixes the release tag with toolchain axes, so leave room for those.
+        if [ "${#GITHUB_REF_NAME}" -gt 96 ]; then
+          echo "::error::tag '${GITHUB_REF_NAME}' is too long for the image tags' toolchain prefix"
+          exit 1
+        fi
+
         echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+        echo "app-version=${GITHUB_REF_NAME}" >> "${GITHUB_OUTPUT}"

@@ -101,12 +101,12 @@ func extraPorts(want *aiv1alpha1.DevEnvironment) {
 func describeExtraPorts() {
 	draftCase{
 		Name:     "ports-extra",
-		Image:    devenv.MustImage("cpu-base-jupyter"),
+		Image:    devenv.MustImage("cpu-pytorch-jupyter"),
 		Identity: devenv.NonRoot,
 		Shape:    extraPorts,
 		Cases: func(open func() *devenv.Environment) {
 			It("K1 publishes an http exposure on the Gateway's own HTTP listener",
-				Label(devenv.TierP1, devenv.LabelFamily("K")), func(ctx SpecContext) {
+				Label(devenv.TierP1, devenv.LabelShard(devenv.ShardP2), devenv.LabelFamily("K")), func(ctx SpecContext) {
 					env := open()
 					running(ctx, env)
 
@@ -174,7 +174,7 @@ func describeExtraPorts() {
 				})
 
 			It("K2 draws tcp and udp from the pool, and the tcp one serves",
-				Label(devenv.TierP1, devenv.LabelFamily("K")), func(ctx SpecContext) {
+				Label(devenv.TierP1, devenv.LabelShard(devenv.ShardP2), devenv.LabelFamily("K")), func(ctx SpecContext) {
 					env := open()
 					running(ctx, env)
 
@@ -276,7 +276,7 @@ func describeExtraPorts() {
 				})
 
 			It("K3 gives a port back when an exposure is removed, and takes one again when it returns",
-				Label(devenv.TierP1, devenv.LabelFamily("K")), func(ctx SpecContext) {
+				Label(devenv.TierP1, devenv.LabelShard(devenv.ShardP2), devenv.LabelFamily("K")), func(ctx SpecContext) {
 					env := open()
 					running(ctx, env)
 
@@ -373,7 +373,7 @@ func describeExtraPorts() {
 				})
 
 			It("K4 keeps a drawn port across a reconcile, and the address follows the dataplane",
-				Label(devenv.TierP1, devenv.LabelFamily("K")), func(ctx SpecContext) {
+				Label(devenv.TierP1, devenv.LabelShard(devenv.ShardP2), devenv.LabelFamily("K")), func(ctx SpecContext) {
 					env := open()
 					running(ctx, env)
 
@@ -458,7 +458,7 @@ func describeExtraPorts() {
 	// tell the two apart.
 	draftCase{
 		Name:     "ports-repeat",
-		Image:    devenv.MustImage("cpu-base-jupyter"),
+		Image:    devenv.MustImage("cpu-pytorch-jupyter"),
 		Identity: devenv.NonRoot,
 		Shape: func(want *aiv1alpha1.DevEnvironment) {
 			want.Spec.Ports = []aiv1alpha1.PortSpec{
@@ -467,7 +467,7 @@ func describeExtraPorts() {
 		},
 		Cases: func(open func() *devenv.Environment) {
 			It("K6 folds an exposure repeating the notebook's own port into the platform's entry",
-				Label(devenv.TierP1, devenv.LabelFamily("K")), func(ctx SpecContext) {
+				Label(devenv.TierP1, devenv.LabelShard(devenv.ShardP2), devenv.LabelFamily("K")), func(ctx SpecContext) {
 					env := open()
 					// Reaching Running is the assertion that the write was
 					// accepted: the environment has a status at all, which is
@@ -541,12 +541,12 @@ func describePoolIsShared() {
 
 	draftCase{
 		Name:     envName,
-		Image:    devenv.MustImage("cpu-base-jupyter"),
+		Image:    devenv.MustImage("cpu-pytorch-jupyter"),
 		Identity: devenv.NonRoot,
 		Shape:    extraPorts,
 		Cases: func(open func() *devenv.Environment) {
 			It("K5 gives an environment in another namespace a different port",
-				Label(devenv.TierP1, devenv.LabelFamily("K")), func(ctx SpecContext) {
+				Label(devenv.TierP1, devenv.LabelShard(devenv.ShardP2), devenv.LabelFamily("K")), func(ctx SpecContext) {
 					mine := open()
 					running(ctx, mine)
 
@@ -555,7 +555,7 @@ func describePoolIsShared() {
 					// only thing it contributes is a second environment holding a
 					// pool port somewhere else in the cluster.
 					peer := conformance.DraftIn(secondNS(), peerEnv,
-						devenv.MustImage("cpu-base-jupyter"), devenv.NonRoot)
+						devenv.MustImage("cpu-pytorch-jupyter"), devenv.NonRoot)
 					Expect(conformance.PrepareNamespace(ctx, secondNS())).To(Succeed())
 					DeferCleanup(func() {
 						cleanup, cancel := context.WithTimeout(context.Background(), 2*time.Minute)

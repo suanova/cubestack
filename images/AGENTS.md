@@ -9,13 +9,15 @@ For platform-wide principles, see `../AGENTS.md`.
 Container images that back the DevEnvironment `type` contract served by the
 `operator/` (see `operator/internal/controller/devenvironment_controller.go`,
 `docs/design/devenv-images/image-contract.md` and
-`docs/design/devenv-images/decision.md`). There is **one image per accelerator family**, and every
-image serves **both** runtime modes:
+`docs/design/devenv-images/decision.md`). There is **one image per (accelerator, stack) cell** the
+platform ships a build for, named `<accelerator>-<stack>` (decision doc §5.1); today that is one
+image in each accelerator family, every one of them on the `pytorch` stack. Each image serves
+**both** runtime modes:
 
-- **`cpu-base`** — CPU, on `ubuntu:22.04`: the platform layer plus `python3`/pip, JupyterLab on the
-  system interpreter, and the shared launcher.
-- **`maca-base`** — GPU, on a vendor Metax MACA base.
-- **`cube-base`** — GPU, on the vendor's NVIDIA NGC PyTorch base.
+- **`cpu-pytorch`** — CPU, on `ubuntu:22.04`: the platform layer plus `python3`/pip, the CPU build of
+  PyTorch and JupyterLab on the system interpreter, and the shared launcher.
+- **`maca-pytorch`** — GPU, on a vendor Metax MACA base.
+- **`cuda-pytorch`** — GPU, on the vendor's NVIDIA NGC PyTorch base.
 
 The mode (`jupyter` vs `ssh`) is **not** baked per image: the controller injects `CUBSTACK_TYPE`
 from `spec.type`, and `common/entrypoint.sh` runs JupyterLab or sshd from it. The images exist per
@@ -69,8 +71,8 @@ Every image:
   in manifest*. Check what a registry actually received with
   `docker buildx imagetools inspect --raw <ref>` rather than assuming the build host's architecture.
   A vendor base published per architecture cannot follow `$(PLATFORM)` at all: it has no layers for any
-  other architecture to build from, so each vendor image names its own — `build-maca-base`
-  (and its `push-` form) takes `$(MACA_PLATFORM)`, `build-cube-base` takes `$(CUBE_PLATFORM)` — and both
+  other architecture to build from, so each vendor image names its own — `build-maca-pytorch`
+  (and its `push-` form) takes `$(MACA_PLATFORM)`, `build-cuda-pytorch` takes `$(CUDA_PLATFORM)` — and both
   publish a single-platform index. The two read alike but say so differently: the MACA package
   states it in the tag (`-amd64` is part of the tag, not a multi-arch index), the NGC PyTorch tag does
   not and the mirror carries one amd64 manifest inside an index shape. That exception belongs to the
@@ -86,7 +88,7 @@ Every image:
   account `@SSH_USER@` (`ARG SSH_USER`) and the session environment `@SSH_ENV@`, which
   `sshd/install-dropin.sh` builds from the variable names each Dockerfile passes it, read out of the
   build shell's environment — i.e. the image's own by then: the base's, plus whatever the overlay has
-  set, which is how `maca-base` gets `/opt/conda/bin` onto a session's `PATH`. A placeholder is
+  set, which is how `maca-pytorch` gets `/opt/conda/bin` onto a session's `PATH`. A placeholder is
   needed because sshd's `SetEnv`
   *replaces* the session environment, so a fixed literal would hide whichever family's toolchain it did
   not name; and it reaches past `PATH`, since the vendor images need their loader and compiler
@@ -135,7 +137,7 @@ make -C images push TAG=<tag>   # builds each image for every $(PLATFORMS) (defa
                                 # linux/amd64 linux/arm64) and pushes it as one multi-arch
                                 # index carrying :TAG and :latest
 make -C images build PLATFORM=linux/arm64   # another architecture (explicit opt-in)
-make -C images smoke-maca-base # one image: --cpu-base / --maca-base / --cube-base select one
+make -C images smoke-maca-pytorch # one image: --cpu-pytorch / --maca-pytorch / --cuda-pytorch select one
 ```
 
 `PLATFORM` takes a single value; a list fails in `check-platform` with that reason. On a host of a
@@ -144,14 +146,14 @@ they exercise the artifact that is actually published. Both **vendor images** ig
 build their own single platform, `linux/amd64` by default, on every host and for every publish — see
 the platform rule. Their published names are the other exception: the tag carries the vendor
 axis read out of the base package with `$(TAG)` after it, not `$(TAG)` alone — `MACA_TAG`, three axes
-(`3.9.0.12-py310-torch2.4`), and `CUBE_TAG`, the NGC release on its own (`26.08`), because that release
+(`3.9.0.12-py310-torch2.4`), and `CUDA_TAG`, the NGC release on its own (`26.08`), because that release
 pins python, torch and CUDA together instead of naming them as separable axes (README, Publish;
 decision doc §5).
 
 `PLATFORMS` is the publish list for the same reason, and `make push PLATFORMS=linux/amd64` narrows it
 back to one. `push` is a `buildx build --push`, so it needs a builder that can do more than one
-platform (Docker Desktop's can; otherwise `docker buildx create --use` plus QEMU) — `push-maca-base`
-and `push-cube-base` are the targets that do not, since a single-platform push
+platform (Docker Desktop's can; otherwise `docker buildx create --use` plus QEMU) — `push-maca-pytorch`
+and `push-cuda-pytorch` are the targets that do not, since a single-platform push
 builds on any builder. It does **not** push the
 image the local smoke ran — buildx cannot load a multi-platform result and push it in one invocation,
 so it builds a fresh one from the same source.
@@ -160,15 +162,15 @@ so it builds a fresh one from the same source.
 hand-kept list: `hack/changed-images.sh` answers "which images does this diff reach", and
 `ci-operator.yml` asks it — in place of a paths filter — what a pull request must smoke. Each image
 depends on its own directory, on `common/`, on the `Makefile` and `.dockerignore`, and on the CI that
-builds, smokes and publishes it — the two workflows and the `changed-images` action both of them
-delegate to, which is what picks the diff base and the flags that size a publishing leg; a Dockerfile
+builds and publishes it — the publish workflow and the `changed-images` action both workflows delegate
+to, which is what picks the diff base and the flags that size a publishing leg; a Dockerfile
 never `COPY`s from a sibling image's directory, which is what makes the
 answer derivable from a changed path alone, and `make -C images check-deps` is what asserts that
 convention rather than assuming it. A changed path under `images/` the rule does not recognise
 selects **every** image and says so on stderr — over-selecting costs a rebuild, under-selecting
 ships a stale image — and markdown selects nothing. It returns two selections, not one: the images
-to smoke are a superset of the images to build, because a change to `hack/smoke.sh` rebuilds
-nothing while re-verifying everything. `make -C images check-select` runs the rule's fixtures, and
+to smoke are a superset of the images to build, because a change to `hack/smoke.sh` — or to the smoke
+workflow that runs it — rebuilds nothing while re-verifying everything. `make -C images check-select` runs the rule's fixtures, and
 `ci-operator.yml`'s `images-check` job runs both checks.
 
 `images-smoke` builds and smokes exactly that selection, on a pull request or a `release-*` push —
@@ -191,8 +193,8 @@ later run would move. A `vX.Y.Z` tag publishes every image at the version it nam
 itself needs no cluster and no registry credentials: every image is built for linux/amd64 and run as
 throwaway containers on 127.0.0.1.
 
-That last point is where the vendor images are expensive: `maca-base`'s base is a 10.5 GiB
-pull and about **33 GB unpacked**, `cube-base`'s about **38.6 GB** — that is what a runner has to
+That last point is where the vendor images are expensive: `maca-pytorch`'s base is a 10.5 GiB
+pull and about **33 GB unpacked**, `cuda-pytorch`'s about **38.6 GB** — that is what a runner has to
 hold, twice over, if the image the smoke built and the one `push` builds land in different stores.
 That is what the steps answer: a vendor leg reclaims the runner's preinstalled SDKs first
 (`.github/actions/reclaim-disk`, because ~31 GB free is less than either of these images), and smokes
@@ -208,13 +210,13 @@ copy of its base, tens of GB, to keep. Nothing pays that cost unless it can chan
 per image is what keeps it that way: a merge that reaches only a CPU image, only the smoke harness or
 only markdown schedules no vendor build at all, and each vendor image gets a whole runner's disk
 rather than sharing one. The reclaim and the long timeout are the vendor legs' alone too — the CPU
-image is a fraction of that base (`cpu-base` is well under a gigabyte). The other side of that split is
+image is a fraction of that base (`cpu-pytorch` is well under a gigabyte). The other side of that split is
 that the vendor images no longer share a runner's layer store, so a merge reaching two of them runs
 their base's pull on two runners in parallel where one lane ran it twice on one; the exchange is the
 disk, the CPU legs' 1m41s and the fact that a merge reaching one of them pays for one. Every image is
 still in the `build` / `smoke` / `push` aggregators, because an image that is never built is never
 checked and a local `make smoke` still means all three, which is every vendor base unpacked on one
 machine (~72 GB) — if that cost ever outweighs the coverage, the lever is to drop the vendor images'
-`build-` targets from the aggregators and run `smoke-maca-base` / `smoke-cube-base` by hand — not to leave
+`build-` targets from the aggregators and run `smoke-maca-pytorch` / `smoke-cuda-pytorch` by hand — not to leave
 their `push-` forms out of `push`, which would publish
 nothing.

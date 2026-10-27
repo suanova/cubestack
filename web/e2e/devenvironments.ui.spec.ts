@@ -54,8 +54,8 @@ function stubToken(page: Page, token = "itest-jupyter-token-0f3a"): string[] {
 }
 
 // The environment's literal env values, served the way the route serves them:
-// on demand, for one environment. Returns the request log so a test can prove
-// the list alone does not carry them.
+// for one environment, when its detail opens. Returns the request log so a test
+// can prove the list alone does not carry them.
 function stubEnvValues(page: Page, values: Record<string, string>): string[] {
   const requests: string[] = [];
   page.route("**/api/devenvironments/env-values?*", (route) => {
@@ -181,16 +181,14 @@ test.describe("dev environments landing (mocked data)", () => {
     // the mount path the CR states rather than one the panel invents.
     await expect(detail).toContainText("200Gi · /home/ubuntu");
     await expect(detail).toContainText("data-cache → /data");
-    // One environment variable per line, masked until asked for: the list
-    // response carries names only, so the values are fetched on reveal.
-    await expect(detail).toContainText(`HF_HOME=${"•".repeat(12)}`);
-    await expect(detail).toContainText(`HF_TOKEN=${"•".repeat(12)}`);
-    await expect(detail).not.toContainText("HF_TOKEN=hf_example");
-    expect(envRequests).toHaveLength(0);
-    await page.locator('[data-od-id="env-values-toggle"]').click();
+    // One environment variable per line, values as they are: the list response
+    // carries names only, so the detail fetches the values when it opens.
     await expect(detail).toContainText("HF_HOME=/home/ubuntu/.cache/huggingface");
     await expect(detail).toContainText("HF_TOKEN=hf_example");
-    expect(envRequests).toHaveLength(1);
+    await expect(page.locator('[data-od-id="env-values-toggle"]')).toHaveCount(0);
+    // The detail was opened on arrival, closed and reopened above, so the fetch
+    // ran once for each mount.
+    expect(envRequests).toHaveLength(2);
     await expect(detail).toContainText("python -m jupyter lab");
     await expect(detail).toContainText("--port 8080");
     await expect(detail).toContainText("api:8080/http");
@@ -485,6 +483,8 @@ test.describe("dev environments landing (mocked data)", () => {
     await page.getByRole("button", { name: "下一步" }).click();
     await expect(page.locator('[data-step="4"]')).toBeVisible();
     await expect(page.locator('[data-step="4"]')).toContainText("shared-models → /models");
+    // The environment variable is restated with its value, not by name alone.
+    await expect(page.locator('[data-step="4"]')).toContainText("HF_HOME=/data/hf");
     // Both of this step's new choices are restated before the environment is
     // created: the node by its own name, and the egress policy it asked for.
     await expect(page.locator('[data-step="4"]')).toContainText("worker-01");

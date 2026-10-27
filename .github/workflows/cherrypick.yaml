@@ -1,0 +1,226 @@
+# Cherry-pick a merged main PR to other branches on request:
+#
+#   /cherrypick release-2.0
+#
+# The comment must be on a merged PR whose base is main, by someone with write
+# access. Each target branch must already exist. The cherry-pick keeps the
+# original commit reference (-x) and opens a PR for human review; nothing is
+# merged automatically.
+
+name: cherrypick
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+concurrency:
+  group: cherrypick-${{ github.event.issue.number }}
+  cancel-in-progress: false
+  # Workflow-level concurrency also sees ordinary comments (including the bot's
+  # own summary); the default single pending slot would let a later one cancel a queued run.
+  queue: max
+
+jobs:
+  prepare:
+    name: Validate command
+    # PR conversation comments (gh pr comment) need pull-requests:write, not
+    # only issues:write.
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    # The body is parsed again below; this only skips unrelated comments.
+    if: >
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/cherrypick')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      targets: ${{ steps.validate.outputs.targets }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Validate comment
+        id: validate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          ACTOR: ${{ github.event.comment.user.login }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          set -euo pipefail
+
+          reply()  { gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$1"; }
+          reject() { reply "Cherry-pick skipped: $1"; exit 0; }
+
+          # On a public repo author_association=MEMBER does not imply write
+          # access, so ask for the repository permission instead.
+          permission=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq .permission 2>/dev/null || true)
+          case "$permission" in
+            admin|maintain|write) ;;
+            *) exit 0 ;;   # silent for arbitrary commenters
+          esac
+
+          # Only the first line is read. Glob characters are invalid in refs, so
+          # disable pathname expansion and keep a target like 'release-*' literal.
+          set -f
+          first_line=${COMMENT_BODY%%$'\n'*}
+          first_line=${first_line%$'\r'}
+          read -r command rest <<<"$first_line" || true
+          if [ "$command" != /cherrypick ] || [ -z "${rest//[[:space:]]/}" ]; then
+            reject "expected '/cherrypick <target-branch>...' on the first line"
+          fi
+          targets=()
+          for branch in $rest; do
+            if [ "$branch" = main ]; then
+              reject 'cannot cherry-pick into main'
+            fi
+            if ! git check-ref-format --branch "$branch" >/dev/null 2>&1; then
+              reject "'$branch' is not a valid branch name"
+            fi
+            targets+=("$branch")
+          done
+          targets="${targets[*]}"
+
+          info=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json mergedAt,baseRefName,headRefName)
+          if [ "$(jq -r 'if .mergedAt then "true" else "false" end' <<<"$info")" != true ]; then
+            reject "PR #$PR_NUMBER is not merged."
+          fi
+          base=$(jq -r .baseRefName <<<"$info")
+          if [ "$base" != main ]; then
+            reject "only PRs merged into main can be cherry-picked (this one targets '$base')."
+          fi
+
+          # The action drops any target equal to the head branch name,
+          # regardless of which repository the head branch lives in.
+          head=$(jq -r .headRefName <<<"$info")
+          for branch in $targets; do
+            if [ "$branch" = "$head" ]; then
+              reject "'$branch' matches this PR's head branch; the cherry-pick action would skip it."
+            fi
+          done
+
+          # ls-remote avoids URL-encoding a branch name with slashes in an API path.
+          for branch in $targets; do
+            if ! git ls-remote --exit-code --heads origin "refs/heads/$branch" >/dev/null 2>&1; then
+              reject "target branch '$branch' does not exist."
+            fi
+          done
+
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
+
+  cherrypick:
+    name: Cherry-pick to ${{ needs.prepare.outputs.targets }}
+    needs: prepare
+    if: needs.prepare.outputs.targets != ''
+    permissions: {}   # writes only through the App token
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # A PR opened with GITHUB_TOKEN triggers no workflows, so its CI would
+      # never run. contents:write lets the push through; pull-requests:write
+      # lets the action create PRs and comment on the source PR.
+      - name: Mint SUANOVA_BOT token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.SUANOVA_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.SUANOVA_BOT_APP_PRIVATE_KEY }}
+          owner: suanova
+          repositories: cubestack
+          permission-contents: write
+          permission-pull-requests: write
+
+      # git push authenticates through the checkout credentials, not the
+      # action's github_token, so the App token has to go here too.
+      - uses: actions/checkout@v7
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Create cherry-pick PRs
+        id: backport
+        uses: korthout/backport-action@8560fb503c275d433c56f05a2f64850093baa9f7 # v4
+        with:
+          github_token: ${{ steps.app-token.outputs.token }}
+          source_pr_number: ${{ github.event.issue.number }}
+          target_branches: ${{ needs.prepare.outputs.targets }}
+          cherry_picking: auto
+          branch_name: 'cherrypick-${pull_number}-to-${target_branch}'
+          pull_title: '[cherrypick ${target_branch}] ${pull_title}'
+          # Only the validated command targets: label-derived targets would
+          # bypass the prepare job (e.g. a "backport main" label).
+          label_pattern: ''
+          comment_style: summary
+
+      # backport-action reports the failure but not the conflicting files (they
+      # are only in its log). Replay the cherry-pick it tried and post them.
+      - name: Report conflicting files
+        if: steps.backport.outputs.was_successful == 'false'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          TARGETS: ${{ steps.backport.outputs.was_successful_by_target }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          # The action's failure comment carries the exact commits it tried.
+          shas=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+            --jq '.[] | select(.user.login == "suanova-bot[bot]") | .body' \
+            | grep -oE 'git cherry-pick -x [0-9a-f ]+' | head -1 \
+            | sed 's/^git cherry-pick -x //') || true
+          if [ -z "$shas" ]; then
+            echo "No cherry-pick command in the action comment; nothing to replay."
+            exit 0
+          fi
+
+          # A shallow checkout cannot resolve the merged commits; deepen it once.
+          git fetch --quiet --unshallow origin 2>/dev/null || git fetch --quiet origin
+
+          while IFS='=' read -r target ok; do
+            [ -n "$target" ] || continue
+            [ "$ok" = false ] || continue
+
+            if ! git fetch --quiet origin "refs/heads/$target"; then
+              echo "Could not fetch $target; skipping"
+              continue
+            fi
+            wt=$(mktemp -d)
+            rmdir "$wt"
+            git worktree add --detach "$wt" FETCH_HEAD >/dev/null
+
+            git_id=(-c user.name='github-actions[bot]' -c user.email='github-actions[bot]@users.noreply.github.com')
+            files=""
+            for sha in $shas; do
+              if git -C "$wt" "${git_id[@]}" cherry-pick -x "$sha" >/dev/null 2>&1; then
+                continue
+              fi
+              files=$(git -C "$wt" diff --name-only --diff-filter=U)
+              if [ -n "$files" ]; then
+                break
+              fi
+              # Already-applied commits leave nothing to pick; skip and continue,
+              # as the backport action does.
+              git -C "$wt" cherry-pick --skip >/dev/null 2>&1 || \
+                git -C "$wt" cherry-pick --abort >/dev/null 2>&1 || true
+            done
+            git -C "$wt" cherry-pick --abort >/dev/null 2>&1 || true
+            if [ -n "$files" ]; then
+              body=$(mktemp)
+              {
+                echo "Cherry-pick to \`$target\` failed; conflicting files:"
+                echo
+                printf '%s\n' "$files" | sed 's/^/- `/; s/$/`/'
+                echo
+                echo "Run: $RUN_URL"
+              } > "$body"
+              gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file "$body"
+              rm -f "$body"
+            fi
+            git worktree remove --force "$wt" >/dev/null 2>&1 || true
+          done <<<"$TARGETS"

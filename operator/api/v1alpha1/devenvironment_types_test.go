@@ -33,7 +33,7 @@ import (
 
 const (
 	testPortName = "app"
-	testDevImage = "harbor.isuanova.com/suanova/cube-base:26.08"
+	testDevImage = "harbor.isuanova.com/suanova/cuda-pytorch:26.08"
 
 	// testGPUModelMXC550 is a real model name of a real vendor, so the round-trip
 	// test would catch the API rewriting a value in the shape the clusters

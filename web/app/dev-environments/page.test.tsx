@@ -59,9 +59,9 @@ describe("dev environments page", () => {
   const SSH_KEY =
     "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZWQyNTUxOQ\n-----END OPENSSH PRIVATE KEY-----\n";
   const keyRequests: string[] = [];
-  // The literal env values the on-demand endpoint hands back, and the requests
-  // made for them: the list carries names only, so the spec panel fetches the
-  // values for one environment when the user reveals them.
+  // The literal env values the endpoint hands back, and the requests made for
+  // them: the list carries names only, so the spec panel fetches the values for
+  // one environment when its detail opens.
   const ENV_VALUES: Record<string, string> = {
     HF_HOME: "/home/ubuntu/.cache/huggingface",
     HF_TOKEN: "hf_example",
@@ -196,23 +196,19 @@ describe("dev environments page", () => {
     stubData(devEnvironmentList());
     const { container, root } = renderPage();
     await act(async () => {});
+    // The detail's env-values fetch resolves a tick after the list's.
+    await act(async () => {});
 
     // The selected environment states everything: storage shows the mount path
     // the CR carries, and each new section gets a row of its own.
     expect(container.textContent).toContain("200Gi · /home/ubuntu");
     expect(container.textContent).toContain("data-cache → /data");
-    // One environment variable per line, not one " · " run — and the literal
-    // values are masked, because the list response does not carry them.
-    expect(container.textContent).toContain(`HF_HOME=${"•".repeat(12)}\nHF_TOKEN=${"•".repeat(12)}`);
-    expect(envRequests).toEqual([]);
-    const envToggle = container.querySelector('[data-od-id="env-values-toggle"]') as HTMLElement;
-    expect(envToggle.getAttribute("aria-label")).toBe("显示环境变量值");
-    await act(async () => {
-      envToggle.click();
-    });
-    expect(envRequests).toEqual(["project-a/jupyter-nlp-ln"]);
+    // One environment variable per line: the list response does not carry the
+    // literal values, so the panel fetches them when its detail opens — and
+    // shows them as they are, with no reveal toggle.
     expect(container.textContent).toContain("HF_HOME=/home/ubuntu/.cache/huggingface\nHF_TOKEN=hf_example");
-    expect(envToggle.getAttribute("aria-pressed")).toBe("true");
+    expect(container.querySelector('[data-od-id="env-values-toggle"]')).toBeNull();
+    expect(envRequests).toEqual(["project-a/jupyter-nlp-ln"]);
     expect(container.textContent).toContain("python -m jupyter lab");
     expect(container.textContent).toContain("--port 8080");
     expect(container.textContent).toContain("api:8080/http");
@@ -1018,13 +1014,13 @@ describe("create wizard", () => {
    * Render the page with both options endpoints stubbed. `rejectCreate` stands in
    * for a create the route refuses: the portal must render whatever it answers.
    */
-  function renderWithBoth(rejectCreate?: { status: number; body: unknown }) {
+  function renderWithBoth(rejectCreate?: { status: number; body: unknown }, opts: object = OPTIONS) {
     vi.stubGlobal(
       "fetch",
       vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url.includes("/options")) {
-          return Promise.resolve({ ok: true, status: 200, json: async () => OPTIONS });
+          return Promise.resolve({ ok: true, status: 200, json: async () => opts });
         }
         if (rejectCreate && init?.method === "POST") {
           return Promise.resolve({ ok: false, status: rejectCreate.status, json: async () => rejectCreate.body });
@@ -1149,6 +1145,10 @@ describe("create wizard", () => {
 
   function rootSwitch(): HTMLElement {
     return document.body.querySelector('[data-od-id="wizard-root"] input') as HTMLElement;
+  }
+
+  function sudoSwitch(): HTMLInputElement {
+    return document.body.querySelector('[data-od-id="wizard-sudo"] input') as HTMLInputElement;
   }
 
   /** The image combobox's text box, on step 1. */
@@ -1731,6 +1731,54 @@ describe("create wizard", () => {
     act(() => root.unmount());
   });
 
+  it("grants sudo to the runtime account only when asked", async () => {
+    const { container, root } = renderWithBoth();
+    await act(async () => {});
+    await toStep3(container);
+
+    await act(async () => {
+      sudoSwitch().click();
+    });
+    await nextStep();
+    // The confirmation restates the grant beside the identity, so it is visible
+    // before the environment is created.
+    expect(document.body.textContent).toContain("sudo");
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="wizard-create"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    expect(createdBody()).toMatchObject({ sudo: true });
+
+    act(() => root.unmount());
+  });
+
+  it("does not state sudo for a root environment", async () => {
+    const { container, root } = renderWithBoth();
+    await act(async () => {});
+    await toStep3(container);
+
+    await act(async () => {
+      sudoSwitch().click();
+    });
+    await act(async () => {
+      rootSwitch().click();
+    });
+    // The grant belongs to the non-root account; a root container already has it.
+    expect(sudoSwitch().disabled).toBe(true);
+    await nextStep();
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="wizard-create"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    const body = createdBody();
+    expect(body).toMatchObject({ runAsUser: 0, runAsGroup: 0 });
+    expect("sudo" in body).toBe(false);
+
+    act(() => root.unmount());
+  });
+
   it("sends the workspace, runtime and network sections the advanced step filled in", async () => {
     const { container, root } = renderWithBoth();
     await act(async () => {});
@@ -1769,6 +1817,8 @@ describe("create wizard", () => {
     // The confirmation step restates the section, so what is read on step 4 is
     // what a user would notice before submitting.
     expect(document.body.textContent).toContain("shared-models → /models");
+    // The environment variable is restated with its value, not by name alone.
+    expect(document.body.textContent).toContain("HF_HOME=/data/hf");
     // Both of this step's new choices, restated: the pin by the node's own name,
     // which is what the user picked.
     expect(document.body.textContent).toContain("worker-03");
@@ -2126,8 +2176,97 @@ describe("create wizard", () => {
     // untouched wizard then created the environment in.
     const namespace = document.body.querySelector('[data-od-id="wizard-namespace"] [role="combobox"]') as HTMLElement;
     expect(namespace.textContent).toBe("default");
-    // Every namespace the API offered is still selectable.
-    expect(await selectOption(namespace, "project-a")).toEqual(["project-a", "default"]);
+    // Every namespace the API offered is still selectable, and the list always
+    // ends with the entry that creates a new one.
+    expect(await selectOption(namespace, "project-a")).toEqual(["project-a", "default", "创建新命名空间"]);
+
+    act(() => root.unmount());
+  });
+
+  /** The namespace select on step 1. */
+  function namespaceSelect(): HTMLElement {
+    return document.body.querySelector('[data-od-id="wizard-namespace"] [role="combobox"]') as HTMLElement;
+  }
+
+  /** The name box the "create a new namespace" entry reveals. */
+  function newNamespaceInput(): HTMLInputElement | null {
+    return document.body.querySelector('[data-od-id="wizard-namespace-name"] input') as HTMLInputElement | null;
+  }
+
+  /** The URLs of every POST the wizard sent, in order. */
+  function postUrls(): string[] {
+    const calls = (globalThis.fetch as unknown as { mock: { calls: Array<[RequestInfo | URL, RequestInit?]> } }).mock.calls;
+    return calls.filter(([, init]) => init?.method === "POST").map(([url]) => String(url));
+  }
+
+  it("creates the namespace it is given, then the environment in it", async () => {
+    const { container, root } = renderWithBoth();
+    await act(async () => {});
+    await toStep3(container);
+
+    // Back to step 1, where the namespace lives.
+    await prevStep();
+    await prevStep();
+    expect(document.body.querySelector('[data-step="1"]')).not.toBeNull();
+
+    // The select no longer lists the tenant namespaces the platform does not
+    // manage, so naming one is how a user gets a home of their own.
+    await selectOption(namespaceSelect(), "创建新命名空间");
+    setInput(newNamespaceInput() as HTMLInputElement, "team-a");
+
+    await nextStep();
+    await nextStep();
+    await nextStep();
+    await click("创建");
+
+    // The namespace first: the environment cannot be created in one that is
+    // not there yet.
+    expect(postUrls()).toEqual([withBasePath("/api/namespaces"), withBasePath("/api/devenvironments")]);
+    expect(createdBody()).toMatchObject({ namespace: "team-a", name: "my-env" });
+
+    act(() => root.unmount());
+  });
+
+  it("shows a namespace error when no existing namespace is available", async () => {
+    const { container, root } = renderWithBoth(undefined, { ...OPTIONS, namespaces: [], defaultNamespace: null });
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="create-env-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    setInput(document.body.querySelector('input[placeholder="e.g. jupyter-nlp-ln"]') as HTMLInputElement, "my-env");
+    await nextStep();
+
+    expect(document.body.querySelector('[data-step="1"]')).not.toBeNull();
+    expect(document.body.textContent).toContain("命名空间名称不合法");
+    expect(postUrls()).toEqual([]);
+
+    act(() => root.unmount());
+  });
+
+  it("refuses to advance until the new namespace has a valid name", async () => {
+    const { container, root } = renderWithBoth();
+    await act(async () => {});
+    await toStep3(container);
+    await prevStep();
+    await prevStep();
+
+    await selectOption(namespaceSelect(), "创建新命名空间");
+    expect(newNamespaceInput()).not.toBeNull();
+
+    await nextStep();
+    // Still on step 1, with the field's own reason for it.
+    expect(document.body.querySelector('[data-step="1"]')).not.toBeNull();
+    expect(document.body.textContent).toContain("命名空间名称不合法");
+
+    // A namespace is a DNS-1123 label: an underscore is not one.
+    setInput(newNamespaceInput() as HTMLInputElement, "team_a");
+    await nextStep();
+    expect(document.body.querySelector('[data-step="1"]')).not.toBeNull();
+
+    setInput(newNamespaceInput() as HTMLInputElement, "team-a");
+    await nextStep();
+    expect(document.body.querySelector('[data-step="2"]')).not.toBeNull();
 
     act(() => root.unmount());
   });

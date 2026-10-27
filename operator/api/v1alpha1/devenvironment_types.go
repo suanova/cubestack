@@ -416,6 +416,23 @@ type RuntimeSpec struct {
 	// (e.g. RDMA); capability and privileged settings are not user-settable.
 	// +optional
 	SecurityContext *RuntimeSecurityContext `json:"securityContext,omitempty"`
+
+	// Sudo grants the environment's non-root account passwordless sudo, so the
+	// processes it runs may act as root inside the container. Off by default:
+	// without it the account cannot elevate at all. The grant follows the uid the
+	// container runs as, not spec.runtime.user. It is confined to the container:
+	// the workload gains no capability beyond the container's own set, does not
+	// need a looser Pod Security Standard than an environment without it, and the
+	// grant ends with the pod. A RoCE environment shares the node's network
+	// namespace, so root there acts on the node's network as a root environment
+	// would. An environment that runs as root already has this privilege and
+	// needs nothing from the field.
+	//
+	// The platform's images include sudo; an image named through spec.image must
+	// include it and an account for the container's uid as well.
+	// +kubebuilder:default=false
+	// +optional
+	Sudo bool `json:"sudo,omitempty"`
 }
 
 // RuntimeSecurityContext is the user-settable subset of the container security
@@ -633,6 +650,9 @@ type Endpoint struct {
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // DevEnvironment is the Schema for the devenvironments API.
+//
+// metadata.name must be a DNS-1035 label: lowercase letters, digits and
+// hyphens, starting with a letter, at most 63 characters.
 //
 // An environment with spec.storage starts from an init container that takes
 // ownership of its workspace claim, running as root with every capability

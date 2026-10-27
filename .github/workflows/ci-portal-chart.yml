@@ -82,15 +82,16 @@ jobs:
         working-directory: web/helm/cubestack-portal-chart
         env:
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_APP_VERSION: ${{ steps.release.outputs.app-version }}
         run: |
           set -euo pipefail
-          # A release names itself: the tag becomes both version and appVersion,
-          # and appVersion is what the templates resolve images from. A merge
-          # packages the rolling chart as <Chart.yaml version>-latest instead, a
-          # distinct OCI tag so a later push cannot clobber a released <version>.
+          # A release names itself: the chart version is the bare semver, the
+          # appVersion (and image tag) keeps the tag's v. A merge packages the
+          # rolling chart as <Chart.yaml version>-latest instead, a distinct OCI
+          # tag so a later push cannot clobber a released <version>.
           if [ -n "${RELEASE_VERSION}" ]; then
             VERSION="${RELEASE_VERSION}"
-            APP_VERSION="${RELEASE_VERSION}"
+            APP_VERSION="${RELEASE_APP_VERSION}"
           else
             VERSION="$(grep '^version:' Chart.yaml | awk '{print $2}')-latest"
             APP_VERSION=latest

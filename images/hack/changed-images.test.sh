@@ -20,7 +20,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.." # repository root: the paths below are the ones CI passes
 SUT=images/hack/changed-images.sh
-ALL="cpu-base maca-base cube-base"
+ALL="cpu-pytorch maca-pytorch cuda-pytorch"
 
 cases=0
 failures=0
@@ -75,11 +75,11 @@ check_groups() { # check_groups <name> <expected-json> <image>...
 check "an empty diff" "" ""
 check "another project" "" "" operator/internal/controller/devenv.go web/src/app.ts
 check "markdown at images/ root" "" "" images/README.md
-check "markdown inside an image directory" "" "" images/cpu-base/README.md
+check "markdown inside an image directory" "" "" images/cpu-pytorch/README.md
 
-check "the cpu-base image's own file" cpu-base cpu-base images/cpu-base/Dockerfile
-check "the maca-base image's own file" maca-base maca-base images/maca-base/Dockerfile
-check "the cube-base image's own file" cube-base cube-base images/cube-base/Dockerfile
+check "the cpu-pytorch image's own file" cpu-pytorch cpu-pytorch images/cpu-pytorch/Dockerfile
+check "the maca-pytorch image's own file" maca-pytorch maca-pytorch images/maca-pytorch/Dockerfile
+check "the cuda-pytorch image's own file" cuda-pytorch cuda-pytorch images/cuda-pytorch/Dockerfile
 
 check "a shared runtime file" "$ALL" "$ALL" images/common/sshd/install-dropin.sh
 # The jupyter launcher lives under common/ because every family image shares it, and
@@ -89,13 +89,14 @@ check "the shared jupyter launcher" "$ALL" "$ALL" images/common/jupyter/start-ju
 check "the Makefile" "$ALL" "$ALL" images/Makefile
 check "the context definition" "$ALL" "$ALL" images/.dockerignore
 check "the publish workflow" "$ALL" "$ALL" .github/workflows/ci-images.yml
-check "the smoke workflow" "$ALL" "$ALL" .github/workflows/ci-operator.yml
 check "the selection action" "$ALL" "$ALL" .github/actions/changed-images/action.yml
 
-# The two selections differ on this path and nowhere else.
+# The two selections differ on these paths and nowhere else: changes that rebuild nothing
+# but change how everything is verified.
 check "the smoke harness" "" "$ALL" images/hack/smoke.sh
+check "the smoke workflow" "" "$ALL" .github/workflows/ci-operator.yml
 
-# Deliberately a directory no image claims, and named so it reads that way: `cube-base` is a
+# Deliberately a directory no image claims, and named so it reads that way: `cuda-pytorch` is a
 # real name now, and a fixture calling itself pytorch-cuda would look like a near-miss of an
 # image that exists rather than like the unclaimed path this is testing.
 check "a new image directory" "$ALL" "$ALL" images/rocm-pytorch/Dockerfile
@@ -103,12 +104,12 @@ check "a stray file at images/ root" "$ALL" "$ALL" images/notes.txt
 
 # A selection is a union over the whole diff, not the last path to match, and these two
 # share no input and are not each other's.
-check "two images' own files" "cpu-base maca-base" "cpu-base maca-base" \
-  images/cpu-base/Dockerfile images/maca-base/Dockerfile
+check "two images' own files" "cpu-pytorch maca-pytorch" "cpu-pytorch maca-pytorch" \
+  images/cpu-pytorch/Dockerfile images/maca-pytorch/Dockerfile
 
 # The same union across the two vendor legs.
-check "images on different bases" "maca-base cube-base" "maca-base cube-base" \
-  images/maca-base/Dockerfile images/cube-base/Dockerfile
+check "images on different bases" "maca-pytorch cuda-pytorch" "maca-pytorch cuda-pytorch" \
+  images/maca-pytorch/Dockerfile images/cuda-pytorch/Dockerfile
 
 # The other half of the unrecognised branch: selecting everything is a guess, so it has
 # to say so. Silence would leave the next person to find the gap by reading the script.
@@ -133,26 +134,26 @@ esac
 # instead of unpacking that base twice).
 
 check_groups "a selection with no images has no leg" '[]'
-check_groups "the cube-base image is one leg" \
-  '[{"base":"cube-base","images":"cube-base","vendor":true}]' cube-base
-check_groups "the cpu-base image is one leg, and is not a vendor leg" \
-  '[{"base":"cpu-base","images":"cpu-base","vendor":false}]' cpu-base
-check_groups "a maca-base-only selection schedules no other base's leg" \
-  '[{"base":"maca-base","images":"maca-base","vendor":true}]' maca-base
+check_groups "the cuda-pytorch image is one leg" \
+  '[{"base":"cuda-pytorch","images":"cuda-pytorch","vendor":true}]' cuda-pytorch
+check_groups "the cpu-pytorch image is one leg, and is not a vendor leg" \
+  '[{"base":"cpu-pytorch","images":"cpu-pytorch","vendor":false}]' cpu-pytorch
+check_groups "a maca-pytorch-only selection schedules no other base's leg" \
+  '[{"base":"maca-pytorch","images":"maca-pytorch","vendor":true}]' maca-pytorch
 check_groups "one leg per selected base, in the table's order" \
-  '[{"base":"cpu-base","images":"cpu-base","vendor":false},{"base":"maca-base","images":"maca-base","vendor":true},{"base":"cube-base","images":"cube-base","vendor":true}]' \
-  cpu-base maca-base cube-base
+  '[{"base":"cpu-pytorch","images":"cpu-pytorch","vendor":false},{"base":"maca-pytorch","images":"maca-pytorch","vendor":true},{"base":"cuda-pytorch","images":"cuda-pytorch","vendor":true}]' \
+  cpu-pytorch maca-pytorch cuda-pytorch
 check_groups "a repeated name does not repeat a leg" \
-  '[{"base":"cube-base","images":"cube-base","vendor":true}]' cube-base cube-base
+  '[{"base":"cuda-pytorch","images":"cuda-pytorch","vendor":true}]' cuda-pytorch cuda-pytorch
 
 # The primitive the action's publish matrix is sized from, asserted apart from the grouping
 # so that a `vendor` gone wrong cannot hide behind a grouping fixture that agrees with it.
 cases=$((cases + 1))
-if [ "$("$SUT" vendor cube-base)" = true ] && [ "$("$SUT" vendor cpu-base)" = false ]; then
+if [ "$("$SUT" vendor cuda-pytorch)" = true ] && [ "$("$SUT" vendor cpu-pytorch)" = false ]; then
   printf 'ok    vendor follows the base, not a name list\n'
 else
   failures=$((failures + 1))
-  printf 'FAIL  vendor must read true for cube-base and false for cpu-base\n'
+  printf 'FAIL  vendor must read true for cuda-pytorch and false for cpu-pytorch\n'
 fi
 
 # A name the rule does not know must fail loudly: a group silently dropped here is an image
@@ -243,7 +244,7 @@ done
 # --- the gate needs the pathspec, not a list of image names ----------------------
 
 cases=$((cases + 1))
-if [ "$("$SUT" paths cpu-base | wc -l)" -lt 2 ]; then
+if [ "$("$SUT" paths cpu-pytorch | wc -l)" -lt 2 ]; then
   failures=$((failures + 1))
   printf 'FAIL  `paths` must emit a pathspec for git, not a name\n'
 else

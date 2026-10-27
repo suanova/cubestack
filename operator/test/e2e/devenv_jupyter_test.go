@@ -78,7 +78,7 @@ func describeJupyter() {
 func describeTokenRefill() {
 	draftCase{
 		Name:     "jupyter-token-refill",
-		Image:    devenv.MustImage("cpu-base-jupyter"),
+		Image:    devenv.MustImage("cpu-pytorch-jupyter"),
 		Identity: devenv.NonRoot,
 		Cases: func(open func() *devenv.Environment) {
 			It("J2 rolls the workload onto the refilled token, and the new token is the one served",
@@ -158,7 +158,7 @@ func describeNotebookArgs() {
 
 	draftCase{
 		Name:     "jupyter-notebook-args",
-		Image:    devenv.MustImage("cpu-base-jupyter"),
+		Image:    devenv.MustImage("cpu-pytorch-jupyter"),
 		Identity: devenv.NonRoot,
 		Shape: func(want *aiv1alpha1.DevEnvironment) {
 			want.Spec.Runtime.Env = append(want.Spec.Runtime.Env, corev1.EnvVar{

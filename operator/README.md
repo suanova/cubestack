@@ -94,6 +94,12 @@ first two of the four and neither of the others, so a DevEnvironment pod is refu
 to a namespace enforcing `restricted` whatever the spec asks for, including one with no
 `spec.storage` at all. Nothing here works around that; `baseline` is the requirement.
 
+`spec.runtime.sudo` changes none of this. The grant is a sudoers file inside the container, and
+the init container that writes it is the same kind of root init container the workspace repair
+already is, so a `baseline` namespace admits it and no namespace has to be relabelled. A
+`restricted` namespace keeps refusing the pod for the reasons above — not because of the grant —
+and the operator cannot preflight either one, since it reads no Namespace objects.
+
 The DevEnvironment e2e labels its namespace `baseline` (`hack/verify-devenv.sh`), which suits
 every environment but the RDMA one.
 

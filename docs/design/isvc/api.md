@@ -382,7 +382,7 @@ GPU 扩展资源通常只区分厂商，不区分具体 GPU 型号。例如，�
 
 **适用范围**
 
-此校验只避免明显不兼容的模型组合，不保证模型一定能以当前 `InferenceRuntimeProfile` 的资源配置稳定运行。同一架构的不同尺寸模型（例如 flash 与 pro）可能因 `InferenceRuntimeProfile` 固定的 TP、GPU 数量或显存配置不足而发生 OOM。这类情况需要在发布时验证：为新的尺寸模型创建新的 `InferenceRuntimeProfile` 版本，先以 `publish: false` 创建服务进行影子验证，确认就绪后再迁移。因此，`InferenceRuntimeProfile` 仍应按模型尺寸档维护；架构和量化校验负责阻止已知不兼容的模型进入部署流程。
+此校验只避免明显不兼容的模型组合，不保证模型一定能以当前 `InferenceRuntimeProfile` 的资源配置稳定运行。同一架构的不同尺寸模型（例如 flash 与 pro）可能因 `InferenceRuntimeProfile` 固定的 TP、GPU 数量或显存配置不足而发生 OOM。这类情况需要在发布时验证：为新的尺寸模型创建新的 `InferenceRuntimeProfile` 版本，先以不设置 `spec.route.aigatewayRouter` 的方式创建服务进行影子验证，确认就绪后再迁移。因此，`InferenceRuntimeProfile` 仍应按模型尺寸档维护；架构和量化校验负责阻止已知不兼容的模型进入部署流程。
 
 ##### assets[]
 
@@ -436,7 +436,7 @@ Controller 将此模板按 `workload.kind` 写入对应位置：`LeaderWorkerSet
 
 **渲染规则**
 
-`command`、`args`、`env[].value`、`nodeSelector`、`labels` 和 `annotations` 的字符串值都可以使用 `{{ }}`。可用变量仅限 `model.*`、`service.*`、`overrides.*`、`role.*`、`roles.<name>.*`、`profile.*` 和 `route.*`；使用未知变量时，Controller 将设置 `Rendered=False`。字段名和 map 的 key 必须是字面量，不能使用模板。渲染完成后，Controller 会再次校验结果是否符合 Kubernetes 的格式要求。
+`command`、`args`、`env[].value`、`nodeSelector`、`labels`、`annotations` 和 `resources.extendedResources` 的字符串值都可以使用 `{{ }}`。可用变量仅限 `model.*`、`service.*`、`overrides.*`、`role.*`、`roles.<name>.*`、`profile.*` 和 `route.*`；使用未知变量时，Controller 将设置 `Rendered=False`。字段名和 map 的 key 必须是字面量，不能使用模板。渲染完成后，Controller 会再次校验结果是否符合 Kubernetes 的格式要求。
 
 | 字段 | 类型 | 校验规则 | 说明 |
 |---|---|---|---|
@@ -445,7 +445,7 @@ Controller 将此模板按 `workload.kind` 写入对应位置：`LeaderWorkerSet
 | `command` / `args` | list | — | 支持 `{{ }}` 渲染，也支持运行期的 `$()` 和 `${}` 变量。 |
 | `env[]` | list | L0：`value` 与 `fieldRef` 二选一 | `{name, value}` 或 `{name, fieldRef}`。`value` 支持 `{{ }}` 和 `$()`；后者可引用通过 `envFrom` 注入的环境变量。 |
 | `envFromAssets[]` | list[asset 别名] | — | 将渲染后的指定 ConfigMap 以 `envFrom` 方式注入 Pod。 |
-| `resources` | object | L1：`extendedResources` 的 key 不得与 `cpu`/`memory`/两厂商 GPU 扩展资源名冲突、须为域限定扩展资源名（`domain/name`），值 ≥1（VAP） | `{cpu, memory, gpuPerPod, extendedResources?}`。`cpu` 和 `memory` 写入 requests；`gpuPerPod` 按 GPU 厂商映射为扩展资源，并同时写入 requests 和 limits；`extendedResources`（map[string]int64）的每项按 key 同时写入 requests 和 limits（与 `gpuPerPod` 语义一致），用于 RDMA 等附加扩展资源。 |
+| `resources` | object | L0：`extendedResources` 只能是逗号分隔的 `name=count` 对或单个 `{{ ... }}` 占位符（Pattern）。L2：渲染后每对须解析为域限定扩展资源名（`domain/name`）、不得与 `cpu`/`memory`/两厂商 GPU 扩展资源名冲突，count 为正整数，否则 `InvalidOverride` | `{cpu, memory, gpuPerPod, extendedResources?}`。`cpu` 和 `memory` 写入 requests；`gpuPerPod` 按 GPU 厂商映射为扩展资源，并同时写入 requests 和 limits；`extendedResources` 是逗号分隔的 `name=count` 字符串，可整体引用 `{{ overrides.* }}`（`stringList` 每个元素一项），解析后每项同时写入 requests 和 limits（与 `gpuPerPod` 语义一致），用于 RDMA 等附加扩展资源；空值不注入任何资源。之所以是 string 而非 map：扩展资源名属于集群（站点用 IB 还是 RoCE、设备插件把它命名成什么），不是 Profile 的事实，而 map 的 key 不能模板化。 |
 | `securityContext` | object | — | `{privileged?, runAsUser?, runAsGroup?}`。三个字段可分别设置。 |
 | `terminationGracePeriodSeconds` | int | L0：可选，默认 30 | 需要等待连接摘流或 checkpoint 写入时可适当增大。 |
 | `mounts[]` | list | L0：`model` 固定 `main`、`readOnly` 固定 `true` | 模型挂载声明：`{model: main, at: <容器内路径>, readOnly: true}`。Profile 指定容器内挂载位置，ModelVersion 指定模型的存储方式。仅卷类策略（`HostPath`/`Dynamic`/`Static`）声明；`S3` 策略以 URI 消费模型，不声明 `mounts[]`（§4.5）。 |
@@ -521,7 +521,7 @@ Controller 将此模板按 `workload.kind` 写入对应位置：`LeaderWorkerSet
 | 字段 | 类型 | 校验规则 | 说明 |
 |---|---|---|---|
 | `vars` | map | L0：可选 | 管理员定义的模板常量。可在模板中通过 `{{ profile.vars.<key> }}` 引用，适合存放多个 role 共用的配置。 |
-| `endpoint.role` | string | L0：必填；L1：必须存在于 `roles`，且该 role 须定义 `service` | 作为服务对外端点的 role 名称。Controller 以该 role 的 Service 作为内部端点（InferenceService 的 `status.endpoint.internal`）；`publish: true` 时，它同时是模型目录条目的后端（目录对象的 endpoints 指向该 Service）。渲染后 Service 的可解析性由 `EndpointReady` 校验（见 §3.3）。 |
+| `endpoint.role` | string | L0：必填；L1：必须存在于 `roles`，且该 role 须定义 `service` | 作为服务对外端点的 role 名称。Controller 以该 role 的 Service 作为内部端点（InferenceService 的 `status.endpoint.internal`）；设置 `spec.route.aigatewayRouter` 时，它同时是模型目录条目的后端（目录对象的 endpoints 指向该 Service）。渲染后 Service 的可解析性由 `EndpointReady` 校验（见 §3.3）。 |
 | `endpoint.portName` | string | L0：可选，默认 `http`；L2：渲染后须存在于端点 Service 的端口中（`EndpointReady`） | 对外端点使用的 Service 端口名，与 `endpoint.role` 一起确定目录条目后端的端口。 |
 | `readinessPolicy.requireAllRoles` | bool | L0：v1alpha1 固定 `true` | 服务就绪条件的聚合方式：所有 role 的工作负载和 Pod 都就绪后，InferenceService 才会标记为 Ready。 |
 | `nodeSelector` | string | L0：可选；只能是逗号分隔的 `key=value` 字面量列表或单个 `{{ ... }}` 占位符（同 `podAntiAffinity.policy`，用 pattern 而非 `enum`：精确匹配会在 CREATE 时拒绝占位符）；L2：渲染后每一项都须解析为一个合法 K8s label 键值对，否则 `InvalidOverride` 且 Rendered=False；若该键是厂商型号 label 而值不在 `accelerator.models` 中（多值时为全部值都不在，即无交集），则 `ModelSchedulingConflict` | 服务级节点选择：若干 `key=value` 标签对，声明一次即并入**全部 role**。之所以是 string 而不是 map，是因为标签的**键属于集群、不属于 Profile**——站点把 GPU 节点分成若干资源池，池名是站点的事实，Profile 作者无从预知，且 Profile 的 `spec` 一经创建不可修改；而 `podTemplate.nodeSelector` 的键由 Profile 作者写死，map 的 key 也不参与模板渲染（§3.2）。同一个 key 只有一个值时写入 PodSpec `nodeSelector`；同一个 key 有多个值时写入 required `nodeAffinity` 的 `In` 表达式（`nodeSelector` 的 map 无法表达“或”）。取值从集群自身读取（`kubectl get nodes --show-labels`），**默认为空 = 不注入任何选择器**，与本字段引入前的调度行为完全一致；因此它只能收窄可选节点集。门户把绑定到该 override 的 `nodeSelector`（scalar）渲染为节点下拉、`stringList` 渲染为节点多选：用户只需选择节点，由门户自动写入 `kubernetes.io/hostname=<node>`，无需手工填写标签对。与 `podTemplate.nodeSelector`、`accelerator.models` 的型号约束按 K8s AND 语义合并（§3.2）。一个服务只有一个该值；需要按 role 区分时使用 `roles[].nodeSelector`（见上）。 |
@@ -582,10 +582,13 @@ spec:
     decodeReplicas: 2
     maxModelLen: 131072
   route:
-    publish: true
+    aigatewayRouter: cubestack-ai-gateway   # public；private 用 cubestack-ai-gateway-private
     modelName: dsv4-flash     # 目录模型名：客户端请求体的 model 字段填该值
-    timeoutSeconds: 0         # 0 = 不设总时长上限（默认）
-    idleTimeoutSeconds: 300   # 无进展上限（默认）
+    paths:                    # 目录上暴露的客户端路径；省略 = 全部
+      - /v1/chat/completions
+      - /v1/messages
+    timeoutSeconds: 0         # 0 = 不设总时长上限（默认；控制台不再设置）
+    idleTimeoutSeconds: 300   # 无进展上限（默认；控制台不再设置）
 ```
 
 #### 字段
@@ -595,10 +598,11 @@ spec:
 | `spec.modelRef` | string | L0：必填、对象名格式；L2：引用存在性与兼容性（`Resolved`） | 引用 ModelVersion。ModelVersion 的 spec 不可变，因此修改此字段就是切换模型版本，用于升级或回滚。 |
 | `spec.profileRef` | string | L0：必填、对象名格式；L2：引用存在性（`Resolved`） | 引用 InferenceRuntimeProfile。Profile 的 spec 不可变，因此修改此字段就是切换运行配置版本，用于升级或回滚。 |
 | `spec.overrides` | map | L2：key 和 value 对照 Profile 的 `overrides[]` 声明校验（`Rendered`），未知 key 或不合法的值在 reconcile 时被拒绝 | 用户填写的可调参数。 |
-| `spec.route.publish` | bool | L0：可选，默认 `false` | 发布到平台模型目录（Agent Router）。已发布服务成为目录里的一个模型：全平台共享同一个目录入口 hostname，客户端用请求体里的 `model` 字段选服务。未发布的服务只提供 ClusterIP 内部端点。 |
-| `spec.route.modelName` | string | L0：`^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$`（首字符字母数字，可含 `.` `_` `/` `-`，长度 ≤128）；L1：`publish: true` 时必填；L2：已发布服务的全平台唯一性（`RouteReady`） | 目录模型名，即客户端请求体 `model` 字段要填的值，也是已发布服务的全平台身份。与引擎的 served model name 解耦（目录条目把请求的 model 改写为引擎名）：同一模型的不同版本（fp16 / w8a8）能以各自的目录名共存，客户端只认目录名，`model` 不等于任何已发布服务的目录名时返回 404。未发布时可省略，省略后引擎使用 ModelVersion 的 `spec.model`；未发布服务使用各自的 ClusterIP，不会相互影响。 |
-| `spec.route.timeoutSeconds` | int | L0：可选，范围 0–86400，默认 0（0 = 不设总时长上限） | 单个请求的**总时长**上限，单位秒，包含全部流式分片。 |
-| `spec.route.idleTimeoutSeconds` | int | L0：可选，范围 1–86400，默认 300 | 单个请求的**无进展**上限，单位秒：上游连续这么久没有发出任何字节即切断。非流式生成在响应完成前不发送任何字节，因此一直被它计时——非流式长生成的实际上限由它决定（要更久就调大）；流式只要有字节流动就不受它约束，其时长的上限由 `timeoutSeconds` 决定。 |
+| `spec.route.aigatewayRouter` | string | L0：可选，枚举 `cubestack-ai-gateway` / `cubestack-ai-gateway-private` | 发布到平台模型目录（Agent Router）的哪条共享路由：`cubestack-ai-gateway`（public）或 `cubestack-ai-gateway-private`（private）。已发布服务成为所选目录里的一个模型：同一目录共享一个入口 hostname，客户端用请求体里的 `model` 字段选服务。空值（或省略 `spec.route`）= 未发布，只提供 ClusterIP 内部端点。 |
+| `spec.route.modelName` | string | L0：`^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$`（首字符字母数字，可含 `.` `_` `/` `-`，长度 ≤128）；L1：`aigatewayRouter` 非空时必填；L2：所选路由内的唯一性（`RouteReady`） | 目录模型名，即客户端请求体 `model` 字段要填的值，也是已发布服务在所选目录里的身份。与引擎的 served model name 解耦（目录条目把请求的 model 改写为引擎名）：同一模型的不同版本（fp16 / w8a8）能以各自的目录名共存，客户端只认目录名，`model` 不等于所选路由里任何已发布服务的目录名时返回 404。public 与 private 两条路由各自独立，同一目录名可同时存在于两条路由。未发布时可省略，省略后引擎使用 ModelVersion 的 `spec.model`；未发布服务使用各自的 ClusterIP，不会相互影响。 |
+| `spec.route.paths` | []string | L0：可选，`MaxItems=4`、数组按集合处理（`listType=set`），枚举 `/v1/chat/completions`、`/v1/responses`、`/v1/messages`、`/v1/images` | 本服务在模型目录上暴露的客户端路径，可多选。省略 = 暴露全部四条（兼容字段引入前的服务）；显式空列表 = 不暴露任何路径。`/v1/messages` 由 Agent Router 处理（请求体 `model` 选模型），其余三条走平台的普通 HTTPRoute，客户端需在请求里带 `x-ai-eg-model: <目录模型名>` header。控制台在发布时默认全选，且至少保留一条。 |
+| `spec.route.timeoutSeconds` | int | L0：可选，范围 0–86400，默认 0（0 = 不设总时长上限） | 单个请求的**总时长**上限，单位秒，包含全部流式分片。字段仍由 CRD/operator 支持，控制台不再提供输入，创建时使用默认值。 |
+| `spec.route.idleTimeoutSeconds` | int | L0：可选，范围 1–86400，默认 300 | 单个请求的**无进展**上限，单位秒：上游连续这么久没有发出任何字节即切断。非流式生成在响应完成前不发送任何字节，因此一直被它计时——非流式长生成的实际上限由它决定（要更久就调大）；流式只要有字节流动就不受它约束，其时长的上限由 `timeoutSeconds` 决定。字段仍由 CRD/operator 支持，控制台不再提供输入，创建时使用默认值。 |
 
 #### Status
 
@@ -665,7 +669,7 @@ status:
     ready: false
   endpoint:
     internal: "dsv4-flash-pd-router.project-a.svc:8001"
-    public: "https://ai.cubestack.dev"     # 仅 publish=true：模型目录的共享入口；模型名见 spec.route.modelName
+    public: "https://ai.cubestack.dev"     # 仅 aigatewayRouter 非空：模型目录的共享入口；模型名见 spec.route.modelName
   assets:             # 创建来源与内容 hash（审计链）
   - name: runtime-config
     source: metax-dsv4-runtime-v0.5.12-rc1
@@ -682,8 +686,8 @@ status:
 | `Rendered` | override 值合法；Phase 1 只使用允许的变量；所有占位符都在允许的变量范围内；引用 `{{ model.path }}` 的 role 已挂载对应模型；引用 `{{ model.credentialsPath }}` 的 role 要求对应 ModelVersion 已设置 `storage.s3.credentialsRef`。 | `UnknownOverride`、`InvalidOverride`、`PhaseViolation`、`UnknownPlaceholder`、`ModelNotMounted`、`ModelCredentialsUnresolved` |
 | `Provisioned` | 渲染后的 asset ConfigMap、模型 PVC 与 S3 凭据 Secret 副本（§3.1 S3 策略）已在服务 namespace 中创建成功；源 Secret 轮换后副本的重新同步同样由该 condition 反映。仅指对象创建/同步成功；PVC 的绑定与存储供给由存储系统完成，其异常通过 Pod 事件体现。 | `AssetConfigMapFailed`、`PVCCreateFailed`、`SecretCopyFailed` |
 | `WorkloadsApplied` | 期望配置已完整写入 Service 与工作负载（LWS/Deployment），即渲染结果已下发到期望版本。只表示配置已应用，不表示就绪：滚动更新期间保持 `True`，Pod 未就绪由 `Ready` 与 `roles[]` 反映。 | `ServiceApplyFailed`、`WorkloadApplyFailed` |
-| `EndpointReady` | 无论 `publish` 取值，内部端点都必须实际可访问：`endpoint.role` 渲染后指向存在的 role，该 role 的 Service 中存在名为 `endpoint.portName`（默认 `http`）的端口，且该 Service 至少有一个就绪的后端端点（对应 Pod 已通过就绪探针）。该 condition 决定 `status.endpoint.internal` 是否有效；`RouteReady` 仅在它为 True 后才在网关上创建路由。 | `EndpointRoleNotFound`、`EndpointPortNotFound`、`EndpointNotReady` |
-| `RouteReady` | 仅覆盖模型目录里的公开条目。`publish: true` 时，`modelName` 在已发布服务中全平台唯一，且本服务在**平台预装的共享 `AIGatewayRoute`**（`--gateway-catalog-route`）里**已有一条 rule**、该 rule 引用的两个 owned 对象已生成：EG `Backend` `<isvc>-endpoint` 与 `AIServiceBackend` `<isvc>-backend`（均以 `EndpointReady` 解析出的 Service 端口为后端；跨 namespace 的 backendRef 另需 `ReferenceGrant` `<isvc>-grant` 授权）。接受判定 = **共享路由 `Accepted=True`** 且 **本服务 `AIServiceBackend` `Accepted=True`**，且本服务的 rule 仍在共享路由里，三者缺一即 False（依赖 `EndpointReady=True`）。`modelName` 与他人冲突时，保留先占用者当前有效的 rule，本服务保持 False。等待接受期间为 `False`，reason 为 `GatewayNotAccepted`；集群未安装 Agent Router CRD 时降级为 `False`，reason 为 `AgentRouterUnavailable`；平台未预装共享路由时降级为 `False`，reason 为 `CatalogRouteNotFound`；平台 Gateway 未配置（`--gateway-name` 为空）时降级为 `False`，reason 为 `GatewayNotConfigured`；本服务 rule 尚不存在且共享路由已达 15 条上限时降级为 `False`，reason 为 `CatalogFull`。`publish: false` 时为 `True`，reason 为 `NotPublished`，表示未请求发布目录条目。 | `ModelNameConflict`、`GatewayNotAccepted`、`AgentRouterUnavailable`、`CatalogRouteNotFound`、`GatewayNotConfigured`、`CatalogFull`、`EndpointNotReady` |
+| `EndpointReady` | 无论是否发布，内部端点都必须实际可访问：`endpoint.role` 渲染后指向存在的 role，该 role 的 Service 中存在名为 `endpoint.portName`（默认 `http`）的端口，且该 Service 至少有一个就绪的后端端点（对应 Pod 已通过就绪探针）。该 condition 决定 `status.endpoint.internal` 是否有效；`RouteReady` 仅在它为 True 后才在网关上创建路由。 | `EndpointRoleNotFound`、`EndpointPortNotFound`、`EndpointNotReady` |
+| `RouteReady` | 仅覆盖模型目录里的条目。`aigatewayRouter` 非空时，`modelName` 在**所选路由**已发布服务中唯一，且 operator 全量维护的共享对象里已写入本服务的 rule：暴露任一目录路径时，共享 `AIGatewayRoute`（`cubestack-ai-gateway` 或 `cubestack-ai-gateway-private`）里有一条指向 `<isvc>-backend`（OpenAI schema，承接全部四个路径）的 rule，本服务的 owned 对象已生成：EG `Backend` `<isvc>-endpoint`、`AIServiceBackend` `<isvc>-backend`（OpenAI）与 `<isvc>-anthropic`（Anthropic，仅供原生出口，不被共享 rule 引用），跨 namespace 引用由 `ReferenceGrant` `<isvc>-grant` 授权。接受判定 = **所选共享 `AIGatewayRoute` `Accepted=True`** 且 **本服务 `<isvc>-backend` `Accepted=True`** 且本服务的 rule 仍在路由里，缺一即 False（依赖 `EndpointReady=True`）。`modelName` 与所选路由里他人冲突时，保留先占用者当前有效的 rule，本服务保持 False。等待接受期间为 `False`，reason 为 `GatewayNotAccepted`；集群未安装 Agent Router CRD 时降级为 `False`，reason 为 `AgentRouterUnavailable`；平台 Gateway 未配置（`--gateway-name` 为空）时降级为 `False`，reason 为 `GatewayNotConfigured`；本服务的 rule 放不进共享对象（`AIGatewayRoute` 15 条上限）时降级为 `False`，reason 为 `CatalogFull`。`aigatewayRouter` 为空时为 `True`，reason 为 `NotPublished`，表示未请求发布目录条目。 | `ModelNameConflict`、`GatewayNotAccepted`、`AgentRouterUnavailable`、`GatewayNotConfigured`、`CatalogFull`、`EndpointNotReady` |
 | `Ready` | 按 `readinessPolicy.requireAllRoles` 聚合。v1 要求所有 role 的工作负载（LWS/Deployment）和 Pod 都就绪。 | `RolesNotReady`（message 包含各 role 的状态） |
 | `Progressing` | spec 变更后，Controller 是否仍在应用期望配置。该条件与 `Ready` 独立。 | `True`：`Reconciling`、`Rollout` 或 `Scaling`；`False`：`Converged` |
 | `ProfileDeprecated`（警示） | 引用的 Profile 带有 deprecated label（`ai.cubestack.io/deprecated`）。 | 不阻断；提示迁移 |
@@ -714,7 +718,7 @@ status:
 
 - **优先级 1 的例外**：`WorkloadsApplied=False, reason=WaitingForDependencies`（role 在等尚未就绪的依赖）不是失败。这一轮写下的 `Progressing` 正是 `Reconciling`（§4.1 步骤 4），因此跳过它、按优先级 3 判定为 `Progressing`。少了这个例外，每个正常启动的服务都会被读作 `Failed`。
 - **为什么前四条排在 `Ready` 之前**：这四条失败路径都在聚合 `Ready` / `Progressing` 之前就结束了本轮 reconcile，两个 condition 还是上一轮的陈旧值（全新对象上则根本不存在）。只看 `Ready` 会把「首次 apply 失败」读成「尚无结论」。
-- **`EndpointReady` / `RouteReady` 不参与判定**：`publish: false` 时 `RouteReady` 本就是 `True/NotPublished`，路由未发布不构成故障；内部端点尚未可达已被 `Progressing` 覆盖。
+- **`EndpointReady` / `RouteReady` 不参与判定**：`aigatewayRouter` 为空时 `RouteReady` 本就是 `True/NotPublished`，路由未发布不构成故障；内部端点尚未可达已被 `Progressing` 覆盖。
 - **`Pending`**：枚举里的第四个取值，语义是「Controller 还没有给出结论」。当前实现中这一状态表现为 `phase` 字段缺省而不是 `name: Pending`——一次走到结尾的 reconcile 一定已经写了 `Ready`，而读失败的早退路径按设计不写 status。因此客户端应把「`phase` 缺省」与 `Pending` 等同看待（门户的「准备中」筛选即如此）。
 
 #### Controller 行为
@@ -726,7 +730,7 @@ Controller 监听 `InferenceService` 及其引用关系的变化、解析引用�
 - `InferenceRuntimeProfile` / `ModelVersion`：平台管理员可写（create/update/delete）；用户可读（get/list）；controller 需要 get/list/watch 和 status 写权限；
 - `cubestack-system` namespace 下的 `ConfigMap`：平台管理员可写（create/update/delete）；controller 需要 get/list/watch 和 status 写权限；
 - `InferenceService`：用户可在各自 namespace 创建；
-- `publish: true` 的服务，Controller 需要在服务 namespace 创建 owned 目录对象的权限（get/list/watch/create/update/patch/delete）：`gateway.envoyproxy.io` 的 `backends`、`aigateway.envoyproxy.io` 的 `aiservicebackends` 与 `gateway.networking.k8s.io` 的 `referencegrants`；对平台预装的共享 `AIGatewayRoute` 只读 + 写规则（get/list/watch/update/patch，不 create/delete，平台对象不归 controller 所有）。另外需要 `gateway.networking.k8s.io` 的 `httproutes` 删除权限——清理 owner 为本服务的旧 per-model hostname 路由，`publish` 两种取值下都执行（见模型目录发布设计 D2）。
+- 设置 `spec.route.aigatewayRouter` 的服务，Controller 需要在服务 namespace 创建 owned 目录对象的权限（get/list/watch/create/update/patch/delete）：`gateway.envoyproxy.io` 的 `backends`、`aigateway.envoyproxy.io` 的 `aiservicebackends` 与 `gateway.networking.k8s.io` 的 `referencegrants`。对平台共享的两条 `AIGatewayRoute` 需要 get/list/watch/create/update/patch：缺失时补建，存在时全量重写 `spec.rules`；平台预装的对象不 delete。已退役的 `HTTPRoute` `cubestack-openai-paths[-private]` 仍需 get/update/delete：operator 自己创建（带 managed-by 标签）的删除，平台预装的清空 `spec.rules`（`HTTPRoute` 的 `spec.rules` 至少一条，清空后落到 CRD 默认的不引用任何 backend 的 catch-all）。另外需要 `gateway.networking.k8s.io` 的 `httproutes` 删除权限——清理 owner 为本服务的旧 per-model hostname 路由，两种发布状态都执行（见模型目录发布设计 D1/D2）。
 - Controller 需要在用户 namespace 下创建 LWS/Deployment/Service/ConfigMap/PVC 的权限。
 - `Static` 策略下，controller 需要读取 operator 配置引用的 Ceph 凭据（rook-ceph namespace 中的 Secret/ConfigMap）并访问 Ceph mon，用于 subvolume 的 `getpath` 与 quota 只读解析。
 - 静态 PV 的 controller 自动化（§7 TODO）落地后，controller 还需要 `persistentvolumes` 的 create/delete 权限。
@@ -759,10 +763,11 @@ Controller 监听 `InferenceService` 及其引用关系的变化、解析引用�
  5) 端点可达性      endpoint.role 的 Service endpoints ≥ 1 ready
         │ (EndpointReady)
         ▼
- 6) 目录发布        仅 publish=true 且 EndpointReady=True
+ 6) 目录发布        仅 aigatewayRouter 非空且 EndpointReady=True
                     - modelName 全平台唯一性（冲突保留先占用者的 rule，本服务 False）
-                    - 创建/更新 owned 对象（Backend / AIServiceBackend / ReferenceGrant）
-                      并在平台预装的共享 AIGatewayRoute 里 upsert 本服务的一条 rule
+                    - 创建/更新 owned 对象（Backend / 两个 AIServiceBackend / 一个 ReferenceGrant）
+                    - 按 spec.route.paths 用全部已发布服务全量重建共享 AIGatewayRoute 与
+                      HTTPRoute 的 spec.rules
                     - 等待接受（共享路由 Accepted 与本服务 AIServiceBackend Accepted 均 True）
         │ (RouteReady)
         ▼

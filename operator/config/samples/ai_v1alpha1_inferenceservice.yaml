@@ -14,7 +14,5 @@ spec:
     decodeReplicas: 2
     maxModelLen: 131072
   route:
-    publish: true
+    aigatewayRouter: cubestack-ai-gateway  # or cubestack-ai-gateway-private
     modelName: dsv4-flash      # catalog model name: clients send it as the request body's `model`
-    timeoutSeconds: 0          # 0 = no cap on total request duration (the default)
-    idleTimeoutSeconds: 300    # cap on time without upstream progress (the default)

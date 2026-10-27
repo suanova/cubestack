@@ -14,7 +14,7 @@ import { logger } from "@/lib/log";
 import { k8sErrorCode, k8sErrorDetails, k8sErrorResponse, tasksNamespace } from "./taskcrd";
 import type { TemplateProviderCr } from "./llm";
 import { modelKey } from "./llm";
-import { PLATFORM_MODEL_NAME, type TemplateProviderOption } from "./types";
+import { isPlatformProviderName, type TemplateProviderOption } from "./types";
 
 const GROUP = "ai.cubestack.io";
 const VERSION = "v1alpha1";
@@ -231,20 +231,20 @@ function sameModels(a: string[] | undefined, b: string[]): boolean {
 }
 
 /**
- * Make sure the template has exactly one platform provider with the resolved
- * endpoint and model list: the provider is updated in place when either moved,
- * appended when missing (the rest of the catalog is left alone), and left
- * untouched when it is already current. Returns the ops to send (empty =
- * nothing to do).
+ * Make sure the template's platform provider `name` has the resolved endpoint
+ * and model list: the provider is updated in place when either moved, appended
+ * when missing (the rest of the catalog is left alone), and left untouched when
+ * it is already current. Returns the ops to send (empty = nothing to do).
  */
 export function platformProviderOps(
   providers: TemplateProviderCr[] | undefined,
+  name: string,
   endpoint: string,
   modelIds: string[],
 ): JsonPatchOp[] {
   const list = providers ?? [];
-  const entry = { name: PLATFORM_MODEL_NAME, endpoint, models: modelIds };
-  const index = list.findIndex((p) => p.name === PLATFORM_MODEL_NAME);
+  const entry = { name, endpoint, models: modelIds };
+  const index = list.findIndex((p) => p.name === name);
   if (index < 0) {
     return list.length > 0
       ? [{ op: "add", path: "/spec/providers/-", value: entry }]
@@ -274,9 +274,9 @@ export function templateProviders(tmpl: AgentTemplateCr | null): TemplateProvide
       endpoint: p.endpoint,
       models: p.models ?? [],
       keyed: Boolean(p.credentialRef?.name),
-      // The platform provider points at the AI Gateway, so it is presented as a
-      // system provider (and stays out of the external-provider editor).
-      origin: p.name === PLATFORM_MODEL_NAME ? ("system" as const) : ("external" as const),
+      // The platform providers point at the AI Gateways, so they are presented
+      // as system providers (and stay out of the external-provider editor).
+      origin: isPlatformProviderName(p.name) ? ("system" as const) : ("external" as const),
     }));
 }
 

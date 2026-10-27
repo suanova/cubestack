@@ -8,7 +8,7 @@
 // (decodeReplicas / prefillReplicas / groupSize) via a PATCH. Metrics are
 // best-effort Prometheus data and show an empty state when absent.
 
-import { Box, Button, Dialog, DialogActions, DialogContent, DialogTitle, Menu, MenuItem, Select, Switch, TextField, Typography, Stepper, Step, StepLabel } from "@mui/material";
+import { Box, Button, Checkbox, Dialog, DialogActions, DialogContent, DialogTitle, Menu, MenuItem, Select, Switch, TextField, Typography, Stepper, Step, StepLabel } from "@mui/material";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { CreateOptionsResponse } from "@/app/api/inferenceservices/options/route";
@@ -17,6 +17,7 @@ import { validationMessage, type ValidationErrorBody } from "@/lib/api-error";
 import { apiFetch } from "@/lib/base-path";
 import { copyText } from "@/lib/clipboard";
 import { useI18n } from "@/lib/i18n";
+import { AIGATEWAY_ROUTER_PRIVATE, AIGATEWAY_ROUTER_PUBLIC, CATALOG_PATHS, type AIGatewayRouter, type CatalogPath } from "@/lib/inference-routes";
 import { platformPalette, usePlatformTheme } from "@/lib/perses/theme";
 
 // The prototype's filter set is 全部 / Ready / 准备中. "准备中" is a service the
@@ -85,36 +86,48 @@ const gpuRoleFacts = (s: InferenceServiceSummary) =>
   s.gpuRoles.length > 0
     ? s.gpuRoles
     : s.gpuPerPod
-      ? [{ name: "", gpuPerPod: s.gpuPerPod, model: s.gpuModel }]
+      ? [{ name: "", gpuPerPod: s.gpuPerPod, model: s.gpuModel, replicas: 1, groupSize: 0 }]
       : [];
 
-const gpuAmountText = (gpuPerPod: number, model: string | null): string =>
-  `${gpuPerPod} × ${model ?? "GPU"}`;
+const gpuAmountText = (cards: number, model: string | null): string => `${cards} × ${model ?? "GPU"}`;
 
-// The list's GPU resource column: the service's whole footprint. Roles asking
-// for the same cards on the same model collapse into one product — a PD
-// service whose prefill and decode each take 8 MXC550 reads "2 × 8 × MXC550" —
-// while roles on different models or card counts are listed per role.
+// The pods one replica runs: a LeaderWorkerSet replica is a group of groupSize
+// pods, while a Deployment replica is a single pod — which the API reports as
+// groupSize 0, the renderer's value for a role without a group.
+const podsPerReplica = (r: { groupSize: number }): number => Math.max(1, r.groupSize);
+
+// The cards one replica occupies: every pod in the group requests gpuPerPod.
+const gpuReplicaCards = (r: { gpuPerPod: number; groupSize: number }): number =>
+  r.gpuPerPod * podsPerReplica(r);
+
+// The cards every replica of the role occupies.
+const gpuRoleCards = (r: { gpuPerPod: number; groupSize: number; replicas: number }): number =>
+  gpuReplicaCards(r) * r.replicas;
+
+// The list's GPU resource column: the service's whole footprint — every card
+// every pod of every replica of every GPU role occupies. Roles on the same
+// model collapse into one product (a PD service whose prefill takes 8 MXC500
+// once and decode 8 MXC500 twice reads "24 × MXC500"); roles on different
+// models are listed per role.
 const gpuText = (s: InferenceServiceSummary): string => {
   const roles = gpuRoleFacts(s);
   if (roles.length === 0) return "—";
-  const [first] = roles;
-  const uniform = roles.every((r) => r.gpuPerPod === first.gpuPerPod && r.model === first.model);
-  if (!uniform) {
-    return roles.map((r) => `${roleLabel(r.name)} ${gpuAmountText(r.gpuPerPod, r.model)}`).join(" · ");
+  if (new Set(roles.map((r) => r.model)).size > 1) {
+    return roles.map((r) => `${roleLabel(r.name)} ${gpuAmountText(gpuRoleCards(r), r.model)}`).join(" · ");
   }
-  return roles.length > 1
-    ? `${roles.length} × ${gpuAmountText(first.gpuPerPod, first.model)}`
-    : gpuAmountText(first.gpuPerPod, first.model);
+  return gpuAmountText(
+    roles.reduce((cards, r) => cards + gpuRoleCards(r), 0),
+    roles[0].model,
+  );
 };
 
 // The detail card's per-replica row: one entry per GPU role, since each role is
-// its own workload.
+// its own workload, each measured per replica (the whole group).
 const gpuPerRoleText = (s: InferenceServiceSummary): string => {
   const roles = gpuRoleFacts(s);
   if (roles.length === 0) return "—";
-  if (roles.length === 1) return gpuAmountText(roles[0].gpuPerPod, roles[0].model);
-  return roles.map((r) => `${roleLabel(r.name)} ${gpuAmountText(r.gpuPerPod, r.model)}`).join(" · ");
+  if (roles.length === 1) return gpuAmountText(gpuReplicaCards(roles[0]), roles[0].model);
+  return roles.map((r) => `${roleLabel(r.name)} ${gpuAmountText(gpuReplicaCards(r), r.model)}`).join(" · ");
 };
 
 // One row per integer override the profile declares (decodeReplicas /
@@ -139,7 +152,11 @@ function ReplicaRows({ s }: { s: InferenceServiceSummary }) {
   );
 }
 
-const numFmt = (n: number | null): string => (n === null ? "—" : String(Math.round(n)));
+// QPS is a rate, not a count: a service handling a few requests a minute is
+// well below 1/s, and rounding it to an integer would render as "0" — reading
+// as no traffic at all. Keep two decimals below 1 and round above it.
+const qpsFmt = (n: number | null): string =>
+  n === null ? "—" : n > 0 && n < 1 ? n.toFixed(2) : String(Math.round(n));
 
 // The list spans all namespaces, and the same service name can exist in two of
 // them (team-a/api and team-b/api). Selection, lookup and row keys therefore
@@ -703,7 +720,7 @@ function ServiceTable({
                     <ReplicaRows s={s} />
                   </td>
                   <td style={{ ...tdSx, fontFamily: "var(--font-mono)", fontSize: 12.5, whiteSpace: "nowrap" }}>
-                    {s.metrics ? numFmt(s.metrics.qps) : "—"}
+                    {s.metrics ? qpsFmt(s.metrics.qps) : "—"}
                   </td>
                   <td style={{ ...tdSx, fontFamily: "var(--font-mono)", fontSize: 12.5, whiteSpace: "nowrap" }}>
                     {s.metrics && s.metrics.p95 != null ? `${Math.round(s.metrics.p95)} ms` : "—"}
@@ -923,29 +940,39 @@ function Kvs({ rows }: { rows: Array<[string, string]> }) {
 function EndpointsCard({ s }: { s: InferenceServiceSummary }) {
   const { t } = useI18n();
   const internal = s.internalEndpoint ?? "—";
-  // The public endpoint is the observed value the operator reports (the shared
-  // catalog host differs per cluster); fall back to "—" when it isn't published
-  // yet. The catalog host serves every published model, so the model name that
-  // selects this service is shown alongside it.
-  const external = s.publicEndpoint ?? "—";
+  // A service published to the private catalog route is not reachable through
+  // the platform's public listener. Its AI Gateway endpoint is therefore the
+  // private gateway's in-cluster Service address, not the cluster's public
+  // catalog host (`status.endpoint.public`, which the operator reports for
+  // either route). The public route's address is the observed value; fall back
+  // to "—" when it isn't published yet. The catalog host serves every published
+  // model, so the model name that selects this service is shown alongside it.
+  // The private address is discovered by the API route, not composed here: the
+  // dataplane Service name carries a generated suffix.
+  const isPrivate = s.aigatewayRouter === AIGATEWAY_ROUTER_PRIVATE;
+  const gatewayLabel = isPrivate ? t("inf.endpoints.gatewayInternal") : t("inf.endpoints.public");
+  const gateway = isPrivate ? (s.privateGatewayEndpoint ?? "—") : (s.publicEndpoint ?? "—");
   return (
     <Card title={t("inf.endpoints.title")}>
       {/* Stacked, not side by side: this card is a third of the panel's width
-          now, and two addresses across it would ellipsise both. */}
+          now, and two addresses across it would ellipsise both. The track's
+          minimum is 0, not the row's min-content: a long in-cluster gateway
+          address is one unbreakable token, and an `auto` minimum sized the
+          track past the card, pushing the copy button outside its border. */}
       <Box
         sx={{
           px: "18px",
           py: "14px",
           display: "grid",
-          gridTemplateColumns: "1fr",
+          gridTemplateColumns: "minmax(0, 1fr)",
           rowGap: "14px",
           alignItems: "start",
         }}
       >
         <EndpointRow label={t("inf.endpoints.internal")} value={internal} />
         <EndpointRow
-          label={t("inf.endpoints.public")}
-          value={external}
+          label={gatewayLabel}
+          value={gateway}
           hint={s.published && s.routeModelName ? t("inf.endpoints.publicModel", { model: s.routeModelName }) : undefined}
         />
       </Box>
@@ -1016,11 +1043,11 @@ function MetricsCard({ s }: { s: InferenceServiceSummary }) {
         <Sparkline data={spark.length > 1 ? spark : [0, 0]} />
         <Box sx={{ display: "flex", justifyContent: "space-between", mt: "6px" }}>
           <Typography component="span" sx={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "text.secondary" }}>{t("inf.metrics.qpsTrend")}</Typography>
-          <Typography component="span" sx={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "text.secondary" }}>{numFmt(m.qps)}</Typography>
+          <Typography component="span" sx={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "text.secondary" }}>{qpsFmt(m.qps)}</Typography>
         </Box>
       </Box>
       <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr" }}>
-        <Metric label={t("inf.metrics.qps")} value={numFmt(m.qps)} />
+        <Metric label={t("inf.metrics.qps")} value={qpsFmt(m.qps)} />
         <Metric label={t("inf.metrics.p95")} value={m.p95 === null ? "—" : `${Math.round(m.p95)} ms`} />
         <Metric label={t("inf.metrics.tps")} value={m.tps === null ? "—" : `${Math.round(m.tps)} /s`} />
         <Metric label={t("inf.metrics.ready")} value={desiredPods === 0 ? "—" : `${readyPods} / ${desiredPods}`} />
@@ -1261,7 +1288,7 @@ function ScaleCard({
       ) : (
         <Box sx={{ px: "18px", py: "12px", display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: "12px", alignItems: "end" }}>
           {s.overrides.map((o) => (
-            <Field key={o.name} label={overrideDisplayName(o.name)} error={!scaleValueValid(o, effective[o.name])}>
+            <Field key={o.name} label={overrideDisplayName(o.name, t("inf.deploy.rdmaType"))} error={!scaleValueValid(o, effective[o.name])}>
               <ScaleInput o={o} value={effective[o.name]} nodes={nodes} onChange={(v) => setValues((prev) => ({ ...prev, [o.name]: v }))} />
             </Field>
           ))}
@@ -1332,7 +1359,12 @@ function ParamsCard({ s }: { s: InferenceServiceSummary }) {
         ? t("inf.params.timeoutNone")
         : `${s.timeoutSeconds}s`;
   const idleTimeout = s.idleTimeoutSeconds === null ? "—" : `${s.idleTimeoutSeconds}s`;
-  const maxLen = s.overrideNums.maxModelLen !== undefined ? String(s.overrideNums.maxModelLen) : "—";
+  // maxModelLen is normally left at the profile's default, so the declared
+  // knob's effective value (user override, else default) is the value to show;
+  // spec.overrides only carries it when the user set it explicitly.
+  const declaredMaxLen = s.overrides.find((o) => o.name === "maxModelLen")?.current;
+  const maxLenValue = typeof declaredMaxLen === "number" ? declaredMaxLen : s.overrideNums.maxModelLen;
+  const maxLen = maxLenValue !== undefined ? String(maxLenValue) : "—";
   return (
     <Card title={t("inf.params.title")} meta={s.engine ?? "—"}>
       <Kvs
@@ -1448,6 +1480,11 @@ function ConditionsCard({ s }: { s: InferenceServiceSummary }) {
 // ── deploy wizard ──────────────────────────────────────────────────────────
 
 const DNS_LABEL_RE = /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/;
+// The namespace select's "create a new one" entry. A name cannot carry an
+// underscore (the API server takes a DNS-1123 label), so it can never collide
+// with a namespace the cluster has, and it is never sent anywhere: `create()`
+// resolves it to the name the user typed before the request is built.
+const NEW_NAMESPACE = "__new__";
 
 interface DeployDraft {
   name: string;
@@ -1455,10 +1492,12 @@ interface DeployDraft {
   profileRef: string;
   modelRef: string;
   overrides: Record<string, OverrideValue>;
-  publish: boolean;
+  // Publishing to the model catalog is mandatory, so the route is always set.
+  aigatewayRouter: AIGatewayRouter;
   modelName: string;
-  timeout: string; // keep as string until parse for a friendlier error path
-  idleTimeout: string; // idem; the operator defaults are 0 (no cap) and 300
+  // The client paths the catalog entry exposes; publishing starts with all of
+  // them selected, and the service must expose at least one.
+  paths: CatalogPath[];
 }
 
 type OverrideDecl = CreateOptionsResponse["profiles"][number]["overrides"][number];
@@ -1485,12 +1524,20 @@ function DeployWizard({
     profileRef: "",
     modelRef: "",
     overrides: {},
-    publish: false,
+    aigatewayRouter: AIGATEWAY_ROUTER_PRIVATE,
     modelName: "",
-    timeout: "0",
-    idleTimeout: "300",
+    paths: [...CATALOG_PATHS],
   });
   const [nameError, setNameError] = useState(false);
+  // The select offers `default` plus "create a new one": the tenant namespaces
+  // the platform does not manage are not listed, because a denylist of the ones
+  // it does manage was always one install behind (issue #367). A namespace the
+  // user names here is created first, then the service is created in it.
+  const [newNamespace, setNewNamespace] = useState(false);
+  const [newNamespaceName, setNewNamespaceName] = useState("");
+  const [namespaceError, setNamespaceError] = useState(false);
+  const newNamespaceValid = !newNamespace || DNS_LABEL_RE.test(newNamespaceName.trim());
+  const effectiveNamespace = newNamespace ? newNamespaceName.trim() : draft.namespace;
   const [createBusy, setCreateBusy] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
 
@@ -1547,20 +1594,40 @@ function DeployWizard({
   const setField = <K extends keyof DeployDraft>(key: K, value: DeployDraft[K]) =>
     setDraft((prev) => ({ ...prev, [key]: value }));
 
+  // Picking the select's last entry opens the new-namespace box instead of
+  // setting a namespace: the name is not known until it is typed, and until
+  // then the draft keeps the namespace it had, so nothing half-named is sent.
+  const changeNamespace = (namespace: string) => {
+    if (namespace === NEW_NAMESPACE) {
+      setNewNamespace(true);
+      return;
+    }
+    setNewNamespace(false);
+    setNamespaceError(false);
+    setField("namespace", namespace);
+  };
+
   // The field's message promises an already-taken check, so it makes one: the
   // namespace's services are already in hand (the table behind this dialog renders
   // them). The same name in another namespace is a different service. Losing the
   // race is still the server's to report — it answers `nameTaken`.
   const nameTaken = services.some(
-    (s) => s.namespace === draft.namespace && s.name === draft.name.trim(),
+    (s) => s.namespace === effectiveNamespace && s.name === draft.name.trim(),
   );
   const nameValid = DNS_LABEL_RE.test(draft.name.trim());
   const step1Valid =
-    nameValid && !nameTaken && draft.name.trim().length > 0 && !!draft.namespace && !!draft.profileRef;
+    nameValid &&
+    !nameTaken &&
+    draft.name.trim().length > 0 &&
+    !!effectiveNamespace &&
+    newNamespaceValid &&
+    !!draft.profileRef;
   const step2Valid = !!draft.modelRef;
 
-  // Default override value, or the declared default.
-  const overrideValue = (o: OverrideDecl): OverrideValue => {
+  // The value an override holds from the user or the profile, before the
+  // wizard's own auto-injection. GPU-model selection reads this one: an
+  // injected RDMA resource pair is never a model name.
+  const declaredOverrideValue = (o: OverrideDecl): OverrideValue => {
     const held = draft.overrides[o.name];
     if (held !== undefined) return held;
     if (Array.isArray(o.default)) return o.default;
@@ -1582,7 +1649,7 @@ function DeployWizard({
   // picking MXC500 would still display only "metax".
   const selectedGpuModel = profile
     ? (profile.overrides
-        .map((o) => overrideValue(o))
+        .map((o) => declaredOverrideValue(o))
         .find((v): v is string => typeof v === "string" && profile.models.includes(v)) ?? null)
     : null;
 
@@ -1595,7 +1662,7 @@ function DeployWizard({
     if (!profile) return null;
     const scoped = profile.overrides
       .filter((o) => o.name.startsWith(`${name}_`) && o.name.endsWith("_model"))
-      .map((o) => overrideValue(o))
+      .map((o) => declaredOverrideValue(o))
       .find((v): v is string => typeof v === "string" && models.includes(v));
     if (scoped !== undefined) return scoped;
     return selectedGpuModel && models.includes(selectedGpuModel) ? selectedGpuModel : null;
@@ -1664,24 +1731,146 @@ function DeployWizard({
   };
 
   const allNodes = options?.nodes ?? [];
-  const overrideInput = (o: OverrideDecl) => (
-    <OverrideInput
-      key={o.name}
-      decl={o}
-      value={overrideValue(o)}
-      nodes={allNodes.filter((n) => nodeMatchesSelectedModel(o, n))}
-      anyNodes={allNodes.length > 0}
-      onChange={(v) => setDraft((prev) => ({ ...prev, overrides: { ...prev.overrides, [o.name]: v } }))}
-    />
-  );
+
+  // Whether one node can run a role's selected GPU model — the node picker's
+  // own filter, asked per role rather than per override.
+  const roleNodeMatches = (
+    name: string,
+    node: CreateOptionsResponse["nodes"][number],
+  ): boolean => {
+    const model = selectedRoleGpuModel(name);
+    if (!model) return true;
+    const vendor = roleVendor(name);
+    return !vendor || node.gpuModels?.[vendor] === model;
+  };
+
+  // The RDMA fabrics an extendedResources override can inject, with the count
+  // derived from the nodes the service may land on. The count is the Pod's
+  // share of the pool: Σ(rdma allocatable) × gpuPerPod ÷ Σ(gpu allocatable)
+  // over the nodes advertising that fabric — the whole node's devices when the
+  // Pod takes every GPU, half when it takes half. null means this is not an
+  // override the wizard can express, so the generic input stays.
+  const rdmaFabrics = (decl: OverrideDecl): RdmaFabric[] | null => {
+    if (!profile || !isExtendedResourcesOverride(decl)) return null;
+    const scoped = decl.name.endsWith("_extendedResources")
+      ? decl.name.slice(0, -"_extendedResources".length)
+      : null;
+    // A role-scoped override feeds one role; a service-level one feeds every
+    // GPU role. A CPU-only role has no gpuPerPod to scale from.
+    const roles = profile.roles.filter((r) =>
+      scoped ? r.name === scoped : (r.gpuPerPod ?? 0) > 0,
+    );
+    if (roles.length === 0) return null;
+    // One count is written to one override, so every role it feeds must agree
+    // on the vendor and the cards per Pod.
+    const vendors = new Set(roles.map((r) => roleVendor(r.name)));
+    const perPod = new Set(roles.map((r) => r.gpuPerPod));
+    if (vendors.size !== 1 || perPod.size !== 1) return null;
+    const vendor = [...vendors][0];
+    const gpuPerPod = [...perPod][0];
+    // A templated gpuPerPod (`{{ overrides.tpSize }}`) reaches this projection
+    // unresolved; without a concrete number there is nothing to scale by.
+    if (typeof vendor !== "string" || typeof gpuPerPod !== "number" || gpuPerPod <= 0) return null;
+    const eligible = allNodes.filter((n) => roles.every((r) => roleNodeMatches(r.name, n)));
+    const fabrics: RdmaFabric[] = [];
+    for (const fabric of RDMA_FABRICS) {
+      const nodes = eligible.filter((n) => (n.allocatable?.rdma[fabric.id] ?? 0) > 0);
+      if (nodes.length === 0) continue;
+      const rdma = nodes.reduce((sum, n) => sum + (n.allocatable?.rdma[fabric.id] ?? 0), 0);
+      const gpu = nodes.reduce((sum, n) => sum + (n.allocatable?.gpu[vendor] ?? 0), 0);
+      if (gpu <= 0) continue;
+      const value = Math.floor((rdma * gpuPerPod) / gpu);
+      if (value > 0) fabrics.push({ id: fabric.id, resource: fabric.resource, value });
+    }
+    return fabrics;
+  };
+
+  // The fabric the wizard injects without the user touching the field:
+  // InfiniBand when the nodes offer it, otherwise the only available fabric.
+  // A profile default is the site's own choice and wins; an empty default —
+  // "" or [] — is "nothing declared", so the wizard still picks.
+  const autoOverrideValue = (o: OverrideDecl): OverrideValue | undefined => {
+    if (draft.overrides[o.name] !== undefined) return undefined;
+    const declared = o.default;
+    const hasDefault = !(
+      declared === null ||
+      declared === undefined ||
+      declared === "" ||
+      (Array.isArray(declared) && declared.length === 0)
+    );
+    if (hasDefault) return undefined;
+    const fabrics = rdmaFabrics(o);
+    if (!fabrics) return undefined;
+    const preferred =
+      fabrics.find((f) => f.id === "infiniband") ?? (fabrics.length === 1 ? fabrics[0] : undefined);
+    return preferred ? fabricOverrideValue(o, preferred) : undefined;
+  };
+
+  // What an input shows and what the summary reports: the user's choice, else
+  // the wizard's auto-injected fabric, else the profile default.
+  const overrideValue = (o: OverrideDecl): OverrideValue => {
+    const auto = autoOverrideValue(o);
+    return auto !== undefined ? auto : declaredOverrideValue(o);
+  };
+
+  // The fabric chosen for the same scope as a nodeSelector override: a
+  // service-level selector follows extendedResources, a role-scoped one
+  // follows <role>_extendedResources and falls back to the service-level
+  // fabric (the PD profiles declare the fabric once for both roles). A node
+  // that does not advertise it cannot run the Pod, so it does not belong in
+  // the picker.
+  const selectedNodeFabric = (decl: OverrideDecl): RdmaFabricId | null => {
+    if (!profile || !isNodeSelectorOverride(decl)) return null;
+    const scoped = decl.name.endsWith("_nodeSelector")
+      ? decl.name.slice(0, -"_nodeSelector".length)
+      : null;
+    const ext =
+      (scoped && profile.overrides.find((o) => o.name === `${scoped}_extendedResources`)) ||
+      profile.overrides.find((o) => o.name === "extendedResources");
+    if (!ext) return null;
+    const fabric = rdmaFabricOf(overrideValue(ext));
+    return fabric === "" ? null : fabric;
+  };
+
+  const overrideInput = (o: OverrideDecl) => {
+    const fabric = selectedNodeFabric(o);
+    return (
+      // In PD separation the service-level extendedResources sits beside the
+      // role grid; give it the whole row there. A standard profile keeps the
+      // ordinary half row alongside its other overrides.
+      <Box
+        key={o.name}
+        sx={
+          o.name === "extendedResources" && profile?.servingMode === "pd-separation"
+            ? { gridColumn: "1 / -1" }
+            : undefined
+        }
+      >
+        <OverrideInput
+          decl={o}
+          value={overrideValue(o)}
+          nodes={allNodes.filter(
+            (n) =>
+              nodeMatchesSelectedModel(o, n) &&
+              (!fabric || (n.allocatable?.rdma[fabric] ?? 0) > 0),
+          )}
+          anyNodes={allNodes.length > 0}
+          fabrics={rdmaFabrics(o)}
+          onChange={(v) => setDraft((prev) => ({ ...prev, overrides: { ...prev.overrides, [o.name]: v } }))}
+        />
+      </Box>
+    );
+  };
 
   const next = () => {
     if (step === 1) {
       if (!step1Valid) {
         setNameError(!nameValid || nameTaken);
+        setNamespaceError(!effectiveNamespace || !newNamespaceValid);
         return;
       }
       setNameError(false);
+      setNamespaceError(false);
     } else if (step === 2 && !step2Valid) {
       return; // model is required to proceed
     }
@@ -1689,32 +1878,55 @@ function DeployWizard({
   };
 
   const create = () => {
+    setNamespaceError(!effectiveNamespace || !newNamespaceValid);
+    if (!step1Valid) return;
     setCreateBusy(true);
     setCreateError(null);
-    const timeout = parseInt(draft.timeout, 10);
-    const idleTimeout = parseInt(draft.idleTimeout, 10);
+    // Profile defaults stay implicit (the operator applies them), but a
+    // fabric the wizard auto-selected is the wizard's own injection: it must
+    // travel in spec.overrides.
+    const overrides = { ...draft.overrides };
+    if (profile) {
+      for (const o of profile.overrides) {
+        const auto = autoOverrideValue(o);
+        if (auto !== undefined) overrides[o.name] = auto;
+      }
+    }
     const body = {
-      namespace: draft.namespace,
+      namespace: effectiveNamespace,
       name: draft.name.trim(),
       profileRef: draft.profileRef,
       modelRef: draft.modelRef,
-      overrides: draft.overrides,
-      route: {
-        publish: draft.publish,
-        modelName: draft.modelName.trim(),
-        timeoutSeconds: Number.isFinite(timeout) ? timeout : 0,
-        idleTimeoutSeconds: Number.isFinite(idleTimeout) ? idleTimeout : 300,
-      },
+      overrides,
+      route: { aigatewayRouter: draft.aigatewayRouter, modelName: draft.modelName.trim(), paths: draft.paths },
     };
-    apiFetch("/api/inferenceservices", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    })
+    // The namespace first, then the service in it: the wizard no longer offers
+    // a tenant namespace, so the one the user names here may not exist yet. The
+    // route answers 200 for one that does, which is what lets the same field
+    // deploy into an existing tenant namespace by name.
+    (newNamespace
+      ? apiFetch("/api/namespaces", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: effectiveNamespace }),
+        }).then(async (res) => {
+          if (res.ok) return;
+          const data = (await res.json().catch(() => ({}))) as ValidationErrorBody;
+          throw new Error(validationMessage(t, data, res.status, "inf"));
+        })
+      : Promise.resolve()
+    )
+      .then(() =>
+        apiFetch("/api/inferenceservices", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }),
+      )
       .then(async (res) => {
         const data = (await res.json().catch(() => ({}))) as ValidationErrorBody & { name?: string };
         if (!res.ok) throw new Error(validationMessage(t, data, res.status, "inf"));
-        onCreated(draft.namespace, data.name ?? draft.name.trim());
+        onCreated(effectiveNamespace, data.name ?? draft.name.trim());
       })
       .catch((err: Error) => setCreateError(err.message))
       .finally(() => setCreateBusy(false));
@@ -1778,16 +1990,53 @@ function DeployWizard({
                     fullWidth
                     autoFocus
                     value={draft.name}
-                    onChange={(e) => setField("name", e.target.value)}
+                    onChange={(e) => {
+                      const name = e.target.value;
+                      setDraft((prev) => ({
+                        ...prev,
+                        name,
+                        // Publishing is always on, and the catalog needs a model
+                        // name. The service name is the natural default — it
+                        // already satisfies the catalog name contract (a DNS
+                        // label). A model name the user typed is never
+                        // overwritten.
+                        modelName: prev.modelName === "" || prev.modelName === prev.name ? name : prev.modelName,
+                      }));
+                    }}
                     placeholder="e.g. dsv4-flash-serve"
                   />
                 </WizField>
-                <WizField label={t("inf.deploy.namespace")}>
-                  <Select size="small" fullWidth data-od-id="deploy-namespace" value={draft.namespace} onChange={(e) => setField("namespace", e.target.value)}>
+                <WizField
+                  label={t("inf.deploy.namespace")}
+                  error={namespaceError}
+                  errorText={t("inf.deploy.errNamespaceName")}
+                >
+                  <Select
+                    size="small"
+                    fullWidth
+                    data-od-id="deploy-namespace"
+                    value={newNamespace ? NEW_NAMESPACE : draft.namespace}
+                    onChange={(e) => changeNamespace(e.target.value)}
+                  >
                     {(options?.namespaces ?? []).map((n) => (
                       <MenuItem key={n.name} value={n.name}>{n.name}</MenuItem>
                     ))}
+                    <MenuItem value={NEW_NAMESPACE} data-od-id="deploy-namespace-new">
+                      {t("inf.deploy.namespaceNew")}
+                    </MenuItem>
                   </Select>
+                  {newNamespace && (
+                    <TextField
+                      size="small"
+                      fullWidth
+                      autoFocus
+                      data-od-id="deploy-namespace-name"
+                      value={newNamespaceName}
+                      onChange={(e) => setNewNamespaceName(e.target.value)}
+                      placeholder={t("inf.deploy.namespaceNewPh")}
+                      sx={{ mt: "8px" }}
+                    />
+                  )}
                 </WizField>
                 <WizField label={t("inf.deploy.profile")} hint={profile ? profileSummary(profile) : undefined}>
                   <Select size="small" fullWidth value={draft.profileRef} onChange={(e) => setDraft((prev) => ({ ...prev, profileRef: e.target.value, modelRef: "", overrides: {} }))}>
@@ -1896,39 +2145,49 @@ function DeployWizard({
                 )}
 
                 <Box sx={{ mt: 3, border: 1, borderColor: "divider", borderRadius: "var(--radius)", p: "14px" }}>
-                  <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                    <Typography sx={{ fontSize: 12.5, fontWeight: 600 }}>{t("inf.deploy.route")}</Typography>
-                    <Switch
-                      checked={draft.publish}
-                      onChange={(e) => {
-                        const publish = e.target.checked;
-                        setDraft((prev) => ({
-                          ...prev,
-                          publish,
-                          // Publishing joins the model catalog, which needs a
-                          // model name. The service name is the natural default:
-                          // it already satisfies the catalog name contract (a
-                          // DNS label) and names this service's model. A name
-                          // the user typed is never overwritten.
-                          modelName:
-                            publish && prev.modelName.trim() === "" ? prev.name.trim() : prev.modelName,
-                        }));
-                      }}
-                    />
+                  <Typography sx={{ fontSize: 12.5, fontWeight: 600 }}>{t("inf.deploy.route")}</Typography>
+                  <Box sx={{ mt: "12px", display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
+                    <WizField label={t("inf.deploy.modelName")} hint={t("inf.deploy.modelNameHint")}>
+                      <TextField data-od-id="deploy-model-name" size="small" fullWidth value={draft.modelName} onChange={(e) => setField("modelName", e.target.value)} />
+                    </WizField>
+                    <WizField label={t("inf.deploy.aigatewayRouter")} hint={t("inf.deploy.aigatewayRouterHint")}>
+                      <Select
+                        size="small"
+                        fullWidth
+                        data-od-id="deploy-aigateway-router"
+                        value={draft.aigatewayRouter}
+                        onChange={(e) => setField("aigatewayRouter", e.target.value as AIGatewayRouter)}
+                      >
+                        <MenuItem value={AIGATEWAY_ROUTER_PRIVATE}>{t("inf.deploy.aigatewayRouterPrivate")}</MenuItem>
+                        <MenuItem value={AIGATEWAY_ROUTER_PUBLIC}>{t("inf.deploy.aigatewayRouterPublic")}</MenuItem>
+                      </Select>
+                    </WizField>
                   </Box>
-                  {draft.publish && (
-                    <Box sx={{ mt: "12px", display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
-                      <WizField label={t("inf.deploy.modelName")} hint={t("inf.deploy.modelNameHint")}>
-                        <TextField data-od-id="deploy-model-name" size="small" fullWidth value={draft.modelName} onChange={(e) => setField("modelName", e.target.value)} />
-                      </WizField>
-                      <WizField label={t("inf.deploy.timeout")} hint="0–86400 s">
-                        <TextField size="small" fullWidth type="number" value={draft.timeout} onChange={(e) => setField("timeout", e.target.value)} />
-                      </WizField>
-                      <WizField label={t("inf.deploy.idleTimeout")} hint="1–86400 s">
-                        <TextField size="small" fullWidth type="number" value={draft.idleTimeout} onChange={(e) => setField("idleTimeout", e.target.value)} />
-                      </WizField>
-                    </Box>
-                  )}
+                  <Box sx={{ mt: "12px" }}>
+                    <WizField label={t("inf.deploy.paths")} hint={t("inf.deploy.pathsHint")}>
+                      <Select
+                        multiple
+                        size="small"
+                        fullWidth
+                        data-od-id="deploy-catalog-paths"
+                        value={draft.paths}
+                        onChange={(e) => {
+                          const next = e.target.value as CatalogPath[];
+                          // A published model must expose at least one path,
+                          // so deselecting the last one is ignored.
+                          if (next.length > 0) setField("paths", next);
+                        }}
+                        renderValue={(selected) => (selected as CatalogPath[]).join(", ")}
+                      >
+                        {CATALOG_PATHS.map((path) => (
+                          <MenuItem key={path} value={path}>
+                            <Checkbox size="small" checked={draft.paths.includes(path)} sx={{ p: 0, pr: "8px" }} />
+                            {path}
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </WizField>
+                  </Box>
                 </Box>
               </Box>
             )}
@@ -1939,17 +2198,17 @@ function DeployWizard({
                 <Kvs
                   rows={[
                     [t("inf.deploy.name"), draft.name.trim()],
-                    [t("inf.deploy.namespace"), draft.namespace],
+                    [t("inf.deploy.namespace"), effectiveNamespace],
                     ["profileRef", draft.profileRef],
                     [t("inf.deploy.gpu"), gpuSummary],
                     ["modelRef", draft.modelRef],
                     ...(profile
                       ? profile.overrides.map((o) => {
                           const v = overrideValue(o);
-                          return [`${t("inf.deploy.override")} ${overrideDisplayName(o.name)}`, Array.isArray(v) ? v.join(", ") : String(v)] as [string, string];
+                          return [`${t("inf.deploy.override")} ${overrideDisplayName(o.name, t("inf.deploy.rdmaType"))}`, Array.isArray(v) ? v.join(", ") : String(v)] as [string, string];
                         })
                       : []),
-                    [t("inf.deploy.route"), draft.publish ? `${t("inf.params.published")} ${draft.modelName}` : t("inf.params.unpublished")],
+                    [t("inf.deploy.route"), `${t("inf.params.published")} · ${draft.aigatewayRouter === AIGATEWAY_ROUTER_PRIVATE ? t("inf.deploy.aigatewayRouterPrivate") : t("inf.deploy.aigatewayRouterPublic")} · ${draft.modelName} · ${draft.paths.join(" ")}`],
                   ]}
                 />
                 {createError ? (
@@ -2055,7 +2314,15 @@ function roleLabel(name: string): string {
 // label instead of an identifier: "prefill_metax_model" becomes "Prefill Metax
 // Model" and "cacheDitWarmup" becomes "Cache Dit Warmup". The raw name remains
 // the override key sent to the API and the data-od-id suffix.
-function overrideDisplayName(name: string): string {
+function overrideDisplayName(name: string, extendedResourcesLabel?: string): string {
+  // The extendedResources knob is the RDMA fabric choice; its CR field name
+  // is an implementation detail the reader should not have to decode.
+  if (
+    extendedResourcesLabel !== undefined &&
+    (name === "extendedResources" || name.endsWith("_extendedResources"))
+  ) {
+    return extendedResourcesLabel;
+  }
   return name
     .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
@@ -2063,6 +2330,58 @@ function overrideDisplayName(name: string): string {
     .filter(Boolean)
     .map((word) => word[0].toUpperCase() + word.slice(1))
     .join(" ");
+}
+
+// An extendedResources override carries the RDMA fabric as one name=count
+// pair. The resource names are the operator's defaults
+// (--rdma-ib-resource / --rdma-roce-resource); a site that renames them keeps
+// the free-text input rather than getting a picker that writes the wrong key.
+const RDMA_FABRICS = [
+  { id: "infiniband", resource: "rdma/ib_shared_devices" },
+  { id: "roce", resource: "rdma/roce_shared_devices" },
+] as const;
+type RdmaFabricId = (typeof RDMA_FABRICS)[number]["id"];
+
+/** One fabric the wizard can inject, with the count derived from the nodes. */
+interface RdmaFabric {
+  id: RdmaFabricId;
+  resource: string;
+  value: number;
+}
+
+function isExtendedResourcesOverride(decl: Pick<OverrideDecl, "name" | "type">): boolean {
+  return (
+    (decl.type === "string" || decl.type === "stringList") &&
+    (decl.name === "extendedResources" || decl.name.endsWith("_extendedResources"))
+  );
+}
+
+/**
+ * The fabric an extendedResources value names: "" for none, null when it names
+ * something the picker cannot represent (several pairs, another resource). The
+ * generic input takes over in the null case, exactly as it does for a
+ * multi-pair nodeSelector.
+ */
+function rdmaFabricOf(value: OverrideValue): "" | RdmaFabricId | null {
+  let raw: unknown = value;
+  if (Array.isArray(raw)) {
+    if (raw.length === 0) return "";
+    if (raw.length !== 1) return null;
+    raw = raw[0];
+  }
+  if (typeof raw !== "string") return null;
+  const pair = raw.trim();
+  if (pair === "") return "";
+  if (pair.includes(",")) return null;
+  const eq = pair.indexOf("=");
+  if (eq < 0) return null;
+  return RDMA_FABRICS.find((f) => f.resource === pair.slice(0, eq).trim())?.id ?? null;
+}
+
+/** The override value a fabric choice writes. */
+function fabricOverrideValue(decl: Pick<OverrideDecl, "type">, fabric: RdmaFabric): OverrideValue {
+  const pair = `${fabric.resource}=${fabric.value}`;
+  return decl.type === "stringList" ? [pair] : pair;
 }
 
 // A nodeSelector override pins one node. The wizard lists the cluster's
@@ -2111,6 +2430,7 @@ function OverrideInput({
   onChange,
   nodes,
   anyNodes,
+  fabrics,
 }: {
   decl: OverrideDecl;
   value: OverrideValue;
@@ -2118,6 +2438,8 @@ function OverrideInput({
   nodes: Array<{ name: string }>;
   /** Whether the cluster offered any node at all; `nodes` may be filtered to none. */
   anyNodes: boolean;
+  /** RDMA fabrics derived from the nodes; null for overrides this is not about. */
+  fabrics?: RdmaFabric[] | null;
 }) {
   const { t } = useI18n();
   // The picker is filtered to the role's selected GPU model; when that leaves
@@ -2128,12 +2450,46 @@ function OverrideInput({
       : decl.description ?? undefined;
   if (decl.type === "boolean") {
     return (
-      <WizField label={overrideDisplayName(decl.name)} hint={decl.description ?? undefined}>
+      <WizField label={overrideDisplayName(decl.name, t("inf.deploy.rdmaType"))} hint={decl.description ?? undefined}>
         <Switch checked={Boolean(value)} data-od-id={`override-${decl.name}`} onChange={(e) => onChange(e.target.checked)} />
       </WizField>
     );
   }
-  const label = `${overrideDisplayName(decl.name)}${decl.min !== null && decl.max !== null ? ` (${decl.min}–${decl.max})` : ""}`;
+  const label = `${overrideDisplayName(decl.name, t("inf.deploy.rdmaType"))}${decl.min !== null && decl.max !== null ? ` (${decl.min}–${decl.max})` : ""}`;
+  // extendedResources gets a fabric picker when the nodes advertise at least
+  // one. The picker lists only real fabrics — there is no "none" entry, and a
+  // profile with nothing to offer keeps the generic input, empty. The generic
+  // input also takes over when the current value is one the picker cannot
+  // express (several pairs, another resource, a fabric these nodes do not
+  // advertise), so a profile's own value is never silently replaced.
+  const fabric = fabrics && fabrics.length > 0 ? rdmaFabricOf(value) : null;
+  const fabricOffered =
+    fabric === "" || (fabric !== null && fabrics?.some((f) => f.id === fabric));
+  if (fabric !== null && fabrics && fabricOffered) {
+    const options = fabrics;
+    const fabricLabel = (id: RdmaFabricId): string => (id === "roce" ? "RoCE" : "InfiniBand");
+    return (
+      <WizField label={label} hint={decl.description ?? t("inf.deploy.rdmaHint")}>
+        <Select
+          size="small"
+          fullWidth
+          displayEmpty
+          value={fabric}
+          data-od-id={`override-${decl.name}`}
+          onChange={(e) => {
+            const chosen = options.find((f) => f.id === e.target.value);
+            if (chosen) onChange(fabricOverrideValue(decl, chosen));
+          }}
+        >
+          {options.map((f) => (
+            <MenuItem key={f.id} value={f.id}>
+              {fabricLabel(f.id)}
+            </MenuItem>
+          ))}
+        </Select>
+      </WizField>
+    );
+  }
   if (decl.type === "stringList") {
     const list = Array.isArray(value) ? value : [];
     const nodeNames = isNodeSelectorOverride(decl) ? pinnedNodes(value) : null;

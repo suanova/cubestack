@@ -1,0 +1,44 @@
+# L1 validation for DevEnvironment (#252): metadata.name must be a DNS-1035 label
+# of at most 63 characters (CREATE).
+#
+# The controller names the environment's Service, StatefulSet, NetworkPolicy and
+# routes after metadata.name, and uses it as the value of the workload label. A
+# Service name is a DNS-1035 label and a label value is capped at 63 characters,
+# so a name admitted as a DNS-1123 subdomain ("my.env", "9lives", 64 characters)
+# is rejected by the API server on the Service write — before the reconcile
+# reaches the status write that would report it. Refusing the name at create
+# time makes that an answer the user reads rather than a reconcile that loops
+# without status.
+#
+# Enforced on CREATE only, like the ModelVersion and InferenceRuntimeProfile
+# name rules: a pre-existing object whose name does not satisfy the rule must
+# stay updatable for metadata changes.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: devenvironments-ai-cubestack-io
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: ["ai.cubestack.io"]
+      apiVersions: ["v1alpha1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["devenvironments"]
+  validations:
+  - expression: "request.operation != 'CREATE' || object.metadata.name.size() <= 63"
+    message: "metadata.name must be at most 63 characters: the environment's Service and its workload label are named after it"
+    reason: Invalid
+  # No escapes in the class, so no [.]-style workaround as in
+  # inferenceruntimeprofile_policy.yaml.
+  - expression: "request.operation != 'CREATE' || object.metadata.name.matches('^[a-z]([-a-z0-9]*[a-z0-9])?$')"
+    message: "metadata.name must be a DNS-1035 label: lowercase letters, digits and '-', starting with a letter"
+    reason: Invalid
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: devenvironments-ai-cubestack-io-binding
+spec:
+  policyName: devenvironments-ai-cubestack-io
+  validationActions: [Deny]

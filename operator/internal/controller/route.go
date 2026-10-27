@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -47,12 +46,6 @@ const (
 	RouteGatewayNotConfigured   = "GatewayNotConfigured"
 	RouteGatewayNotAccepted     = "GatewayNotAccepted"
 	RouteAgentRouterUnavailable = "AgentRouterUnavailable"
-	// RouteCatalogNotFound is reported when the platform's pre-installed shared
-	// catalog route does not exist. Unlike the per-service routes the previous
-	// design created, the shared route is owned by the platform, not the
-	// operator, so a missing one is a deployment prerequisite, not something the
-	// controller creates.
-	RouteCatalogNotFound = "CatalogRouteNotFound"
 	// RouteCatalogFull is reported when adding this service's rule would put the
 	// shared route over its rule cap (catalogRuleMax).
 	RouteCatalogFull = "CatalogFull"
@@ -60,22 +53,43 @@ const (
 
 // routeCheck reports the route-publish outcome.
 type routeCheck struct {
-	Reason string // NotPublished | ModelNameConflict | GatewayNotConfigured | CatalogRouteNotFound | CatalogFull | EndpointNotReady | AgentRouterUnavailable | GatewayNotAccepted | ""
+	Reason string // NotPublished | ModelNameConflict | GatewayNotConfigured | CatalogFull | EndpointNotReady | AgentRouterUnavailable | GatewayNotAccepted | ""
 	Err    error  // API-level failure
 }
 
 // Kinds, API groups and the fixed fields of the Agent Router catalog objects a
 // published service owns: the Envoy Gateway Backend naming the endpoint pool,
-// the AIServiceBackend declaring the upstream schema and referencing that
-// Backend, and the ReferenceGrant authorising the shared catalog route (in the
-// Gateway's namespace) to reference this service's AIServiceBackend across
-// namespaces. The Backend type, weight, priority and modelsOwnedBy are spelled
+// two AIServiceBackends declaring the upstream schema over that Backend (one
+// OpenAI, one Anthropic), and the ReferenceGrant authorising both cross-namespace
+// hops: the shared catalog route (in the Gateway's namespace) referencing either
+// AIServiceBackend, and the child HTTPRoute it expands into referencing the
+// Backend. The Backend type, weight, priority and modelsOwnedBy are spelled
 // explicitly so the API server's defaults never read as drift.
+//
+// Both AIServiceBackends carry traffic, each behind its own rule: the
+// Anthropic-schema one serves native Anthropic clients on /v1/messages (see
+// anthropicRuleFor), the OpenAI-schema one serves everything else —
+// /v1/chat/completions, /v1/completions, /v1/responses and
+// /v1/images/generations pass through, and /v1/messages without an
+// anthropic-version header is translated Anthropic→OpenAI. The plain
+// OpenAI-paths HTTPRoute this operator used to maintain is retired: it reached
+// the Backend directly, bypassing the route-level ext_proc configuration, and
+// the listener-wide ext_proc then buffered every response (streamed replies
+// arrived as one block, and a 300s stream idle timeout cut long generations).
 const (
 	envoyGatewayAPIGroup = "gateway.envoyproxy.io"
 	egBackendKind        = "Backend"
 	aiModelHeaderName    = "x-ai-eg-model"
-	catalogOwnedBy       = "CubeStack"
+	// anthropicVersionHeaderName is sent by every Anthropic SDK on every call
+	// and by no OpenAI client, so it tells the two client families apart
+	// without changing the request: native Anthropic traffic takes the
+	// Anthropic-schema backend, everything else the OpenAI one.
+	anthropicVersionHeaderName = "anthropic-version"
+	// anthropicVersionValue is the only value the Anthropic API defines for that
+	// header today; clients pinned to a future version string fall back to the
+	// translated OpenAI rule, which still serves them.
+	anthropicVersionValue = "2023-06-01"
+	catalogOwnedBy        = "CubeStack"
 	// catalogRuleMax is the AIGatewayRoute rule cap: the CRD allows at most 15
 	// rules (one slot is reserved for the controller's catch-all), so a shared
 	// route can hold at most this many published models.
@@ -83,9 +97,36 @@ const (
 )
 
 // Names of the catalog objects a published service owns.
-func backendName(isvc *aiv1alpha1.InferenceService) string          { return isvc.Name + "-endpoint" }
-func aiServiceBackendName(isvc *aiv1alpha1.InferenceService) string { return isvc.Name + "-backend" }
-func referenceGrantName(isvc *aiv1alpha1.InferenceService) string   { return isvc.Name + "-grant" }
+func backendName(isvc *aiv1alpha1.InferenceService) string { return isvc.Name + "-endpoint" }
+func aiServiceBackendName(isvc *aiv1alpha1.InferenceService) string {
+	return isvc.Name + "-backend"
+}
+func anthropicServiceBackendName(isvc *aiv1alpha1.InferenceService) string {
+	return isvc.Name + "-anthropic"
+}
+func referenceGrantName(isvc *aiv1alpha1.InferenceService) string { return isvc.Name + "-grant" }
+
+// openAIPathsRouteName is the shared plain HTTPRoute that serves the OpenAI
+// paths of the named catalog route. It lives beside the AIGatewayRoute in
+// GatewayNamespace and is maintained in full by the operator.
+func openAIPathsRouteName(route aiv1alpha1.AIGatewayRouterName) string {
+	if route == aiv1alpha1.AIGatewayRouterPrivate {
+		return "cubestack-openai-paths-private"
+	}
+	return "cubestack-openai-paths"
+}
+
+// catalogPathsServed reports whether a service publishes at least one catalog
+// path. Any exposed path needs the catalog rule: the AIGatewayRoute is the only
+// surface that carries traffic now, whatever the path.
+func catalogPathsServed(isvc *aiv1alpha1.InferenceService) bool {
+	return len(isvc.Spec.Route.ExposedPaths()) > 0
+}
+
+// sharedRouteLabels are the labels the two shared catalog surfaces carry.
+func sharedRouteLabels() map[string]string {
+	return map[string]string{managedByLabelKey: managedByValue}
+}
 
 // routeLabels are the labels every catalog object carries.
 func routeLabels(isvc *aiv1alpha1.InferenceService) map[string]string {
@@ -115,13 +156,25 @@ func (r *InferenceServiceReconciler) desiredBackend(isvc *aiv1alpha1.InferenceSe
 	return backend
 }
 
-// desiredAIServiceBackend builds the AIServiceBackend declaring the upstream
-// schema (OpenAI: the model servers are vLLM) and referencing the Backend.
+// desiredAIServiceBackend builds the AIServiceBackend declaring the OpenAI
+// upstream schema (the model servers are vLLM) and referencing the Backend.
 func (r *InferenceServiceReconciler) desiredAIServiceBackend(isvc *aiv1alpha1.InferenceService) *aigwv1beta1.AIServiceBackend {
+	return r.desiredAIServiceBackendFor(isvc, aiServiceBackendName(isvc), aigwv1beta1.APISchemaOpenAI)
+}
+
+// desiredAnthropicAIServiceBackend builds a second AIServiceBackend over the
+// same Backend, declaring the Anthropic schema. The schema is a property of the
+// AIServiceBackend, so the Anthropic surface cannot share the OpenAI object;
+// one per published service is what lets the Agent Router serve /v1/messages.
+func (r *InferenceServiceReconciler) desiredAnthropicAIServiceBackend(isvc *aiv1alpha1.InferenceService) *aigwv1beta1.AIServiceBackend {
+	return r.desiredAIServiceBackendFor(isvc, anthropicServiceBackendName(isvc), aigwv1beta1.APISchemaAnthropic)
+}
+
+func (r *InferenceServiceReconciler) desiredAIServiceBackendFor(isvc *aiv1alpha1.InferenceService, name string, schema aigwv1beta1.APISchema) *aigwv1beta1.AIServiceBackend {
 	sb := &aigwv1beta1.AIServiceBackend{
-		ObjectMeta: metav1.ObjectMeta{Name: aiServiceBackendName(isvc), Namespace: isvc.Namespace, Labels: routeLabels(isvc)},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: isvc.Namespace, Labels: routeLabels(isvc)},
 		Spec: aigwv1beta1.AIServiceBackendSpec{
-			APISchema: aigwv1beta1.VersionedAPISchema{Name: aigwv1beta1.APISchemaOpenAI},
+			APISchema: aigwv1beta1.VersionedAPISchema{Name: schema},
 			BackendRef: gatewayv1.BackendObjectReference{
 				Group: ptr(gatewayv1.Group(envoyGatewayAPIGroup)),
 				Kind:  ptr(gatewayv1.Kind(egBackendKind)),
@@ -134,48 +187,86 @@ func (r *InferenceServiceReconciler) desiredAIServiceBackend(isvc *aiv1alpha1.In
 }
 
 // desiredReferenceGrant builds the ReferenceGrant, in the service's namespace,
-// that authorises the shared catalog AIGatewayRoute (in the Gateway's
-// namespace) to reference this service's AIServiceBackend — the route's
-// backendRef is what crosses the namespace boundary, the Gateway itself never
-// names the AIServiceBackend. The grant's `to` names only the
-// AIServiceBackend; the Backend is referenced by a same-namespace
-// AIServiceBackend and needs none.
+// that authorises every cross-namespace reference the catalog makes to this
+// service's objects. Two hops cross the boundary, and a ReferenceGrant allows
+// every (from, to) pair it lists, so one object carries both:
+//
+//   - the shared catalog AIGatewayRoute (in the Gateway's namespace) references
+//     this service's two AIServiceBackends — the route's backendRef;
+//   - the child HTTPRoute the Agent Router expands that route into (same
+//     namespace) references this service's Envoy Gateway Backend — it backs the
+//     AIServiceBackends, and without the grant the child route is accepted but
+//     ResolvedRefs=False/RefNotPermitted, so every request to the model fails.
+//
+// Both AIServiceBackends and the Backend are named, so a service's grant never
+// authorises another service's objects. The AIServiceBackend entries are what
+// keep the grant valid across a switch between the OpenAI and Anthropic rules.
 func (r *InferenceServiceReconciler) desiredReferenceGrant(isvc *aiv1alpha1.InferenceService) *gatewayv1.ReferenceGrant {
 	grant := &gatewayv1.ReferenceGrant{
 		ObjectMeta: metav1.ObjectMeta{Name: referenceGrantName(isvc), Namespace: isvc.Namespace, Labels: routeLabels(isvc)},
 		Spec: gatewayv1.ReferenceGrantSpec{
-			From: []gatewayv1.ReferenceGrantFrom{{
-				Group:     gatewayv1.Group(aigwv1beta1.GroupName),
-				Kind:      gatewayv1.Kind("AIGatewayRoute"),
-				Namespace: gatewayv1.Namespace(r.GatewayNamespace),
-			}},
-			To: []gatewayv1.ReferenceGrantTo{{
-				Group: gatewayv1.Group(aigwv1beta1.GroupName),
-				Kind:  gatewayv1.Kind("AIServiceBackend"),
-				Name:  ptr(gatewayv1.ObjectName(aiServiceBackendName(isvc))),
-			}},
+			From: []gatewayv1.ReferenceGrantFrom{
+				{
+					Group:     gatewayv1.Group(aigwv1beta1.GroupName),
+					Kind:      gatewayv1.Kind("AIGatewayRoute"),
+					Namespace: gatewayv1.Namespace(r.GatewayNamespace),
+				},
+				{
+					Group:     gatewayv1.Group(gatewayAPIGroup),
+					Kind:      gatewayv1.Kind("HTTPRoute"),
+					Namespace: gatewayv1.Namespace(r.GatewayNamespace),
+				},
+			},
+			To: []gatewayv1.ReferenceGrantTo{
+				{
+					Group: gatewayv1.Group(aigwv1beta1.GroupName),
+					Kind:  gatewayv1.Kind("AIServiceBackend"),
+					Name:  ptr(gatewayv1.ObjectName(aiServiceBackendName(isvc))),
+				},
+				{
+					Group: gatewayv1.Group(aigwv1beta1.GroupName),
+					Kind:  gatewayv1.Kind("AIServiceBackend"),
+					Name:  ptr(gatewayv1.ObjectName(anthropicServiceBackendName(isvc))),
+				},
+				{
+					Group: gatewayv1.Group(envoyGatewayAPIGroup),
+					Kind:  gatewayv1.Kind(egBackendKind),
+					Name:  ptr(gatewayv1.ObjectName(backendName(isvc))),
+				},
+			},
 		},
 	}
 	_ = ctrl.SetControllerReference(isvc, grant, r.Scheme)
 	return grant
 }
 
-// catalogRuleFor builds the one rule of the shared catalog route this service
-// contributes: a match on the catalog model name — set by the Agent Router's
-// ext_proc from the request body's "model" field and injected as the
-// x-ai-eg-model header — routing to the service's backend (in its namespace,
-// hence the explicit Namespace and the ReferenceGrant) with the engine's served
-// model name written back over it. The per-service timeouts and the owned-by
-// tag ride on the rule, as the shared route is a single object.
-func (r *InferenceServiceReconciler) catalogRuleFor(isvc *aiv1alpha1.InferenceService, modelName string) aigwv1beta1.AIGatewayRouteRule {
-	timeout := int64(0)
+// catalogRuleLimits reads the per-service timeouts that ride on every rule the
+// service contributes, as the shared route is a single object.
+func catalogRuleLimits(isvc *aiv1alpha1.InferenceService) (timeout, idle int64) {
 	if isvc.Spec.Route != nil && isvc.Spec.Route.TimeoutSeconds != nil {
 		timeout = *isvc.Spec.Route.TimeoutSeconds
 	}
-	idle := int64(300)
+	// 0 disables the idle cut: a long generation that occasionally pauses for
+	// longer than a fixed idle window would otherwise be killed mid-stream.
 	if isvc.Spec.Route != nil && isvc.Spec.Route.IdleTimeoutSeconds != nil {
 		idle = *isvc.Spec.Route.IdleTimeoutSeconds
 	}
+	return timeout, idle
+}
+
+// catalogRuleFor builds the OpenAI rule of the shared catalog route this service
+// contributes: a match on the catalog model name — set by the Agent Router's
+// ext_proc from the request body's "model" field and injected as the
+// x-ai-eg-model header — routing to the service's OpenAI-schema
+// AIServiceBackend (in its namespace, hence the explicit Namespace and the
+// ReferenceGrant) with the engine's served model name written back over it. The
+// OpenAI schema is what makes one rule enough for the whole catalog surface:
+// ext_proc passes /v1/chat/completions, /v1/responses and /v1/images through to
+// an OpenAI backend and translates /v1/messages into it. The per-service
+// timeouts and the owned-by tag ride on the rule, as the shared route is a
+// single object.
+func (r *InferenceServiceReconciler) catalogRuleFor(isvc *aiv1alpha1.InferenceService, modelName string) aigwv1beta1.AIGatewayRouteRule {
+	timeout, idle := catalogRuleLimits(isvc)
 	return aigwv1beta1.AIGatewayRouteRule{
 		Matches: []aigwv1beta1.AIGatewayRouteRuleMatch{{
 			Headers: []gatewayv1.HTTPHeaderMatch{{
@@ -197,10 +288,55 @@ func (r *InferenceServiceReconciler) catalogRuleFor(isvc *aiv1alpha1.InferenceSe
 	}
 }
 
+// anthropicRuleFor builds the native-Anthropic sibling rule: the same catalog
+// model name, plus a requirement that the anthropic-version header is present —
+// every Anthropic SDK sends it on every call and no OpenAI client does, so the
+// two client families are told apart without touching the request. It routes to
+// the service's Anthropic-schema AIServiceBackend, so /v1/messages reaches a
+// backend speaking that wire format natively: thinking blocks and cache_control
+// markers survive, where the translated OpenAI path would drop them.
+//
+// The match must be the more specific of the pair: the generated HTTPRoute
+// keeps rule order and Envoy takes the first match, so this rule is appended
+// before the service's OpenAI rule. An Anthropic-shaped request that carries no
+// anthropic-version header falls through to that rule and is translated, which
+// is exactly what it got before this rule existed.
+func (r *InferenceServiceReconciler) anthropicRuleFor(isvc *aiv1alpha1.InferenceService, modelName string) aigwv1beta1.AIGatewayRouteRule {
+	timeout, idle := catalogRuleLimits(isvc)
+	return aigwv1beta1.AIGatewayRouteRule{
+		Matches: []aigwv1beta1.AIGatewayRouteRuleMatch{{
+			Headers: []gatewayv1.HTTPHeaderMatch{
+				{
+					Type:  ptr(gatewayv1.HeaderMatchExact),
+					Name:  gatewayv1.HTTPHeaderName(aiModelHeaderName),
+					Value: isvc.Spec.Route.ModelName,
+				},
+				{
+					Type:  ptr(gatewayv1.HeaderMatchExact),
+					Name:  gatewayv1.HTTPHeaderName(anthropicVersionHeaderName),
+					Value: anthropicVersionValue,
+				},
+			},
+		}},
+		BackendRefs: []aigwv1beta1.AIGatewayRouteRuleBackendRef{
+			{
+				Name:              anthropicServiceBackendName(isvc),
+				Namespace:         ptr(gatewayv1.Namespace(isvc.Namespace)),
+				ModelNameOverride: modelName,
+				Weight:            ptr(int32(1)),
+				Priority:          ptr(uint32(0)),
+			},
+		},
+		Timeouts:          &gatewayv1.HTTPRouteTimeouts{Request: ptr(gatewayv1.Duration(fmt.Sprintf("%ds", timeout)))},
+		StreamIdleTimeout: ptr(gatewayv1.Duration(fmt.Sprintf("%ds", idle))),
+		ModelsOwnedBy:     ptr(catalogOwnedBy),
+	}
+}
+
 // catalogRuleLocator reports whether a rule belongs to this service: it is the
-// one whose first backendRef is this service's AIServiceBackend (namespace and
-// name). The locator is stable across modelName changes and unique per service,
-// unlike the rule name or the header value.
+// one whose first backendRef is this service's OpenAI-schema AIServiceBackend
+// (namespace and name). The locator is stable across modelName changes and
+// unique per service, unlike the rule name or the header value.
 func catalogRuleIsMine(rule aigwv1beta1.AIGatewayRouteRule, isvc *aiv1alpha1.InferenceService) bool {
 	if len(rule.BackendRefs) == 0 {
 		return false
@@ -238,114 +374,376 @@ func catalogRuleEqual(a, b aigwv1beta1.AIGatewayRouteRule) bool {
 	return apiequality.Semantic.DeepEqual(a, b)
 }
 
-// upsertCatalogRule adds or updates this service's rule in the shared catalog
-// route, leaving every other rule untouched. The shared route is one object
-// many services write to concurrently, so the mutation is optimistic: it reads
-// the route, applies the idempotent delta, and writes it back with the
-// resourceVersion it read; a 409 conflict re-reads and re-applies. Because each
-// service only ever touches its own rule, the retries converge. An unchanged
-// rule is left untouched: updating an identical object would bump the
-// resourceVersion and re-enqueue through the shared-route watch in a loop.
-//
-// The model-name uniqueness and rule-capacity checks run inside the retry
-// closure against the freshly read route, not against a snapshot taken earlier
-// in checkRoute: two services publishing at once with the same model name
-// would otherwise both pass a pre-check and the conflict retry would append
-// both rules, and the same race could push the route past its cap. When a
-// check fails the closure returns the matching sentinel so the caller maps it
-// to the condition reason instead of a hard error.
-func (r *InferenceServiceReconciler) upsertCatalogRule(ctx context.Context, isvc *aiv1alpha1.InferenceService, modelName string) error {
-	// No shared route configured: nothing to write, and building the addressing
-	// object with an empty name would reject every request. checkRoute reaches
-	// here only with a configured route, but the helper is shared with the
-	// removal path, so it guards on its own.
-	if r.CatalogRoute == "" {
-		return nil
+// catalogRulesEqual compares two rule sets positionally, with the same
+// modelsCreatedAt-blind equality as catalogRuleEqual.
+func catalogRulesEqual(a, b []aigwv1beta1.AIGatewayRouteRule) bool {
+	if len(a) != len(b) {
+		return false
 	}
-	desired := r.catalogRuleFor(isvc, modelName)
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		route := r.getSharedCatalogRoute()
-		if err := r.Get(ctx, client.ObjectKeyFromObject(route), route); err != nil {
-			return err
+	for i := range a {
+		if !catalogRuleEqual(a[i], b[i]) {
+			return false
 		}
-		// Re-validate against the current route on every attempt: the checks are
-		// only meaningful against the state we are about to write into.
-		if r.catalogModelNameTaken(route, isvc) {
-			return errCatalogModelNameTaken
-		}
-		if findCatalogRuleIndex(route.Spec.Rules, isvc) < 0 && len(route.Spec.Rules) >= catalogRuleMax {
-			return errCatalogRouteFull
-		}
-		idx := findCatalogRuleIndex(route.Spec.Rules, isvc)
-		if idx >= 0 {
-			if catalogRuleEqual(route.Spec.Rules[idx], desired) {
-				return nil // already there: no write
-			}
-			route.Spec.Rules[idx] = desired
-		} else {
-			route.Spec.Rules = append(route.Spec.Rules, desired)
-		}
-		return r.Update(ctx, route)
-	})
+	}
+	return true
 }
 
-// Sentinel errors from the shared-route write's optimistic retry, mapped to the
-// matching RouteReady reason by checkRoute. They are deliberately not API
-// errors: RetryOnConflict must not treat them as a 409 to back off and
-// re-run, and the caller must report them as a stable condition rather than
-// fail the reconcile.
-var (
-	errCatalogModelNameTaken = errors.New("catalog model name is claimed by another rule")
-	errCatalogRouteFull      = errors.New("shared catalog route is at its rule cap")
-)
+// sharedRuleSet is the complete set of rules the operator maintains in one
+// catalog surface, built from every published service attached to the route.
+// The two flags report why the service being reconciled, when known, did not
+// end up with its own rule.
+type sharedRuleSet struct {
+	ai        []aigwv1beta1.AIGatewayRouteRule
+	nameTaken bool // its model name is claimed by an earlier service
+	routeFull bool // its rules would exceed a shared route's rule cap
+}
 
-// removeCatalogRule deletes this service's rule from the shared catalog route.
-// A missing route or an absent rule is a no-op, so it is safe to call on every
-// unpublish and on the ISVC's deletion.
-func (r *InferenceServiceReconciler) removeCatalogRule(ctx context.Context, isvc *aiv1alpha1.InferenceService) error {
-	// No shared route configured: nothing to remove. This guard is what keeps
-	// the publish=false and deletion paths working on a reconciler that has no
-	// catalog route set — building the addressing object with an empty name
-	// would reject every request.
-	if r.CatalogRoute == "" {
+// desiredSharedRuleSet lists every published service on routeName and builds
+// the full rule set for the AIGatewayRoute. The operator owns the surface: the
+// rules are replaced wholesale, so a rule left behind by a deleted service or
+// added by hand disappears on the next pass.
+//
+// The list is filtered in memory rather than through the route index: the index
+// backs the watches, while this pass needs every field of every candidate and
+// runs against whatever client the reconciler holds.
+//
+// Services are ordered by creation time (then namespace/name), so the first
+// service to claim a catalog model name keeps it. A duplicate loses all of its
+// rules and reports a conflict. Each shared surface has its own rule cap — 15
+// for the AIGatewayRoute and 16 for the HTTPRoute, which spends one rule per
+// selected OpenAI path — and a service whose rules would overflow one is given
+// none of that surface's rules and reports the route full. The current
+// service, when non-nil, is matched by UID so a status echo lagging behind the
+// freshly resolved engine name does not build a stale override.
+func (r *InferenceServiceReconciler) desiredSharedRuleSet(ctx context.Context, routeName aiv1alpha1.AIGatewayRouterName, current *aiv1alpha1.InferenceService, currentModelName string) (*sharedRuleSet, error) {
+	var list aiv1alpha1.InferenceServiceList
+	if err := r.List(ctx, &list); err != nil {
+		return nil, err
+	}
+	slices.SortFunc(list.Items, func(a, b aiv1alpha1.InferenceService) int {
+		if c := a.CreationTimestamp.Compare(b.CreationTimestamp.Time); c != 0 {
+			return c
+		}
+		if c := strings.Compare(a.Namespace, b.Namespace); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
+	set := &sharedRuleSet{}
+	claimed := map[string]bool{}
+	for i := range list.Items {
+		svc := &list.Items[i]
+		if svc.Spec.Route == nil || !svc.Spec.Route.Published() || svc.Spec.Route.AIGatewayRouter != routeName || !svc.DeletionTimestamp.IsZero() {
+			continue
+		}
+		isCurrent := current != nil && svc.UID == current.UID
+		if !isCurrent {
+			// A service that has not reached a ready endpoint has no catalog
+			// objects yet. Its rule would reference a Backend the shared route
+			// cannot resolve, and one dangling reference rejects the whole route
+			// — taking every other service on it down. The current service is
+			// exempt: checkRoute applied its objects just before this pass, and
+			// the cached client may not observe the writes yet.
+			//
+			// The gate is object existence, not endpoint readiness, so a rule
+			// survives an endpoint going unready: its objects stay behind.
+			exists, err := r.catalogObjectsExist(ctx, svc)
+			if err != nil {
+				return nil, err
+			}
+			if !exists {
+				continue
+			}
+		}
+		modelName := ""
+		if svc.Status.Model != nil {
+			modelName = svc.Status.Model.Name
+		}
+		if isCurrent && currentModelName != "" {
+			modelName = currentModelName
+		}
+		if modelName == "" {
+			// The service's own reconcile fills the echo once it resolves the
+			// model; until then the catalog name is the honest fallback.
+			modelName = svc.Spec.Route.ModelName
+		}
+		if claimed[svc.Spec.Route.ModelName] {
+			if isCurrent {
+				set.nameTaken = true
+			}
+			continue
+		}
+		claimed[svc.Spec.Route.ModelName] = true
+		if catalogPathsServed(svc) {
+			// The native-Anthropic rule comes first: both rules match the same
+			// model name and Envoy takes the first match, so the more specific
+			// one (model + anthropic-version) has to be listed ahead of the
+			// catch-all OpenAI rule.
+			rules := make([]aigwv1beta1.AIGatewayRouteRule, 0, 2)
+			if svc.Spec.Route.Exposes(aiv1alpha1.CatalogPathMessages) {
+				rules = append(rules, r.anthropicRuleFor(svc, modelName))
+			}
+			rules = append(rules, r.catalogRuleFor(svc, modelName))
+			if len(set.ai)+len(rules) > catalogRuleMax {
+				if isCurrent {
+					set.routeFull = true
+				}
+			} else {
+				set.ai = append(set.ai, rules...)
+			}
+		}
+	}
+	return set, nil
+}
+
+// catalogObjectsExist reports whether the objects a rule references exist: the
+// Backend serving the OpenAI paths and the Anthropic-schema AIServiceBackend
+// serving /v1/messages. checkRoute creates them together once the service's
+// endpoint is ready, so a published service without them has never been
+// publishable.
+func (r *InferenceServiceReconciler) catalogObjectsExist(ctx context.Context, isvc *aiv1alpha1.InferenceService) (bool, error) {
+	backend := &egv1alpha1.Backend{}
+	err := r.Get(ctx, client.ObjectKey{Namespace: isvc.Namespace, Name: backendName(isvc)}, backend)
+	if apierrors.IsNotFound(err) || meta.IsNoMatchError(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	anthropic := &aigwv1beta1.AIServiceBackend{}
+	err = r.Get(ctx, client.ObjectKey{Namespace: isvc.Namespace, Name: anthropicServiceBackendName(isvc)}, anthropic)
+	if apierrors.IsNotFound(err) || meta.IsNoMatchError(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// syncSharedCatalogRoute rewrites both shared surfaces of one catalog route
+// from the current state of every published service, and rewrites the other
+// route's surfaces too: a service that has just moved must lose its rules from
+// the route it left. Concurrent services each write the same full set
+// optimistically; the retries and the no-write-on-equal check converge them.
+func (r *InferenceServiceReconciler) syncSharedCatalogRoute(ctx context.Context, routeName aiv1alpha1.AIGatewayRouterName, current *aiv1alpha1.InferenceService, currentModelName string) (*sharedRuleSet, error) {
+	set, err := r.syncRoutePair(ctx, routeName, current, currentModelName)
+	if err != nil {
+		return nil, err
+	}
+	for _, other := range catalogRouteNames {
+		if other == routeName {
+			continue
+		}
+		if _, err := r.syncRoutePair(ctx, other, nil, ""); err != nil {
+			return nil, err
+		}
+	}
+	return set, nil
+}
+
+// syncRoutePair rewrites the AIGatewayRoute of one catalog route from the
+// published services attached to it, and retires the plain OpenAI-paths
+// HTTPRoute that used to sit beside it. The plain surface is written with an
+// empty rule set: the object is deleted when this operator created it, and
+// otherwise left in the CRD's catch-all shape, so no path is captured ahead of
+// the AIGatewayRoute (a plain rule is a more specific match, and traffic taking
+// it never sees the route-level ext_proc configuration — streamed responses
+// come back buffered).
+func (r *InferenceServiceReconciler) syncRoutePair(ctx context.Context, routeName aiv1alpha1.AIGatewayRouterName, current *aiv1alpha1.InferenceService, currentModelName string) (*sharedRuleSet, error) {
+	set, err := r.desiredSharedRuleSet(ctx, routeName, current, currentModelName)
+	if err != nil {
+		return nil, err
+	}
+	if err := r.applyCatalogRoute(ctx, routeName, set.ai); err != nil {
+		return nil, err
+	}
+	if err := r.applyOpenAIPathsRoute(ctx, routeName, nil); err != nil {
+		return nil, err
+	}
+	return set, nil
+}
+
+// syncSharedCatalogRoutes rewrites both catalog surfaces of both known routes,
+// with no service being the subject. Unpublish and deletion use it: the
+// service's rules must disappear from whichever route held them, and the
+// remaining rules must survive.
+func (r *InferenceServiceReconciler) syncSharedCatalogRoutes(ctx context.Context) error {
+	if r.GatewayName == "" || r.GatewayNamespace == "" {
+		// No shared catalog surface is configured, so there is nothing this
+		// reconciler could have written to shed. Addressing the routes anyway
+		// would fail: the empty namespace fails a direct-client Get, and an
+		// empty Gateway name is rejected when a route would have to be created.
 		return nil
 	}
+	for _, routeName := range catalogRouteNames {
+		if _, err := r.syncRoutePair(ctx, routeName, nil, ""); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// applyCatalogRoute writes the full rule set to the named AIGatewayRoute,
+// creating the object when it does not exist yet and the set is not empty. An
+// unchanged set is left untouched: updating an identical object would bump the
+// resourceVersion and re-enqueue through the shared-route watch in a loop.
+func (r *InferenceServiceReconciler) applyCatalogRoute(ctx context.Context, routeName aiv1alpha1.AIGatewayRouterName, rules []aigwv1beta1.AIGatewayRouteRule) error {
+	if rules == nil {
+		rules = []aigwv1beta1.AIGatewayRouteRule{}
+	}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		route := r.getSharedCatalogRoute()
+		route := r.getCatalogRoute(routeName)
 		err := r.Get(ctx, client.ObjectKeyFromObject(route), route)
-		if apierrors.IsNotFound(err) || meta.IsNoMatchError(err) {
-			// Absent route, or a cluster serving no AIGatewayRoute CRD: there is
-			// no rule to remove. The latter also covers the deletion path, where
-			// a cluster without the Agent Router never had a rule to begin with.
+		if meta.IsNoMatchError(err) {
+			return nil // cluster serves no AIGatewayRoute CRD
+		}
+		if apierrors.IsNotFound(err) {
+			if len(rules) == 0 {
+				return nil // nothing to publish: leave the platform surface absent
+			}
+			if err := r.Create(ctx, r.desiredCatalogRoute(routeName, rules)); err != nil && !apierrors.IsAlreadyExists(err) {
+				return err
+			}
 			return nil
 		}
 		if err != nil {
 			return err
 		}
-		idx := findCatalogRuleIndex(route.Spec.Rules, isvc)
-		if idx < 0 {
+		if catalogRulesEqual(route.Spec.Rules, rules) {
 			return nil
 		}
-		route.Spec.Rules = slices.Delete(route.Spec.Rules, idx, idx+1)
+		route.Spec.Rules = rules
 		return r.Update(ctx, route)
 	})
 }
 
-// getSharedCatalogRoute returns an empty object addressing the platform's
-// pre-installed shared catalog route: the object the operator's published
-// services attach a rule to.
-func (r *InferenceServiceReconciler) getSharedCatalogRoute() *aigwv1beta1.AIGatewayRoute {
-	return &aigwv1beta1.AIGatewayRoute{ObjectMeta: metav1.ObjectMeta{Name: r.CatalogRoute, Namespace: r.GatewayNamespace}}
+// applyOpenAIPathsRoute writes the full rule set to the named shared HTTPRoute,
+// creating it when absent and the set is not empty. The platform may have
+// installed the object itself: its lifetime and other spec fields (hostnames,
+// parentRefs) are not the operator's, and only the rules are reconciled.
+func (r *InferenceServiceReconciler) applyOpenAIPathsRoute(ctx context.Context, routeName aiv1alpha1.AIGatewayRouterName, rules []gatewayv1.HTTPRouteRule) error {
+	if rules == nil {
+		rules = []gatewayv1.HTTPRouteRule{}
+	}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		route := r.getOpenAIPathsRoute(routeName)
+		err := r.Get(ctx, client.ObjectKeyFromObject(route), route)
+		if apierrors.IsNotFound(err) {
+			if len(rules) == 0 {
+				return nil // nothing to publish: leave the platform surface absent
+			}
+			if err := r.Create(ctx, r.desiredOpenAIPathsRoute(routeName, rules)); err != nil && !apierrors.IsAlreadyExists(err) {
+				return err
+			}
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if len(rules) == 0 {
+			// spec.rules must hold at least one rule, so "no rules" cannot be
+			// stored. Remove the surface only when this operator created it — the
+			// managed-by label it stamps at creation is that marker. A surface the
+			// platform installed predates the label and its lifetime is not ours
+			// to end: clear the rules it carries instead, or the last published
+			// service's backendRefs outlive the Backend objects cleanup deletes.
+			// Omitting the field stores the CRD's default catch-all rule, which
+			// references nothing; an object already in that state is left alone.
+			if route.Labels[managedByLabelKey] != managedByValue {
+				if rulesReferenceNothing(route.Spec.Rules) {
+					return nil
+				}
+				route.Spec.Rules = nil
+				return r.Update(ctx, route)
+			}
+			return client.IgnoreNotFound(r.Delete(ctx, route))
+		}
+		if apiequality.Semantic.DeepEqual(route.Spec.Rules, rules) {
+			return nil
+		}
+		route.Spec.Rules = rules
+		return r.Update(ctx, route)
+	})
 }
 
-// checkRoute applies the publish decision: publish=false removes the service's
-// catalog objects and its rule from the shared route (a valid state reported
-// as NotPublished); publish=true creates the Backend, AIServiceBackend and
-// ReferenceGrant in the service's namespace and upserts the service's rule into
-// the platform's pre-installed shared catalog route, reporting acceptance from
-// the shared route and the service's AIServiceBackend. A cluster without the
-// Agent Router CRDs degrades to AgentRouterUnavailable; a missing shared route
-// degrades to CatalogRouteNotFound.
+// rulesReferenceNothing reports whether no rule forwards to a backend or runs a
+// filter — the shape the HTTPRoute CRD defaults an omitted rule list to. A rule
+// with no destination answers 500 for what it matches, so such a route is
+// harmless while nothing is published, and its reconciliation is a no-op.
+func rulesReferenceNothing(rules []gatewayv1.HTTPRouteRule) bool {
+	for _, rule := range rules {
+		if len(rule.BackendRefs) > 0 || len(rule.Filters) > 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// desiredCatalogRoute builds the shared AIGatewayRoute the operator maintains:
+// attached to the platform Gateway and carrying only the rules it computed.
+func (r *InferenceServiceReconciler) desiredCatalogRoute(name aiv1alpha1.AIGatewayRouterName, rules []aigwv1beta1.AIGatewayRouteRule) *aigwv1beta1.AIGatewayRoute {
+	return &aigwv1beta1.AIGatewayRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: string(name), Namespace: r.GatewayNamespace, Labels: sharedRouteLabels()},
+		Spec: aigwv1beta1.AIGatewayRouteSpec{
+			ParentRefs: []gatewayv1.ParentReference{{Name: gatewayv1.ObjectName(r.GatewayName)}},
+			Rules:      rules,
+		},
+	}
+}
+
+// desiredOpenAIPathsRoute builds the shared plain HTTPRoute the operator
+// maintains: attached to the platform Gateway and carrying only the rules it
+// computed.
+func (r *InferenceServiceReconciler) desiredOpenAIPathsRoute(name aiv1alpha1.AIGatewayRouterName, rules []gatewayv1.HTTPRouteRule) *gatewayv1.HTTPRoute {
+	return &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: openAIPathsRouteName(name), Namespace: r.GatewayNamespace, Labels: sharedRouteLabels()},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{{Name: gatewayv1.ObjectName(r.GatewayName)}},
+			},
+			Rules: rules,
+		},
+	}
+}
+
+// catalogRouteNames are the catalog surfaces a service can select. Both are
+// pre-installed by the platform in GatewayNamespace; the operator only edits
+// the one named by spec.route.aigatewayRouter.
+var catalogRouteNames = []aiv1alpha1.AIGatewayRouterName{
+	aiv1alpha1.AIGatewayRouterPublic,
+	aiv1alpha1.AIGatewayRouterPrivate,
+}
+
+// selectedCatalogRoute returns the shared route the service publishes to, or ""
+// when it is not published.
+func selectedCatalogRoute(isvc *aiv1alpha1.InferenceService) aiv1alpha1.AIGatewayRouterName {
+	if isvc.Spec.Route == nil {
+		return ""
+	}
+	return isvc.Spec.Route.AIGatewayRouter
+}
+
+// getCatalogRoute returns an empty object addressing one of the platform's
+// pre-installed shared catalog routes: the object a published service attaches
+// its rule to.
+func (r *InferenceServiceReconciler) getCatalogRoute(name aiv1alpha1.AIGatewayRouterName) *aigwv1beta1.AIGatewayRoute {
+	return &aigwv1beta1.AIGatewayRoute{ObjectMeta: metav1.ObjectMeta{Name: string(name), Namespace: r.GatewayNamespace}}
+}
+
+// getOpenAIPathsRoute returns an empty object addressing the shared plain
+// HTTPRoute paired with the named catalog route.
+func (r *InferenceServiceReconciler) getOpenAIPathsRoute(name aiv1alpha1.AIGatewayRouterName) *gatewayv1.HTTPRoute {
+	return &gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Name: openAIPathsRouteName(name), Namespace: r.GatewayNamespace}}
+}
+
+// checkRoute applies the publish decision: an empty spec.route.aigatewayRouter
+// removes the service's catalog objects and its rules from the shared routes (a
+// valid state reported as NotPublished); a non-empty one creates the Backend,
+// the two schema-specific AIServiceBackends and the ReferenceGrant in the
+// service's namespace, then rebuilds the selected shared catalog surfaces from
+// every published service and reports this service's acceptance. A cluster
+// without the Agent Router CRDs degrades to AgentRouterUnavailable.
 func (r *InferenceServiceReconciler) checkRoute(ctx context.Context, isvc *aiv1alpha1.InferenceService, profile *aiv1alpha1.InferenceRuntimeProfile, endpoint *endpointCheck, modelName string) (*routeCheck, error) {
 	check := &routeCheck{}
 	// The retired per-model hostname HTTPRoute is removed on every pass: an
@@ -354,7 +752,8 @@ func (r *InferenceServiceReconciler) checkRoute(ctx context.Context, isvc *aiv1a
 	if err := r.deleteLegacyHTTPRoute(ctx, isvc); err != nil {
 		return routeErr(check, err)
 	}
-	if isvc.Spec.Route == nil || !isvc.Spec.Route.Publish {
+	routeName := selectedCatalogRoute(isvc)
+	if !isvc.Spec.Route.Published() {
 		if err := r.deleteCatalogObjects(ctx, isvc); err != nil {
 			return routeErr(check, err)
 		}
@@ -369,26 +768,8 @@ func (r *InferenceServiceReconciler) checkRoute(ctx context.Context, isvc *aiv1a
 		check.Reason = EndpointNotReady
 		return check, nil
 	}
-	if r.GatewayName == "" {
+	if r.GatewayName == "" || r.GatewayNamespace == "" {
 		check.Reason = RouteGatewayNotConfigured
-		return check, nil
-	}
-	// The shared route is a platform prerequisite: the operator reads and edits
-	// a rule in it but never creates it.
-	shared := r.getSharedCatalogRoute()
-	if err := r.Get(ctx, client.ObjectKeyFromObject(shared), shared); err != nil {
-		if apierrors.IsNotFound(err) {
-			check.Reason = RouteCatalogNotFound
-			return check, nil
-		}
-		return routeErr(check, err)
-	}
-	if r.catalogModelNameTaken(shared, isvc) {
-		check.Reason = RouteModelNameConflict
-		return check, nil
-	}
-	if findCatalogRuleIndex(shared.Spec.Rules, isvc) < 0 && len(shared.Spec.Rules) >= catalogRuleMax {
-		check.Reason = RouteCatalogFull
 		return check, nil
 	}
 	port, err := endpointPort(endpoint.Internal)
@@ -404,36 +785,59 @@ func (r *InferenceServiceReconciler) checkRoute(ctx context.Context, isvc *aiv1a
 	if err := applyOwned(ctx, r.Client, isvc, sb, aiServiceBackendNeedsUpdate); err != nil {
 		return routeErr(check, err)
 	}
+	anthropicSB := r.desiredAnthropicAIServiceBackend(isvc)
+	if err := applyOwned(ctx, r.Client, isvc, anthropicSB, aiServiceBackendNeedsUpdate); err != nil {
+		return routeErr(check, err)
+	}
 	grant := r.desiredReferenceGrant(isvc)
 	if err := applyOwned(ctx, r.Client, isvc, grant, referenceGrantNeedsUpdate); err != nil {
 		return routeErr(check, err)
 	}
-	// The optimistic retry re-validates the model name and the rule cap against
-	// the route's current state and reports a conflict or a full route through
-	// a sentinel rather than a hard error: a lost race is a stable condition for
-	// this service (first-come-keeps / at capacity), not a failure to requeue.
-	if err := r.upsertCatalogRule(ctx, isvc, modelName); err != nil {
-		if errors.Is(err, errCatalogModelNameTaken) {
-			check.Reason = RouteModelNameConflict
-			return check, nil
-		}
-		if errors.Is(err, errCatalogRouteFull) {
-			check.Reason = RouteCatalogFull
-			return check, nil
-		}
+	// The shared surfaces are rebuilt from every published service, so a
+	// duplicate catalog name is lost by the later service (first-come keeps it)
+	// and a full shared route drops the later rules. Both are stable conditions
+	// for this service, not failures to requeue.
+	set, err := r.syncSharedCatalogRoute(ctx, routeName, isvc, modelName)
+	if err != nil {
 		return routeErr(check, err)
 	}
+	if set.nameTaken {
+		check.Reason = RouteModelNameConflict
+		return check, nil
+	}
+	if set.routeFull {
+		check.Reason = RouteCatalogFull
+		return check, nil
+	}
 	// Re-fetch after the writes: the acceptance check must not run against a
-	// status written for a previous generation.
-	fresh := r.getSharedCatalogRoute()
+	// status written for a previous generation. Every published path now rides
+	// on the shared AIGatewayRoute through the OpenAI-schema AIServiceBackend
+	// (ext_proc passes chat/responses/images through and translates
+	// /v1/messages into it), so that route and that backend are the only
+	// objects whose acceptance decides the outcome. A service that publishes no
+	// path has nothing on the shared route to accept.
+	if !catalogPathsServed(isvc) {
+		return check, nil
+	}
+	fresh := r.getCatalogRoute(routeName)
 	if err := r.Get(ctx, client.ObjectKeyFromObject(fresh), fresh); err != nil {
 		return routeErrAfterApply(check, err)
 	}
-	freshSB := &aigwv1beta1.AIServiceBackend{}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(sb), freshSB); err != nil {
+	freshOpenAI := &aigwv1beta1.AIServiceBackend{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(sb), freshOpenAI); err != nil {
 		return routeErrAfterApply(check, err)
 	}
-	return sharedRouteAcceptance(check, fresh, freshSB, isvc), nil
+	freshAnthropic := &aigwv1beta1.AIServiceBackend{}
+	if isvc.Spec.Route.Exposes(aiv1alpha1.CatalogPathMessages) {
+		freshAnthropic.ObjectMeta = metav1.ObjectMeta{
+			Name:      anthropicServiceBackendName(isvc),
+			Namespace: isvc.Namespace,
+		}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(freshAnthropic), freshAnthropic); err != nil {
+			return routeErrAfterApply(check, err)
+		}
+	}
+	return sharedRouteAcceptance(check, fresh, freshOpenAI, freshAnthropic, isvc), nil
 }
 
 // applyOwned creates the desired object, or updates it in place when a
@@ -489,42 +893,50 @@ func referenceGrantNeedsUpdate(existing, desired *gatewayv1.ReferenceGrant) bool
 		!apiequality.Semantic.DeepEqual(existing.Spec, desired.Spec)
 }
 
-// catalogModelNameTaken reports whether another service already claims this
-// service's catalog model name: the x-ai-eg-model match value of a rule in the
-// shared route that is not this service's rule.
-func (r *InferenceServiceReconciler) catalogModelNameTaken(route *aigwv1beta1.AIGatewayRoute, isvc *aiv1alpha1.InferenceService) bool {
-	for i := range route.Spec.Rules {
-		rule := route.Spec.Rules[i]
-		if catalogRuleIsMine(rule, isvc) {
-			continue
-		}
-		for _, match := range rule.Matches {
-			for _, header := range match.Headers {
-				if header.Name == aiModelHeaderName && header.Value == isvc.Spec.Route.ModelName {
-					return true
-				}
-			}
-		}
+// sharedRouteAcceptance reports the Agent Router side of a published service:
+// for any exposed catalog path, acceptance requires this service's rule to be
+// present in the shared AIGatewayRoute and both the route and the OpenAI-schema
+// AIServiceBackend to be Accepted for the current generation. The shared route
+// carries a single route-level Accepted condition — with many services in one
+// route, the per-service granularity lives on the AIServiceBackend, which the
+// Agent Router also accepts per object of the service.
+func sharedRouteAcceptance(check *routeCheck, route *aigwv1beta1.AIGatewayRoute, backend, anthropicBackend *aigwv1beta1.AIServiceBackend, isvc *aiv1alpha1.InferenceService) *routeCheck {
+	if !catalogPathsServed(isvc) {
+		return check // nothing is published on the shared route
 	}
-	return false
-}
-
-// sharedRouteAcceptance reports the acceptance of a published service: RouteReady
-// requires both the shared catalog route and the service's AIServiceBackend to
-// be Accepted for the current generation, and the service's rule to be present in
-// the shared route. The shared route carries a single route-level Accepted
-// condition — with many services in one route, the per-service granularity lives
-// on the AIServiceBackend, which the Agent Router also accepts per object.
-func sharedRouteAcceptance(check *routeCheck, route *aigwv1beta1.AIGatewayRoute, backend *aigwv1beta1.AIServiceBackend, isvc *aiv1alpha1.InferenceService) *routeCheck {
 	if findCatalogRuleIndex(route.Spec.Rules, isvc) < 0 {
 		check.Reason = RouteGatewayNotAccepted
 		return check
 	}
-	if aiObjectAccepted(route.Status.Conditions, route.Generation) && aiObjectAccepted(backend.Status.Conditions, backend.Generation) {
+	accepted := aiObjectAccepted(route.Status.Conditions, route.Generation) &&
+		aiObjectAccepted(backend.Status.Conditions, backend.Generation)
+	if isvc.Spec.Route.Exposes(aiv1alpha1.CatalogPathMessages) {
+		// The native-Anthropic rule is the only path /v1/messages with an
+		// anthropic-version header can take, so its own backend must be accepted
+		// as well; a rule without a resolvable backend rejects the whole route.
+		if catalogRuleIndexForRule(route.Spec.Rules, anthropicServiceBackendName(isvc)) < 0 {
+			check.Reason = RouteGatewayNotAccepted
+			return check
+		}
+		accepted = accepted && anthropicBackend.Name != "" &&
+			aiObjectAccepted(anthropicBackend.Status.Conditions, anthropicBackend.Generation)
+	}
+	if accepted {
 		return check // Reason stays "" — published and accepted.
 	}
 	check.Reason = RouteGatewayNotAccepted
 	return check
+}
+
+// catalogRuleIndexForRule returns the index of the rule whose first backendRef
+// carries the given name, or -1.
+func catalogRuleIndexForRule(rules []aigwv1beta1.AIGatewayRouteRule, backendName string) int {
+	for i := range rules {
+		if len(rules[i].BackendRefs) > 0 && rules[i].BackendRefs[0].Name == backendName {
+			return i
+		}
+	}
+	return -1
 }
 
 // aiObjectAccepted reports whether the Agent Router controller accepted the
@@ -551,17 +963,19 @@ func aiObjectAccepted(conditions []metav1.Condition, generation int64) bool {
 }
 
 // deleteCatalogObjects removes the objects a published service owns: the
-// Backend, AIServiceBackend and ReferenceGrant in its namespace, plus its rule
-// from the shared catalog route. The three objects carry a controller ownerRef
-// to the service, so they also cascade on deletion; the rule lives in another
-// namespace and is not owned by the service, so it is removed explicitly here
-// and on the ISVC's finalizer.
+// Backend, both AIServiceBackends and the ReferenceGrant in its namespace, plus
+// its rules from the shared catalog surfaces — rebuilt from the services that
+// remain. The objects carry a controller ownerRef to the service, so they also
+// cascade on deletion; the shared routes live in another namespace and are not
+// owned by the service, so their rules are removed explicitly here and on the
+// ISVC's finalizer.
 func (r *InferenceServiceReconciler) deleteCatalogObjects(ctx context.Context, isvc *aiv1alpha1.InferenceService) error {
-	if err := r.removeCatalogRule(ctx, isvc); err != nil {
+	if err := r.syncSharedCatalogRoutes(ctx); err != nil {
 		return err
 	}
 	for _, obj := range []client.Object{
 		&gatewayv1.ReferenceGrant{ObjectMeta: metav1.ObjectMeta{Name: referenceGrantName(isvc), Namespace: isvc.Namespace}},
+		&aigwv1beta1.AIServiceBackend{ObjectMeta: metav1.ObjectMeta{Name: anthropicServiceBackendName(isvc), Namespace: isvc.Namespace}},
 		&aigwv1beta1.AIServiceBackend{ObjectMeta: metav1.ObjectMeta{Name: aiServiceBackendName(isvc), Namespace: isvc.Namespace}},
 		&egv1alpha1.Backend{ObjectMeta: metav1.ObjectMeta{Name: backendName(isvc), Namespace: isvc.Namespace}},
 	} {
@@ -633,7 +1047,22 @@ func (r *InferenceServiceReconciler) deleteOwned(ctx context.Context, isvc *aiv1
 // It takes the parents rather than a route so it applies to every route kind:
 // HTTPRoute and TCPRoute are distinct types sharing only this status shape.
 func routeParentsAccepted(parents []gatewayv1.RouteParentStatus, generation int64, gatewayName, gatewayNamespace string) bool {
-	parent := routeParentFor(parents, gatewayName, gatewayNamespace)
+	return parentAccepted(routeParentFor(parents, gatewayName, gatewayNamespace), generation)
+}
+
+// routeParentsAcceptedForRef is routeParentsAccepted for the entry belonging to
+// one complete parentRef. A route may declare several listeners on one Gateway
+// (sectionName, port), and the Gateway reports one entry per listener, some
+// accepted and some not: matching on name and namespace alone could read the
+// wrong listener's verdict.
+func routeParentsAcceptedForRef(parents []gatewayv1.RouteParentStatus, generation int64, ref gatewayv1.ParentReference, routeNamespace string) bool {
+	return parentAccepted(routeParentForRef(parents, ref, routeNamespace), generation)
+}
+
+// parentAccepted evaluates one status.parents entry: Accepted=True and
+// ResolvedRefs=True for the current generation. A nil entry — the gateway has
+// not reported on the route — is not accepted.
+func parentAccepted(parent *gatewayv1.RouteParentStatus, generation int64) bool {
 	if parent == nil {
 		return false
 	}
@@ -666,6 +1095,67 @@ func routeParentFor(parents []gatewayv1.RouteParentStatus, gatewayName, gatewayN
 		return &parents[i]
 	}
 	return nil
+}
+
+// routeParentForRef returns the status.parents entry the Gateway wrote for ref,
+// matching every field that identifies the listener: group, kind, name,
+// namespace, sectionName and port. An unset namespace means the route's own
+// namespace, and an unset group or kind means a Gateway in the Gateway API
+// group. It is nil when the gateway has not reported on this parent.
+func routeParentForRef(parents []gatewayv1.RouteParentStatus, ref gatewayv1.ParentReference, routeNamespace string) *gatewayv1.RouteParentStatus {
+	for i := range parents {
+		if !sameParentRef(parents[i].ParentRef, ref, routeNamespace) {
+			continue
+		}
+		return &parents[i]
+	}
+	return nil
+}
+
+// sameParentRef reports whether two parent references address the same
+// listener, applying the API's defaults for an unset namespace, group and kind.
+func sameParentRef(a, b gatewayv1.ParentReference, routeNamespace string) bool {
+	return parentRefGroup(a) == parentRefGroup(b) &&
+		parentRefKind(a) == parentRefKind(b) &&
+		a.Name == b.Name &&
+		parentRefNamespace(a, routeNamespace) == parentRefNamespace(b, routeNamespace) &&
+		sameSectionName(a.SectionName, b.SectionName) &&
+		samePortNumber(a.Port, b.Port)
+}
+
+func parentRefGroup(ref gatewayv1.ParentReference) string {
+	if ref.Group == nil {
+		return gatewayAPIGroup
+	}
+	return string(*ref.Group)
+}
+
+func parentRefKind(ref gatewayv1.ParentReference) string {
+	if ref.Kind == nil {
+		return gatewayKind
+	}
+	return string(*ref.Kind)
+}
+
+func parentRefNamespace(ref gatewayv1.ParentReference, routeNamespace string) string {
+	if ref.Namespace == nil {
+		return routeNamespace
+	}
+	return string(*ref.Namespace)
+}
+
+func sameSectionName(a, b *gatewayv1.SectionName) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+func samePortNumber(a, b *gatewayv1.PortNumber) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 // routeParentsTo reports whether a route's spec.parentRefs attach it to the
@@ -751,9 +1241,9 @@ func routeErrAfterApply(check *routeCheck, err error) (*routeCheck, error) {
 }
 
 // setRouteReadyCondition sets the RouteReady condition from the check:
-// publish=false is a valid state reported as True/NotPublished (the service
-// simply did not request a public route); any other non-empty reason is a
-// failure reported as False.
+// an empty spec.route.aigatewayRouter is a valid state reported as
+// True/NotPublished (the service simply did not request a catalog route); any
+// other non-empty reason is a failure reported as False.
 func setRouteReadyCondition(conditions *[]metav1.Condition, check *routeCheck) {
 	if check.Reason == "" {
 		meta.SetStatusCondition(conditions, metav1.Condition{

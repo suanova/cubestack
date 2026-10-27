@@ -1,5 +1,7 @@
 import { getCoreClient, getCustomObjectsClient } from "@/lib/kubernetes";
 import { withAuth } from "@/lib/auth/guard";
+import { privateGatewayClusterEndpoint } from "@/lib/cubepilot/gateway";
+import { CATALOG_PATHS, isAIGatewayRouter, isCatalogPath, type CatalogPath } from "@/lib/inference-routes";
 
 // @kubernetes/client-node needs Node APIs (TLS, fs), not the Edge runtime.
 export const runtime = "nodejs";
@@ -35,6 +37,9 @@ export interface InferenceServiceSummary {
   profileRef: string;
   modelRef: string;
   published: boolean;
+  // The shared catalog route the service publishes to (public or private), or
+  // null when it is not published. Drives which endpoint the detail card shows.
+  aigatewayRouter: string | null;
   routeModelName: string | null;
   timeoutSeconds: number | null;
   idleTimeoutSeconds: number | null;
@@ -46,11 +51,14 @@ export interface InferenceServiceSummary {
   gpuModel: string | null;
   gpuPerPod: number | null;
   // Profile-derived GPU facts, one entry per GPU-carrying role: how many cards
-  // each pod requests and which accelerator model the role is pinned to. model
-  // is null when the role accepts any of the profile's declared models (a
-  // multi-model profile without a role-level pin). The list's GPU resource
-  // column sums these roles; a PD service reads "2 × 8 × MXC550".
-  gpuRoles: Array<{ name: string; gpuPerPod: number; model: string | null }>;
+  // each pod requests, which accelerator model the role is pinned to, and how
+  // many pods the role runs. model is null when the role accepts any of the
+  // profile's declared models (a multi-model profile without a role-level pin).
+  // replicas is the renderer's replica count and groupSize the LeaderWorkerSet
+  // pods per replica (0 for a Deployment, whose replica is one pod), so
+  // cards × groupSize × replicas is that role's whole footprint; the list's GPU
+  // resource column sums these roles.
+  gpuRoles: Array<{ name: string; gpuPerPod: number; model: string | null; replicas: number; groupSize: number }>;
   modelName: string | null;
   modelVersion: string | null;
   // override knobs declared by the profile, with the effective value (the
@@ -88,6 +96,13 @@ export interface InferenceServiceSummary {
   internalEndpoint: string | null;
   publicEndpoint: string | null;
   /**
+   * The private catalog Gateway's in-cluster Service address, discovered from
+   * the cluster's dataplane Services; null when no private Gateway is found.
+   * Only meaningful for a service published to the private route (it has no
+   * public listener), whose detail card shows this as its AI Gateway endpoint.
+   */
+  privateGatewayEndpoint: string | null;
+  /**
    * Best-effort engine metrics; null when Prometheus has none. `p95` is in
    * milliseconds (the engine histogram itself is in seconds).
    */
@@ -113,7 +128,7 @@ interface IsvcSpec {
   profileRef?: string;
   overrides?: Record<string, unknown>;
   route?: {
-    publish?: boolean;
+    aigatewayRouter?: string;
     modelName?: string;
     timeoutSeconds?: number;
     idleTimeoutSeconds?: number;
@@ -141,13 +156,19 @@ interface ProfileOverride {
 }
 interface ProfileRole {
   name?: string;
-  workload?: { kind?: string };
+  // replicas and group.size are int-or-string: the renderer resolves templates
+  // such as `{{ overrides.decodeReplicas }}` / `{{ overrides.groupSize }}` to
+  // the role's replica count and its LeaderWorkerSet pods per replica, and
+  // defaults an absent replicas field to 1.
+  workload?: { kind?: string; replicas?: number | string; group?: { size?: number | string } };
   // Effective accelerator (design §3.2): the role's own declaration replaces
   // the profile-level one wholesale.
   accelerator?: { vendor?: string; models?: string[] };
   podTemplate?: {
     nodeSelector?: Record<string, string>;
-    resources?: { gpuPerPod?: number };
+    // int-or-string: a profile may template the count from an override (the
+    // tensor-parallel size), which the renderer resolves to a concrete Int.
+    resources?: { gpuPerPod?: number | string };
   };
 }
 interface ProfileSpec {
@@ -199,6 +220,72 @@ function roleGpuModel(
   }
   const models = accel?.models ?? [];
   return models.length === 1 ? models[0] : null;
+}
+
+/**
+ * The number of cards a GPU role's pod requests. gpuPerPod is int-or-string:
+ * a profile may write `{{ overrides.tpSize }}` so a pod is granted as many
+ * GPUs as the engine shards the model across, and the renderer resolves that
+ * template before creating the workload. Resolve the same reference here so
+ * the page shows the effective count instead of dropping the role.
+ */
+function roleGpuPerPod(
+  role: ProfileRole,
+  effective: Map<string, string | number | boolean | null>,
+): number | null {
+  const raw = role.podTemplate?.resources?.gpuPerPod;
+  if (typeof raw === "number") return Number.isInteger(raw) && raw > 0 ? raw : null;
+  if (typeof raw !== "string") return null;
+  const ref = OVERRIDE_REF.exec(raw.trim());
+  const resolved = ref ? effective.get(ref[1]) : raw.trim();
+  if (typeof resolved !== "string" && typeof resolved !== "number") return null;
+  const n = Number(resolved);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+/**
+ * An int-or-string count the renderer resolves from an override template, or
+ * null when the field is absent (or names something no integer can resolve).
+ */
+function resolvedCount(
+  raw: number | string | undefined,
+  effective: Map<string, string | number | boolean | null>,
+): number | null {
+  if (raw === undefined) return null;
+  const ref = typeof raw === "string" ? OVERRIDE_REF.exec(raw.trim()) : null;
+  const resolved = ref ? effective.get(ref[1]) : raw;
+  const n = typeof resolved === "number" ? resolved : typeof resolved === "string" ? Number(resolved.trim()) : NaN;
+  return Number.isInteger(n) ? n : null;
+}
+
+/**
+ * The number of replicas a role runs. Mirrors the renderer's resolveReplicas:
+ * an absent field defaults to 1, and a templated field resolves against the
+ * service's effective overrides. A template that does not resolve fails the
+ * role in the renderer, so a service that renders at all has a concrete count;
+ * 1 keeps the footprint finite here rather than dropping the role's GPU facts.
+ */
+function roleReplicas(
+  role: ProfileRole,
+  effective: Map<string, string | number | boolean | null>,
+): number {
+  const n = resolvedCount(role.workload?.replicas, effective);
+  return n !== null && n >= 0 ? n : 1;
+}
+
+/**
+ * The number of pods one replica runs: the LeaderWorkerSet group size, which
+ * the renderer leaves at 0 for a Deployment (a replica there is one pod). Every
+ * pod in the group requests the role's gpuPerPod cards, so a replica's GPU
+ * footprint is gpuPerPod × groupSize, and the service's is that × replicas.
+ */
+function roleGroupSize(
+  role: ProfileRole,
+  effective: Map<string, string | number | boolean | null>,
+): number {
+  if (role.workload?.kind !== "LeaderWorkerSet" || role.workload.group === undefined) return 0;
+  const n = resolvedCount(role.workload.group.size, effective);
+  return n !== null && n >= 0 ? n : 0;
 }
 
 function num(v: unknown): number | null {
@@ -268,6 +355,7 @@ function project(
   isvc: Isvc,
   profile: Profile | undefined,
   metrics: NonNullable<InferenceServiceSummary["metrics"]> | null,
+  privateGatewayEndpoint: string | null,
 ): InferenceServiceSummary {
   const spec = isvc.spec ?? {};
   const status = isvc.status ?? {};
@@ -324,11 +412,14 @@ function project(
   );
   const gpuRoles: InferenceServiceSummary["gpuRoles"] = profile
     ? (profile.spec?.roles ?? [])
-        .filter((r) => (r.podTemplate?.resources?.gpuPerPod ?? 0) > 0)
-        .map((r) => ({
-          name: r.name ?? "?",
-          gpuPerPod: r.podTemplate?.resources?.gpuPerPod ?? 0,
-          model: roleGpuModel(r, profile, effective),
+        .map((r) => ({ role: r, gpuPerPod: roleGpuPerPod(r, effective) }))
+        .filter((entry): entry is { role: ProfileRole; gpuPerPod: number } => entry.gpuPerPod !== null)
+        .map(({ role, gpuPerPod }) => ({
+          name: role.name ?? "?",
+          gpuPerPod,
+          model: roleGpuModel(role, profile, effective),
+          replicas: roleReplicas(role, effective),
+          groupSize: roleGroupSize(role, effective),
         }))
     : [];
   // The single-model fields stay as a compact summary: every concrete model a
@@ -341,7 +432,8 @@ function project(
     namespace: isvc.metadata?.namespace ?? "",
     profileRef: spec.profileRef ?? "—",
     modelRef: spec.modelRef ?? "—",
-    published: spec.route?.publish ?? false,
+    published: (spec.route?.aigatewayRouter ?? "") !== "",
+    aigatewayRouter: spec.route?.aigatewayRouter ?? null,
     routeModelName: spec.route?.modelName ?? null,
     timeoutSeconds: spec.route?.timeoutSeconds ?? null,
     idleTimeoutSeconds: spec.route?.idleTimeoutSeconds ?? null,
@@ -368,6 +460,7 @@ function project(
     roles,
     internalEndpoint: status.endpoint?.internal ?? null,
     publicEndpoint: status.endpoint?.public ?? null,
+    privateGatewayEndpoint,
     metrics,
   };
 }
@@ -402,19 +495,24 @@ export const GET = withAuth(async () => {
     // Best-effort, per-service metrics in parallel; a failure (or a stalled
     // backend, which now times out) degrades that service to `metrics: null`
     // (the page then shows its empty state).
-    const metrics = await Promise.all(
-      isvcs.map((isvc) => {
-        const profile = byProfile.get(isvc.spec?.profileRef ?? "");
-        return loadMetrics(
-          isvc.metadata?.namespace ?? "",
-          isvc.metadata?.name ?? "",
-          profile?.spec?.engine?.name,
-        ).catch(() => null);
-      }),
-    );
+    const [privateGatewayEndpoint, metrics] = await Promise.all([
+      // The private catalog's address is a cluster fact, resolved once per
+      // response (discovery is memoized in the gateway client).
+      privateGatewayClusterEndpoint(),
+      Promise.all(
+        isvcs.map((isvc) => {
+          const profile = byProfile.get(isvc.spec?.profileRef ?? "");
+          return loadMetrics(
+            isvc.metadata?.namespace ?? "",
+            isvc.metadata?.name ?? "",
+            profile?.spec?.engine?.name,
+          ).catch(() => null);
+        }),
+      ),
+    ]);
 
     const items = isvcs.map((isvc, i) =>
-      project(isvc, byProfile.get(isvc.spec?.profileRef ?? ""), metrics[i]),
+      project(isvc, byProfile.get(isvc.spec?.profileRef ?? ""), metrics[i], privateGatewayEndpoint),
     );
     // Newest first, mirroring the prototype's ordering by freshness.
     items.sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""));
@@ -527,10 +625,9 @@ interface CreateBody {
   modelRef?: string;
   overrides?: Record<string, number | string | boolean>;
   route?: {
-    publish?: boolean;
+    aigatewayRouter?: string;
     modelName?: string;
-    timeoutSeconds?: number;
-    idleTimeoutSeconds?: number;
+    paths?: string[];
   };
 }
 interface ModelVersionRef {
@@ -600,31 +697,33 @@ export const POST = withAuth(async (req) => {
     const oerr = overrideError(body.overrides ?? {}, profile);
     if (oerr) return ValidationError(oerr.code, oerr.params);
 
-    // Route: publishing joins the platform model catalog, which requires a
-    // valid catalog model name. Both timeouts are bounded by the operator's CRD
-    // ranges; timeoutSeconds 0 means "no total-duration cap".
-    const timeout = body.route?.timeoutSeconds;
-    const idle = body.route?.idleTimeoutSeconds;
-    if (timeout !== undefined && timeout !== null && (Number.isNaN(timeout) || timeout < 0 || timeout > 86400)) {
-      return ValidationError("timeoutInvalid");
-    }
-    if (idle !== undefined && idle !== null && (Number.isNaN(idle) || idle < 1 || idle > 86400)) {
-      return ValidationError("idleTimeoutInvalid");
-    }
-    let route: {
-      publish: boolean;
-      modelName?: string;
-      timeoutSeconds?: number;
-      idleTimeoutSeconds?: number;
-    };
-    if (body.route?.publish) {
+    // Route: a non-empty aigatewayRouter publishes the service into the model
+    // catalog attached to that pre-installed AIGatewayRoute, which requires a
+    // valid catalog model name and at least one exposed path. An absent router
+    // leaves the service unpublished; the CRD supplies the timeout defaults.
+    let route: { aigatewayRouter: string; modelName: string; paths: CatalogPath[] } | undefined;
+    const router = body.route?.aigatewayRouter;
+    if (router !== undefined && router !== "") {
+      if (!isAIGatewayRouter(router)) {
+        return ValidationError("aigatewayRouterInvalid");
+      }
       const modelName = body.route?.modelName;
       if (!modelName || !MODEL_NAME_RE.test(modelName)) {
         return ValidationError("routeModelNameInvalid");
       }
-      route = { publish: true, modelName, timeoutSeconds: timeout ?? 0, idleTimeoutSeconds: idle ?? 300 };
-    } else {
-      route = { publish: false };
+      const paths = body.route?.paths;
+      // Untrusted JSON: the CreateBody type does not survive the wire, so a
+      // null or a bare string must be refused here instead of throwing into
+      // the 500 handler.
+      if (!Array.isArray(paths) || !paths.every(isCatalogPath)) {
+        return ValidationError("routePathsInvalid");
+      }
+      if (paths.length === 0) {
+        return ValidationError("routePathsRequired");
+      }
+      // The CRD list is a set: dedupe instead of rejecting a repeated path.
+      const unique = CATALOG_PATHS.filter((p) => paths.includes(p));
+      route = { aigatewayRouter: router, modelName, paths: unique };
     }
 
     const cr = {
@@ -635,7 +734,7 @@ export const POST = withAuth(async (req) => {
         modelRef: body.modelRef,
         profileRef: body.profileRef,
         overrides: body.overrides ?? {},
-        route,
+        ...(route ? { route } : {}),
       },
     };
 
