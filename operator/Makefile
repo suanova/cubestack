@@ -242,7 +242,7 @@ PERMISSION_INIT_IMAGE ?= $(shell sed -n 's/^[[:space:]]*permissionInitImage[[:sp
 # they are listed so the mirror stays the single account of what an offline build
 # needs. Without them `make -C images build` reaches Docker Hub, which no e2e run
 # would catch.
-BASE_MIRRORS = JUPYTER_BASE=harbor.isuanova.com/mirrors/quay.io/jupyter/minimal-notebook:2026-09-07@sha256:f6dc79ec57e05d28fa8f08dbd457c0d46f79e3677083e2eed9fb2d892942d810=quay.io/jupyter/minimal-notebook:2026-09-07 GOLANG_BASE=harbor.isuanova.com/mirrors/docker.io/library/golang:1.26@sha256:6c2a5538f964f1c82f97ad14988bf05de100d922d159d0e398b54c7b0ca0c6c9=golang:1.26 DISTROLESS_BASE=harbor.isuanova.com/mirrors/gcr.io/distroless/static:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3=gcr.io/distroless/static:nonroot PYTHON_BASE=harbor.isuanova.com/mirrors/docker.io/library/python:3.12-alpine@sha256:c4634f578a412db396771b61b064c6e546c9d6414c7fb5b1b05d5871f1885f7b=python:3.12-alpine UBUNTU_BASE=harbor.isuanova.com/mirrors/docker.io/library/ubuntu:22.04@sha256:b8b6ee6aa931ecd9d0d952abc34dc0e5f7c6a30c6bb71b079fe399fde0329c02=ubuntu:22.04
+BASE_MIRRORS = JUPYTER_BASE=harbor.isuanova.com/mirrors/quay.io/jupyter/minimal-notebook:2026-09-07@sha256:f6dc79ec57e05d28fa8f08dbd457c0d46f79e3677083e2eed9fb2d892942d810=quay.io/jupyter/minimal-notebook:2026-09-07 GOLANG_BASE=harbor.isuanova.com/mirrors/docker.io/library/golang:1.27@sha256:9048d5e7751706200eb1719c7dae0436950d362f29a1da91fa05e5c63867c60f=golang:1.27 DISTROLESS_BASE=harbor.isuanova.com/mirrors/gcr.io/distroless/static:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3=gcr.io/distroless/static:nonroot PYTHON_BASE=harbor.isuanova.com/mirrors/docker.io/library/python:3.12-alpine@sha256:c4634f578a412db396771b61b064c6e546c9d6414c7fb5b1b05d5871f1885f7b=python:3.12-alpine UBUNTU_BASE=harbor.isuanova.com/mirrors/docker.io/library/ubuntu:22.04@sha256:b8b6ee6aa931ecd9d0d952abc34dc0e5f7c6a30c6bb71b079fe399fde0329c02=ubuntu:22.04
 
 # $(1) = a Dockerfile's build arg name -> the --build-arg flag that points it at
 # the mirror. An image reference never contains '=', so splitting on it yields
@@ -846,7 +846,7 @@ ENVTEST_K8S_VERSION ?= $(shell v='$(call gomodver,k8s.io/api)'; \
   [ -n "$$v" ] || { echo "Set ENVTEST_K8S_VERSION manually (k8s.io/api replace has no tag)" >&2; exit 1; }; \
   printf '%s\n' "$$v" | sed -E 's/^v?[0-9]+\.([0-9]+).*/1.\1/')
 
-GOLANGCI_LINT_VERSION ?= v2.12.2
+GOLANGCI_LINT_VERSION ?= v2.13.2
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
 $(KUSTOMIZE): $(LOCALBIN)

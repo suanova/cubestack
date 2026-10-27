@@ -8,10 +8,10 @@
 # Both must be declared before the first FROM. An ARG declared after one is
 # scoped to that stage, and the second FROM then expands to a blank base name —
 # "base name (${DISTROLESS_BASE}) should not be blank".
-# The golang base is pinned to a patch version, not to the 1.26 line: go.mod
-# requires go 1.26.7 (envoyproxy/gateway v1.9.1), and a base older than that
+# The golang base is pinned to a patch version, not to the 1.27 line: go.mod
+# requires go 1.27.1 (envoyproxy/ai-gateway v1.2.0), and a base older than that
 # makes the build download a toolchain at build time.
-ARG GOLANG_BASE=golang:1.26.7
+ARG GOLANG_BASE=golang:1.27.1
 ARG DISTROLESS_BASE=gcr.io/distroless/static:nonroot
 FROM ${GOLANG_BASE} AS builder
 ARG TARGETOS

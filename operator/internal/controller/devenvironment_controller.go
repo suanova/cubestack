@@ -463,6 +463,7 @@ func (r *DevEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			r.Recorder.Eventf(&env, nil, corev1.EventTypeNormal, eventReasonCreated, eventReasonCreated,
 				"DevEnvironment %s/%s created", env.Namespace, env.Name)
 		}
+		//nolint:staticcheck // Requeue is deprecated in favour of RequeueAfter; this is an immediate retry, not a delay.
 		return ctrl.Result{Requeue: true}, nil
 	}
 
@@ -614,6 +615,7 @@ func (r *DevEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if decision.Stop {
 		// The write to the environment is itself a watched update, so this
 		// requeue is belt and braces rather than the mechanism.
+		//nolint:staticcheck // Requeue is deprecated in favour of RequeueAfter; this is an immediate retry, not a delay.
 		return ctrl.Result{Requeue: true}, nil
 	}
 	// RequeueAfter is the idle deadline — the one thing here that no watch can
