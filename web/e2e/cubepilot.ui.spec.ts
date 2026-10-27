@@ -119,7 +119,6 @@ const TURN_APPROVAL = [
   { type: "message_delta", sessionId: SESSION_KEY, delta: "正在检查 Ceph 状态…" },
   { type: "tool_call", sessionId: SESSION_KEY, name: "shell", callId: "call-1", arguments: { cmd: "ceph df" } },
   { type: "tool_result", sessionId: SESSION_KEY, callId: "call-1", name: "shell", output: "POOL USED: 71%" },
-  { type: "message_delta", sessionId: SESSION_KEY, delta: "OSD 使用率 71%。" },
   {
     type: "approval_pending",
     sessionId: SESSION_KEY,
@@ -129,6 +128,10 @@ const TURN_APPROVAL = [
     level: "write",
     message: "调整 OSD 参数属于写操作",
   },
+  // After the card: the client stamps a card with the block it was raised
+  // after, so an answer emitted first parks the card behind it. The reference
+  // draws the tool log, the resolved card, then the answer.
+  { type: "message_delta", sessionId: SESSION_KEY, delta: "OSD 使用率 71%。" },
 ];
 
 /** A turn holding TWO writes back at once (cubepilot #226): each has its own
