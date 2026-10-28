@@ -155,6 +155,11 @@ export default function DevEnvironmentsPage() {
   const [errorMsg, setErrorMsg] = useState("");
   const [reloadKey, setReloadKey] = useState(0);
   const [wizardOpen, setWizardOpen] = useState(false);
+  /** One-line confirmation of the last successful create, e.g.
+   *  "已创建 dev-env-a · 命名空间 default". Auto-clears after a few seconds;
+   *  null = nothing to show. */
+  const [successNote, setSuccessNote] = useState<string | null>(null);
+  const noteTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // The environment the delete dialog is about, or null when it is closed.
   const [pendingDelete, setPendingDelete] = useState<DevEnvironmentSummary | null>(null);
   // The message of an action that failed, or null when none has. One slot for
@@ -217,6 +222,14 @@ export default function DevEnvironmentsPage() {
       document.removeEventListener("visibilitychange", onVis);
     };
   }, [reloadKey, load]);
+
+  // Drop the success note's timer when the console unmounts, so a backdrop
+  // navigation cannot leave a stale timer that fires into an unmounted subtree.
+  useEffect(() => {
+    return () => {
+      if (noteTimer.current) clearTimeout(noteTimer.current);
+    };
+  }, []);
 
   const selected = items.find((e) => envKey(e) === selKey) ?? null;
 
@@ -331,6 +344,29 @@ export default function DevEnvironmentsPage() {
           </Box>
         ) : (
           <>
+            {successNote ? (
+              <Box
+                data-od-id="dev-created-note"
+                role="status"
+                sx={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "8px",
+                  mb: "12px",
+                  border: 1,
+                  borderColor: soft(STATUS_OK, 45),
+                  borderRadius: "8px",
+                  bgcolor: soft(STATUS_OK, 8),
+                  px: "12px",
+                  py: "8px",
+                  fontSize: 13,
+                  color: "text.primary",
+                }}
+              >
+                <Box component="span" sx={{ color: STATUS_OK }} aria-hidden="true">✓</Box>
+                {successNote}
+              </Box>
+            ) : null}
             <Box
               data-od-id="dev-toolbar"
               sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "14px", mb: "12px" }}
@@ -413,6 +449,14 @@ export default function DevEnvironmentsPage() {
         onClose={() => setWizardOpen(false)}
         onCreated={(namespace, name) => {
           selectAfterLoad.current = `${namespace}/${name}`;
+          // The new row may not match the active filter (a Stopped filter hides a
+          // Pending/Running environment, leaving the table on "no matches" while
+          // the object exists). Cut back to All so the created one is visible
+          // where the user was looking.
+          setFilter("all");
+          setSuccessNote(t("dev.created", { namespace, name }));
+          if (noteTimer.current) clearTimeout(noteTimer.current);
+          noteTimer.current = setTimeout(() => setSuccessNote(null), 6000);
           setWizardOpen(false);
           load();
         }}
