@@ -326,9 +326,14 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
 
   // Agent (CubePilot) state — real data from the agent CRs + agent API.
   const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null);
-  /** Only a Ready instance can answer: it is what the config tab creates, and
-   *  where a start that failed says why. */
-  const agentReady = agentStatus?.exists === true && agentStatus.phase === "Ready";
+  /** Only a Ready instance that also has an LLM configured can answer. The
+   *  operator reports a model-less instance as Ready but with the ModelConfigured
+   *  condition False; calling that ready would enable the composer on an
+   *  assistant that can never answer a turn. */
+  const agentReady =
+    agentStatus?.exists === true &&
+    agentStatus.phase === "Ready" &&
+    agentStatus.modelConfigured !== false;
   /** Only the newest status read may be applied: a slow poll can land after a
    *  newer one and put an older phase back on screen. */
   const statusGenRef = useRef(0);
@@ -2453,7 +2458,7 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
               >
                 {/* A start in progress is the one state worth animating: it is
                     the only one that ends by itself. */}
-                {agentStatus?.exists && agentStatus.phase !== "Failed" ? <Spinner size={14} /> : null}
+                {agentStatus?.exists && agentStatus.phase !== "Failed" && agentStatus.modelConfigured !== false ? <Spinner size={14} /> : null}
                 <Box sx={{ flex: 1, fontSize: 13, fontWeight: 600, lineHeight: 1.6 }}>
                   {!agentStatus
                     ? t("cubepilot.chat.agentMetaLoading")
@@ -2461,13 +2466,20 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
                       ? t("cubepilot.chat.notReadyMissing")
                       : agentStatus.phase === "Failed"
                         ? t("cubepilot.chat.notReadyFailed")
-                        : t("cubepilot.chat.agentStarting", {
-                            secs: String(waitingSeconds(agentStatus.startedAt, now) ?? 0),
-                          })}
+                        : agentStatus.modelConfigured === false
+                          ? agentStatus.modelMessage ||
+                            t("cubepilot.chat.notReadyNoModel")
+                          : t("cubepilot.chat.agentStarting", {
+                              secs: String(waitingSeconds(agentStatus.startedAt, now) ?? 0),
+                            })}
                 </Box>
-                {/* Nothing to configure while it is starting: the config tab
-                    would only show the same state back. */}
-                {agentStatus && agentStatus.exists && agentStatus.phase !== "Failed" ? null : (
+                {/* A Ready-but-model-less instance is done starting, so it is the
+                    one case that can be acted on: send the reader to the config
+                    tab to pick the model it is missing. The spinner belongs only
+                    to a start still in flight. */}
+                {agentStatus && agentStatus.exists && agentStatus.phase !== "Failed" && agentStatus.modelConfigured !== false ? (
+                  null
+                ) : (
                   <Btn variant="primary" onClick={() => setStoredTab("config")} data-od-id="agent-go-config">
                     {t("cubepilot.chat.goConfig")}
                   </Btn>

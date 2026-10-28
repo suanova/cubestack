@@ -1243,7 +1243,11 @@ describe("cubepilot page", () => {
     act(() => root.unmount());
   }, 30000);
 
-  it("says a first save started the assistant rather than that it is ready", async () => {
+  it("refuses to provision the assistant when no model can be chosen", async () => {
+    // The gateway serves no models, so the select is empty and saving would
+    // write an empty selectedModel. The console refuses instead of provisioning
+    // an instance the operator would mark Ready-but-unconfigured (never able to
+    // answer a turn).
     stubApi({ exists: false, selectedModel: "", userInstructions: "", providers: [], gatewayModels: [] });
     const { container, root } = renderPage();
     await act(async () => {});
@@ -1252,7 +1256,7 @@ describe("cubepilot page", () => {
     act(() => (container.querySelector('[data-od-id="cp-config-save"]') as HTMLElement).click());
     await act(async () => {});
 
-    expect(document.body.textContent ?? "").toContain("助手正在创建");
+    expect(document.body.textContent ?? "").toContain("请先选择模型再保存");
     act(() => root.unmount());
   });
 

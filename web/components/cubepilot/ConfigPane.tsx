@@ -253,6 +253,13 @@ export function ConfigPane() {
     // A first save only starts the instance, which is not "saved" in the sense
     // the reader expects.
     const wasMissing = !config.exists;
+    // With no model the save would write an empty selectedModel, which the
+    // operator reads back as Ready-but-not-configured: the instance spins a pod
+    // and a PVC and can never answer a turn. Refuse rather than provision that.
+    if (!modelValue) {
+      showToast(t("cubepilot.config.saveNeedsModel"), "error");
+      return;
+    }
     setSaving(true);
     try {
       const res = await apiFetch("/api/cubepilot/agent/config", {
