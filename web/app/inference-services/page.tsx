@@ -1529,6 +1529,7 @@ function DeployWizard({
     paths: [...CATALOG_PATHS],
   });
   const [nameError, setNameError] = useState(false);
+  const [modelError, setModelError] = useState(false);
   // The select offers `default` plus "create a new one": the tenant namespaces
   // the platform does not manage are not listed, because a denylist of the ones
   // it does manage was always one install behind (issue #367). A namespace the
@@ -1570,6 +1571,26 @@ function DeployWizard({
     return () => {
       cancelled = true;
     };
+  }, [open]);
+
+  // Escaping out of a Select list is the one Escape that must not close the
+  // whole wizard (it would drop the draft). The Select list is a portal, so
+  // the Dialog's own Escape handling and this element's onKeyDown never see it;
+  // a document-level capture listener swallows the key when focus is inside the
+  // open list, letting the Select close itself. Focus has moved back to the
+  // body by the time the user presses Escape a second time, so that second one
+  // falls through to the Dialog and closes as normal.
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (e: KeyboardEvent): void => {
+      if (e.key === "Escape" && document.activeElement?.closest('[role="listbox"], [role="option"], .MuiPopover-root')) {
+        e.stopPropagation();
+        e.preventDefault();
+      }
+    };
+    // `capture` so this runs before the Select/MUI handlers that close things.
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
   }, [open]);
 
   const profile = options?.profiles.find((p) => p.name === draft.profileRef) ?? null;
@@ -1872,6 +1893,7 @@ function DeployWizard({
       setNameError(false);
       setNamespaceError(false);
     } else if (step === 2 && !step2Valid) {
+      setModelError(true);
       return; // model is required to proceed
     }
     setStep((s) => Math.min(3, s + 1));
@@ -2050,12 +2072,13 @@ function DeployWizard({
 
             {step === 2 && (
               <Box data-step="2">
-                <WizField label={t("inf.deploy.model")} hint={t("inf.deploy.modelHint")}>
+                <WizField label={t("inf.deploy.model")} hint={modelError ? undefined : t("inf.deploy.modelHint")} error={modelError} errorText={t("inf.deploy.errModel")}>
                   <Select
                     size="small"
                     fullWidth
                     value={draft.modelRef}
                     onChange={(e) => {
+                      setModelError(false);
                       setField("modelRef", e.target.value);
                     }}
                     displayEmpty
