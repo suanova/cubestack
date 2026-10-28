@@ -2580,7 +2580,7 @@ function CreateWizard({
                       <MenuItem value="retain">{t("dev.wizard.pvcRetentionRetain")}</MenuItem>
                     </Select>
                   </WizField>
-                  <WizField label={t("dev.wizard.pvcs")} error={pvcError} errorText={t("dev.wizard.errPvc")}>
+                  <WizField label={t("dev.wizard.pvcs")} hint={t("dev.wizard.pvcHint")} error={pvcError} errorText={t("dev.wizard.errPvc")}>
                     {draft.pvcs.map((r) => (
                       <Box key={r.id} sx={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: "8px", alignItems: "center", mb: "8px" }}>
                         <TextField
