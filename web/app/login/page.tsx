@@ -194,6 +194,7 @@ export default function LoginPage() {
         <Box
           data-od-id="login-card"
           component="form"
+          method="post"
           onSubmit={onSubmit}
           noValidate
           sx={{
