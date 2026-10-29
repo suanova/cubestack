@@ -348,16 +348,21 @@ jobs:
           set -euo pipefail
           deadline=$((SECONDS + 1800))
 
-          # A branch push pins the chart to :latest, which already exists; wait
-          # for the image workflow of THIS commit instead.
           if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
-            workflow="ci-images.yml"
+            case "${IMAGE}" in
+              cubestack-controller-manager) workflow=ci-operator-image.yml ;;
+              cubestack-ui) workflow=ci-portal-image.yml ;;
+              *) echo "::error::no image workflow known for ${IMAGE}"; exit 1 ;;
+            esac
             run=""
             grace=$((SECONDS + 120))
             while :; do
-              run=$(gh run list --repo "$GITHUB_REPOSITORY" --commit "$GITHUB_SHA" \
-                --workflow "$workflow" --limit 1 \
-                --json databaseId,status,conclusion --jq '.[0] // empty' 2>/dev/null || true)
+              if ! run=$(timeout 30 gh run list --repo "$GITHUB_REPOSITORY" --commit "$GITHUB_SHA" \
+                  --workflow "$workflow" --event push --branch main --limit 1 \
+                  --json databaseId,status,conclusion --jq '.[0] // empty' 2>/dev/null); then
+                echo "::error::failed to query $workflow for $GITHUB_SHA"
+                exit 1
+              fi
               if [ -n "$run" ] || [ "$SECONDS" -ge "$grace" ]; then break; fi
               sleep 10
             done
@@ -365,8 +370,11 @@ jobs:
               while [ "$(printf '%s' "$run" | jq -r .status)" != completed ]; do
                 [ "$SECONDS" -lt "$deadline" ] || { echo "::error::timed out waiting for $workflow"; exit 1; }
                 sleep 20
-                run=$(gh run view "$(printf '%s' "$run" | jq -r .databaseId)" \
-                  --repo "$GITHUB_REPOSITORY" --json databaseId,status,conclusion)
+                if ! run=$(timeout 30 gh run view "$(printf '%s' "$run" | jq -r .databaseId)" \
+                    --repo "$GITHUB_REPOSITORY" --json databaseId,status,conclusion 2>/dev/null); then
+                  echo "::error::failed to query $workflow run"
+                  exit 1
+                fi
               done
               conclusion=$(printf '%s' "$run" | jq -r .conclusion)
               [ "$conclusion" = success ] || { echo "::error::$workflow for this commit concluded $conclusion"; exit 1; }
@@ -397,6 +405,12 @@ jobs:
               echo "waiting for $image..."
               sleep 30
             done
+            sha_url="https://harbor.isuanova.com/api/v2.0/projects/${project}/repositories/${repo}/artifacts/${GITHUB_SHA}"
+            if sha_digest=$(curl -fsS --max-time "$max" "$sha_url" 2>/dev/null | jq -r .digest) && [ -n "$sha_digest" ] && [ "$sha_digest" != null ]; then
+              latest_digest=$(curl -fsS --max-time "$max" "$url" | jq -r .digest)
+              [ "$latest_digest" = "$sha_digest" ] || { echo "::error::latest for $repo does not point at $GITHUB_SHA"; exit 1; }
+            fi
+
             echo "ready: $image"
           done
 
