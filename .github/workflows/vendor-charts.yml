@@ -54,6 +54,7 @@ jobs:
     # Every write below — branch, pull request — goes through the App token.
     permissions:
       contents: read
+      actions: read   # gh run list for the image workflow
     strategy:
       # One chart failing to package must not take the other's pull request with it.
       fail-fast: false
@@ -338,6 +339,105 @@ jobs:
               handle.writelines(lines)
           PY
           fi
+      - name: Wait for this commit's images
+        working-directory: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APP_VERSION: ${{ steps.package.outputs.app-version }}
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 1800))
+
+          if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            case "${IMAGE}" in
+              cubestack-controller-manager) workflow=ci-operator-image.yml ;;
+              cubestack-ui) workflow=ci-portal-image.yml ;;
+              *) echo "::error::no image workflow known for ${IMAGE}"; exit 1 ;;
+            esac
+            run=""
+            grace=$((SECONDS + 120))
+            while :; do
+              if ! run=$(timeout 30 gh run list --repo "$GITHUB_REPOSITORY" --commit "$GITHUB_SHA" \
+                  --workflow "$workflow" --event push --branch main --limit 1 \
+                  --json databaseId,status,conclusion --jq '.[0] // empty' 2>/dev/null); then
+                echo "::error::failed to query $workflow for $GITHUB_SHA"
+                exit 1
+              fi
+              if [ -n "$run" ] || [ "$SECONDS" -ge "$grace" ]; then break; fi
+              sleep 10
+            done
+            if [ -n "$run" ]; then
+              while [ "$(printf '%s' "$run" | jq -r .status)" != completed ]; do
+                [ "$SECONDS" -lt "$deadline" ] || { echo "::error::timed out waiting for $workflow"; exit 1; }
+                sleep 20
+                if ! run=$(timeout 30 gh run view "$(printf '%s' "$run" | jq -r .databaseId)" \
+                    --repo "$GITHUB_REPOSITORY" --json databaseId,status,conclusion 2>/dev/null); then
+                  echo "::error::failed to query $workflow run"
+                  exit 1
+                fi
+              done
+              conclusion=$(printf '%s' "$run" | jq -r .conclusion)
+              [ "$conclusion" = success ] || { echo "::error::$workflow for this commit concluded $conclusion"; exit 1; }
+            else
+              echo "No $workflow run for this commit; the images did not change."
+            fi
+          fi
+
+          if [ ! -f test/e2e/images.txt ]; then
+            echo "::error::test/e2e/images.txt is missing; cannot verify the chart images"
+            exit 1
+          fi
+          images=$(grep -E "/${IMAGE}(-[^:[:space:]]+)?:${APP_VERSION}$" test/e2e/images.txt || true)
+          if [ -z "$images" ]; then
+            echo "::error::no own images found in test/e2e/images.txt"
+            exit 1
+          fi
+          echo "Waiting for:"; echo "$images"
+          for image in $images; do
+            path=${image#*/}
+            project=${path%%/*}
+            repo_tag=${path#*/}
+            repo=${repo_tag%:*}
+            tag=${repo_tag##*:}
+            url="https://harbor.isuanova.com/api/v2.0/projects/${project}/repositories/${repo}/artifacts/${tag}"
+            while :; do
+              [ "$SECONDS" -lt "$deadline" ] || { echo "::error::timed out waiting for $image in Harbor"; exit 1; }
+              remaining=$((deadline - SECONDS))
+              max=$(( remaining < 30 ? remaining : 30 ))
+              if curl -fsS --max-time "$max" -o /dev/null "$url"; then
+                [ "$SECONDS" -lt "$deadline" ] || { echo "::error::deadline exceeded before $image was ready"; exit 1; }
+                break
+              fi
+              echo "waiting for $image..."
+              sleep 30
+            done
+            if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+              sha_url="https://harbor.isuanova.com/api/v2.0/projects/${project}/repositories/${repo}/artifacts/${GITHUB_SHA}"
+              sha_body=$(mktemp)
+              sha_code=$(curl -sS --max-time "$max" -o "$sha_body" -w '%{http_code}' "$sha_url") || {
+                echo "::error::failed to query $sha_url"
+                rm -f "$sha_body"
+                exit 1
+              }
+              if [ "$sha_code" = 200 ]; then
+                sha_digest=$(jq -r .digest "$sha_body")
+                latest_digest=$(curl -fsS --max-time "$max" "$url" | jq -r .digest)
+                if [ "$latest_digest" != "$sha_digest" ]; then
+                  echo "::error::latest for $repo does not point at $GITHUB_SHA"
+                  rm -f "$sha_body"
+                  exit 1
+                fi
+              elif [ "$sha_code" != 404 ]; then
+                echo "::error::failed to query $sha_url (HTTP $sha_code)"
+                rm -f "$sha_body"
+                exit 1
+              fi
+              rm -f "$sha_body"
+            fi
+
+            echo "ready: $image"
+          done
+
       - name: Commit and push the branch
         id: commit
         working-directory: target
