@@ -383,9 +383,15 @@ jobs:
             fi
           fi
 
-          [ -f test/e2e/images.txt ] || { echo "no preload list"; exit 0; }
+          if [ ! -f test/e2e/images.txt ]; then
+            echo "::error::test/e2e/images.txt is missing; cannot verify the chart images"
+            exit 1
+          fi
           images=$(grep -E "/${IMAGE}(-[^:[:space:]]+)?:${APP_VERSION}$" test/e2e/images.txt || true)
-          [ -n "$images" ] || { echo "no own images to wait for"; exit 0; }
+          if [ -z "$images" ]; then
+            echo "::error::no own images found in test/e2e/images.txt"
+            exit 1
+          fi
           echo "Waiting for:"; echo "$images"
           for image in $images; do
             path=${image#*/}
@@ -405,10 +411,28 @@ jobs:
               echo "waiting for $image..."
               sleep 30
             done
-            sha_url="https://harbor.isuanova.com/api/v2.0/projects/${project}/repositories/${repo}/artifacts/${GITHUB_SHA}"
-            if sha_digest=$(curl -fsS --max-time "$max" "$sha_url" 2>/dev/null | jq -r .digest) && [ -n "$sha_digest" ] && [ "$sha_digest" != null ]; then
-              latest_digest=$(curl -fsS --max-time "$max" "$url" | jq -r .digest)
-              [ "$latest_digest" = "$sha_digest" ] || { echo "::error::latest for $repo does not point at $GITHUB_SHA"; exit 1; }
+            if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+              sha_url="https://harbor.isuanova.com/api/v2.0/projects/${project}/repositories/${repo}/artifacts/${GITHUB_SHA}"
+              sha_body=$(mktemp)
+              sha_code=$(curl -sS --max-time "$max" -o "$sha_body" -w '%{http_code}' "$sha_url") || {
+                echo "::error::failed to query $sha_url"
+                rm -f "$sha_body"
+                exit 1
+              }
+              if [ "$sha_code" = 200 ]; then
+                sha_digest=$(jq -r .digest "$sha_body")
+                latest_digest=$(curl -fsS --max-time "$max" "$url" | jq -r .digest)
+                if [ "$latest_digest" != "$sha_digest" ]; then
+                  echo "::error::latest for $repo does not point at $GITHUB_SHA"
+                  rm -f "$sha_body"
+                  exit 1
+                fi
+              elif [ "$sha_code" != 404 ]; then
+                echo "::error::failed to query $sha_url (HTTP $sha_code)"
+                rm -f "$sha_body"
+                exit 1
+              fi
+              rm -f "$sha_body"
             fi
 
             echo "ready: $image"
