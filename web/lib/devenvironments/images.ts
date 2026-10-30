@@ -73,7 +73,7 @@ const REGISTRY =
 // DevEnvironment can be pointed at (docs/design/devenv-images/decision.md).
 export const DEV_IMAGES: DevImage[] = [
   {
-    tag: `${REGISTRY}/suanova/cpu-pytorch:latest`,
+    tag: `${REGISTRY}/suanova/cpu-pytorch:py310-torch2.4-v2.0.0`,
     label: "suanova/cpu-pytorch · CPU · JupyterLab (ubuntu)",
     // Stock-derived overlay: docker-stacks' jovyan is uid 1000 / gid *100*, and
     // no other spec field implies that gid — the platform default is 1000.
@@ -82,7 +82,7 @@ export const DEV_IMAGES: DevImage[] = [
     vendor: "cpu",
   },
   {
-    tag: `${REGISTRY}/suanova/cpu-pytorch:latest`,
+    tag: `${REGISTRY}/suanova/cpu-pytorch:py310-torch2.4-v2.0.0`,
     label: "suanova/cpu-pytorch · CPU · SSH (ubuntu)",
     // Self-authored family: account ubuntu, uid/gid 1000 — the platform default.
     user: "ubuntu",
@@ -90,28 +90,28 @@ export const DEV_IMAGES: DevImage[] = [
     vendor: "cpu",
   },
   {
-    tag: `${REGISTRY}/suanova/cuda-pytorch:latest`,
+    tag: `${REGISTRY}/suanova/cuda-pytorch:26.08-v2.0.0`,
     label: "suanova/cuda-pytorch · NVIDIA CUDA · JupyterLab (ubuntu)",
     user: "ubuntu",
     interface: "jupyter",
     vendor: "nvidia",
   },
   {
-    tag: `${REGISTRY}/suanova/cuda-pytorch:latest`,
+    tag: `${REGISTRY}/suanova/cuda-pytorch:26.08-v2.0.0`,
     label: "suanova/cuda-pytorch · NVIDIA CUDA · SSH (ubuntu)",
     user: "ubuntu",
     interface: "ssh",
     vendor: "nvidia",
   },
   {
-    tag: `${REGISTRY}/suanova/maca-pytorch:latest`,
+    tag: `${REGISTRY}/suanova/maca-pytorch:3.9.0.12-py310-torch2.4-v2.0.0`,
     label: "suanova/maca-pytorch · Metax MACA · JupyterLab (ubuntu)",
     user: "ubuntu",
     interface: "jupyter",
     vendor: "metax",
   },
   {
-    tag: `${REGISTRY}/suanova/maca-pytorch:latest`,
+    tag: `${REGISTRY}/suanova/maca-pytorch:3.9.0.12-py310-torch2.4-v2.0.0`,
     label: "suanova/maca-pytorch · Metax MACA · SSH (ubuntu)",
     user: "ubuntu",
     interface: "ssh",
