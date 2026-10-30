@@ -43,7 +43,7 @@ function stubCluster() {
         },
         spec: {
           type: "jupyter",
-          image: "harbor.isuanova.com/suanova/cuda-pytorch:latest",
+          image: "harbor.isuanova.com/suanova/cuda-pytorch:26.08-v2.0.0",
           running: true,
           resources: { gpu: { vendor: "nvidia", count: 2, model: "H200" }, cpu: "16", memory: "64Gi" },
           storage: { size: "200Gi", mountPath: "/home/ubuntu" },
@@ -116,7 +116,7 @@ describe("GET /api/devenvironments", () => {
       name: "jupyter-nlp-ln",
       namespace: "project-a",
       type: "jupyter",
-      image: "harbor.isuanova.com/suanova/cuda-pytorch:latest",
+      image: "harbor.isuanova.com/suanova/cuda-pytorch:26.08-v2.0.0",
       running: true,
       resources: { gpu: { vendor: "nvidia", count: 2, model: "H200" }, cpu: "16", memory: "64Gi" },
       storage: { size: "200Gi", mountPath: "/home/ubuntu" },
@@ -357,7 +357,7 @@ describe("POST /api/devenvironments", () => {
           name: "jupyter-recsys",
           namespace: "project-a",
           type: "jupyter",
-          image: "harbor.isuanova.com/suanova/cuda-pytorch:latest",
+          image: "harbor.isuanova.com/suanova/cuda-pytorch:26.08-v2.0.0",
           accelerator: "nvidia",
           gpuCount: 4,
           cpu: "64",
@@ -378,7 +378,7 @@ describe("POST /api/devenvironments", () => {
       metadata: { name: "jupyter-recsys", namespace: "project-a" },
       spec: {
         type: "jupyter",
-        image: "harbor.isuanova.com/suanova/cuda-pytorch:latest",
+        image: "harbor.isuanova.com/suanova/cuda-pytorch:26.08-v2.0.0",
         running: true,
         resources: { gpu: { vendor: "nvidia", count: 4 }, cpu: "64", memory: "256Gi" },
         // Derived from the image, never sent by the client: the self-authored
@@ -465,7 +465,7 @@ describe("POST /api/devenvironments", () => {
     await POST(
       await authedRequest({
         method: "POST",
-        body: JSON.stringify({ name: "cpu-env", namespace: "project-a", type: "jupyter", image: "harbor.isuanova.com/suanova/cpu-pytorch:latest" }),
+        body: JSON.stringify({ name: "cpu-env", namespace: "project-a", type: "jupyter", image: "harbor.isuanova.com/suanova/cpu-pytorch:py310-torch2.4-v2.0.0" }),
       }),
       undefined,
     );
@@ -479,7 +479,7 @@ describe("POST /api/devenvironments", () => {
     await POST(
       await authedRequest({
         method: "POST",
-        body: JSON.stringify({ name: "cuda-env", namespace: "project-a", type: "ssh", image: "harbor.isuanova.com/suanova/cuda-pytorch:latest" }),
+        body: JSON.stringify({ name: "cuda-env", namespace: "project-a", type: "ssh", image: "harbor.isuanova.com/suanova/cuda-pytorch:26.08-v2.0.0" }),
       }),
       undefined,
     );
@@ -517,7 +517,7 @@ describe("POST /api/devenvironments", () => {
           name: "alice-env",
           namespace: "project-a",
           type: "jupyter",
-          image: "harbor.isuanova.com/suanova/cpu-pytorch:latest",
+          image: "harbor.isuanova.com/suanova/cpu-pytorch:py310-torch2.4-v2.0.0",
           runtimeUser: "alice",
           runAsUser: 1500,
           runAsGroup: 1500,
@@ -546,7 +546,7 @@ describe("POST /api/devenvironments", () => {
           name: "cuda-env",
           namespace: "project-a",
           type: "jupyter",
-          image: "harbor.isuanova.com/suanova/cuda-pytorch:latest",
+          image: "harbor.isuanova.com/suanova/cuda-pytorch:26.08-v2.0.0",
           runAsUser: 1500,
         }),
       }),
@@ -829,7 +829,7 @@ describe("POST /api/devenvironments", () => {
           name: "ok-name",
           namespace: "project-a",
           type: "jupyter",
-          image: "harbor.isuanova.com/suanova/cpu-pytorch:latest",
+          image: "harbor.isuanova.com/suanova/cpu-pytorch:py310-torch2.4-v2.0.0",
           env: [{ name: "HF_HOME", value: "/data/hf" }],
           command: 'python -m "my app"',
           args: '--port 8080 --name "a b"',
