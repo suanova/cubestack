@@ -20,6 +20,10 @@ RUN npm run build
 FROM base AS runner
 ENV NODE_ENV=production
 ENV PORT=3000
+# The server only needs `node`. Drop npm and corepack so the image does not
+# ship their bundled dependencies, which are not used at runtime.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
+    /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
 # Standalone output bundles the traced server and node_modules; public and
 # static must be copied alongside it (see output.md in the Next.js docs).
 COPY --from=builder /app/.next/standalone ./
