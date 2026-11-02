@@ -10,7 +10,7 @@ See `docs/design/devenv-images/decision.md` for the sourcing/composition decisio
 The repositories are named `<accelerator>-<stack>` (decision doc §5.1). There are **three** images
 today — the `pytorch` cell of each accelerator — and each serves **both** runtime modes:
 
-- `cpu-pytorch` — CPU, built on `ubuntu:22.04`, with the CPU build of PyTorch;
+- `cpu-pytorch` — CPU, built on `ubuntu:24.04`, with the CPU build of PyTorch;
 - `maca-pytorch` — Metax/MACA, on a vendor MACA base with its `torch+metax`;
 - `cuda-pytorch` — NVIDIA, on NVIDIA's NGC PyTorch base.
 
@@ -29,7 +29,7 @@ every one of them: account `ubuntu`, uid/gid **1000:1000**, home and workdir **`
 
 | Image | Base | Account (uid:gid) | Home / workspace | Modes | Exposes |
 |-------|------|-------------------|------------------|-------|---------|
-| `harbor.isuanova.com/suanova/cpu-pytorch` | `ubuntu:22.04` | `ubuntu` 1000:1000 | `/home/ubuntu` | jupyter + ssh | jupyter `8888`, ssh `2222` |
+| `harbor.isuanova.com/suanova/cpu-pytorch` | `ubuntu:24.04` | `ubuntu` 1000:1000 | `/home/ubuntu` | jupyter + ssh | jupyter `8888`, ssh `2222` |
 | `harbor.isuanova.com/suanova/maca-pytorch` | `maca-pytorch:3.9.0.12-torch2.4-py310-ubuntu22.04-amd64` (mirror of `cr.metax-tech.com/public-library/…`) | `ubuntu` 1000:1000 | `/home/ubuntu` | jupyter + ssh | jupyter `8888`, ssh `2222` |
 | `harbor.isuanova.com/suanova/cuda-pytorch` | `pytorch:26.08-py3` (mirror of `nvcr.io/nvidia/pytorch`) | `ubuntu` 1000:1000 | `/home/ubuntu` | jupyter + ssh | jupyter `8888`, ssh `2222` |
 
@@ -38,7 +38,7 @@ no longer published. A pinned `spec.image` keeps pulling. That includes `suanova
 family's original name) and `suanova/cpu-base` (its name in #336): the repository is named for the
 accelerator and stack it serves, as the other two are, rather than for how small the image is.
 
-`cpu-pytorch` is the thinnest overlay but no longer a bare ssh server: it is `ubuntu:22.04` plus
+`cpu-pytorch` is the thinnest overlay but no longer a bare ssh server: it is `ubuntu:24.04` plus
 `openssh-server`, `python3`/`pip`, `sudo`, `tini`, the **CPU build of PyTorch**, **numpy** (torch's
 array bridge) and **JupyterLab on the system interpreter**, with the shared launcher as its CMD.
 Torch comes from PyTorch's own
@@ -346,7 +346,7 @@ a given node's driver is the same node-side question the MACA image leaves open 
 ### Publish
 
 Each image has **one name**: `make build` tags it at the reference it is published under,
-`$(REGISTRY)/$(PROJECT)/<image>:<stack axes>-$(TAG)` — `py310-torch2.4` for the CPU image,
+`$(REGISTRY)/$(PROJECT)/<image>:<stack axes>-$(TAG)` — `py312-torch2.6` for the CPU image,
 `3.9.0.12-py310-torch2.4` for MACA, `26.08` for CUDA — defaulting to `harbor.isuanova.com/suanova/...`
 and the short commit SHA (decision doc §5.2). `push` adds `:latest` to that same name rather than
 introducing a second one, and publishes it as **one multi-arch index per image** covering
@@ -355,7 +355,7 @@ introducing a second one, and publishes it as **one multi-arch index per image**
 ```bash
 docker login harbor.isuanova.com              # once — the Makefile never authenticates
 make -C images push                           # publish every image
-make -C images push-cpu-pytorch   # cpu-pytorch:py310-torch2.4-<sha>
+make -C images push-cpu-pytorch   # cpu-pytorch:py312-torch2.6-<sha>
 make -C images push-maca-pytorch  # maca-pytorch:3.9.0.12-py310-torch2.4-<sha>
 make -C images push-cuda-pytorch  # cuda-pytorch:26.08-<sha>
 make -C images push PLATFORMS=linux/amd64     # narrow back to one platform
@@ -436,7 +436,7 @@ the shared `$(MIRROR_PROJECT)` project, each repo named for the upstream referen
 `$(REGISTRY)/$(MIRROR_PROJECT)/docker.io/library/ubuntu:$(UBUNTU_VERSION)`, passed through
 `BASE_ARGS`. Building from the
 mirror keeps the published image descended from the
-base the platform serves, where `FROM ubuntu:22.04` would silently give whatever upstream has
+base the platform serves, where `FROM ubuntu:24.04` would silently give whatever upstream has
 retagged it to — and it is the only copy that resolves where upstream is unreachable. Each is
 pinned by the digest of the mirror's index, and the digest is what the build resolves:
 `operator/hack/mirror-e2e-images.sh` repoints those tags, so on the tag alone the same commit
@@ -485,7 +485,7 @@ images/
     sshd/10-devenv.conf    sshd_config.d drop-in; @SSH_USER@ login account, @SSH_ENV@ session env
     sshd/install-dropin.sh fills both placeholders in, or fails the build
   cpu-pytorch/
-    Dockerfile             the CPU family: plain ubuntu:22.04 + python3, the CPU torch build, JupyterLab, sshd
+    Dockerfile             the CPU family: plain ubuntu:24.04 + python3, the CPU torch build, JupyterLab, sshd
   maca-pytorch/
     Dockerfile             platform layer on the Metax MACA vendor base
   cuda-pytorch/

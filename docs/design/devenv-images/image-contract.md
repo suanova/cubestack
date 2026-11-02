@@ -121,7 +121,7 @@ controller probes only the one `spec.type` selects.
 
 | Image | Base | Platforms |
 |---|---|---|
-| `cpu-pytorch` | `ubuntu:22.04` | `linux/amd64`, `linux/arm64` (multi-arch index) |
+| `cpu-pytorch` | `ubuntu:24.04` | `linux/amd64`, `linux/arm64` (multi-arch index) |
 | `cuda-pytorch` | NVIDIA NGC PyTorch (`nvcr.io/nvidia/pytorch:<release>-py3`, mirrored) | `linux/amd64` |
 | `maca-pytorch` | Metax MACA (`public-library/maca-pytorch:…`, mirrored) | `linux/amd64` |
 

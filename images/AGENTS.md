@@ -14,7 +14,7 @@ platform ships a build for, named `<accelerator>-<stack>` (decision doc §5.1); 
 image in each accelerator family, every one of them on the `pytorch` stack. Each image serves
 **both** runtime modes:
 
-- **`cpu-pytorch`** — CPU, on `ubuntu:22.04`: the platform layer plus `python3`/pip, the CPU build of
+- **`cpu-pytorch`** — CPU, on `ubuntu:24.04`: the platform layer plus `python3`/pip, the CPU build of
   PyTorch and JupyterLab on the system interpreter, and the shared launcher.
 - **`maca-pytorch`** — GPU, on a vendor Metax MACA base.
 - **`cuda-pytorch`** — GPU, on the vendor's NVIDIA NGC PyTorch base.
