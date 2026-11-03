@@ -27,9 +27,10 @@ repeat its whole base for a delta of a few MB — see `images/README.md`.
 All three ship the **same layout**, so the platform is configured identically for each: account
 `ubuntu`, uid/gid **1000:1000**, home/workdir **`/home/ubuntu`** (the platform default, so no spec
 needs a `runAsGroup` override). A vendor-base image is where the overlay's size varies most, because
-what the base already ships is what decides it. The MACA base ships no account, no sshd, no
-`ENTRYPOINT` and no launcher at all, so the platform layer there is the whole of it, account
-included. The NGC PyTorch base ships the account (`ubuntu` 1000:1000 at `/home/ubuntu` — the
+what the base already ships is what decides it. The MACA base ships the account (`ubuntu` 1000:1000
+at `/home/ubuntu`) and an sshd, but no `ENTRYPOINT` and no launcher at all, so the platform layer
+there is the entrypoint, the sshd drop-in and the launch chain. The NGC PyTorch base ships the
+account (`ubuntu` 1000:1000 at `/home/ubuntu` — the
 platform default layout exactly), an `ENTRYPOINT`, JupyterLab, and an interpreter with torch already
 in it, so its overlay adds the sshd layer and the launcher and nothing else. Two consequences for a
 new image either way: the account the image runs under is the one the shared sshd drop-in is written
@@ -146,7 +147,7 @@ they exercise the artifact that is actually published. Both **vendor images** ig
 build their own single platform, `linux/amd64` by default, on every host and for every publish — see
 the platform rule. Their published names are the other exception: the tag carries the vendor
 axis read out of the base package with `$(TAG)` after it, not `$(TAG)` alone — `MACA_TAG`, three axes
-(`3.9.0.12-py310-torch2.4`), and `CUDA_TAG`, the NGC release on its own (`26.08`), because that release
+(`3.8.5.2-py312-torch2.8`), and `CUDA_TAG`, the NGC release on its own (`26.08`), because that release
 pins python, torch and CUDA together instead of naming them as separable axes (README, Publish;
 decision doc §5).
 

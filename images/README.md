@@ -30,7 +30,7 @@ every one of them: account `ubuntu`, uid/gid **1000:1000**, home and workdir **`
 | Image | Base | Account (uid:gid) | Home / workspace | Modes | Exposes |
 |-------|------|-------------------|------------------|-------|---------|
 | `harbor.isuanova.com/suanova/cpu-pytorch` | `ubuntu:24.04` | `ubuntu` 1000:1000 | `/home/ubuntu` | jupyter + ssh | jupyter `8888`, ssh `2222` |
-| `harbor.isuanova.com/suanova/maca-pytorch` | `maca-pytorch:3.9.0.12-torch2.4-py310-ubuntu22.04-amd64` (mirror of `cr.metax-tech.com/public-library/…`) | `ubuntu` 1000:1000 | `/home/ubuntu` | jupyter + ssh | jupyter `8888`, ssh `2222` |
+| `harbor.isuanova.com/suanova/maca-pytorch` | `maca-pytorch:3.8.5.2-torch2.8-py312-ubuntu24.04-amd64` (mirror of `cr.metax-tech.com/public-library/…`) | `ubuntu` 1000:1000 | `/home/ubuntu` | jupyter + ssh | jupyter `8888`, ssh `2222` |
 | `harbor.isuanova.com/suanova/cuda-pytorch` | `pytorch:26.08-py3` (mirror of `nvcr.io/nvidia/pytorch`) | `ubuntu` 1000:1000 | `/home/ubuntu` | jupyter + ssh | jupyter `8888`, ssh `2222` |
 
 The repositories the old images were published under keep their existing tags; they are simply
@@ -48,14 +48,16 @@ both `ssh-ubuntu22.04` (plain ssh) and `jupyter-minimal` (stock-derived, with th
 and `/home/jovyan` layout).
 
 `maca-pytorch` is the same platform layer on a very different base: a vendor GPU base is not a
-distro, so the platform layer there is the whole of it. The base runs as **root** (no
-`config.User`), has no `ENTRYPOINT` at all (`Cmd: ["/bin/bash"]`, so it exits immediately), no
-sshd, no jupyter, and no non-root account — the account is the platform's even though the base
-has none, because the shared sshd drop-in is a non-root configuration. The base ships its
-interpreter beside a system python that has no torch, and names it only from a login profile, so
-this Dockerfile puts `/opt/conda/bin` on `PATH` itself before installing JupyterLab. The base
-publishes one architecture per tag (the `-amd64` suffix is part of the package name, not a
-multi-arch index), so this image is **amd64-only** — see Platform.
+distro, so the platform layer there is most of what a DevEnvironment needs. The base runs as
+**root** (no `config.User`), has no `ENTRYPOINT` and no jupyter (`Cmd: ["/bin/bash"]`, so it exits
+immediately). It does ship the platform account (`ubuntu` 1000:1000 at `/home/ubuntu`, with a locked
+password), sshd, host keys and its own conda interpreter. The overlay keeps the account, drops the
+base's sudo-group membership (sudo is opt-in through `spec.runtime.sudo`), removes the host keys
+(the mounted Secret is the only identity), and installs JupyterLab onto the interpreter that owns
+the vendor torch. The base's `PATH` already names `/opt/conda/bin`, and the Dockerfile re-asserts it
+so the ssh session and the build agree. The base publishes one architecture per tag (the `-amd64`
+suffix is part of the package name, not a multi-arch index), so this image is **amd64-only** — see
+Platform.
 
 `cuda-pytorch` is the **thinnest overlay here**: the base is not a bare vendor SDK but a
 distribution built for the purpose, so it already ships the account (`ubuntu`, uid/gid 1000, home
@@ -347,7 +349,7 @@ a given node's driver is the same node-side question the MACA image leaves open 
 
 Each image has **one name**: `make build` tags it at the reference it is published under,
 `$(REGISTRY)/$(PROJECT)/<image>:<stack axes>-$(TAG)` — `py312-torch2.6` for the CPU image,
-`3.9.0.12-py310-torch2.4` for MACA, `26.08` for CUDA — defaulting to `harbor.isuanova.com/suanova/...`
+`3.8.5.2-py312-torch2.8` for MACA, `26.08` for CUDA — defaulting to `harbor.isuanova.com/suanova/...`
 and the short commit SHA (decision doc §5.2). `push` adds `:latest` to that same name rather than
 introducing a second one, and publishes it as **one multi-arch index per image** covering
 `$(PLATFORMS)` — except the two vendor images, which publish a single-platform index (see Platform):
@@ -356,7 +358,7 @@ introducing a second one, and publishes it as **one multi-arch index per image**
 docker login harbor.isuanova.com              # once — the Makefile never authenticates
 make -C images push                           # publish every image
 make -C images push-cpu-pytorch   # cpu-pytorch:py312-torch2.6-<sha>
-make -C images push-maca-pytorch  # maca-pytorch:3.9.0.12-py310-torch2.4-<sha>
+make -C images push-maca-pytorch  # maca-pytorch:3.8.5.2-py312-torch2.8-<sha>
 make -C images push-cuda-pytorch  # cuda-pytorch:26.08-<sha>
 make -C images push PLATFORMS=linux/amd64     # narrow back to one platform
 ```
