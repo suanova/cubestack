@@ -76,7 +76,7 @@ Every image:
   (and its `push-` form) takes `$(MACA_PLATFORM)`, `build-cuda-pytorch` takes `$(CUDA_PLATFORM)` — and both
   publish a single-platform index. The two read alike but say so differently: the MACA package
   states it in the tag (`-amd64` is part of the tag, not a multi-arch index), the NGC PyTorch tag does
-  not and the mirror carries one amd64 manifest inside an index shape. That exception belongs to the
+  not and the mirror carries an amd64 manifest alone. That exception belongs to the
   image, not the host — do not fold it back into `PLATFORMS`.
 - **Keep ignore rules in `images/.dockerignore`** (deny-by-default). Docker only honors the
   context-root ignore file; a per-subdir `.dockerignore` is inert and misleading.
@@ -147,7 +147,7 @@ they exercise the artifact that is actually published. Both **vendor images** ig
 build their own single platform, `linux/amd64` by default, on every host and for every publish — see
 the platform rule. Their published names are the other exception: the tag carries the vendor
 axis read out of the base package with `$(TAG)` after it, not `$(TAG)` alone — `MACA_TAG`, three axes
-(`3.8.5.2-py312-torch2.8`), and `CUDA_TAG`, the NGC release on its own (`26.08`), because that release
+(`3.8.5.2-py312-torch2.8`), and `CUDA_TAG`, the NGC release on its own (`26.10`), because that release
 pins python, torch and CUDA together instead of naming them as separable axes (README, Publish;
 decision doc §5).
 
