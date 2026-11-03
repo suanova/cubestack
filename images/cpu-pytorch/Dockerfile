@@ -20,14 +20,14 @@
 # must be named: the base is multi-arch, so a bare `docker build` resolves it to the *host*
 # architecture and an arm64 host would publish an arm64-only image.
 #   docker build --platform linux/amd64 -f cpu-pytorch/Dockerfile \
-#     --build-arg TORCH_VERSION=2.4.0 \
-#     -t harbor.isuanova.com/suanova/cpu-pytorch:py310-torch2.4-<tag> images/
+#     --build-arg TORCH_VERSION=2.6.0 \
+#     -t harbor.isuanova.com/suanova/cpu-pytorch:py312-torch2.6-<tag> images/
 #   (or: make -C images build-cpu-pytorch)
 
 # Base: the Ubuntu release tag plus the digest of the platform registry's copy of it, which
 # is what the build resolves (BASE_ARGS, images/Makefile). The digest is there because the
 # tag alone is not a decision made here: the mirror is repointed by
-# operator/hack/mirror-e2e-images.sh and `ubuntu:22.04` is refreshed upstream monthly, so the
+# operator/hack/mirror-e2e-images.sh and `ubuntu:24.04` is refreshed upstream monthly, so the
 # same revision could otherwise build two different base layers under one published tag.
 # Pinning makes picking up the security updates that refresh carries a deliberate step —
 # read the new digest, update the two maps, re-mirror. Offline installs record the digest of
@@ -37,7 +37,7 @@
 # therefore a separate arg defaulting to upstream through that same version, and the
 # platform registry's copy is substituted for offline builds — see BASE_MIRRORS in the
 # operator Makefile.
-ARG UBUNTU_VERSION=22.04
+ARG UBUNTU_VERSION=24.04
 ARG UBUNTU_BASE=ubuntu:${UBUNTU_VERSION}
 FROM ${UBUNTU_BASE}
 
@@ -52,6 +52,11 @@ ARG DEBIAN_FRONTEND=noninteractive
 # sudo is installed but grants nothing: it runs only for the accounts a sudoers rule
 # names, and the image names none. spec.runtime.sudo is what supplies the rule
 # (images/README.md, image-contract.md).
+#
+# libssl3t64 is upgraded in place: the base is a pinned mirror snapshot, so a security update
+# released after it was mirrored would otherwise wait for the next re-mirror. Taking it here
+# keeps the base reference stable for offline installs that record the digest they shipped.
+# (The package is named libssl3t64 on 24.04, after the 64-bit time_t transition.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
       openssh-server \
@@ -59,7 +64,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3-pip \
       sudo \
       tini \
+    && apt-get install -y --no-install-recommends --only-upgrade libssl3t64 \
     && rm -rf /var/lib/apt/lists/*
+
+# 24.04 marks the system interpreter as externally managed (PEP 668), which would refuse the
+# pip installs below. This image's python is the environment's own — the notebook kernel, an
+# ssh session and the launcher all use it — so the marker is removed rather than worked around
+# with --break-system-packages on every command, which would leave the same refusal in front
+# of the environments' own installs.
+RUN rm -f /usr/lib/python3*/EXTERNALLY-MANAGED
 
 # PyTorch, the CPU build: the family's stack and the reason the image is named for it. Installed
 # from PyTorch's own CPU wheel index rather than from PyPI, whose linux wheel is the *CUDA* build
@@ -69,17 +82,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # cannot back. It is a required build arg, not a floating latest.
 ARG TORCH_VERSION
 ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
+# filelock is torch's dependency, not the image's; the floor is the release that closes
+# CVE-2026-112940. That release and everything after it require Python 3.11, which is why this
+# image is on 24.04's python3.12 rather than 22.04's 3.10.
 RUN python3 -m pip install --no-cache-dir \
       --index-url "$TORCH_INDEX_URL" \
-      torch==${TORCH_VERSION}
+      torch==${TORCH_VERSION} \
+      'filelock>=4.2.1'
 
 # JupyterLab onto the distribution's python: the base ships no notebook stack, and the
 # notebook kernel has to be the interpreter an ssh session and the launcher both reach.
 # numpy rides along: torch does not depend on it, but its array bridge does — importing torch
 # without numpy warns on every start and `Tensor.numpy()` fails — and the torch index above
-# does not carry it. It is held below 2 because torch 2.4.0 predates its official NumPy 2
-# support; the bridge does work against the 2.x that was current when this was built, but
-# leaving it floating would let a rebuild change the answer under an unchanged image tag.
+# does not carry it. It stays below 2 so a rebuild cannot move the numpy axis under an
+# unchanged image tag; moving it past that line is a separate change from a security bump.
 # pip's cache is dropped; the image carries the installed packages only.
 ARG PIP_INDEX_URL=""
 RUN set -eu; \
@@ -87,14 +103,12 @@ RUN set -eu; \
     if [ -n "$PIP_INDEX_URL" ]; then pip_args="--index-url $PIP_INDEX_URL"; fi; \
     python3 -m pip install --no-cache-dir $pip_args jupyterlab 'numpy<2'
 
-# Platform account: literal 'ubuntu', uid/gid 1000, home /home/ubuntu — the same account,
-# group, and home every family image ships, so a DevEnvironment states it once
-# (spec.runtime.user: ubuntu) whatever family it runs. The workspace PVC mounts at the home,
-# so nothing durable is baked under it; ~/.ssh exists only so the account's own
-# `ssh-copy-id` target exists when no PVC is attached.
-RUN groupadd -g 1000 ubuntu \
-    && useradd -u 1000 -g 1000 -s /bin/bash -d /home/ubuntu ubuntu \
-    && mkdir -p /home/ubuntu/.ssh \
+# Platform account: the 24.04 base already ships literal 'ubuntu', uid/gid 1000, home
+# /home/ubuntu — the same account, group, and home every family image ships, so a
+# DevEnvironment states it once (spec.runtime.user: ubuntu) whatever family it runs. The
+# workspace PVC mounts at the home, so nothing durable is baked under it; ~/.ssh exists only
+# so the account's own `ssh-copy-id` target exists when no PVC is attached.
+RUN mkdir -p /home/ubuntu/.ssh \
     && chown -R 1000:1000 /home/ubuntu \
     && chmod 700 /home/ubuntu/.ssh
 

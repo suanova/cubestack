@@ -6,7 +6,7 @@
 # image per accelerator family, and each serves BOTH modes — CUBSTACK_TYPE, which
 # the controller injects from spec.type, decides what the container is:
 #
-#   cpu-pytorch      the CPU family, built on plain ubuntu:22.04 with python3, the CPU
+#   cpu-pytorch      the CPU family, built on plain ubuntu:24.04 with python3, the CPU
 #                 build of torch and JupyterLab; account 'ubuntu' uid/gid 1000,
 #                 home /home/ubuntu
 #   maca-pytorch     the Metax MACA family, the same platform layer on the vendor base,
@@ -69,7 +69,7 @@ cd "$(dirname "$self")/.." # images/ workspace root
 # Makefile — keep them in step). Only a direct call reaches these: the Makefile passes
 # every ref it built with.
 TAG="${TAG:-$(git rev-parse --short HEAD 2>/dev/null || echo latest)}"
-IMG_CPU_PYTORCH="${IMG_CPU_PYTORCH:-harbor.isuanova.com/suanova/cpu-pytorch:py310-torch2.4-$TAG}"
+IMG_CPU_PYTORCH="${IMG_CPU_PYTORCH:-harbor.isuanova.com/suanova/cpu-pytorch:py312-torch2.6-$TAG}"
 IMG_MACA="${IMG_MACA:-harbor.isuanova.com/suanova/maca-pytorch:3.9.0.12-py310-torch2.4-$TAG}"
 # One axis, not three: the NGC release pins python, torch and CUDA together, so CUDA_TAG is that
 # release and nothing else.
