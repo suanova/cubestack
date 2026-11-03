@@ -1,0 +1,67 @@
+name: PR Agent (CodeRabbit fallback)
+
+# CodeRabbit is the primary reviewer for this public repo. Its free OSS quota can run
+# out, in which case it posts a "Review limit reached" notice — as a new comment, or as
+# an edit of its existing comment — instead of a review. PR-Agent then takes over, so a
+# pull request is reviewed by exactly one of the two bots.
+on:
+  issue_comment:
+    types: [created, edited]
+
+concurrency:
+  group: pr-agent-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  pr_agent_job:
+    # Either CodeRabbit's own rate-limit notice, or a maintainer explicitly asking
+    # PR-Agent for a review by commenting `/review`. An edited notice only triggers
+    # when the edit introduces the marker, and an edited `/review` comment never
+    # repeats the review.
+    if: >-
+      github.event.issue.pull_request != null && (
+        (github.event.comment.user.login == 'coderabbitai[bot]' &&
+         contains(github.event.comment.body, 'rate limited by coderabbit.ai') &&
+         (github.event.action == 'created' ||
+          !contains(github.event.changes.body.from, 'rate limited by coderabbit.ai'))) ||
+        (github.event.action == 'created' &&
+         contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
+         startsWith(github.event.comment.body, '/review'))
+      )
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    name: Review the pull request when CodeRabbit is rate-limited
+    steps:
+      # The official action only accepts commands from human slash commands, so it
+      # cannot consume CodeRabbit's bot-authored notice. Run the same review through
+      # the CLI image instead: `--pr_url` carries everything the action would have
+      # read from the event payload.
+      - name: Run PR-Agent review
+        uses: docker://pragent/pr-agent:latest
+        with:
+          args: --pr_url=${{ github.event.issue.pull_request.html_url }} review
+        env:
+          GITHUB__USER_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+          # ---- LLM 路由（模型名来自仓库变量）----
+          # 使用 OpenAI 兼容端点：cuberouter 的 Anthropic 端点(/v1/messages)会忽略
+          # reasoning_effort，模型默认先输出 thinking token；thinking 会耗尽输出
+          # 预算并导致 "Empty content in model response (finish_reason: length)"。
+          # OpenAI 兼容端点(/v1/chat/completions)支持 reasoning_effort=none，可关闭思考。
+          OPENAI__API_BASE: ${{ vars.LLM_OPENAI_BASE_URL || 'https://cuberouter.cn/v1' }}
+          OPENAI__KEY: ${{ secrets.CUBEROUTER_TOKEN }}
+
+          CONFIG__MODEL: ${{ vars.LLM_MODEL || 'openai/deepseek-flash' }}
+          CONFIG__FALLBACK_MODELS: '[]'
+          CONFIG__CUSTOM_MODEL_MAX_TOKENS: ${{ vars.LLM_MAX_TOKENS || '128000' }}
+          # OpenAI 兼容网关不认识该模型 ID，显式声明其支持 reasoning_effort，
+          # 否则 pr-agent 不会把 reasoning_effort 传给网关。
+          CONFIG__ADDITIONAL_REASONING_EFFORT_MODELS: ${{ vars.LLM_REASONING_MODELS || '["deepseek-flash"]' }}
+          # 关闭思考后 8k 已够用，但仍留足余量避免长回答被截断。
+          CONFIG__MAX_OUTPUT_TOKENS: ${{ vars.LLM_MAX_OUTPUT_TOKENS || '16384' }}
+          CONFIG__REASONING_EFFORT: ${{ vars.LLM_REASONING_EFFORT || 'none' }}
+          CONFIG__NO_TEMPERATURE_MODELS: ${{ vars.LLM_NO_TEMPERATURE_MODELS || '["deepseek-flash"]' }}
+          CONFIG__OUTPUT_RUN_DETAILS: 'true'
