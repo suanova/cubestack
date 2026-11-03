@@ -10,8 +10,11 @@
 # "base name (${DISTROLESS_BASE}) should not be blank".
 # The golang base is pinned to a patch version, not to the 1.27 line: go.mod
 # requires go 1.27.1 (envoyproxy/ai-gateway v1.2.0), and a base older than that
-# makes the build download a toolchain at build time.
-ARG GOLANG_BASE=golang:1.27.1
+# makes the build download a toolchain at build time. The patch is 1.27.3, not
+# that 1.27.1 floor, because 1.27.2 and 1.27.3 carry the stdlib fixes the
+# 2026-11 CVE scan reports (#169): x509, net/http Range, HTTP/2 SETTINGS and
+# ECH. An older base would bake the vulnerable stdlib into the image.
+ARG GOLANG_BASE=golang:1.27.3
 ARG DISTROLESS_BASE=gcr.io/distroless/static:nonroot
 FROM ${GOLANG_BASE} AS builder
 ARG TARGETOS
