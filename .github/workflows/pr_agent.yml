@@ -1,11 +1,12 @@
 name: PR Agent (CodeRabbit fallback)
 
 # CodeRabbit is the primary reviewer for this public repo. Its free OSS quota can run
-# out, in which case it posts a "Review limit reached" notice instead of a review.
-# PR-Agent then takes over, so a pull request is reviewed by exactly one of the two bots.
+# out, in which case it posts a "Review limit reached" notice — as a new comment, or as
+# an edit of its existing comment — instead of a review. PR-Agent then takes over, so a
+# pull request is reviewed by exactly one of the two bots.
 on:
   issue_comment:
-    types: [created]
+    types: [created, edited]
 
 concurrency:
   group: pr-agent-${{ github.event.issue.number }}
@@ -14,12 +15,17 @@ concurrency:
 jobs:
   pr_agent_job:
     # Either CodeRabbit's own rate-limit notice, or a maintainer explicitly asking
-    # PR-Agent for a review by commenting `/review`.
+    # PR-Agent for a review by commenting `/review`. An edited notice only triggers
+    # when the edit introduces the marker, and an edited `/review` comment never
+    # repeats the review.
     if: >-
       github.event.issue.pull_request != null && (
         (github.event.comment.user.login == 'coderabbitai[bot]' &&
-         contains(github.event.comment.body, 'rate limited by coderabbit.ai')) ||
-        (contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
+         contains(github.event.comment.body, 'rate limited by coderabbit.ai') &&
+         (github.event.action == 'created' ||
+          !contains(github.event.changes.body.from, 'rate limited by coderabbit.ai'))) ||
+        (github.event.action == 'created' &&
+         contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
          startsWith(github.event.comment.body, '/review'))
       )
     runs-on: ubuntu-latest
@@ -29,38 +35,16 @@ jobs:
       pull-requests: write
     name: Review the pull request when CodeRabbit is rate-limited
     steps:
-      # PR-Agent ignores comments authored by bots and comments that do not start with a
-      # slash command, so CodeRabbit's notice cannot drive it directly. When that notice
-      # is what triggered this run, replace the event payload with the `/review` command
-      # PR-Agent would have received from a maintainer.
-      - name: Translate the CodeRabbit rate-limit notice into /review
-        if: github.event.comment.user.login == 'coderabbitai[bot]'
-        uses: actions/github-script@v7
+      # The official action only accepts commands from human slash commands, so it
+      # cannot consume CodeRabbit's bot-authored notice. Run the same review through
+      # the CLI image instead: `--pr_url` carries everything the action would have
+      # read from the event payload.
+      - name: Run PR-Agent review
+        uses: docker://pragent/pr-agent:latest
         with:
-          script: |
-            const fs = require('fs');
-            const { owner, repo } = context.repo;
-            const pr = context.issue.number;
-            const event = {
-              action: 'created',
-              sender: { type: 'User', login: context.actor },
-              issue: {
-                number: pr,
-                pull_request: {
-                  url: `https://api.github.com/repos/${owner}/${repo}/pulls/${pr}`,
-                  html_url: `https://github.com/${owner}/${repo}/pull/${pr}`,
-                },
-              },
-              comment: { id: context.payload.comment.id, body: '/review' },
-              repository: context.payload.repository,
-            };
-            fs.writeFileSync(process.env.GITHUB_EVENT_PATH, JSON.stringify(event));
-
-      - name: PR Agent action step
-        id: pragent
-        uses: the-pr-agent/pr-agent@main
+          args: --pr_url=${{ github.event.issue.pull_request.html_url }} review
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB__USER_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
           # ---- LLM 路由（模型名来自仓库变量）----
           # 使用 OpenAI 兼容端点：cuberouter 的 Anthropic 端点(/v1/messages)会忽略
