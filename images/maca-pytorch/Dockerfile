@@ -29,13 +29,14 @@
 #   (or: make -C images build-maca-pytorch)
 
 # The platform registry's mirrored copy of the vendor package, which is what a bare `docker build`
-# resolves. Every published build substitutes the same reference pinned by digest through BASE_ARGS
-# in images/Makefile — which is where the base is bumped, and the pin is the only difference.
+# resolves. It carries the digest as well as the tag, the same pin BASE_ARGS substitutes in
+# images/Makefile, so a bare build and a published one descend from identical base layers.
+# images/Makefile is where the base is bumped; this default and BASE_ARGS name it, so bump both.
 #
 # The vendor publishes this package per architecture (`-amd64` is part of the tag), and the
 # mirror is a single-arch manifest rather than an index, so this image is amd64-only — see
 # MACA_PLATFORM in the Makefile.
-ARG MACA_BASE=harbor.isuanova.com/mirrors/cr.metax-tech.com/public-library/maca-pytorch:3.8.5.2-torch2.8-py312-ubuntu24.04-amd64
+ARG MACA_BASE=harbor.isuanova.com/mirrors/cr.metax-tech.com/public-library/maca-pytorch:3.8.5.2-torch2.8-py312-ubuntu24.04-amd64@sha256:210a29faead61b85b536485f9eb48bc5e782c671a835ec30f141f0e20a3cadce
 FROM ${MACA_BASE}
 
 # The vendor image runs as root; step up for the overlay steps.
