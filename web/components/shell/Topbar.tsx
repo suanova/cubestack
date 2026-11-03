@@ -1,7 +1,7 @@
 "use client";
 
 // Topbar: sticky blurred bar matching the prototype pages' `.topbar`
-// (public/overview.html) — breadcrumb on the left; theme toggle, language
+// (public/overview.html) — breadcrumb on the left; docs, theme toggle, language
 // switcher and avatar on the right. The blurred background is the same
 // color-mix() of --bg as the prototype, so it tracks the theme without a
 // re-render hook.
@@ -10,6 +10,7 @@ import { Box, Button, Tooltip } from "@mui/material";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
+import { DocsButton } from "@/components/shell/DocsButton";
 import { LanguageSwitcher } from "@/components/shell/LanguageSwitcher";
 import { ThemeToggle } from "@/components/perses/ThemeToggle";
 import { apiFetch } from "@/lib/base-path";
@@ -77,6 +78,7 @@ export function Topbar() {
           ) : null}
         </Box>
         <Box sx={{ display: "flex", alignItems: "center", gap: "10px" }}>
+          <DocsButton />
           <ThemeToggle />
           <LanguageSwitcher />
           {user ? (
