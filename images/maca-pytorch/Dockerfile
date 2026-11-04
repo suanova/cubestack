@@ -9,15 +9,15 @@
 # One image rather than two is what keeps the offline package small: the ssh sibling omitted the
 # JupyterLab pip step and baked a mode, which CUBSTACK_TYPE now states at run time.
 #
-# Unlike the cuda-pytorch image this is not stock-native: the vendor base ships no launcher, no sshd,
-# no non-root account, and no ENTRYPOINT at all (config.User is unset, so it would run as root and
-# its CMD is a bare /bin/bash that exits immediately). So this Dockerfile adds the platform
-# layer the cpu-pytorch family image defines — account ubuntu 1000:1000 with $HOME=/home/ubuntu,
-# openssh-server, the shared entrypoint — on top of the vendor's own python/torch/MACA stack,
-# inherited as the base published it except for PATH, which the overlay corrects so that `python3`
-# is the interpreter that owns the vendor torch (see below). The account is not a preference: the
-# shared sshd drop-in is a non-root configuration (Port 2222, UsePAM no, AllowUsers pinned to that
-# one account), and a non-root sshd can only serve the uid it runs as.
+# Unlike the cuda-pytorch image this is not stock-native: the vendor base ships no launcher and no
+# ENTRYPOINT (config.User is unset, so it runs as root and its CMD is a bare /bin/bash that exits
+# immediately), but it does ship the platform account (ubuntu 1000:1000, /home/ubuntu), sshd and
+# host keys of its own. So this Dockerfile adds the platform layer the cpu-pytorch family image
+# defines — the shared entrypoint, the sshd drop-in, and the removal of the base's host keys, whose
+# absence is what tells the entrypoint ssh is not enabled — on top of the vendor's own
+# python/torch/MACA stack. The account is not a preference: the shared sshd drop-in is a non-root
+# configuration (Port 2222, UsePAM no, AllowUsers pinned to that one account), and a non-root sshd
+# can only serve the uid it runs as.
 #
 # No key staging: the operator mounts two Secret entries and sshd reads them in place —
 #   ssh_host_ed25519_key -> /etc/ssh/ssh_host_ed25519_key   (host identity, subPath file)
@@ -29,16 +29,17 @@
 #   (or: make -C images build-maca-pytorch)
 
 # The platform registry's mirrored copy of the vendor package, which is what a bare `docker build`
-# resolves. Every published build substitutes the same reference pinned by digest through BASE_ARGS
-# in images/Makefile — which is where the base is bumped, and the pin is the only difference.
+# resolves. It carries the digest as well as the tag, the same pin BASE_ARGS substitutes in
+# images/Makefile, so a bare build and a published one descend from identical base layers.
+# images/Makefile is where the base is bumped; this default and BASE_ARGS name it, so bump both.
 #
 # The vendor publishes this package per architecture (`-amd64` is part of the tag), and the
 # mirror is a single-arch manifest rather than an index, so this image is amd64-only — see
 # MACA_PLATFORM in the Makefile.
-ARG MACA_BASE=harbor.isuanova.com/mirrors/cr.metax-tech.com/public-library/maca-pytorch:3.9.0.12-torch2.4-py310-ubuntu22.04-amd64
+ARG MACA_BASE=harbor.isuanova.com/mirrors/cr.metax-tech.com/public-library/maca-pytorch:3.8.5.2-torch2.8-py312-ubuntu24.04-amd64@sha256:210a29faead61b85b536485f9eb48bc5e782c671a835ec30f141f0e20a3cadce
 FROM ${MACA_BASE}
 
-# The vendor image runs as root and ships no non-root account; step up for the overlay steps.
+# The vendor image runs as root; step up for the overlay steps.
 USER root
 
 # Optional apt/pip mirror overrides for CN/offline builds; empty = upstream.
@@ -49,9 +50,9 @@ RUN if [ -n "$APT_MIRROR" ]; then \
     fi
 
 ARG DEBIAN_FRONTEND=noninteractive
-# sudo is installed but grants nothing: it runs only for the accounts a sudoers rule
-# names, and the image names none. spec.runtime.sudo is what supplies the rule
-# (images/README.md, image-contract.md).
+# sudo is installed but grants nothing by default: the vendor base ships the account with a locked
+# password, and the overlay removes its sudo-group membership (below). spec.runtime.sudo is what
+# supplies the NOPASSWD rule by uid (images/README.md, image-contract.md).
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
       openssh-server \
@@ -61,13 +62,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Make the VENDOR's python the image's python, before anything resolves `python3`.
 #
-# The base ships two 3.10 interpreters: /opt/conda/bin/python3, which owns the vendor torch, and the
-# system /usr/bin/python3, which does not. It publishes conda only from /etc/profile.d/conda.sh, which
-# prepends it for a *login* shell — so an interactive session gets the right interpreter while a build
-# RUN, or the non-login shell sshd gives a one-shot command, silently gets the other. Naming it here is
-# what makes every path agree: this build, the launch chain below, the notebook kernel (jupyter_client
-# rewrites a bare `python` argv[0] to sys.executable, so the kernel runs the server's interpreter), and
-# the ssh session, whose SetEnv carries exactly this PATH (see common/sshd/install-dropin.sh).
+# The base ships two 3.12 interpreters: /opt/conda/bin/python3, which owns the vendor torch, and the
+# system /usr/bin/python3, which does not. Its ENV already puts /opt/conda/bin first, so every path
+# agrees on it: this build, the launch chain below, the notebook kernel (jupyter_client rewrites a
+# bare `python` argv[0] to sys.executable, so the kernel runs the server's interpreter), and the ssh
+# session, whose SetEnv carries exactly this PATH (see common/sshd/install-dropin.sh). Re-asserting
+# it here keeps the image independent of that base default rather than depending on it.
 #
 # Prepending is safe against this base in particular: /opt/conda/bin shares no name with any of the
 # MACA toolchain directories and holds no compiler, linker or mpirun, so the vendor's own tools are
@@ -90,14 +90,13 @@ RUN set -eu; \
 
 # Platform account: literal 'ubuntu', uid/gid 1000, home /home/ubuntu — the identity every family
 # image ships, so one account names them all and a DevEnvironment states it once
-# (spec.runtime.user: ubuntu). The workspace PVC mounts at the home, so nothing durable is baked
-# under it; ~/.ssh exists only so the account's own `ssh-copy-id` target exists when no PVC is
-# attached.
-RUN groupadd -g 1000 ubuntu \
-    && useradd -u 1000 -g 1000 -s /bin/bash -d /home/ubuntu ubuntu \
-    && mkdir -p /home/ubuntu/.ssh \
-    && chown -R 1000:1000 /home/ubuntu \
-    && chmod 700 /home/ubuntu/.ssh
+# (spec.runtime.user: ubuntu). The vendor base already ships exactly that account, so only the
+# ~/.ssh placeholder is added: the workspace PVC mounts at the home, so nothing durable is baked
+# under it, and ~/.ssh exists so the account's own `ssh-copy-id` target exists when no PVC is
+# attached. The base also puts the account in the sudo group; the platform grants sudo only through
+# spec.runtime.sudo, so that membership is dropped.
+RUN install -d -o 1000 -g 1000 -m 700 /home/ubuntu/.ssh \
+    && gpasswd -d ubuntu sudo >/dev/null
 
 # No host keys in the image: identity comes from the mounted Secret. Their absence is also what
 # tells the entrypoint whether ssh is enabled.
