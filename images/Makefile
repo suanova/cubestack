@@ -125,8 +125,8 @@ MACA_BASE = $(REGISTRY)/$(MIRROR_PROJECT)/cr.metax-tech.com/public-library/$(MAC
 # so the published reference would claim a release its layers do not come from. One entry per
 # mirrored release; a release with no entry stops in check-cuda-pytorch instead. Nothing mirrors the
 # vendor bases, so the entry is added by hand.
-CUDA_PACKAGE = pytorch:26.08-py3
-CUDA_BASE_DIGESTS = pytorch:26.08-py3=sha256:ee619c9e16df23c5a7f6f79ff9a41ce3c6ea9f23a92a4833b59825bb056002cc
+CUDA_PACKAGE = pytorch:26.10-py3
+CUDA_BASE_DIGESTS = pytorch:26.10-py3=sha256:e0f31cd806303e97b656f583182472d811f4170a437e6008c714a0cbbf08c0bd
 CUDA_BASE_DIGEST = $(patsubst $(CUDA_PACKAGE)=%,%,$(filter $(CUDA_PACKAGE)=%,$(CUDA_BASE_DIGESTS)))
 CUDA_BASE = $(REGISTRY)/$(MIRROR_PROJECT)/nvcr.io/nvidia/$(CUDA_PACKAGE)@$(CUDA_BASE_DIGEST)
 
@@ -203,10 +203,10 @@ MACA_TAG_AXES    = $(MACA_PKG_VERSION)-$(MACA_PKG_PY)-$(MACA_PKG_TORCH)
 MACA_TAG        ?= $(MACA_TAG_AXES)-$(TAG)
 
 # The cuda-pytorch image's tag carries its vendor release for the same reason, and is derived the same way —
-# but the NGC tag has a different shape, so the derivation is not the same one. `pytorch:26.08-py3`
+# but the NGC tag has a different shape, so the derivation is not the same one. `pytorch:26.10-py3`
 # encodes no torch axis: the release *is* the combination of python, torch and CUDA, pinned
 # together upstream, which is why the whole compatibility contract is the release. What is read out
-# of CUDA_PACKAGE is therefore just its version field, '26.08', giving '<release>-<sha>'. The
+# of CUDA_PACKAGE is therefore just its version field, '26.10', giving '<release>-<sha>'. The
 # remaining field is dropped rather than appended: '-py3' names a python the release already
 # fixes, with one interpreter in the image for it to be ambiguous about.
 CUDA_PKG_VERSION = $(firstword $(subst -, ,$(lastword $(subst :, ,$(CUDA_PACKAGE)))))
@@ -344,7 +344,7 @@ check-maca-pytorch:
 check-cuda-pytorch:
 	@test -n "$(CUDA_PKG_VERSION)" || { \
 		echo "make -C images: cannot read the vendor release out of CUDA_PACKAGE=$(CUDA_PACKAGE)." >&2; \
-		echo "                Expected <release>-py<python>, e.g. pytorch:26.08-py3." >&2; \
+		echo "                Expected <release>-py<python>, e.g. pytorch:26.10-py3." >&2; \
 		exit 1; }
 	@test "$(origin BASE_ARGS)" != file || test -n "$(CUDA_BASE_DIGEST)" || { \
 		echo "make -C images: CUDA_PACKAGE=$(CUDA_PACKAGE) has no pinned base in CUDA_BASE_DIGESTS." >&2; \
