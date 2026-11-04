@@ -422,13 +422,14 @@ Jupyter launcher) is written once. They differ in the base and what the base alr
             +----------------------+----------------------+
             |                      |                      |
    cpu-pytorch                  cuda-pytorch               maca-pytorch
-   on ubuntu:24.04           on the vendor's NGC     on a vendor Metax
-   self-authored overlay:    PyTorch base: keeps     MACA base: ships no
-   account, sshd, python3,   its account (ubuntu     account, no sshd, no
-   the CPU build of torch,   1000:1000 /home/ubuntu), ENTRYPOINT - the
-   jupyterlab, launcher      torch, JupyterLab; the   overlay is the whole
-                             overlay adds sshd +     platform layer, account
-                             the launcher             included
+   on ubuntu:24.04              on the vendor's NGC        on a vendor Metax
+   self-authored overlay:       PyTorch base: keeps        MACA base: ships
+   account, sshd, python3,      its account (ubuntu        the account (ubuntu
+   the CPU build of torch,      1000:1000 /home/ubuntu),   1000:1000 /home/ubuntu),
+   jupyterlab, launcher         torch, JupyterLab; the     sshd; no ENTRYPOINT - the
+                                overlay adds sshd +        overlay adds the
+                                the launcher               entrypoint, drop-in and
+                                                           JupyterLab
 ```
 
 Key points:
@@ -544,7 +545,7 @@ Rules that follow:
     version to state separately, and repeating the python field the release also encodes (`-py3`)
     would restate what it already fixes.
   - `maca-pytorch:<maca-version>-py<python>-torch<ver>-<sha>`, e.g.
-    `3.9.0.12-py310-torch2.4-<sha>`. The same axes the base is built on: the vendor package version
+    `3.8.5.2-py312-torch2.8-<sha>`. The same axes the base is built on: the vendor package version
     is the compatibility contract of the whole stack, and it is what a user picks between. It moves
     on the vendor's cadence, not ours, so it stays in the tag while the repository keeps the stack
     identity.
@@ -655,15 +656,15 @@ that `base` vocabulary until the whole set was renamed.
   What remains unconfirmed is the **injection model** - whether `container-runtime` injects MACA on
   demand for non-root uid-1000 containers. This image bakes the stack regardless, so it does not depend
   on injection being available; if injection does apply, the two may overlap.
-- **Base**: the mirrored vendor package, pinned by digest. It is a **bare SDK image**, not a distro:
-  no `config.User` (so it runs as root), no `ENTRYPOINT` at all (`Cmd: ["/bin/bash"]`, which exits
-  immediately), no sshd, no jupyter, no non-root account - stock `ubuntu:22.04` plus MACA at
-  `/opt/maca` and a baked `/opt/mxdriver`. It therefore cannot back a DevEnvironment as it stands, and
-  the overlay is the whole platform layer rather than a delta - account `ubuntu` (1000:1000,
-  `$HOME=/home/ubuntu`), `openssh-server`, `tini`, the shared entrypoint and sshd drop-in and the
-  shared jupyter launcher, plus `jupyterlab` installed into the vendor's own python. It is also
-  **single-arch** (the `-amd64` suffix is part of the package tag, not a multi-arch index), so the
-  published image is amd64-only - see `images/README.md`.
+- **Base**: the mirrored vendor package, pinned by digest. It is a GPU SDK image, not a distro:
+  no `config.User` (so it runs as root), no `ENTRYPOINT` (`Cmd: ["/bin/bash"]`, which exits
+  immediately), no jupyter - stock `ubuntu:24.04` plus MACA at `/opt/maca` and a baked
+  `/opt/mxdriver`. It does ship the platform account (`ubuntu` 1000:1000, `$HOME=/home/ubuntu`) and
+  `openssh-server`, so the overlay is most of the platform layer rather than a delta: it removes the
+  base's host keys, drops the account's sudo-group membership, supplies `tini`, the shared entrypoint
+  and sshd drop-in and the shared jupyter launcher, plus `jupyterlab` installed into the vendor's own
+  python. It is also **single-arch** (the `-amd64` suffix is part of the package tag, not a
+  multi-arch index), so the published image is amd64-only - see `images/README.md`.
 - **Software stack**: the vendor's own python and `torch+metax` build, inherited untouched - jupyterlab
   is installed into that interpreter rather than beside it; stock CUDA wheels remain unusable
   (cu-bridge recompile).

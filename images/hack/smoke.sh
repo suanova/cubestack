@@ -70,7 +70,7 @@ cd "$(dirname "$self")/.." # images/ workspace root
 # every ref it built with.
 TAG="${TAG:-$(git rev-parse --short HEAD 2>/dev/null || echo latest)}"
 IMG_CPU_PYTORCH="${IMG_CPU_PYTORCH:-harbor.isuanova.com/suanova/cpu-pytorch:py312-torch2.6-$TAG}"
-IMG_MACA="${IMG_MACA:-harbor.isuanova.com/suanova/maca-pytorch:3.9.0.12-py310-torch2.4-$TAG}"
+IMG_MACA="${IMG_MACA:-harbor.isuanova.com/suanova/maca-pytorch:3.8.5.2-py312-torch2.8-$TAG}"
 # One axis, not three: the NGC release pins python, torch and CUDA together, so CUDA_TAG is that
 # release and nothing else.
 IMG_CUDA="${IMG_CUDA:-harbor.isuanova.com/suanova/cuda-pytorch:26.08-$TAG}"

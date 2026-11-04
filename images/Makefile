@@ -109,8 +109,8 @@ UBUNTU_BASE = $(REGISTRY)/$(MIRROR_PROJECT)/docker.io/library/ubuntu:$(UBUNTU_VE
 # reference would claim a package its layers do not come from. One entry per mirrored package; a
 # package with no entry stops in check-maca-pytorch instead. Nothing mirrors the vendor bases, so the
 # entry is added by hand.
-MACA_PACKAGE = maca-pytorch:3.9.0.12-torch2.4-py310-ubuntu22.04-amd64
-MACA_BASE_DIGESTS = maca-pytorch:3.9.0.12-torch2.4-py310-ubuntu22.04-amd64=sha256:da5065e441290224914e5643f6cd39e46a927d58eb2d97c865263ddd87c37a49
+MACA_PACKAGE = maca-pytorch:3.8.5.2-torch2.8-py312-ubuntu24.04-amd64
+MACA_BASE_DIGESTS = maca-pytorch:3.8.5.2-torch2.8-py312-ubuntu24.04-amd64=sha256:210a29faead61b85b536485f9eb48bc5e782c671a835ec30f141f0e20a3cadce
 MACA_BASE_DIGEST = $(patsubst $(MACA_PACKAGE)=%,%,$(filter $(MACA_PACKAGE)=%,$(MACA_BASE_DIGESTS)))
 MACA_BASE = $(REGISTRY)/$(MIRROR_PROJECT)/cr.metax-tech.com/public-library/$(MACA_PACKAGE)@$(MACA_BASE_DIGEST)
 
@@ -189,8 +189,8 @@ CPU_TAG         ?= $(CPU_TAG_AXES)-$(TAG)
 # commit: this is the one base the platform does not choose, and the vendor package version is the
 # compatibility contract of the whole stack, so a deployment naming it should say what it is. Read
 # out of MACA_PACKAGE rather than written twice, the way UBUNTU_VERSION is looked up in
-# UBUNTU_BASE_DIGESTS: 'maca-pytorch:3.9.0.12-torch2.4-py310-ubuntu22.04-amd64' becomes
-# '3.9.0.12-py310-torch2.4', so the tag cannot name a base the image was not built from. The
+# UBUNTU_BASE_DIGESTS: 'maca-pytorch:3.8.5.2-torch2.8-py312-ubuntu24.04-amd64' becomes
+# '3.8.5.2-py312-torch2.8', so the tag cannot name a base the image was not built from. The
 # vendor's field order is its own — §5 puts the python axis first — and the distro/arch fields are
 # dropped: the vendor's Ubuntu release is not our pin, and the package is amd64-only, which
 # MACA_PLATFORM already states. The commit still ends the tag, so re-building this overlay on an
