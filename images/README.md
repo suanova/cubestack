@@ -31,7 +31,7 @@ every one of them: account `ubuntu`, uid/gid **1000:1000**, home and workdir **`
 |-------|------|-------------------|------------------|-------|---------|
 | `harbor.isuanova.com/suanova/cpu-pytorch` | `ubuntu:22.04` | `ubuntu` 1000:1000 | `/home/ubuntu` | jupyter + ssh | jupyter `8888`, ssh `2222` |
 | `harbor.isuanova.com/suanova/maca-pytorch` | `maca-pytorch:3.8.5.2-torch2.8-py312-ubuntu24.04-amd64` (mirror of `cr.metax-tech.com/public-library/…`) | `ubuntu` 1000:1000 | `/home/ubuntu` | jupyter + ssh | jupyter `8888`, ssh `2222` |
-| `harbor.isuanova.com/suanova/cuda-pytorch` | `pytorch:26.08-py3` (mirror of `nvcr.io/nvidia/pytorch`) | `ubuntu` 1000:1000 | `/home/ubuntu` | jupyter + ssh | jupyter `8888`, ssh `2222` |
+| `harbor.isuanova.com/suanova/cuda-pytorch` | `pytorch:26.10-py3` (mirror of `nvcr.io/nvidia/pytorch`) | `ubuntu` 1000:1000 | `/home/ubuntu` | jupyter + ssh | jupyter `8888`, ssh `2222` |
 
 The repositories the old images were published under keep their existing tags; they are simply
 no longer published. A pinned `spec.image` keeps pulling. That includes `suanova/minimal` (this
@@ -73,8 +73,8 @@ diagnostics, then `exec "$@"`) is displaced by the platform's, losing no mechani
 needs.
 
 `cuda-pytorch` is **amd64-only** like `maca-pytorch`, though for the opposite reason: the MACA
-vendor publishes one architecture per tag, while this base reaches us as a **mirror whose
-manifest lists `linux/amd64` alone**. Both therefore build and publish on their own platform
+vendor publishes one architecture per tag, while this base reaches us as a **mirror that serves
+`linux/amd64` alone**. Both therefore build and publish on their own platform
 variable — see Platform. The base's GPU-side properties are the same kind of thing as MACA's and
 untestable here: the CUDA runtime is baked, and whether the node's driver satisfies it is a
 node-side question.
@@ -349,7 +349,7 @@ a given node's driver is the same node-side question the MACA image leaves open 
 
 Each image has **one name**: `make build` tags it at the reference it is published under,
 `$(REGISTRY)/$(PROJECT)/<image>:<stack axes>-$(TAG)` — `py310-torch2.4` for the CPU image,
-`3.8.5.2-py312-torch2.8` for MACA, `26.08` for CUDA — defaulting to `harbor.isuanova.com/suanova/...`
+`3.8.5.2-py312-torch2.8` for MACA, `26.10` for CUDA — defaulting to `harbor.isuanova.com/suanova/...`
 and the short commit SHA (decision doc §5.2). `push` adds `:latest` to that same name rather than
 introducing a second one, and publishes it as **one multi-arch index per image** covering
 `$(PLATFORMS)` — except the two vendor images, which publish a single-platform index (see Platform):
@@ -359,7 +359,7 @@ docker login harbor.isuanova.com              # once — the Makefile never auth
 make -C images push                           # publish every image
 make -C images push-cpu-pytorch   # cpu-pytorch:py310-torch2.4-<sha>
 make -C images push-maca-pytorch  # maca-pytorch:3.8.5.2-py312-torch2.8-<sha>
-make -C images push-cuda-pytorch  # cuda-pytorch:26.08-<sha>
+make -C images push-cuda-pytorch  # cuda-pytorch:26.10-<sha>
 make -C images push PLATFORMS=linux/amd64     # narrow back to one platform
 ```
 
@@ -451,7 +451,7 @@ The **vendor bases** ride the same `BASE_ARGS` and are pinned the same way, but 
 counts, both of which follow from its being a **vendor package mirrored as it stands** rather than a
 base the platform re-published: each lives under `$(REGISTRY)/$(MIRROR_PROJECT)/<vendor registry>/…`,
 not under `$(PROJECT)` — `…/cr.metax-tech.com/public-library/…` for MACA,
-`…/nvcr.io/nvidia/pytorch:26.08-py3` for CUDA — so they are named literally in `images/Makefile` and
+`…/nvcr.io/nvidia/pytorch:26.10-py3` for CUDA — so they are named literally in `images/Makefile` and
 have no entry in `operator/Makefile`'s `BASE_MIRRORS`; and `BASE_ARGS=` does not reach an upstream for
 them — neither vendor registry is something a build here resolves — so a MACA or CUDA build overridden
 that way needs an explicit `--build-arg MACA_BASE=<ref>` / `--build-arg CUDA_BASE=<ref>` in its place.
