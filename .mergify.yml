@@ -1,7 +1,16 @@
 pull_request_rules:
-  - name: automatically merge approved PRs
+  - name: automatically merge approved PRs (main)
     conditions:
       - base = main
+      - '#approved-reviews-by >= 1'
+      - check-success = @github-actions/result
+    actions:
+      merge:
+        method: squash
+
+  - name: automatically merge approved PRs (release-2.0)
+    conditions:
+      - base = release-2.0
       - '#approved-reviews-by >= 1'
       - check-success = @github-actions/result
     actions:
