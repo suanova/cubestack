@@ -39,10 +39,27 @@ jobs:
       # cannot consume CodeRabbit's bot-authored notice. Run the same review through
       # the CLI image instead: `--pr_url` carries everything the action would have
       # read from the event payload.
+      #
+      # The image entrypoint runs `python pr_agent/cli.py` with a relative path, so
+      # the container must start in its own /app. A `uses: docker://...` step cannot
+      # override that (the runner forces the repository checkout as the workdir),
+      # which fails with "can't open file '/github/workspace/pr_agent/cli.py'".
       - name: Run PR-Agent review
-        uses: docker://pragent/pr-agent:latest
-        with:
-          args: --pr_url=${{ github.event.issue.pull_request.html_url }} review
+        run: |
+          docker run --rm --workdir /app \
+            -e GITHUB__USER_TOKEN \
+            -e OPENAI__API_BASE \
+            -e OPENAI__KEY \
+            -e CONFIG__MODEL \
+            -e CONFIG__FALLBACK_MODELS \
+            -e CONFIG__CUSTOM_MODEL_MAX_TOKENS \
+            -e CONFIG__ADDITIONAL_REASONING_EFFORT_MODELS \
+            -e CONFIG__MAX_OUTPUT_TOKENS \
+            -e CONFIG__REASONING_EFFORT \
+            -e CONFIG__NO_TEMPERATURE_MODELS \
+            -e CONFIG__OUTPUT_RUN_DETAILS \
+            pragent/pr-agent:latest \
+            --pr_url="${{ github.event.issue.pull_request.html_url }}" review
         env:
           GITHUB__USER_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
