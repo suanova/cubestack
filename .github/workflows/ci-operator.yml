@@ -171,11 +171,13 @@ jobs:
         include: ${{ fromJSON(needs.changes.outputs.smoke-groups-json) }}
     # A smoke of the four images then shipping measured 17m02s on one runner, so this only ever
     # fires on something stuck. Each leg is now strictly smaller than the run that number came
-    # from, being one image today (and at most the images of one base if a base gains a second),
-    # so the bound stays what it was: the job's release, not a deadline a leg should approach. A
-    # leg that did reach it is answered by sizing it off `vendor` here, not by a column in the
-    # rule.
-    timeout-minutes: 45
+    # from, being one image today (and at most the images of one base if a base gains a second).
+    # A vendor leg is not that small, though: it pulls the 10.5-12 GB base it builds on, the same
+    # transfer the publish leg sizes at 300 minutes (ci-images.yml, where a cold one measured at
+    # 1.30 MB/s and took 2h25m), and the pull alone has measured at 0.7-2 MB/s from a CI runner.
+    # At 45 minutes the job was cancelled mid-pull. So size it off `vendor` the way the publish
+    # leg does, and keep the tighter bound for the CPU leg.
+    timeout-minutes: ${{ matrix.vendor && 300 || 45 }}
     steps:
       - name: Clone the code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
