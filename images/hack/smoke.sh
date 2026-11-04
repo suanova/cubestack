@@ -73,7 +73,7 @@ IMG_CPU_PYTORCH="${IMG_CPU_PYTORCH:-harbor.isuanova.com/suanova/cpu-pytorch:py31
 IMG_MACA="${IMG_MACA:-harbor.isuanova.com/suanova/maca-pytorch:3.8.5.2-py312-torch2.8-$TAG}"
 # One axis, not three: the NGC release pins python, torch and CUDA together, so CUDA_TAG is that
 # release and nothing else.
-IMG_CUDA="${IMG_CUDA:-harbor.isuanova.com/suanova/cuda-pytorch:26.08-$TAG}"
+IMG_CUDA="${IMG_CUDA:-harbor.isuanova.com/suanova/cuda-pytorch:26.10-$TAG}"
 CONTAINER_TOOL="${CONTAINER_TOOL:-docker}"
 
 run_cpu_pytorch=1
@@ -669,7 +669,7 @@ check_vendor_python() {
 #
 # The interpreter is the point. The account's python3 is what an ssh session and a build RUN get —
 # so torch importing there is what the image has to deliver. The version is reported, not compared:
-# the vendor builds carry their own suffixes (…+4fdf77b against …+4fdf77b940.nv26.08), so an
+# the vendor builds carry their own suffixes (…+4fdf77b against …+4fdf77b940.nv26.10), so an
 # equality check would be a false one.
 #
 # Read without --user, so `docker exec` uses the image's own USER — the account in question, the

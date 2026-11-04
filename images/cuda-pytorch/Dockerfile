@@ -42,12 +42,13 @@
 #   (or: make -C images build-cuda-pytorch)
 
 # The platform registry's mirrored copy of the vendor image, which is what a bare `docker build`
-# resolves. Every published build substitutes the same reference pinned by digest through BASE_ARGS
-# in images/Makefile — which is where the base is bumped, and the pin is the only difference.
+# resolves. It carries the digest as well as the tag, the same pin BASE_ARGS substitutes in
+# images/Makefile, so a bare build and a published one descend from identical base layers.
+# images/Makefile is where the base is bumped; this default and BASE_ARGS name it, so bump both.
 #
 # The mirror serves a single-arch manifest (linux/amd64) rather than an index, so this image is
 # amd64-only — see CUDA_PLATFORM in the Makefile.
-ARG CUDA_BASE=harbor.isuanova.com/mirrors/nvcr.io/nvidia/pytorch:26.08-py3
+ARG CUDA_BASE=harbor.isuanova.com/mirrors/nvcr.io/nvidia/pytorch:26.10-py3@sha256:e0f31cd806303e97b656f583182472d811f4170a437e6008c714a0cbbf08c0bd
 FROM ${CUDA_BASE}
 
 # The vendor image runs as root (config.User is unset); step up for the overlay steps.
@@ -62,9 +63,10 @@ RUN if [ -n "$APT_MIRROR" ]; then \
     fi
 
 ARG DEBIAN_FRONTEND=noninteractive
-# sudo is installed but grants nothing: it runs only for the accounts a sudoers rule
-# names, and the image names none. spec.runtime.sudo is what supplies the rule
-# (images/README.md, image-contract.md).
+# sudo is installed but grants nothing by default: the base ships the account in the sudo group, and
+# installing sudo brings the /etc/sudoers rule that group names, so the overlay drops the membership
+# (below). spec.runtime.sudo is what supplies the NOPASSWD rule by uid (images/README.md,
+# image-contract.md).
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
       openssh-server \
@@ -74,10 +76,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # The account is the base's, so all this adds is the one directory it does not ship: the `ssh-copy-id`
 # target the account's own key lands in when no workspace is attached. The workspace PVC mounts at
-# this home, so nothing durable is baked under it.
-RUN mkdir -p /home/ubuntu/.ssh \
-    && chown 1000:1000 /home/ubuntu/.ssh \
-    && chmod 700 /home/ubuntu/.ssh
+# this home, so nothing durable is baked under it. The base also puts the account in the sudo group;
+# the platform grants sudo only through spec.runtime.sudo, so that membership is dropped.
+RUN install -d -o 1000 -g 1000 -m 700 /home/ubuntu/.ssh \
+    && gpasswd -d ubuntu sudo >/dev/null
 
 # No host keys in the image: identity comes from the mounted Secret. Their absence is also what
 # tells the entrypoint whether ssh is enabled. (The apt package above may generate a set of its own,

@@ -539,7 +539,7 @@ Rules that follow:
   surface the same three images at `harbor.local`; only the host is swapped, by
   packaging/rewriting.
 - **Tags**: content-locked and reproducible. Examples:
-  - `cuda-pytorch:<ngc-release>-<sha>`, e.g. `26.08-<sha>`. Here the release *is* the
+  - `cuda-pytorch:<ngc-release>-<sha>`, e.g. `26.10-<sha>`. Here the release *is* the
     compatibility contract: NGC pins python, torch and CUDA together in one tag rather than naming
     them as separable axes, so there is one axis and not three - there is no torch
     version to state separately, and repeating the python field the release also encodes (`-py3`)
