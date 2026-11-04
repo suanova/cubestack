@@ -1,9 +1,9 @@
 "use client";
 
 // Inline SVG icon set lifted from the static prototype pages (public/*.html),
-// plus the two the React shell adds: "activity" for 监控中心 and "globe" for the
-// language switcher. All are 24x24 strokes drawn at 1.6px to match the
-// prototype's nav icons.
+// plus the ones the React shell adds: "activity" for 监控中心, "globe" for the
+// language switcher, and "help"/"close" for the documentation dialog. All are
+// 24x24 strokes drawn at 1.6px to match the prototype's nav icons.
 
 import type { CSSProperties, ReactNode } from "react";
 
@@ -14,7 +14,9 @@ export type IconName =
   | "server"
   | "code"
   | "spark"
-  | "globe";
+  | "globe"
+  | "help"
+  | "close";
 
 const ICONS: Record<IconName, ReactNode> = {
   brand: (
@@ -57,6 +59,14 @@ const ICONS: Record<IconName, ReactNode> = {
       <path d="M3 12h18M12 3c2.5 2.6 3.8 5.7 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.7-3.8-9S9.5 5.6 12 3Z" />
     </>
   ),
+  help: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M9.6 9a2.5 2.5 0 1 1 4 2c-.9.6-1.6 1.2-1.6 2.3" />
+      <path d="M12 17h.01" />
+    </>
+  ),
+  close: <path d="M6 6l12 12M18 6 6 18" />,
 };
 
 /** Render one of the shell's inline icons at the given pixel size. */
