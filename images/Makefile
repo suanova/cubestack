@@ -84,14 +84,14 @@ BASE_ARGS ?= \
 # Base release of the cpu-pytorch family image — the CPU image, built on plain ubuntu:<version>.
 # It selects the build base and nothing else; it is looked up in UBUNTU_BASE_DIGESTS below, so
 # a release and its digest can never be chosen apart.
-UBUNTU_VERSION ?= 22.04
+UBUNTU_VERSION ?= 24.04
 
 # The pinned base, one entry per supported Ubuntu release, as <version>=<digest of the
 # platform registry's copy>. A release with no entry has no base to build from: its tag would
 # carry another release's digest, which the build resolves — so it would either fail the pull
-# or build a release the image does not claim. `make build-cpu-pytorch UBUNTU_VERSION=24.04`
-# stops in check-ubuntu-base instead, until 24.04 is mirrored and pinned here.
-UBUNTU_BASE_DIGESTS = 22.04=sha256:b8b6ee6aa931ecd9d0d952abc34dc0e5f7c6a30c6bb71b079fe399fde0329c02
+# or build a release the image does not claim. `make build-cpu-pytorch UBUNTU_VERSION=26.04`
+# stops in check-ubuntu-base instead, until 26.04 is mirrored and pinned here.
+UBUNTU_BASE_DIGESTS = 24.04=sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
 
 UBUNTU_BASE_DIGEST = $(patsubst $(UBUNTU_VERSION)=%,%,$(filter $(UBUNTU_VERSION)=%,$(UBUNTU_BASE_DIGESTS)))
 UBUNTU_BASE = $(REGISTRY)/$(MIRROR_PROJECT)/docker.io/library/ubuntu:$(UBUNTU_VERSION)@$(UBUNTU_BASE_DIGEST)
@@ -176,11 +176,11 @@ CUDA_REPO   = $(REGISTRY)/$(PROJECT)/cuda-pytorch
 # the same reason the vendor tags are: a deployment naming this image should be able to tell
 # what it runs. There is no vendor release to read, so the axes come from the two build inputs
 # that fix the stack — TORCH_VERSION, read here so the tag cannot name a torch the image was
-# not built from, and CPU_PYTHON, which is ubuntu:22.04's python3 and has to move with
+# not built from, and CPU_PYTHON, which is the base release's python3 and has to move with
 # UBUNTU_VERSION above. The commit still ends the tag, so re-building the overlay on an
 # unchanged stack moves the reference instead of redefining it.
-TORCH_VERSION   ?= 2.4.0
-CPU_PYTHON      ?= py310
+TORCH_VERSION   ?= 2.6.0
+CPU_PYTHON      ?= py312
 TORCH_AXIS       = torch$(word 1,$(subst ., ,$(TORCH_VERSION))).$(word 2,$(subst ., ,$(TORCH_VERSION)))
 CPU_TAG_AXES     = $(CPU_PYTHON)-$(TORCH_AXIS)
 CPU_TAG         ?= $(CPU_TAG_AXES)-$(TAG)
@@ -296,7 +296,7 @@ check-ubuntu-base:
 		exit 1; }
 
 # TORCH_VERSION is read for the tag too, and the derivation takes its first two fields — so a
-# value that does not parse would publish 'py310-torch.-<sha>', a tag claiming a framework
+# value that does not parse would publish 'py312-torch.-<sha>', a tag claiming a framework
 # version it cannot name. Stop instead; the fix is TORCH_VERSION itself.
 check-cpu-pytorch:
 	@case "$(TORCH_VERSION)" in \
@@ -306,7 +306,7 @@ check-cpu-pytorch:
 		   exit 1;; \
 	esac
 	@test -n "$(CPU_PYTHON)" || { \
-		echo "make -C images: CPU_PYTHON is empty - name the interpreter axis (e.g. py310)." >&2; \
+		echo "make -C images: CPU_PYTHON is empty - name the interpreter axis (e.g. py312)." >&2; \
 		exit 1; }
 
 # MACA_TAG is read out of MACA_PACKAGE, so a vendor package whose tag carries only one of the two

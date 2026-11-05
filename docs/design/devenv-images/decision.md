@@ -9,7 +9,7 @@ satisfy the image contract already fixed in the operator, are published to a con
 registry, and can be bundled for offline installation.
 
 In scope: the image set that now ships — **one image per (accelerator, stack) cell**: `cpu-pytorch`
-(CPU, on `ubuntu:22.04`), `maca-pytorch` (Metax), and `cuda-pytorch` (NVIDIA), each carrying its
+(CPU, on `ubuntu:24.04`), `maca-pytorch` (Metax), and `cuda-pytorch` (NVIDIA), each carrying its
 family's PyTorch build. The naming rule those names follow is §5.1. Each image serves **both**
 runtime modes: `spec.type` is injected as `CUBSTACK_TYPE` and the entrypoint runs JupyterLab or sshd
 from it (Gap D). This supersedes the six-image set this document originally scoped — the CPU pair
@@ -422,7 +422,7 @@ Jupyter launcher) is written once. They differ in the base and what the base alr
             +----------------------+----------------------+
             |                      |                      |
    cpu-pytorch                  cuda-pytorch               maca-pytorch
-   on ubuntu:22.04              on the vendor's NGC        on a vendor Metax
+   on ubuntu:24.04              on the vendor's NGC        on a vendor Metax
    self-authored overlay:       PyTorch base: keeps        MACA base: ships
    account, sshd, python3,      its account (ubuntu        the account (ubuntu
    the CPU build of torch,      1000:1000 /home/ubuntu),   1000:1000 /home/ubuntu),
@@ -549,8 +549,8 @@ Rules that follow:
     is the compatibility contract of the whole stack, and it is what a user picks between. It moves
     on the vendor's cadence, not ours, so it stays in the tag while the repository keeps the stack
     identity.
-  - `cpu-pytorch:py<python>-torch<ver>-<sha>`, e.g. `py310-torch2.4-<sha>`. No vendor release fixes
-    the stack, so the tag states the two build inputs that do — `CPU_PYTHON` (ubuntu:22.04's
+  - `cpu-pytorch:py<python>-torch<ver>-<sha>`, e.g. `py312-torch2.6-<sha>`. No vendor release fixes
+    the stack, so the tag states the two build inputs that do — `CPU_PYTHON` (ubuntu:24.04's
     python3) and `TORCH_VERSION` — and the Makefile reads both out of those rather than expecting
     them typed twice. The Ubuntu release stays out, as the MACA package's distro field does: it is a
     build input, not an axis a user picks between, and the digest a deployment pins fixes it.
@@ -582,7 +582,7 @@ each serving both runtime modes:
 
 | image | base | modes | platforms | compressed |
 |---|---|---|---|---|
-| `cpu-pytorch` | `ubuntu:22.04` (self-authored overlay) | jupyter, ssh | amd64, arm64 | 0.32 GiB (measured) |
+| `cpu-pytorch` | `ubuntu:24.04` (self-authored overlay) | jupyter, ssh | amd64, arm64 | 0.32 GiB (measured) |
 | `cuda-pytorch` | `nvcr.io/nvidia/pytorch:<release>-py3` (mirrored) | jupyter, ssh | amd64 | 10.56 GiB |
 | `maca-pytorch` | `public-library/maca-pytorch:<ver>-<os>-<arch>` (mirrored) | jupyter, ssh | amd64 | 10.57 GiB |
 
@@ -686,7 +686,7 @@ that `base` vocabulary until the whole set was renamed.
 
 ### 6.3 `cpu-pytorch` (CPU)
 
-Shipped as `images/cpu-pytorch/`, built on **`ubuntu:22.04`** and carrying the CPU build of
+Shipped as `images/cpu-pytorch/`, built on **`ubuntu:24.04`** and carrying the CPU build of
 PyTorch. The name follows §5.1 — `cpu` says there is no accelerator, `pytorch` the stack — after a
 spell as `cpu-base` (and `minimal` in the original design). This section was written as two
 candidate CPU images - a thin overlay on docker-stacks' `minimal-notebook`, and a self-build - with
@@ -703,7 +703,8 @@ six-image set did not have.
   by an order of magnitude, so the overlay costs little against what the offline set already ships.
 - **Overlay**: `ca-certificates`, `openssh-server`, `python3`, `python3-pip` and `tini` from the
   Ubuntu mirror (`APT_MIRROR`), the **CPU build of PyTorch**, `numpy` (torch's array bridge, which
-  torch does not pull in itself, held below 2 because torch 2.4.0 predates its NumPy 2 support)
+  torch does not pull in itself, held below 2 so a rebuild cannot move the numpy axis under an
+  unchanged tag)
   and `jupyterlab` from pip into the
   **system interpreter** (no venv, no conda), account `ubuntu` uid/gid 1000 at `/home/ubuntu`,
   `/run/sshd` at 0700, and the shared entrypoint, launcher and sshd drop-in (session environment:
@@ -713,7 +714,7 @@ six-image set did not have.
   published tag is derived from it (§5.2). `tini` is PID 1, the baked default is
   `CUBESTACK_IMAGE=jupyter`, `EXPOSE 8888 2222`, and the `CMD` is the shared launcher - the same
   structure as the vendor images, on a base the platform owns outright.
-- **Platforms**: the `ubuntu:22.04` base is multi-arch, and everything added (the apt packages,
+- **Platforms**: the `ubuntu:24.04` base is multi-arch, and everything added (the apt packages,
   JupyterLab and its pure-python dependencies, and the CPU torch wheel) has arm64 builds, so this
   is the one image published as a multi-arch index (amd64, arm64).
 - **Acceptance mapping**: in both modes - non-root 1000, `/home/ubuntu` writable, jupyter 8888 behind
@@ -779,7 +780,7 @@ six-image set did not have.
 | Dockerfiles live in monorepo `images/` | §7 | ✅ decided — landed, with CI on both sides (smoke per PR, publish on merge); the offline export script is still open |
 | NVIDIA image: self-authored platform layer on the **mirrored** NGC PyTorch vendor base, which already supplies the account, the interpreter, torch and JupyterLab — so the "bake torch or not" and "runtime or devel" questions this row used to leave open are answered together by the base choice — plus the shared launcher; amd64-only, both modes in one `cuda-pytorch` image | §6.1 | ✅ shipped in `images/` (the earlier `base-cuda` on a bare `nvidia/cuda` runtime is superseded); ⚠️ **to confirm on an NVIDIA node**: the node's driver against the release's CUDA requirement, and the vendor stack under uid 1000 once a device is present |
 | Metax image: self-authored platform layer on the **mirrored** vendor base, plus the shared launcher (`common/jupyter/` — the vendor base ships none), amd64-only — both modes in one `maca-pytorch` image | §6.2 | ✅ shipped in `images/`; ⚠️ **to confirm on a Metax node**: driver model (the base's baked `/opt/mxdriver` vs. what the node injects) and `mx-smi`/`metax-tech.com/gpu` |
-| CPU image: self-build on `ubuntu:22.04` with `python3`/pip, the CPU build of PyTorch and JupyterLab on the system interpreter, account `ubuntu`/`$HOME=/home/ubuntu`; multi-arch (amd64, arm64); both modes in one `cpu-pytorch` image. The stock docker-stacks overlay (`jovyan`, gid 100) is retired: it was the one layout that needed a `runAsGroup` override | §6.3 | ✅ shipped in `images/` in #332; PyTorch and the `cpu-pytorch` name added in #343; replaces both the earlier `jupyter-minimal` and `ssh-ubuntu22.04` |
+| CPU image: self-build on `ubuntu:24.04` with `python3`/pip, the CPU build of PyTorch and JupyterLab on the system interpreter, account `ubuntu`/`$HOME=/home/ubuntu`; multi-arch (amd64, arm64); both modes in one `cpu-pytorch` image. The stock docker-stacks overlay (`jovyan`, gid 100) is retired: it was the one layout that needed a `runAsGroup` override | §6.3 | ✅ shipped in `images/` in #332; PyTorch and the `cpu-pytorch` name added in #343; replaces both the earlier `jupyter-minimal` and `ssh-ubuntu22.04` |
 | Non-root elevation: `spec.runtime.sudo` (default `false`) grants the container's uid passwordless sudo through a controller-written sudoers drop-in. The images ship `sudo` and grant nothing; a root environment needs no grant; the field adds no Pod Security requirement | Gap E | ✅ decided and implemented (issue #330) |
 | Gaps A/B/C/D/E closure | §8, Gap E | ✅ all five closed: A and C controller-side, B and D image-side (D by #332), E by `spec.runtime.sudo` — the images ship sudo and grant nothing, and the controller writes the rule only when the spec asks (issue #330) |
 
