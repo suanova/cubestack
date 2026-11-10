@@ -34,4 +34,7 @@ resources:
 - modelversion_admin_role.yaml
 - modelversion_editor_role.yaml
 - modelversion_viewer_role.yaml
+- dataset_admin_role.yaml
+- dataset_editor_role.yaml
+- dataset_viewer_role.yaml
 

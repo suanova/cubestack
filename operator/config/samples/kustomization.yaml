@@ -4,4 +4,5 @@ resources:
 - ai_v1alpha1_inferenceruntimeprofile.yaml
 - ai_v1alpha1_inferenceservice.yaml
 - ai_v1alpha1_devenvironment.yaml
+- ai_v1alpha1_dataset.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

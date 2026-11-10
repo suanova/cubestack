@@ -1,8 +1,10 @@
 # CubeStack Operator
 
 The CubeStack operator manages the `ai.cubestack.io` resources: `ModelVersion`,
-`InferenceRuntimeProfile`, `InferenceService` and `DevEnvironment`. It ships as a
-Helm chart (see [helm/cubestack-controller-manager-chart](helm/cubestack-controller-manager-chart/README.md));
+`InferenceRuntimeProfile`, `InferenceService` and `DevEnvironment`. The chart
+also ships `Dataset`, a cluster-scoped registry entry for a dataset version;
+there is no Dataset controller yet, so `Dataset` objects carry spec only. It
+ships as a Helm chart (see [helm/cubestack-controller-manager-chart](helm/cubestack-controller-manager-chart/README.md));
 the `make helm-e2e-*` targets below are the quickest way to install it locally
 and verify it end-to-end on a dedicated kind cluster.
 
@@ -61,7 +63,7 @@ before the chart is helm-installed:
   `leaderworkerset.x-k8s.io` / `disaggregatedset.x-k8s.io` CRDs.
 
 The chart installs the `ai.cubestack.io` CRDs (ModelVersion,
-InferenceRuntimeProfile, InferenceService, DevEnvironment — synced from
+InferenceRuntimeProfile, InferenceService, DevEnvironment, Dataset — synced from
 `config/crd/bases` at build time) together with the VAPs, RBAC and Deployment
 for the controller manager; it does not ship the lws CRDs, and creates no
 Gateway API object.

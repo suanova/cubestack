@@ -1,0 +1,215 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: datasets.ai.cubestack.io
+spec:
+  group: ai.cubestack.io
+  names:
+    kind: Dataset
+    listKind: DatasetList
+    plural: datasets
+    singular: dataset
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.dataset
+      name: Dataset
+      type: string
+    - jsonPath: .spec.version
+      name: Version
+      type: string
+    - jsonPath: .spec.format
+      name: Format
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Dataset is the Schema for the datasets API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of Dataset
+            properties:
+              dataset:
+                description: Dataset is the semantic dataset name; versions of the
+                  same dataset share it.
+                minLength: 1
+                type: string
+              format:
+                description: Format is the physical data format, e.g. Parquet, JSONL,
+                  WebDataset or DICOM.
+                minLength: 1
+                type: string
+              meta:
+                additionalProperties:
+                  type: string
+                description: Meta is a free-form map maintained by the admin.
+                type: object
+              recordCount:
+                description: RecordCount is the number of rows, samples or images
+                  in the dataset version.
+                format: int64
+                minimum: 0
+                type: integer
+              size:
+                anyOf:
+                - type: integer
+                - type: string
+                description: |-
+                  Size is the total size of the dataset version. Optional because some
+                  registries only know it after the data has been materialized.
+                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                x-kubernetes-int-or-string: true
+              storage:
+                description: Storage defines where and how the dataset is provided.
+                properties:
+                  dynamic:
+                    description: Dynamic is the shared-storage configuration, required
+                      when strategy is Dynamic.
+                    properties:
+                      capacity:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: Capacity is written to spec.resources.requests.storage
+                          of the created PVC.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      storageClassName:
+                        description: StorageClassName references a StorageClass created
+                          by the platform admin.
+                        minLength: 1
+                        type: string
+                      subPath:
+                        description: SubPath is the model directory within the shared
+                          storage, organized as <model>/<version>.
+                        minLength: 1
+                        type: string
+                    required:
+                    - capacity
+                    - storageClassName
+                    - subPath
+                    type: object
+                  hostPath:
+                    description: HostPath is the pre-distributed dataset configuration,
+                      required when strategy is HostPath.
+                    properties:
+                      path:
+                        description: Path is the absolute path of the pre-distributed
+                          model root directory.
+                        pattern: ^/
+                        type: string
+                    required:
+                    - path
+                    type: object
+                  s3:
+                    description: S3 is the direct-S3 configuration, required when
+                      strategy is S3.
+                    properties:
+                      credentialsRef:
+                        description: |-
+                          CredentialsRef optionally names the credentials Secret in cubestack-system
+                          that the controller copies into the service namespace. Absent means
+                          anonymous reads or node-level identity.
+                        properties:
+                          name:
+                            description: |-
+                              Name is the credentials Secret name in cubestack-system, scoped read-only
+                              to the model's uri prefix by the platform admin.
+                            minLength: 1
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      uri:
+                        description: |-
+                          URI optionally locates the S3 prefix of the model data,
+                          <bucket>/<prefix>/<model>/<version>. The bucket must be non-empty: a bare
+                          "s3://" or a missing bucket ("s3:///path") has no addressable model store
+                          (design §3.1). Omitted means the location is supplied per deployment (for
+                          example by an InferenceService override), keeping the cluster-scoped
+                          registry entry free of environment-specific addresses. A template that
+                          references {{ model.path }} then fails to render until a URI is set.
+                        pattern: ^s3://[^/]+(/.*)?$
+                        type: string
+                    type: object
+                  static:
+                    description: Static is the pre-provisioned PV configuration, required
+                      when strategy is Static.
+                    properties:
+                      capacity:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: |-
+                          Capacity declares the model storage size; it is written to the PVC request and
+                          validated against the storage-side quota by the storage integration.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      storageClassName:
+                        description: StorageClassName references the no-provisioner
+                          StorageClass of the pre-created PVs.
+                        minLength: 1
+                        type: string
+                    required:
+                    - capacity
+                    - storageClassName
+                    type: object
+                  strategy:
+                    description: Strategy selects how the dataset storage is provided.
+                    enum:
+                    - HostPath
+                    - Dynamic
+                    - Static
+                    - S3
+                    type: string
+                required:
+                - strategy
+                type: object
+                x-kubernetes-validations:
+                - message: Exactly one of hostPath, dynamic, static, or s3 must be
+                    set for the chosen strategy
+                  rule: 'self.strategy == ''HostPath'' ? (has(self.hostPath) && !has(self.dynamic)
+                    && !has(self.static) && !has(self.s3)) : (self.strategy == ''Dynamic''
+                    ? (has(self.dynamic) && !has(self.hostPath) && !has(self.static)
+                    && !has(self.s3)) : (self.strategy == ''Static'' ? (has(self.static)
+                    && !has(self.hostPath) && !has(self.dynamic) && !has(self.s3))
+                    : (self.strategy == ''S3'' ? (has(self.s3) && !has(self.hostPath)
+                    && !has(self.dynamic) && !has(self.static)) : true)))'
+              version:
+                description: |-
+                  Version is the dataset version. Dataset names may contain '-', so the version
+                  cannot be reliably parsed back from metadata.name and is stored explicitly.
+                minLength: 1
+                type: string
+            required:
+            - dataset
+            - format
+            - storage
+            - version
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources: {}
