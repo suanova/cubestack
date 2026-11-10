@@ -32,6 +32,13 @@ CTX="kind-${KIND_CLUSTER}"
 KUBECTL="${KUBECTL:-kubectl}"
 DOCKER="${DOCKER:-docker}"
 KIND_BIN="${KIND:-kind}"
+# kind's node runs the host architecture. A plain pull of a multi-arch tag
+# stores the index plus only this platform's blobs, and `kind load docker-image`
+# re-exports the whole index, so the node's `ctr import --all-platforms` fails
+# on the manifests the pull never fetched ("content digest ...: not found").
+# Pulling for the node's platform up front — the same rule the Makefile's
+# busybox pull follows — leaves nothing for the load to miss.
+LWS_PLATFORM="linux/$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')"
 
 cd "$(dirname "$0")/.." # operator/
 
@@ -73,7 +80,7 @@ MANIFEST_REF="${MANIFEST_REF:-us-central1-docker.pkg.dev/k8s-staging-images/lws/
 # first everywhere, not just in CI. Steps 2-4 below are the fallbacks for a
 # network that cannot reach the platform registry.
 REF=""
-if "${DOCKER}" pull "${LWS_IMAGE}" >/dev/null 2>&1; then
+if "${DOCKER}" pull --platform "${LWS_PLATFORM}" "${LWS_IMAGE}" >/dev/null 2>&1; then
   REF="${LWS_IMAGE}"
   echo "pulled the pinned lws controller image ${REF}"
 elif [ -n "${CI:-}" ]; then
@@ -84,10 +91,10 @@ elif [ -n "${CI:-}" ]; then
   echo "rather than unreachable, publish it with hack/mirror-e2e-images.sh —" >&2
   echo "it mirrors registry.k8s.io/lws/lws:${LWS_VER#v}." >&2
   exit 1
-elif "${DOCKER}" pull "${MANIFEST_REF}" >/dev/null 2>&1; then
+elif "${DOCKER}" pull --platform "${LWS_PLATFORM}" "${MANIFEST_REF}" >/dev/null 2>&1; then
   REF="${MANIFEST_REF}"
   echo "pulled upstream manifest image ${REF}"
-elif "${DOCKER}" pull "docker.1ms.run/${MANIFEST_REF}" >/dev/null 2>&1; then
+elif "${DOCKER}" pull --platform "${LWS_PLATFORM}" "docker.1ms.run/${MANIFEST_REF}" >/dev/null 2>&1; then
   "${DOCKER}" tag "docker.1ms.run/${MANIFEST_REF}" "${MANIFEST_REF}"
   REF="${MANIFEST_REF}"
   echo "pulled docker.1ms.run/${MANIFEST_REF} via mirror, retagged to ${REF}"
