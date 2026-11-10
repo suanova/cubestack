@@ -1,4 +1,4 @@
-import { DashboardResource } from "@perses-dev/core";
+import { DashboardResource } from "@perses-dev/client";
 
 import { PERSES_PROXY_BASE_PATH } from "./config";
 

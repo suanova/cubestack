@@ -24,7 +24,7 @@ import {
   Select,
   Typography,
 } from "@mui/material";
-import { DashboardResource } from "@perses-dev/core";
+import { DashboardResource } from "@perses-dev/client";
 import { useEffect, useState } from "react";
 
 import { PersesIslandHost } from "@/components/perses/PersesIslandHost";

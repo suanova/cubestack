@@ -5,7 +5,7 @@
 // Next 15 passes params to client pages as a Promise, unwrapped below.
 
 import { Box, CircularProgress, Typography } from "@mui/material";
-import { DashboardResource } from "@perses-dev/core";
+import { DashboardResource } from "@perses-dev/client";
 import { useEffect, useState } from "react";
 
 import { PersesIslandHost } from "@/components/perses/PersesIslandHost";

@@ -2,7 +2,7 @@
 
 import { useLayoutEffect, useMemo, useRef } from "react";
 
-import { DashboardResource } from "@perses-dev/core";
+import { DashboardResource } from "@perses-dev/client";
 import { useDashboardStore, useVariableDefinitionStates } from "@perses-dev/dashboards";
 import { DEFAULT_ALL_VALUE } from "@perses-dev/spec";
 

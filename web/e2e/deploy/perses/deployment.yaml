@@ -17,9 +17,9 @@ spec:
       containers:
         - name: perses
           # Distroless/non-root image. Version must stay close to the portal's
-          # @perses-dev/* client packages (0.54 line) so the plugin/API surfaces
+          # @perses-dev/* client packages (0.55 line) so the plugin/API surfaces
           # stay compatible.
-          image: persesdev/perses:v0.54.0
+          image: persesdev/perses:v0.55.1
           ports:
             - name: http
               containerPort: 8080
