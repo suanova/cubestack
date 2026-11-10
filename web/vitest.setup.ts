@@ -18,6 +18,20 @@ if (typeof window !== "undefined") {
   });
 }
 
+// jsdom reports a DOM (so libraries take their browser code path) but does not
+// implement ResizeObserver. perses 0.55's dashboard modules read it at import
+// time, so the island bundle test crashes without this stub.
+if (typeof window !== "undefined" && !("ResizeObserver" in window)) {
+  Object.defineProperty(window, "ResizeObserver", {
+    writable: true,
+    value: class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  });
+}
+
 // jose (session-cookie signing) uses the WebCrypto `subtle` API. Node exposes
 // it via globalThis.crypto.subtle, but jsdom installs a partial `crypto` that
 // lacks a usable subtle. Backfill it from node:crypto's native webcrypto so the

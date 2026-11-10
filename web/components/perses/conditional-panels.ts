@@ -7,7 +7,7 @@
 // or, on a scoped landing, immediately. The rule lives in the dashboard YAML;
 // these helpers only interpret it.
 
-import type { DashboardResource } from "@perses-dev/core";
+import type { DashboardResource } from "@perses-dev/client";
 import type { GridItemDefinition } from "@perses-dev/spec";
 
 const PANEL_REF_PREFIX = "#/spec/panels/";

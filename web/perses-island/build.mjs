@@ -9,6 +9,27 @@ import * as esbuild from "esbuild";
 const here = path.dirname(fileURLToPath(import.meta.url)); // web/perses-island
 const root = path.resolve(here, ".."); // web
 
+// @perses-dev/components is ESM ("type": "module") and imports icons as
+// `import Calendar from "mdi-material-ui/Calendar"`. That subpath resolves to
+// the package's CJS file, and esbuild applies Node's ESM->CJS default interop
+// (default = module.exports) because the importer is an ES module. The CJS
+// file sets `__esModule` and puts the component on `exports.default`, so the
+// icon binding becomes the `{ __esModule, default }` object instead of the
+// component (React error #130: element type is invalid, got object). Resolve
+// the subpaths to the package's ESM build, whose default export is the icon.
+const mdiEsmSubpaths = {
+  name: "mdi-material-ui-esm-subpaths",
+  setup(build) {
+    build.onResolve({ filter: /^mdi-material-ui\/[^/]+$/ }, (args) => ({
+      path: path.join(
+        root,
+        "node_modules/mdi-material-ui/esm",
+        `${args.path.slice("mdi-material-ui/".length)}.js`,
+      ),
+    }));
+  },
+};
+
 await esbuild.build({
   entryPoints: [path.join(root, "perses-island/index.tsx")],
   bundle: true,
@@ -19,7 +40,7 @@ await esbuild.build({
   platform: "browser",
   target: ["es2020"],
   // Match tsconfig "jsx": "react-jsx"; resolves react/jsx-runtime from
-  // node_modules/react (18.2.0), NOT Next's bundled react-builtin.
+  // node_modules/react (18.3.1), NOT Next's bundled react-builtin.
   jsx: "automatic",
   // Make react resolve its production build. process.env itself is folded to {}
   // (lib/perses/config.ts reads process.env.NEXT_PUBLIC_PERSES_PROJECT, which
@@ -56,4 +77,5 @@ await esbuild.build({
   // esbuild substitutes import.meta with {} (guards just take the dev path).
   logOverride: { "empty-import-meta": "silent" },
   logLevel: "info",
+  plugins: [mdiEsmSubpaths],
 });

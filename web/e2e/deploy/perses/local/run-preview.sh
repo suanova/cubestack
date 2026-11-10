@@ -21,7 +21,7 @@
 # Stop with Ctrl-C; all three processes are killed on exit.
 set -euo pipefail
 
-VERSION="0.54.0" # must stay in lockstep with the web/@perses-dev packages (see README)
+VERSION="0.55.1" # must stay in lockstep with the web/@perses-dev packages (see README)
 PERSES_PORT="${PERSES_PORT:-8081}"       # avoid 8080, which the dev box uses for other work
 DATASOURCE_URL="${PROMETHEUS_URL:-http://127.0.0.1:9090}"
 
@@ -67,6 +67,12 @@ database:
     extension: json
 security:
   readonly: false
+# Perses 0.55 denies loopback destinations in the datasource proxy by default.
+# The mock Prometheus above lives on 127.0.0.1, so allow exactly that.
+datasource:
+  proxy:
+    allowed_networks:
+      - "127.0.0.1/32"
 plugin:
   archive_paths:
     - ${PERSES_DIR}/plugins-archive
