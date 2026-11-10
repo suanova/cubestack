@@ -95,8 +95,10 @@ echo "Starting mock Prometheus on :9090 ..."
 node "${REPO_ROOT}/web/e2e/deploy/perses/local/mock-prometheus.mjs" 9090 &
 MOCK_PID=$!
 
-echo "Starting perses on :${PERSES_PORT} ..."
-"${PERSES_DIR}/perses" -config "${CACHE_DIR}/config.yaml" -web.listen-address=":${PERSES_PORT}" &
+# Bind to loopback: perses runs without auth here, so it must not be reachable
+# from other hosts on the developer's network.
+echo "Starting perses on 127.0.0.1:${PERSES_PORT} ..."
+"${PERSES_DIR}/perses" -config "${CACHE_DIR}/config.yaml" -web.listen-address="127.0.0.1:${PERSES_PORT}" &
 PERSES_PID=$!
 
 echo "Waiting for perses to come up ..."
