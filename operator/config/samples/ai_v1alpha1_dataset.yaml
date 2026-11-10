@@ -1,0 +1,17 @@
+apiVersion: ai.cubestack.io/v1alpha1
+kind: Dataset
+metadata:
+  labels:
+    app.kubernetes.io/name: cubestack
+    app.kubernetes.io/managed-by: kustomize
+  name: demo-dataset-v1-0-0
+spec:
+  dataset: demo-dataset
+  version: v1.0.0
+  format: Parquet
+  size: 1.2Gi
+  recordCount: 120000
+  storage:
+    strategy: S3
+    s3:
+      uri: s3://datasets/demo-dataset/v1.0.0

@@ -1,9 +1,10 @@
 # cubestack-controller-manager-chart
 
 The CubeStack operator chart: installs the `ai.cubestack.io` CRDs
-(ModelVersion, InferenceRuntimeProfile, InferenceService, DevEnvironment),
-their L1 validating admission policies (VAPs) and bindings, and the controller
-manager. InferenceService workloads are LeaderWorkerSets, but the chart
+(ModelVersion, InferenceRuntimeProfile, InferenceService, DevEnvironment,
+Dataset), their L1 validating admission policies (VAPs) and bindings, and the
+controller manager. `Dataset` is a spec-only registry CRD without a controller.
+InferenceService workloads are LeaderWorkerSets, but the chart
 installs only the `ai.cubestack.io` CRDs — the `leaderworkerset.x-k8s.io` /
 `disaggregatedset.x-k8s.io` CRDs come with the upstream LeaderWorkerSet
 controller prerequisite below.
