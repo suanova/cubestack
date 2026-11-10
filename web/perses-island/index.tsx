@@ -1,14 +1,14 @@
 // React-18 island entry for rendering perses dashboards. Next 16 forces react 19
-// into its client bundles, but perses 0.54 (and its module-federation plugin
-// bundles) require react ^18, so this standalone bundle is built with the real
-// react 18.2.0 and mounted via react-dom 18 createRoot into a div the host page
+// into its client bundles, but perses 0.55 (and its module-federation plugin
+// bundles) require react ^18.3, so this standalone bundle is built with the real
+// react 18.3.1 and mounted via react-dom 18 createRoot into a div the host page
 // provides. Built by perses-island/build.mjs into public/perses-viewer/.
 
 import { CacheProvider } from "@emotion/react";
 import createCache from "@emotion/cache";
 import { createRoot } from "react-dom/client";
 import type { Root } from "react-dom/client";
-import type { DashboardResource } from "@perses-dev/core";
+import type { DashboardResource } from "@perses-dev/client";
 
 import "@/lib/perses/config";
 import { DashboardViewer } from "../components/perses/DashboardViewer";

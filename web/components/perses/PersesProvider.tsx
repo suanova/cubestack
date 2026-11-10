@@ -7,24 +7,31 @@ import "@/lib/perses/config";
 
 import { ThemeProvider } from "@mui/material";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import * as PersesClient from "@perses-dev/client";
+import { DashboardResource } from "@perses-dev/client";
+import * as PersesComponents from "@perses-dev/components";
 import { ChartsProvider, SnackbarProvider } from "@perses-dev/components";
-import { DashboardResource, TimeRangeValue } from "@perses-dev/core";
+import * as PersesDashboards from "@perses-dev/dashboards";
 import {
   DashboardProvider,
   DatasourceStoreProvider,
   PanelFocusProvider,
   VariableProvider,
 } from "@perses-dev/dashboards";
+import * as PersesExplore from "@perses-dev/explore";
+import * as PersesPluginSystem from "@perses-dev/plugin-system";
 import {
   DataQueriesProvider,
   PluginRegistry,
+  registerHostSharedModules,
   remotePluginLoader,
   RouterProvider,
   TimeRangeProviderBasic,
   usePluginBuiltinVariableDefinitions,
   ValidationProvider,
 } from "@perses-dev/plugin-system";
-import { BuiltinVariableDefinition } from "@perses-dev/spec";
+import * as PersesSpec from "@perses-dev/spec";
+import { BuiltinVariableDefinition, TimeRangeValue } from "@perses-dev/spec";
 import { forwardRef, ReactNode, useMemo } from "react";
 import type { AnchorHTMLAttributes, RefAttributes } from "react";
 
@@ -36,6 +43,19 @@ import {
   buildPlatformMuiTheme,
   usePlatformTheme,
 } from "@/lib/perses/theme";
+
+// Plugin bundles served by the perses server consume these packages as
+// module-federation singletons. Since 0.55 the host must hand its own copies
+// over explicitly before the first remote plugin loads, otherwise the plugin
+// throws "Shared module ... was not registered".
+registerHostSharedModules({
+  "@perses-dev/spec": PersesSpec,
+  "@perses-dev/client": PersesClient,
+  "@perses-dev/components": PersesComponents,
+  "@perses-dev/plugin-system": PersesPluginSystem,
+  "@perses-dev/explore": PersesExplore,
+  "@perses-dev/dashboards": PersesDashboards,
+});
 
 const queryClient = new QueryClient({
   defaultOptions: {

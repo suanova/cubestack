@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { DashboardResource } from "@perses-dev/core";
+import type { DashboardResource } from "@perses-dev/client";
 import type { GridDefinition } from "@perses-dev/spec";
 
 import { buildFilteredResource, extractHideRules } from "@/components/perses/conditional-panels";

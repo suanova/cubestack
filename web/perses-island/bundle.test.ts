@@ -1,13 +1,13 @@
 // Regression test for the react-18 island bundle. The dashboard renders in a
-// standalone esbuild bundle built against the real react 18.2.0 (Next 16
-// forces react 19 into its client bundles, which perses 0.54 cannot run
+// standalone esbuild bundle built against the real react 18.3.1 (Next 16
+// forces react 19 into its client bundles, which perses 0.55 cannot run
 // under). Build the bundle with the real build script and assert the runtime
 // properties the fix depends on, so a future change that regresses any of them
 // fails here instead of breaking panels at runtime.
 //
 // Each assertion fails under the previous incorrect behavior:
 // - react 19 in the bundle (island picking up Next's react) -> would contain
-//   next/dist/compiled react instead of node_modules/react 18.2.0
+//   next/dist/compiled react instead of node_modules/react 18.3.1
 // - un-folded process.env.NEXT_PUBLIC_PERSES_PROJECT -> "process is not defined"
 // - a second (ESM) @tanstack/react-query instance -> "No QueryClient set"
 
@@ -19,6 +19,9 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const bundlePath = path.join(root, "public/perses-viewer/perses-viewer.js");
+const reactVersion = JSON.parse(
+  readFileSync(path.join(root, "node_modules/react/package.json"), "utf8"),
+).version as string;
 
 let bundle = "";
 
@@ -30,11 +33,11 @@ beforeAll(() => {
 }, 30000);
 
 describe("react-18 perses island bundle", () => {
-  it("bundles the real react 18.2.0, not Next's react 19", () => {
-    // esbuild emits a module header for node_modules/react (18.2.0). Next's
-    // bundled react lives under next/dist/compiled and must not be here.
+  it("bundles the real react 18.3.1, not Next's react 19", () => {
+    // esbuild emits a module header for node_modules/react. Next's bundled
+    // react lives under next/dist/compiled and must not be here.
     expect(bundle).toContain("// node_modules/react/index.js");
-    expect(bundle).toContain('version: "18.2.0"');
+    expect(bundle).toContain(`version: "${reactVersion}"`);
     expect(bundle).not.toContain("next/dist/compiled");
   });
 

@@ -1,9 +1,10 @@
 import {
+  BuildDatasourceProxyUrlParams,
   DatasourceApi,
   DatasourceResource,
   DatasourceSelector,
   GlobalDatasourceResource,
-} from "@perses-dev/core";
+} from "@perses-dev/client";
 
 import { PERSES_PROXY_BASE_PATH } from "./config";
 
@@ -42,11 +43,18 @@ export class PortalDatasourceApi implements DatasourceApi {
   private readonly cache = new DatasourceCache();
 
   /** Build the URL the browser hits to proxy queries to a datasource. */
-  buildProxyUrl({ project, name }: { project?: string; name: string }): string {
-    const scope = project
-      ? `/proxy/projects/${encodeURIComponent(project)}/datasources/${encodeURIComponent(name)}`
-      : `/proxy/globaldatasources/${encodeURIComponent(name)}`;
-    return `${PERSES_PROXY_BASE_PATH}${scope}`;
+  buildProxyUrl({ project, dashboard, name }: BuildDatasourceProxyUrlParams): string {
+    // Mirror @perses-dev/client's buildProxyUrl so dashboard-scoped and
+    // unsaved (name omitted) datasources hit the same Perses endpoints.
+    let scope = project || dashboard ? "datasources" : "globaldatasources";
+    if (dashboard) {
+      scope = `dashboards/${encodeURIComponent(dashboard)}/${scope}`;
+    }
+    if (project) {
+      scope = `projects/${encodeURIComponent(project)}/${scope}`;
+    }
+    scope = name === undefined ? `unsaved/${scope}` : `${scope}/${encodeURIComponent(name)}`;
+    return `${PERSES_PROXY_BASE_PATH}/proxy/${scope}`;
   }
 
   async getDatasource(

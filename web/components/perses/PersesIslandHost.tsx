@@ -1,14 +1,14 @@
 "use client";
 
 // Host for the react-18 perses island. Next 16 forces react 19 into its client
-// bundles, which perses 0.54 cannot run under, so the dashboard renders in a
-// standalone esbuild bundle (perses-island/) built against the real react 18.2.0
+// bundles, which perses 0.55 cannot run under, so the dashboard renders in a
+// standalone esbuild bundle (perses-island/) built against the real react 18.3.1
 // and mounted here via react-dom 18 createRoot. This component lives in the
 // react-19 Next tree and only provides the container div + loads the island's
 // static assets; it never renders into the island's DOM itself.
 
 import { Box, CircularProgress, Typography } from "@mui/material";
-import type { DashboardResource } from "@perses-dev/core";
+import type { DashboardResource } from "@perses-dev/client";
 import { useEffect, useRef, useState } from "react";
 
 import { withBasePath } from "@/lib/base-path";
