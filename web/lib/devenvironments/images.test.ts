@@ -25,12 +25,12 @@ describe("DEV_IMAGES", () => {
     // offered the four vendor images the project publishes (images/README.md).
     // Changing the set means changing this list too.
     expect(DEV_IMAGES.map((image) => image.tag)).toEqual([
-      "harbor.isuanova.com/suanova/cpu-pytorch:py310-torch2.4-v2.0.0",
-      "harbor.isuanova.com/suanova/cpu-pytorch:py310-torch2.4-v2.0.0",
-      "harbor.isuanova.com/suanova/cuda-pytorch:26.08-v2.0.0",
-      "harbor.isuanova.com/suanova/cuda-pytorch:26.08-v2.0.0",
-      "harbor.isuanova.com/suanova/maca-pytorch:3.9.0.12-py310-torch2.4-v2.0.0",
-      "harbor.isuanova.com/suanova/maca-pytorch:3.9.0.12-py310-torch2.4-v2.0.0",
+      "harbor.isuanova.com/suanova/cpu-pytorch:py312-torch2.6-v2.0.1",
+      "harbor.isuanova.com/suanova/cpu-pytorch:py312-torch2.6-v2.0.1",
+      "harbor.isuanova.com/suanova/cuda-pytorch:26.10-v2.0.1",
+      "harbor.isuanova.com/suanova/cuda-pytorch:26.10-v2.0.1",
+      "harbor.isuanova.com/suanova/maca-pytorch:3.8.5.2-py312-torch2.8-v2.0.1",
+      "harbor.isuanova.com/suanova/maca-pytorch:3.8.5.2-py312-torch2.8-v2.0.1",
     ]);
   });
 
@@ -53,12 +53,12 @@ describe("DEV_IMAGES", () => {
     // interface, which would put a metax environment on the CPU image — an
     // Accepted=False / BrandMismatch on the cluster.
     expect(DEV_IMAGES.map((image) => [image.tag.split("/").pop(), image.vendor, image.interface])).toEqual([
-      ["cpu-pytorch:py310-torch2.4-v2.0.0", "cpu", "jupyter"],
-      ["cpu-pytorch:py310-torch2.4-v2.0.0", "cpu", "ssh"],
-      ["cuda-pytorch:26.08-v2.0.0", "nvidia", "jupyter"],
-      ["cuda-pytorch:26.08-v2.0.0", "nvidia", "ssh"],
-      ["maca-pytorch:3.9.0.12-py310-torch2.4-v2.0.0", "metax", "jupyter"],
-      ["maca-pytorch:3.9.0.12-py310-torch2.4-v2.0.0", "metax", "ssh"],
+      ["cpu-pytorch:py312-torch2.6-v2.0.1", "cpu", "jupyter"],
+      ["cpu-pytorch:py312-torch2.6-v2.0.1", "cpu", "ssh"],
+      ["cuda-pytorch:26.10-v2.0.1", "nvidia", "jupyter"],
+      ["cuda-pytorch:26.10-v2.0.1", "nvidia", "ssh"],
+      ["maca-pytorch:3.8.5.2-py312-torch2.8-v2.0.1", "metax", "jupyter"],
+      ["maca-pytorch:3.8.5.2-py312-torch2.8-v2.0.1", "metax", "ssh"],
     ]);
     // Every vendor with a jupyter image has an ssh one and the other way round,
     // since that is exactly the lookup the wizard performs.
