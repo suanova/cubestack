@@ -34,11 +34,12 @@ declare global {
 }
 
 // Note: the perses remote plugin bundles register `react`/`react-dom` as
-// module-federation singletons pinned to the exact React they were built with.
-// The host shares its own React (18.3.1); when a plugin's pin does not match,
-// federation rejects the share and the remote loads its own React copy. That is
-// logged as a warning per plugin but is harmless — the dashboards render
-// correctly with it.
+// module-federation singletons. Their manifests pin the exact requiredVersion
+// "18.2.0" (a stale pin from the plugins' package.json — the bundles
+// themselves are built with 18.3.1), while perses 0.55's own packages require
+// react ^18.3.0. No single version satisfies both, so federation logs a
+// version warning per plugin. With strictVersion disabled it still hands the
+// plugin the host's 18.3.1 copy, so the warning is cosmetic.
 if (typeof window !== "undefined") {
   window.PERSES_APP_CONFIG = { api_prefix: PERSES_PROXY_BASE_PATH };
   window.PERSES_PLUGIN_ASSETS_PATH = PERSES_PROXY_BASE_PATH;
