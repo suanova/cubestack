@@ -123,19 +123,10 @@ DOCKERFILE
 fi
 
 echo "loading ${REF} into kind cluster ${KIND_CLUSTER}"
-# kind's docker-image path re-exports the whole index, and a containerd-backed
-# docker keeps the multi-arch index on the tag even after a platform pull, so
-# the node's `ctr import --all-platforms` fails on manifests that were never
-# fetched. Export only the node's platform and hand the archive to kind; the
-# archive then carries exactly the manifests the import walks.
-LWS_ARCHIVE="$(mktemp "${TMPDIR:-/tmp}/lws-image.XXXXXX")"
-trap 'rm -f "${LWS_ARCHIVE}"' EXIT
-if "${DOCKER}" save --platform "${LWS_PLATFORM}" -o "${LWS_ARCHIVE}" "${REF}" 2>/dev/null; then
-  "${KIND_BIN}" load image-archive "${LWS_ARCHIVE}" --name "${KIND_CLUSTER}"
-else
-  # docker without `save --platform` (pre-28) or a single-platform image.
-  "${KIND_BIN}" load docker-image "${REF}" --name "${KIND_CLUSTER}"
-fi
+# The shared loader saves the node's platform first; kind's docker-image path
+# would re-export the whole multi-arch index this pull left on the tag.
+KIND="${KIND_BIN}" DOCKER="${DOCKER}" \
+  hack/load-image-into-kind.sh "${KIND_CLUSTER}" "${REF}"
 
 # --- render + apply the full upstream default, CRDs included ---
 # The leaderworkerset/disaggregatedset CRDs are part of this install: the

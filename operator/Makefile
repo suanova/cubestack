@@ -402,14 +402,14 @@ helm-e2e-images: ## Build the manager, activity agent, echo and environment imag
 .PHONY: helm-e2e-images-load
 helm-e2e-images-load: helm-e2e-setup helm-e2e-images ## Load the built and pulled images into the kind cluster
 	# The echo image only exists from a later task onward and its build is skipped when the
-	# Dockerfile is absent, so the load skips on the same condition.
-	@if [ -f test/e2e/assets/echo/Dockerfile ]; then \
-		$(KIND) load docker-image $(ECHO_IMG) --name $(KIND_CLUSTER_HELM); \
-	fi
-	$(KIND) load docker-image $(HELM_E2E_IMG) --name $(KIND_CLUSTER_HELM)
-	$(KIND) load docker-image $(ACTIVITY_AGENT_IMAGE) --name $(KIND_CLUSTER_HELM)
-	$(KIND) load docker-image $(PERMISSION_INIT_IMAGE) --name $(KIND_CLUSTER_HELM)
-	$(KIND) load docker-image $(DEV_ENV_IMAGE) --name $(KIND_CLUSTER_HELM)
+	# Dockerfile is absent, so the load skips on the same condition. The helper saves each
+	# image for the node's platform first: kind's own docker-image path re-exports whatever
+	# multi-arch index the tag carries, which the node cannot import when the other
+	# platforms were never fetched (see hack/load-image-into-kind.sh).
+	@images="$(HELM_E2E_IMG) $(ACTIVITY_AGENT_IMAGE) $(PERMISSION_INIT_IMAGE) $(DEV_ENV_IMAGE)"; \
+	if [ -f test/e2e/assets/echo/Dockerfile ]; then images="$(ECHO_IMG) $$images"; fi; \
+	KIND="$(KIND)" DOCKER="$(CONTAINER_TOOL)" \
+		hack/load-image-into-kind.sh "$(KIND_CLUSTER_HELM)" $$images
 
 # The codegen prerequisites below are for someone running this target against a
 # tree they just edited. CI already runs the same three targets — `generate-check`
