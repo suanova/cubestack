@@ -2,7 +2,6 @@
 // `npm run build:island` before `next build` / `next dev` so the static assets
 // (JS + CSS + fonts) exist under public/ for Next to serve.
 
-import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as esbuild from "esbuild";
@@ -10,34 +9,24 @@ import * as esbuild from "esbuild";
 const here = path.dirname(fileURLToPath(import.meta.url)); // web/perses-island
 const root = path.resolve(here, ".."); // web
 
-// perses 0.55's EChart module registers the echarts chart extensions at module
-// top level. Its module graph has a cycle (components/index <-> EChart/index)
-// and esbuild now inlines EChart.js eagerly while leaving echarts' extension
-// registry in a lazily initialized module, so the registration runs first and
-// throws "Cannot read properties of undefined (reading 'push')" at bundle
-// load. Empty the registration list: the island never renders the local EChart
-// component (it is tree-shaken), and remote plugin bundles get echarts through
-// the module-federation shared module, which loads echarts on demand.
-const neutralizePersesEChartsRegistration = {
-  name: "perses-echarts-registration",
+// @perses-dev/components is ESM ("type": "module") and imports icons as
+// `import Calendar from "mdi-material-ui/Calendar"`. That subpath resolves to
+// the package's CJS file, and esbuild applies Node's ESM->CJS default interop
+// (default = module.exports) because the importer is an ES module. The CJS
+// file sets `__esModule` and puts the component on `exports.default`, so the
+// icon binding becomes the `{ __esModule, default }` object instead of the
+// component (React error #130: element type is invalid, got object). Resolve
+// the subpaths to the package's ESM build, whose default export is the icon.
+const mdiEsmSubpaths = {
+  name: "mdi-material-ui-esm-subpaths",
   setup(build) {
-    build.onLoad(
-      { filter: /@perses-dev\/components\/dist\/EChart\/EChart\.js$/ },
-      async (args) => {
-        const source = await fs.readFile(args.path, "utf8");
-        const contents = source.replace(
-          /registerEChartsComponents\(\[[\s\S]*?\]\);/,
-          "registerEChartsComponents([]);",
-        );
-        if (contents === source) {
-          throw new Error(
-            `Expected a top-level registerEChartsComponents([...]) call in ${args.path}; ` +
-              "the perses EChart registration workaround needs updating.",
-          );
-        }
-        return { contents, loader: "js" };
-      },
-    );
+    build.onResolve({ filter: /^mdi-material-ui\/[^/]+$/ }, (args) => ({
+      path: path.join(
+        root,
+        "node_modules/mdi-material-ui/esm",
+        `${args.path.slice("mdi-material-ui/".length)}.js`,
+      ),
+    }));
   },
 };
 
@@ -88,5 +77,5 @@ await esbuild.build({
   // esbuild substitutes import.meta with {} (guards just take the dev path).
   logOverride: { "empty-import-meta": "silent" },
   logLevel: "info",
-  plugins: [neutralizePersesEChartsRegistration],
+  plugins: [mdiEsmSubpaths],
 });
