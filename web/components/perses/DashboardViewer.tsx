@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { Box, Typography } from "@mui/material";
 import { ErrorAlert, ErrorBoundary } from "@perses-dev/components";
-import { DashboardResource } from "@perses-dev/core";
+import { DashboardResource } from "@perses-dev/client";
 import { Dashboard, VariableList } from "@perses-dev/dashboards";
 import { TimeRangeControls, useVariableValues } from "@perses-dev/plugin-system";
 

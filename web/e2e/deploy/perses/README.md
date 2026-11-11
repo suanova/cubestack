@@ -61,16 +61,15 @@ provisioning.
 
 ## Image version
 
-`persesdev/perses:v0.54.0` stays close to the portal's `@perses-dev/*` client
-packages (all `0.54.0`) so the plugin/API surfaces stay compatible. Bump both
+`persesdev/perses:v0.55.1` stays close to the portal's `@perses-dev/*` client
+packages (all `0.55.1`) so the plugin/API surfaces stay compatible. Bump both
 together.
 
-> The perses 0.54 plugin bundles (served by this server) require React 18.2.0.
-> The portal pins `react`/`react-dom` to `18.2.0` and runs Next.js 14.2.x, the
-> last major whose App Router compiles a React 18 runtime (`18.3.0-canary`) with
-> the internal (`ReactCurrentOwner`) the perses plugin bundles read. Next.js
-> 15/16 force React 19, which removed that internal — those majors cannot host
-> these dashboards.
+> The perses 0.55 plugin bundles (served by this server) require React 18.3.1.
+> The portal pins `react`/`react-dom` to `18.3.1` and renders the dashboards in
+> a standalone react-18 island bundle (`web/perses-island/`), because Next.js
+> 16's client bundles force React 19 and the perses plugin bundles read the
+> React internal (`ReactCurrentOwner`) that React 19 removed.
 
 ## Local development
 
@@ -100,7 +99,7 @@ the local proxy first, e.g.
 docker run --rm -p 8080:8080 \
   -v "$PWD/web/e2e/deploy/perses/config.yaml:/etc/perses/config.yaml:ro" \
   -v "$PWD/web/e2e/deploy/perses/provisioning:/etc/perses/provisioning:ro" \
-  persesdev/perses:v0.54.0
+  persesdev/perses:v0.55.1
 ```
 
 For dashboards to show data, the datasource URL in
