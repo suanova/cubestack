@@ -55,6 +55,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -93,6 +94,12 @@ type InferenceServiceReconciler struct {
 	// reconcile its InferenceServices, so the apply step skips them instead
 	// of failing on an unknown kind. Probed once at startup.
 	ServiceMonitorAvailable bool
+	// APIReader reads straight from the API server instead of the manager's
+	// cache: the workload-Pod failure check lists Events with field selectors,
+	// which the cache does not index.
+	APIReader client.Reader
+	// Recorder emits lifecycle Events on the service; nil skips emission.
+	Recorder events.EventRecorder
 }
 
 // ServiceMonitorAvailable reports whether the cluster serves the
@@ -213,6 +220,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// Provision only on a successful render: with Rendered=False the output
 	// may still hold unresolved placeholders, which must not be written to
 	// asset ConfigMaps.
+	res := ctrl.Result{}
 	if len(rendered.Errors) == 0 {
 		assetStatuses, err := r.provisionAssets(ctx, &isvc, resolved.profile, &rendered)
 		if err != nil {
@@ -289,7 +297,21 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		setEndpointReadyCondition(&desired.Status.Conditions, endpoint)
+		// A service whose roles are not all ready is polled: kubelet retries a
+		// failing start in place, so no owned object necessarily changes and a
+		// watch would leave the conditions stale. The same pass collects the
+		// stuck Pods' failure details — the real cause lives in their Events,
+		// not in the Pod status — for the conditions and the service's Events.
+		var problems map[string]*workloadPodProblem
+		if !allRolesReady(rolesStatus) || endpoint.Reason == EndpointNotReady {
+			problems, err = r.podProblems(ctx, desired)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			r.recordPodProblems(desired, problems)
+			res.RequeueAfter = workloadNotReadyRequeueInterval
+		}
+		setEndpointReadyCondition(&desired.Status.Conditions, endpoint, problems[endpoint.Role])
 		desired.Status.Endpoint = &aiv1alpha1.EndpointStatus{Internal: endpoint.Internal}
 
 		route, err := r.checkRoute(ctx, desired, resolved.profile, endpoint, resolved.model.Spec.Model)
@@ -307,7 +329,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			desired.Status.Endpoint.Public = "https://" + r.CatalogHostname
 		}
 
-		setReadyCondition(&desired.Status.Conditions, rolesStatus)
+		setReadyCondition(&desired.Status.Conditions, rolesStatus, problems)
 		setProgressingCondition(&desired.Status.Conditions, rolesStatus, applyRes.Progressing)
 	} else {
 		// A stale Provisioned — and the applied-result conditions, whose steps
@@ -322,7 +344,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		setProgressingCondition(&desired.Status.Conditions, nil, "")
 	}
 
-	return ctrl.Result{}, writeStatus()
+	return res, writeStatus()
 }
 
 // finalizeCatalogRule removes the catalog finalizer from a service that is
@@ -417,6 +439,12 @@ func (r *InferenceServiceReconciler) updateStatusIfChanged(ctx context.Context, 
 // InferenceRuntimeProfile and source-ConfigMap watches mapped back through the
 // shared cache indexes.
 func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
+	}
+	if r.Recorder == nil {
+		r.Recorder = mgr.GetEventRecorder("inferenceservice-controller")
+	}
 	if err := registerSharedIndexes(mgr); err != nil {
 		return err
 	}

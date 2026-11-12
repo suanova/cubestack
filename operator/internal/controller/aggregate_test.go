@@ -33,13 +33,13 @@ func roleStatusReady(name string, ready bool) aiv1alpha1.RoleStatus {
 var _ = Describe("aggregation", func() {
 	It("sets Ready true when every role is ready", func() {
 		conditions := []metav1.Condition{}
-		setReadyCondition(&conditions, []aiv1alpha1.RoleStatus{roleStatusReady("router", true), roleStatusReady("prefill", true)})
+		setReadyCondition(&conditions, []aiv1alpha1.RoleStatus{roleStatusReady("router", true), roleStatusReady("prefill", true)}, nil)
 		Expect(meta.FindStatusCondition(conditions, aiv1alpha1.ConditionReady).Status).To(Equal(metav1.ConditionTrue))
 	})
 
 	It("sets Ready false with RolesNotReady listing the unready roles", func() {
 		conditions := []metav1.Condition{}
-		setReadyCondition(&conditions, []aiv1alpha1.RoleStatus{roleStatusReady("router", true), roleStatusReady("decode", false)})
+		setReadyCondition(&conditions, []aiv1alpha1.RoleStatus{roleStatusReady("router", true), roleStatusReady("decode", false)}, nil)
 		cond := meta.FindStatusCondition(conditions, aiv1alpha1.ConditionReady)
 		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 		Expect(cond.Reason).To(Equal("RolesNotReady"))

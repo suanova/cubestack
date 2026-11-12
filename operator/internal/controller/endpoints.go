@@ -116,7 +116,10 @@ func (r *InferenceServiceReconciler) checkEndpoint(ctx context.Context, isvc *ai
 }
 
 // setEndpointReadyCondition sets the EndpointReady condition from the check.
-func setEndpointReadyCondition(conditions *[]metav1.Condition, check *endpointCheck) {
+// problem, when non-nil, is the endpoint role's workload failure detail and is
+// appended to the message: without it the message only says the endpoint is
+// unreachable, which reads as a gateway problem rather than a stuck Pod.
+func setEndpointReadyCondition(conditions *[]metav1.Condition, check *endpointCheck, problem *workloadPodProblem) {
 	if check.Internal != "" {
 		meta.SetStatusCondition(conditions, metav1.Condition{
 			Type:    aiv1alpha1.ConditionEndpointReady,
@@ -126,10 +129,14 @@ func setEndpointReadyCondition(conditions *[]metav1.Condition, check *endpointCh
 		})
 		return
 	}
+	message := fmt.Sprintf("Internal endpoint of role %q is not reachable", check.Role)
+	if problem != nil {
+		message += "; " + problem.String()
+	}
 	meta.SetStatusCondition(conditions, metav1.Condition{
 		Type:    aiv1alpha1.ConditionEndpointReady,
 		Status:  metav1.ConditionFalse,
 		Reason:  check.Reason,
-		Message: fmt.Sprintf("Internal endpoint of role %q is not reachable", check.Role),
+		Message: message,
 	})
 }
