@@ -268,6 +268,56 @@ describe("inference services page", () => {
     act(() => root.unmount());
   });
 
+  it("shows the failing condition's message under the status chip", async () => {
+    stubData([
+      inferenceServiceSummary({
+        name: "stuck-svc",
+        phase: "Progressing",
+        phaseReason: "Reconciling",
+        conditions: [
+          {
+            type: "Ready",
+            status: "False",
+            reason: "RolesNotReady",
+            message:
+              "router not ready (0/1); pod dsv4-flash-anton-sglang-0: FailedMount: hostPath type check failed: /mnt/cephfs/models/DeepSeek-V4-Flash-0731-W8A8 is not a directory",
+            transitionTime: null,
+          },
+        ],
+      }),
+    ]);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    const detail = container.querySelector('[data-od-id="svc-status-detail-stuck-svc"]') as HTMLElement;
+    expect(detail).not.toBeNull();
+    expect(detail.textContent).toContain("FailedMount");
+    // The line is clipped to the status column; the hover still carries the
+    // whole sentence.
+    expect(detail.getAttribute("title")).toContain(
+      "hostPath type check failed: /mnt/cephfs/models/DeepSeek-V4-Flash-0731-W8A8 is not a directory",
+    );
+
+    act(() => root.unmount());
+  });
+
+  it("shows no detail line for a ready service", async () => {
+    stubData([
+      inferenceServiceSummary({
+        name: "up-svc",
+        phase: "Ready",
+        phaseReason: "Ready",
+        conditions: [{ type: "Ready", status: "True", reason: "Ready", message: "All roles are ready", transitionTime: null }],
+      }),
+    ]);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    expect(container.querySelector('[data-od-id="svc-status-detail-up-svc"]')).toBeNull();
+
+    act(() => root.unmount());
+  });
+
   it("switches the selected service when a row is clicked", async () => {
     stubData(inferenceServiceList());
     const { container, root } = renderPage();
