@@ -220,6 +220,29 @@ describe("lib/cubepilot/gateway", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("drops a duplicated id from one Gateway's answer", async () => {
+    // The upstream /v1/models processor appends without deduplicating, and the
+    // duplicated id would be written into the AgentTemplate's set-typed models
+    // field, which the API server rejects.
+    vi.stubEnv("CUBESTACK_GATEWAT_URL", "http://gw.test:8080");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            data: [
+              { id: "dsv4-pd", owned_by: "CubeStack" },
+              { id: "dsv4-pd", owned_by: "" },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      ),
+    );
+    const [catalog] = await gatewayCatalogs();
+    expect(catalog.models).toEqual([{ id: "dsv4-pd", ownedBy: "CubeStack" }]);
+  });
+
   it("pairs each Gateway with the models its own endpoint serves", async () => {
     // The config page writes one provider entry per endpoint, so it needs the
     // catalogue split by Gateway — not just the union.
