@@ -277,14 +277,21 @@ async function gatewayCatalogAt(base: GatewayBase, timeoutMs: number): Promise<G
       if (res.ok) {
         const body = (await res.json()) as { data?: Array<{ id?: unknown; owned_by?: unknown }> };
         if (Array.isArray(body.data)) {
-          models = body.data
-            .filter((m): m is { id: string; owned_by?: unknown } => typeof m?.id === "string" && m.id.length > 0)
-            .map((m) => ({ id: m.id, ownedBy: typeof m.owned_by === "string" ? m.owned_by : "" }))
+          // The upstream /v1/models processor appends without deduplicating, and
+          // a repeated id would reach the template's set-typed models field,
+          // which the API server rejects.
+          const seen = new Set<string>();
+          models = [];
+          for (const m of body.data) {
+            if (typeof m?.id !== "string" || m.id.length === 0 || seen.has(m.id)) continue;
             // The catalogue mixes modalities (the gateway serves image and
             // embedding models beside chat ones), and every caller of this
             // function is a chat surface: the chat tab, the assistant's model
             // picker, and the platform provider the save writes.
-            .filter((m) => isChatModel(m.id));
+            if (!isChatModel(m.id)) continue;
+            seen.add(m.id);
+            models.push({ id: m.id, ownedBy: typeof m.owned_by === "string" ? m.owned_by : "" });
+          }
         }
       } else {
         logger("gateway").warn("model catalog unavailable: the gateway answered an error", {
