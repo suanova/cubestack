@@ -485,7 +485,11 @@ describe("dev environments page", () => {
     // The card carries the login command and the download together in one row —
     // the generic endpoint row stands aside — so the key is named once.
     const endpoint = container.querySelector('[data-od-id="ssh-endpoint"]') as HTMLElement;
-    expect(endpoint.textContent).toBe("ssh -i ./id_ed25519 ubuntu@203.0.113.7 -p 2200");
+    // accept-new, not no: the environment's host key is minted once by the
+    // operator, so an unseen key is a first login while a changed one is not.
+    expect(endpoint.textContent).toBe(
+      "ssh -i ./id_ed25519 -o StrictHostKeyChecking=accept-new ubuntu@203.0.113.7 -p 2200",
+    );
     const link = container.querySelector('[data-od-id="ssh-key-download"]') as HTMLAnchorElement;
     expect(link).not.toBeNull();
     expect(link.getAttribute("href")).toBe("/cubestack/api/devenvironments/ssh-key?namespace=project-a&name=jupyter-nlp-ln");
@@ -514,7 +518,9 @@ describe("dev environments page", () => {
     expect(shown.endsWith('exit "$rc")')).toBe(true);
     // The key is carried verbatim, so it needs no file on disk before the paste.
     expect(shown).toContain(SSH_KEY);
-    expect(shown).toContain('ssh -i "$tmp" -p 2200 \'ubuntu@203.0.113.7\'');
+    // The same host-key policy as the hint above, and the same reason: the line
+    // is pasted into scripts too, where an authenticity prompt is a hang.
+    expect(shown).toContain('ssh -i "$tmp" -o StrictHostKeyChecking=accept-new -p 2200 \'ubuntu@203.0.113.7\'');
     expect(shown).toContain('rc=$?; rm -f "$tmp"; exit "$rc"');
     expect(toggle().getAttribute("aria-pressed")).toBe("true");
     expect(toggle().getAttribute("aria-label")).toBe("隐藏登录命令");
