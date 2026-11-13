@@ -1166,10 +1166,18 @@ const shQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 // The whole sequence runs in a subshell: the pasted line lands in the user's
 // interactive shell, and a bare `exit` would close it — on a failed login too,
 // before the error could be read — and would leave `tmp`/`rc` set.
+//
+// StrictHostKeyChecking=accept-new, not =no: the operator mints one host key per
+// environment and keeps it in a Secret, so a key this machine has not seen is the
+// ordinary first login, while a *changed* key means whatever now answers on that
+// address is not the environment. =no accepts that case too, which is the one
+// thing a known host key exists to catch. accept-new records the key once and
+// refuses a change after. The prompt is also a hang rather than a keystroke
+// wherever this line is pasted into a script or a CI step.
 function sshCommand(key: string, parts: { user: string; host: string; port: string }): string {
   return (
     `(tmp=$(mktemp) && chmod 600 "$tmp" && printf '%s\\n' ${shQuote(key)} > "$tmp" && ` +
-    `ssh -i "$tmp" -p ${parts.port} ${shQuote(`${parts.user}@${parts.host}`)}; ` +
+    `ssh -i "$tmp" -o StrictHostKeyChecking=accept-new -p ${parts.port} ${shQuote(`${parts.user}@${parts.host}`)}; ` +
     `rc=$?; rm -f "$tmp"; exit "$rc")`
   );
 }
@@ -1202,7 +1210,10 @@ function SshKeyRow({
   const [busy, setBusy] = useState(false);
   const parts = sshParts(address);
   // The command the downloaded key is used with: the file is the fixed target of
-  // the download above, so only user, host and port vary.
+  // the download above, so only user, host and port vary. The dictionary string
+  // carries the same host-key policy as sshCommand — accept-new, not no — so the
+  // two commands cannot disagree about what a first login does; the reason for
+  // that choice is stated on sshCommand.
   const login = parts
     ? t("dev.conn.sshLoginCommand", { user: parts.user, host: parts.host, port: parts.port })
     : address;
