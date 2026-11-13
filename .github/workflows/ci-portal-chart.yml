@@ -57,11 +57,18 @@ jobs:
     permissions:
       contents: read
     runs-on: ubuntu-latest
+    outputs:
+      dev: ${{ steps.package.outputs.dev }}
+      chart_json: ${{ steps.push.outputs.chart_json }}
     steps:
       - name: Clone the code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      - name: Install oras
+        uses: oras-project/setup-oras@v1
+        with:
+          version: 1.2.0
       - name: Resolve the release version
         id: release
         uses: ./.github/actions/resolve-release-version
@@ -78,28 +85,98 @@ jobs:
           set -euo pipefail
           helm registry login harbor.isuanova.com \
             -u "$HARBOR_USERNAME" -p "$HARBOR_PASSWORD"
-      - name: Package and push the chart to Harbor
+          printf '%s' "$HARBOR_PASSWORD" | oras login harbor.isuanova.com \
+            -u "$HARBOR_USERNAME" --password-stdin
+      - name: Package the chart
+        id: package
         working-directory: web/helm/cubestack-portal-chart
         env:
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
           RELEASE_APP_VERSION: ${{ steps.release.outputs.app-version }}
         run: |
           set -euo pipefail
-          # A release names itself: the chart version is the bare semver, the
-          # appVersion (and image tag) keeps the tag's v. A merge packages the
-          # rolling chart as <Chart.yaml version>-latest instead, a distinct OCI
-          # tag so a later push cannot clobber a released <version>.
           if [ -n "${RELEASE_VERSION}" ]; then
             VERSION="${RELEASE_VERSION}"
             APP_VERSION="${RELEASE_APP_VERSION}"
+            echo "dev=false" >> "$GITHUB_OUTPUT"
           else
-            VERSION="$(grep '^version:' Chart.yaml | awk '{print $2}')-latest"
-            APP_VERSION=latest
+            VERSION="$(grep '^version:' Chart.yaml | awk '{print $2}')"
+            APP_VERSION="v${VERSION}"
+            echo "dev=true" >> "$GITHUB_OUTPUT"
           fi
-          # Package next to the chart dir and push as an OCI artifact. The OCI
-          # repository is the chart name (cubestack-portal-chart); Harbor
-          # serves chart-OCI and image artifacts under the same project, and
-          # this name does not collide with the cubestack-ui image repo.
           helm package . --version "${VERSION}" --app-version "${APP_VERSION}"
-          helm push "cubestack-portal-chart-${VERSION}.tgz" \
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tgz=cubestack-portal-chart-${VERSION}.tgz" >> "$GITHUB_OUTPUT"
+      - name: Push release chart (OCI)
+        if: steps.package.outputs.dev != 'true'
+        working-directory: web/helm/cubestack-portal-chart
+        run: |
+          set -euo pipefail
+          helm push "cubestack-portal-chart-${{ steps.package.outputs.version }}.tgz" \
             oci://harbor.isuanova.com/suanova
+      - name: Push dev chart with channel tag
+        id: push
+        if: steps.package.outputs.dev == 'true'
+        working-directory: web/helm/cubestack-portal-chart
+        env:
+          CHART_VERSION: ${{ steps.package.outputs.version }}
+          CHART_TGZ: ${{ steps.package.outputs.tgz }}
+        run: |
+          set -euo pipefail
+          chart_repo="harbor.isuanova.com/suanova/cubestack-portal-chart"
+          chart_channel="sha-${GITHUB_SHA::7}"
+          python3 -m pip install --quiet pyyaml
+          python3 - <<'PY2'
+          import json, os, yaml
+          meta = yaml.safe_load(open("Chart.yaml"))
+          json.dump(meta, open(os.path.join(os.environ["RUNNER_TEMP"], "helm-config.json"), "w"), separators=(",", ":"))
+          PY2
+          out="$(oras push "${chart_repo}:${chart_channel}" \
+            "${CHART_TGZ}:application/vnd.cncf.helm.chart.content.v1.tar+gzip" \
+            --config "${RUNNER_TEMP}/helm-config.json:application/vnd.cncf.helm.config.v1+json")"
+          manifest_digest="$(printf '%s' "$out" | sed -n 's/^Digest: //p' | tail -1)"
+          [ -n "$manifest_digest" ] || { echo "::error::cannot resolve chart manifest digest"; exit 1; }
+          tgz_digest="sha256:$(sha256sum "$CHART_TGZ" | awk '{print $1}')"
+          jq -nc --arg v "$CHART_VERSION" --arg d "$tgz_digest" --arg m "$manifest_digest" \
+            '{version:$v,digest:$d,manifest_digest:$m}' > "${RUNNER_TEMP}/chart.json"
+          echo "chart_json=$(cat "${RUNNER_TEMP}/chart.json")" >> "$GITHUB_OUTPUT"
+
+  notify-release:
+    needs: build-push-chart
+    if: needs.build-push-chart.outputs.dev == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - name: Create an installation token for cubestack-release
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.SUANOVA_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.SUANOVA_BOT_APP_PRIVATE_KEY }}
+          owner: suanova
+          repositories: cubestack-release
+          permission-contents: write
+      - name: Dispatch component-built
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          CHART_JSON: ${{ needs.build-push-chart.outputs.chart_json }}
+        run: |
+          set -euo pipefail
+          payload="$(jq -nc \
+            --arg repo "suanova/cubestack" \
+            --arg commit "${GITHUB_SHA}" \
+            --arg line "2.1" \
+            --arg component "cubestack-portal" \
+            --argjson chart "${CHART_JSON}" \
+            '{event_type:"component-built",client_payload:{repo:$repo,commit:$commit,line:$line,component:$component,chart:$chart}}')"
+          for i in 1 2 3; do
+            if printf '%s' "${payload}" | gh api --method POST \
+                repos/suanova/cubestack-release/dispatches --input -; then
+              exit 0
+            fi
+            sleep $((i * 5))
+          done
+          echo "::error::component-built dispatch failed after 3 attempts"
+          exit 1
