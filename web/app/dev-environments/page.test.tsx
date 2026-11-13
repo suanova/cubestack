@@ -67,6 +67,10 @@ describe("dev environments page", () => {
     HF_TOKEN: "hf_example",
   };
   const envRequests: string[] = [];
+  // Where the stubbed session route sends the browser, and the requests made
+  // for it: opening JupyterLab is one click, not a token to copy.
+  const JUPYTER_URL = "http://gateway.example.dev:8080/dev/project-a/jupyter-nlp-ln/lab";
+  const openRequests: string[] = [];
 
   function renderPage() {
     const container = document.createElement("div");
@@ -82,9 +86,17 @@ describe("dev environments page", () => {
     tokenRequests.length = 0;
     keyRequests.length = 0;
     envRequests.length = 0;
+    openRequests.length = 0;
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: unknown) => {
+        // The session route is the one that both reads a credential and
+        // navigates: the card must ask for it only when the button is clicked.
+        if (String(url).includes("/api/devenvironments/jupyter-session")) {
+          const q = new URL(String(url), "http://localhost").searchParams;
+          openRequests.push(`${q.get("namespace")}/${q.get("name")}`);
+          return { ok: true, status: 200, json: async () => ({ url: JUPYTER_URL }) };
+        }
         // The token endpoint is the one request whose *timing* matters: the card
         // must not pull a credential it was not asked to show.
         if (String(url).includes("/api/devenvironments/token")) {
@@ -543,6 +555,108 @@ describe("dev environments page", () => {
     await act(async () => {});
     expect(container.querySelector('[data-od-id="ssh-key-download"]')).toBeNull();
 
+    act(() => root.unmount());
+  });
+
+  it("opens JupyterLab in one click, with no token to copy", async () => {
+    stubData(devEnvironmentList());
+    // jsdom's location cannot navigate; the click's destination is the assertion.
+    const original = window.location;
+    const assign = vi.fn();
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: { assign, href: "http://gateway.example.dev:8080/cubestack/dev-environments", origin: "http://gateway.example.dev:8080", protocol: "http:", host: "gateway.example.dev:8080", hostname: "gateway.example.dev", pathname: "/cubestack/dev-environments", search: "" },
+    });
+
+    const { container, root } = renderPage();
+    await act(async () => {});
+    // Nothing is fetched until the user asks to open it.
+    expect(openRequests).toEqual([]);
+
+    const button = container.querySelector('[data-od-id="jupyter-open"]') as HTMLElement;
+    expect(button.textContent).toBe("打开 JupyterLab");
+    await act(async () => {
+      button.click();
+    });
+
+    // The console asks the route for this environment's session...
+    expect(openRequests).toEqual(["project-a/jupyter-nlp-ln"]);
+    // ...and navigates to the clean page: the token appears in no address the
+    // user lands on, shares, or finds later in the browser's history.
+    expect(assign).toHaveBeenCalledWith(JUPYTER_URL);
+    expect(assign.mock.calls[0][0]).not.toContain(JUPYTER_TOKEN);
+
+    Object.defineProperty(window, "location", { configurable: true, value: original });
+    act(() => root.unmount());
+  });
+
+  it("says so when the console and the environment are on different hosts", async () => {
+    // The session cookie was set on the console's host, and a cookie never
+    // travels to another one: navigating anyway would land the user on Jupyter's
+    // login page with no hint of why.
+    stubData(devEnvironmentList());
+    const original = window.location;
+    const assign = vi.fn();
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: { assign, href: "http://console.example.dev/cubestack/dev-environments", origin: "http://console.example.dev", protocol: "http:", host: "console.example.dev", hostname: "console.example.dev", pathname: "/cubestack/dev-environments", search: "" },
+    });
+
+    const { container, root } = renderPage();
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="jupyter-open"]') as HTMLElement).click();
+    });
+
+    expect(container.querySelector('[data-od-id="jupyter-open-error"]')?.textContent).toContain("不在同一主机");
+    expect(assign).not.toHaveBeenCalled();
+
+    Object.defineProperty(window, "location", { configurable: true, value: original });
+    act(() => root.unmount());
+  });
+
+  it("offers no JupyterLab button for an ssh environment", async () => {
+    stubData(devEnvironmentList());
+    const { container, root } = renderPage();
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="dev-row-ssh-dataset-prep"]') as HTMLElement).click();
+    });
+    expect(container.querySelector('[data-od-id="jupyter-open"]')).toBeNull();
+    expect(openRequests).toEqual([]);
+    act(() => root.unmount());
+  });
+
+  it("says why JupyterLab could not be opened instead of navigating", async () => {
+    stubData(devEnvironmentList());
+    const original = window.location;
+    const assign = vi.fn();
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: { assign, href: "http://gateway.example.dev:8080/cubestack/dev-environments", origin: "http://gateway.example.dev:8080", protocol: "http:", host: "gateway.example.dev:8080", hostname: "gateway.example.dev", pathname: "/cubestack/dev-environments", search: "" },
+    });
+    const real = globalThis.fetch as unknown as (u: unknown, i?: unknown) => Promise<unknown>;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown, init?: unknown) => {
+        if (String(url).includes("/api/devenvironments/jupyter-session")) {
+          return { ok: false, status: 404, json: async () => ({ error: "jupyterMissing", params: { name: "jupyter-nlp-ln" } }) };
+        }
+        return real(url, init);
+      }),
+    );
+
+    const { container, root } = renderPage();
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="jupyter-open"]') as HTMLElement).click();
+    });
+
+    // The route's code reaches the card as a sentence, and nothing navigates.
+    expect(container.querySelector('[data-od-id="jupyter-open-error"]')?.textContent).toContain("没有 Jupyter 访问端点");
+    expect(assign).not.toHaveBeenCalled();
+
+    Object.defineProperty(window, "location", { configurable: true, value: original });
     act(() => root.unmount());
   });
 

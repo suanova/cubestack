@@ -1326,6 +1326,73 @@ function SshKeyRow({
   );
 }
 
+// One click from the console into JupyterLab, with no token to copy: the route
+// signs in to the environment's own endpoint server-side and hands back the
+// session cookie, so the browser lands on the clean page — the token never
+// appears in a URL, the history, or the Gateway's access log.
+function OpenJupyterRow({ name, namespace }: { name: string; namespace: string }) {
+  const { t } = useI18n();
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const open = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await apiFetch(
+        `/api/devenvironments/jupyter-session?namespace=${encodeURIComponent(namespace)}&name=${encodeURIComponent(name)}`,
+      );
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as ValidationErrorBody;
+        setError(validationMessage(t, body, res.status, "dev"));
+        return;
+      }
+      const body = (await res.json().catch(() => ({}))) as { url?: string };
+      if (!body.url) {
+        setError(t("dev.err.jupyterUnreachable"));
+        return;
+      }
+      // The session cookie was set on this console's host, and a cookie is
+      // never sent to another one: a deployment that serves the console and the
+      // environments under different names would drop the user on Jupyter's
+      // login page with no explanation. Say so instead. (Ports do not matter —
+      // a cookie's scope is its host and path.)
+      if (new URL(body.url).hostname !== window.location.hostname) {
+        setError(t("dev.err.jupyterHostMismatch"));
+        return;
+      }
+      // A full navigation: the session cookie is installed for this origin by
+      // the response above, and the browser has to carry it to the gateway's
+      // path for Jupyter to accept the user.
+      window.location.assign(body.url);
+    } catch {
+      setError(t("dev.err.jupyterUnreachable"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Box sx={{ gridColumn: { lg: "1 / -1" } }}>
+      <Button
+        size="small"
+        variant="contained"
+        data-od-id="jupyter-open"
+        disabled={busy}
+        onClick={open}
+        sx={{ textTransform: "none", fontSize: 12.5, whiteSpace: "nowrap" }}
+      >
+        {busy ? t("dev.conn.jupyterOpening") : t("dev.conn.jupyterOpen")}
+      </Button>
+      {error ? (
+        <Typography data-od-id="jupyter-open-error" sx={{ display: "block", fontSize: 11, lineHeight: 1.7, color: STATUS_ERR, mt: "8px" }}>
+          {error}
+        </Typography>
+      ) : null}
+    </Box>
+  );
+}
+
 function ConnectionCard({ e, onAct }: { e: DevEnvironmentSummary; onAct: (e: DevEnvironmentSummary, act: string) => void }) {
   const { t } = useI18n();
   const sshEndpoint = e.endpoints.find((ep) => ep.name === "ssh");
@@ -1375,6 +1442,11 @@ function ConnectionCard({ e, onAct }: { e: DevEnvironmentSummary; onAct: (e: Dev
               address={sshEndpoint.address}
               label={sshEndpoint.name}
             />
+          ) : null}
+          {/* A jupyter environment is opened with one click, the token handled
+              behind the scenes rather than copied by hand. */}
+          {e.type === "jupyter" ? (
+            <OpenJupyterRow key={`${e.namespace}/${e.name}-jupyter-open`} name={e.name} namespace={e.namespace} />
           ) : null}
         </Box>
         {/* Said only when it is true of this environment: the idle clause used to
