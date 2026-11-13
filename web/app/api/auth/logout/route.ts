@@ -4,10 +4,16 @@ import { clearSessionCookieHeader, secureCookieForRequest } from "@/lib/auth/ses
 
 // POST /api/auth/logout
 // Clears the session cookie and returns success, regardless of whether a valid
-// session existed (logout is idempotent). Clearing the cookie is a side effect
-// a cross-site page could otherwise trigger with a form POST, so same-origin
-// callers are enforced: a browser always attaches Origin (and usually Referer)
-// to a POST, and a foreign origin is rejected.
+// session existed (logout is idempotent).
+//
+// No CSRF origin check here: logout is a harmless, idempotent side effect (the
+// worst a cross-origin form POST could force is a logged-out browser), and an
+// origin/host comparison against request.url misfires behind a reverse proxy or
+// ingress that rewrites the host, silently returning 403 and leaving the
+// session cookie live — which reads as "logged out" in the UI while the
+// session persists. The session cookie is already SameSite=Lax, which stops
+// cross-site POSTs from carrying it, so a cross-site logout POST has no
+// session cookie attached and clears nothing.
 //
 // The cleared cookie mirrors the session cookie's Secure flag, derived from the
 // same scheme check used at login (see secureCookieForRequest). This assumes
@@ -18,23 +24,8 @@ import { clearSessionCookieHeader, secureCookieForRequest } from "@/lib/auth/ses
 // SESSION_COOKIE_SECURE when a TLS terminator does not forward
 // X-Forwarded-Proto.
 export async function POST(req: NextRequest) {
-  if (!isSameOrigin(req)) {
-    return Response.json({ error: "Forbidden" }, { status: 403 });
-  }
   return Response.json(
     { ok: true },
     { headers: { "Set-Cookie": clearSessionCookieHeader(secureCookieForRequest(req)) } },
   );
-}
-
-function isSameOrigin(req: NextRequest): boolean {
-  // Trust Origin when present, else fall back to Referer. Non-browser clients
-  // (curl, tests) send neither; they cannot be CSRF targets, so allow them.
-  const candidate = req.headers.get("origin") ?? req.headers.get("referer");
-  if (!candidate) return true;
-  try {
-    return new URL(candidate).origin === new URL(req.url).origin;
-  } catch {
-    return false;
-  }
 }
