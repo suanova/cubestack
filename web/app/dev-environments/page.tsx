@@ -36,6 +36,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 
 import type { DevEnvironmentSummary } from "@/app/api/devenvironments/route";
 import type { DevEnvImageOption, DevEnvOptionsResponse } from "@/app/api/devenvironments/options/route";
+import type { PodStatusResponse } from "@/app/api/devenvironments/pod-status/route";
 import { validationMessage, type ValidationErrorBody } from "@/lib/api-error";
 import { apiFetch, withBasePath } from "@/lib/base-path";
 import { copyText } from "@/lib/clipboard";
@@ -1653,8 +1654,114 @@ function StatusCard({ e }: { e: DevEnvironmentSummary }) {
             );
           })
         )}
+        {/* Below the conditions, because that is where the controller's own
+            account of the environment ends and the pod's begins. */}
+        <PodReason namespace={e.namespace} name={e.name} />
       </Box>
     </Card>
+  );
+}
+
+/**
+ * Why the environment's pod is not up, in the kubelet's own words.
+ *
+ * The conditions above stop where the controller's knowledge stops: a container
+ * that cannot pull its image, crashes on start or is OOM-killed is reported on
+ * the pod, and that is the fact a red environment is diagnosed from. The reason
+ * and message are rendered verbatim — they are the kubelet's enum and text, the
+ * same in every locale, as a condition's status already is — while the label
+ * around them is the platform's own.
+ */
+function PodReason({ namespace, name }: { namespace: string; name: string }) {
+  const { t } = useI18n();
+  const [failure, setFailure] = useState<PodStatusResponse["failure"]>(null);
+  const [error, setError] = useState<string | null>(null);
+  // One request per mounted status card. React's development StrictMode runs
+  // every effect twice (mount, simulated unmount, mount); sharing the in-flight
+  // promise keeps the second run from issuing another read — and lets it still
+  // apply the first one's answer, which a per-run cancellation flag would
+  // discard.
+  const requestRef = useRef<Promise<{ failure: PodStatusResponse["failure"] } | { error: string }> | null>(null);
+
+  useEffect(() => {
+    if (requestRef.current === null) {
+      requestRef.current = apiFetch(
+        `/api/devenvironments/pod-status?namespace=${encodeURIComponent(namespace)}&name=${encodeURIComponent(name)}`,
+      )
+        .then(async (res) => {
+          const body = (await res.json().catch(() => ({}))) as ValidationErrorBody & PodStatusResponse;
+          if (!res.ok) return { error: validationMessage(t, body, res.status, "dev") };
+          return { failure: body.failure ?? null };
+        })
+        .catch(() => ({ error: t("dev.err.podUnreadable") }));
+    }
+    let cancelled = false;
+    void requestRef.current.then((result) => {
+      if (cancelled) return;
+      if ("failure" in result) {
+        setFailure(result.failure);
+        setError(null);
+      } else {
+        setError(result.error);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+    // `t` is rebuilt on every render by useI18n; the fetch is keyed to the
+    // environment alone.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [namespace, name]);
+
+  if (error) {
+    return (
+      <Typography data-od-id="pod-reason-error" sx={{ fontSize: 12, color: STATUS_ERR }}>
+        {error}
+      </Typography>
+    );
+  }
+  // A healthy or still-starting pod has nothing to say here: the conditions
+  // above already state that it is not ready yet, and a line repeating that
+  // would read as a second problem.
+  if (!failure) return null;
+
+  const detail = [
+    [failure.container, failure.message].filter(Boolean).join(": "),
+    failure.exitCode !== undefined ? `(${t("dev.pod.exitCode", { code: failure.exitCode })})` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  return (
+    <Box
+      data-od-id="pod-reason"
+      sx={{
+        display: "flex",
+        alignItems: "center",
+        gap: "6px",
+        flexWrap: "wrap",
+        fontSize: 12,
+        color: "text.secondary",
+        lineHeight: 2,
+      }}
+    >
+      <Box component="span" sx={{ opacity: 0.7 }}>{t("dev.pod.title")}</Box>
+      <Box
+        component="span"
+        sx={{
+          px: "9px",
+          py: "2px",
+          borderRadius: 999,
+          fontWeight: 600,
+          bgcolor: soft(STATUS_ERR),
+          color: `color-mix(in oklch, ${STATUS_ERR} 66%, var(--fg))`,
+          whiteSpace: "nowrap",
+        }}
+      >
+        {failure.reason}
+      </Box>
+      {detail ? <Box component="span" sx={{ overflowWrap: "anywhere" }}>{detail}</Box> : null}
+    </Box>
   );
 }
 
