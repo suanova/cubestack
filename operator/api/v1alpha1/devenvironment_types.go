@@ -609,6 +609,19 @@ type DevEnvironmentStatus struct {
 	// +optional
 	JupyterTokenSecret *corev1.SecretReference `json:"jupyterTokenSecret,omitempty"`
 
+	// HostPorts is the node ports the environment listens on, and absent for one
+	// with a network namespace of its own, where the type's fixed container
+	// ports suffice. An RDMA environment that shares the node's network binds
+	// the node's ports instead, so the controller allocates them from its own
+	// pool — which is what lets more than one such environment run on a node.
+	//
+	// The record is the allocation, which the controller reuses while the port
+	// is still free, so it is stable for as long as the environment exists. It is
+	// the port inside the container, not an address: what a client dials is in
+	// status.endpoints.
+	// +optional
+	HostPorts *HostPorts `json:"hostPorts,omitempty"`
+
 	// LastActivityTime is when the environment was last seen active, which is
 	// what the idle timeout is measured against. It is reported by the
 	// environment's own activity agent, which writes the pod annotation
@@ -640,6 +653,20 @@ type DevEnvironmentStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// HostPorts is the node ports an environment that shares the node's network
+// listens on: the ports its containers bind, which there are the node's.
+type HostPorts struct {
+	// Main is the port the environment's main container listens on: the notebook
+	// server's for jupyter.
+	Main int32 `json:"main"`
+
+	// SSH is the port sshd listens on when ssh is exposed beside another type.
+	// Absent when the type is ssh — Main is the sshd port then — and when ssh is
+	// not exposed at all.
+	// +optional
+	SSH int32 `json:"ssh,omitempty"`
 }
 
 // Endpoint describes an access address of the environment: the web (Jupyter)

@@ -77,6 +77,7 @@ func main() {
 	var tlsOpts []func(*tls.Config)
 	var gatewayName, gatewayNamespace, gatewayDataplaneNamespace, gatewayCatalogHostname string
 	var l4PortRangeStart, l4PortRangeEnd int
+	var hostPortRangeStart, hostPortRangeEnd int
 	var rdmaIBResource, rdmaRoCEResource string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -100,6 +101,14 @@ func main() {
 	flag.IntVar(&l4PortRangeEnd, "l4-port-range-end", 20999,
 		"Last port of the DevEnvironment L4 port pool. The pool is cluster-wide: each ssh exposure and "+
 			"each spec.ports[].type: tcp exposure takes one port from it.")
+	flag.IntVar(&hostPortRangeStart, "host-port-range-start", 21000,
+		"First port of the pool a host-network DevEnvironment draws its node ports from. An RDMA "+
+			"environment that needs the host network binds the notebook server's port and sshd's on the "+
+			"node itself, so the platform allocates them per environment rather than using the type's "+
+			"fixed ones. Keep the range clear of the L4 pool and of the ports a node runs services on.")
+	flag.IntVar(&hostPortRangeEnd, "host-port-range-end", 29999,
+		"Last port of that pool. The allocation is cluster-wide, so the range bounds how many "+
+			"host-network environments the cluster can hold.")
 	flag.StringVar(&rdmaIBResource, "rdma-ib-resource", "rdma/ib_shared_devices",
 		"Extended resource an InfiniBand DevEnvironment requests. It is advertised by the cluster's "+
 			"shared RDMA device plugin, whose ConfigMap owns the name. The rdma/ prefix is the plugin's "+
@@ -143,6 +152,8 @@ func main() {
 	}{
 		{"l4-port-range-start", l4PortRangeStart},
 		{"l4-port-range-end", l4PortRangeEnd},
+		{"host-port-range-start", hostPortRangeStart},
+		{"host-port-range-end", hostPortRangeEnd},
 	} {
 		if f.value != 0 && (f.value < 1 || f.value > 65535) {
 			setupLog.Error(fmt.Errorf("--%s must be a port between 1 and 65535, got %d", f.name, f.value), "Invalid flag")
@@ -308,6 +319,8 @@ func main() {
 			HTTPPort:                  80,
 			L4PortRangeStart:          int32(l4PortRangeStart),
 			L4PortRangeEnd:            int32(l4PortRangeEnd),
+			HostPortRangeStart:        int32(hostPortRangeStart),
+			HostPortRangeEnd:          int32(hostPortRangeEnd),
 			RDMAIBResource:            rdmaIBResource,
 			RDMARoCEResource:          rdmaRoCEResource,
 		},

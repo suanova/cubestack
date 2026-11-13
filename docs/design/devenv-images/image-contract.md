@@ -25,6 +25,11 @@ The runtime mode is a property of the **environment**, not of the image.
 - Readiness is **TCP listening on the type's main port** — `8888` for jupyter, `2222` for ssh. An
   `ssh` environment is never probed on `8888`, which is why its image must not start a notebook at
   all, even one that ships with the base.
+- The port numbers above are the defaults, not the contract. An environment on the host network
+  (RoCE) binds its node's ports, so the controller allocates each one from a cluster-wide pool and
+  injects the result as `CUBSTACK_MAIN_PORT` and — where sshd runs — `CUBSTACK_SSH_PORT`. A launcher
+  must listen on those when set and fall back to `8888` / `2222` when they are not. The two are
+  controller-owned like `CUBSTACK_TYPE`: a spec value is dropped.
 
 ## Account and home
 
