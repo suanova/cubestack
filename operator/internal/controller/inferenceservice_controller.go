@@ -30,6 +30,7 @@ limitations under the License.
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=referencegrants,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=gateway.envoyproxy.io,resources=backends,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;watch
 
 package controller
 
@@ -48,6 +49,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -87,13 +89,12 @@ type InferenceServiceReconciler struct {
 	// AgentRouterAvailable reports whether the cluster serves the Agent
 	// Router CRDs. Probed once at startup (AgentRouterAvailable below).
 	AgentRouterAvailable bool
-	// ServiceMonitorAvailable reports whether the cluster serves the
-	// monitoring.coreos.com ServiceMonitor CRD. The ServiceMonitors scraping
-	// the role Services are monitoring infrastructure, not part of the
-	// service: a cluster without the prometheus-operator CRDs must still
-	// reconcile its InferenceServices, so the apply step skips them instead
-	// of failing on an unknown kind. Probed once at startup.
-	ServiceMonitorAvailable bool
+	// RESTMapper probes optional CRDs at reconcile time (the ServiceMonitor
+	// CRD today). The manager's mapper is dynamic — it re-discovers a kind it
+	// reported missing — so a CRD installed after startup is picked up on the
+	// next pass instead of needing an operator restart. A nil mapper disables
+	// the optional-CRD resources (no probe, no retry).
+	RESTMapper meta.RESTMapper
 	// APIReader reads straight from the API server instead of the manager's
 	// cache: the workload-Pod failure check lists Events with field selectors,
 	// which the cache does not index.
@@ -102,11 +103,18 @@ type InferenceServiceReconciler struct {
 	Recorder events.EventRecorder
 }
 
+// serviceMonitorCRDName is the ServiceMonitor CRD the per-reconcile probe looks
+// for. Its creation or deletion re-runs every InferenceService: the monitors
+// are monitoring infrastructure applied per pass, so the dependency changing
+// changes what a pass produces even though no service object changed.
+const serviceMonitorCRDName = "servicemonitors.monitoring.coreos.com"
+
 // ServiceMonitorAvailable reports whether the cluster serves the
 // monitoring.coreos.com ServiceMonitor CRD. The ServiceMonitors scraping the
 // role Services are optional monitoring infrastructure: where
 // prometheus-operator is not installed, the controller skips them rather than
-// failing every InferenceService on an unknown kind.
+// failing every InferenceService on an unknown kind. The caller probes this on
+// every reconcile, so an install that lands after startup is still picked up.
 func ServiceMonitorAvailable(mapper meta.RESTMapper) bool {
 	_, err := mapper.RESTMapping(
 		monitoringv1.SchemeGroupVersion.WithKind("ServiceMonitor").GroupKind(),
@@ -123,7 +131,7 @@ func ServiceMonitorAvailable(mapper meta.RESTMapper) bool {
 // unknown kind. All the kinds are probed together because the guarded setup
 // registers an Owns/Watches for each of them — a cluster serving only some of
 // them would otherwise abort controller startup, the very failure the guard
-// exists to prevent. Probed once at startup, like ServiceMonitorAvailable.
+// exists to prevent. Probed once at startup.
 func AgentRouterAvailable(mapper meta.RESTMapper) bool {
 	for _, gvk := range []schema.GroupVersionKind{
 		aigwv1beta1.SchemeGroupVersion.WithKind("AIGatewayRoute"),
@@ -288,6 +296,13 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			// Fully applied: adopt the revision and report WorkloadsApplied.
 			desired.Status.Profile.Revision = rev
 			setWorkloadsAppliedCondition(&desired.Status.Conditions, "", nil)
+		}
+		// The ServiceMonitor could not be applied because the cluster does not
+		// serve its CRD: retry on a timer, since no object event announces the
+		// later install. A shorter workload-readiness requeue set below still
+		// wins — it re-attempts this step sooner.
+		if applyRes.ServiceMonitorDeferred && res.RequeueAfter == 0 {
+			res.RequeueAfter = serviceMonitorRetryInterval
 		}
 
 		// Convergence steps (design §4.1 steps 5-7): endpoint reachability,
@@ -455,10 +470,14 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Secret{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{})
-	if r.ServiceMonitorAvailable {
+	if ServiceMonitorAvailable(mgr.GetRESTMapper()) {
 		// Owns() starts an informer on the kind: registering it where the CRD
 		// is not served would abort controller startup — the very failure the
-		// ServiceMonitorAvailable degradation exists to avoid.
+		// ServiceMonitorAvailable degradation exists to avoid. This probe only
+		// decides the ownership watch; applyServiceMonitor probes on every pass,
+		// so a monitor for a CRD installed later is still created — it simply
+		// does not get the watch, since an informer cannot be registered after
+		// the manager started.
 		b = b.Owns(&monitoringv1.ServiceMonitor{})
 	}
 	if r.AgentRouterAvailable {
@@ -488,7 +507,35 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(r.enqueueForSourceCredentialsSecret)).
 		Watches(&leaderworkersetv1.LeaderWorkerSet{},
 			handler.EnqueueRequestsFromMapFunc(r.enqueueForOwnedLWS)).
+		// Metadata-only: the handler needs nothing but the CRD's name, and
+		// caching every CRD's full OpenAPI schema would be a large, pointless
+		// heap cost (the prometheus-operator CRDs alone are megabytes).
+		WatchesMetadata(&apiextensionsv1.CustomResourceDefinition{},
+			handler.EnqueueRequestsFromMapFunc(r.enqueueForServiceMonitorCRD)).
 		Complete(r)
+}
+
+// enqueueForServiceMonitorCRD maps the ServiceMonitor CRD's creation or
+// deletion to every InferenceService. Monitors are applied per pass, so an
+// install (or a reinstall after a removal) that lands after startup must
+// re-run them — the retry timer alone would leave a reinstall waiting until it
+// next fires.
+func (r *InferenceServiceReconciler) enqueueForServiceMonitorCRD(ctx context.Context, obj client.Object) []reconcile.Request {
+	if obj.GetName() != serviceMonitorCRDName {
+		return nil
+	}
+	var list aiv1alpha1.InferenceServiceList
+	if err := r.List(ctx, &list); err != nil {
+		return nil
+	}
+	requests := make([]reconcile.Request, 0, len(list.Items))
+	for i := range list.Items {
+		requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{
+			Namespace: list.Items[i].Namespace,
+			Name:      list.Items[i].Name,
+		}})
+	}
+	return requests
 }
 
 // enqueueReferencingServices maps a ModelVersion or InferenceRuntimeProfile

@@ -23,6 +23,7 @@ import (
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -56,6 +57,29 @@ func smProfile(name string, headless bool) *aiv1alpha1.InferenceRuntimeProfile {
 	}
 	if headless {
 		irp.Spec.Roles[0].Service.Headless = ptrTo(true)
+	}
+	return irp
+}
+
+// rolePort names one role of a profileWithServices fixture and the Service
+// port it declares; an empty port means the role declares no Service.
+type rolePort struct{ name, port string }
+
+// profileWithServices returns a profile whose roles are exactly the given
+// ones, with endpoint.role set to endpointRole. It exercises the
+// ServiceMonitor role selection without a cluster.
+func profileWithServices(endpointRole string, roles ...rolePort) *aiv1alpha1.InferenceRuntimeProfile {
+	irp := validInferenceRuntimeProfile("monitored-roles")
+	irp.Spec.Endpoint.Role = endpointRole
+	irp.Spec.Roles = nil
+	for _, rp := range roles {
+		role := aiv1alpha1.Role{Name: rp.name}
+		if rp.port != "" {
+			role.Service = &aiv1alpha1.RoleService{
+				Ports: []aiv1alpha1.ServicePort{{Name: rp.port, Port: 8000}},
+			}
+		}
+		irp.Spec.Roles = append(irp.Spec.Roles, role)
 	}
 	return irp
 }
@@ -128,7 +152,7 @@ var _ = Describe("ServiceMonitor", func() {
 
 		// A cluster without the prometheus-operator CRDs: the reconciler must
 		// skip the ServiceMonitor and leave the rest of the pipeline intact.
-		r := &InferenceServiceReconciler{Client: k8sClient, Scheme: testScheme}
+		r := &InferenceServiceReconciler{Client: k8sClient, Scheme: testScheme, RESTMapper: meta.NewDefaultRESTMapper(nil)}
 		_, err := reconcileWith(ctx, r, name, testNamespace)
 		Expect(err).NotTo(HaveOccurred())
 
@@ -138,6 +162,38 @@ var _ = Describe("ServiceMonitor", func() {
 
 		svc := &corev1.Service{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-" + testApplyRouterRole, Namespace: testNamespace}, svc)).To(Succeed())
+	})
+
+	It("creates the ServiceMonitor on a later pass when the CRD appears after startup", func() {
+		name := "sm-late-crd"
+		Expect(k8sClient.Create(ctx, validModelVersion(name+"-mv"))).To(Succeed())
+		Expect(k8sClient.Create(ctx, smProfile(name+"-prof", false))).To(Succeed())
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: name + "-prof-cm", Namespace: systemNamespace},
+			Immutable:  ptrTo(true),
+			Data:       map[string]string{testConfigMapDataKey: testConfigMapDataValue},
+		}
+		Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+		Expect(k8sClient.Create(ctx, isvcRefs(name))).To(Succeed())
+
+		// The controller started before prometheus, so its mapper has never seen
+		// the ServiceMonitor kind.
+		mapper := meta.NewDefaultRESTMapper(nil)
+		r := &InferenceServiceReconciler{Client: k8sClient, Scheme: testScheme, RESTMapper: mapper}
+
+		_, err := reconcileWith(ctx, r, name, testNamespace)
+		Expect(err).NotTo(HaveOccurred())
+		sm := &monitoringv1.ServiceMonitor{}
+		Expect(apierrors.IsNotFound(
+			k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: testNamespace}, sm))).To(BeTrue())
+
+		// The prometheus component lands later. The manager's mapper is dynamic
+		// (it re-discovers a missing kind), so the probe on the next pass sees
+		// the CRD and the monitor is created without an operator restart.
+		mapper.Add(monitoringv1.SchemeGroupVersion.WithKind("ServiceMonitor"), meta.RESTScopeNamespace)
+		_, err = reconcileWith(ctx, r, name, testNamespace)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: testNamespace}, sm)).To(Succeed())
 	})
 
 	It("repairs an externally edited selector", func() {
@@ -195,7 +251,47 @@ var _ = Describe("ServiceMonitor", func() {
 		Expect(sm.Spec.Endpoints).To(Equal([]monitoringv1.Endpoint{{
 			Port: testPortName,
 			Path: "/metrics",
+			// The scrape carries the Service name as a `service` label: the
+			// SGLang PD Grafana dashboard's $service variable reads it, and
+			// prometheus-operator injects only `job` on its own.
+			RelabelConfigs: []monitoringv1.RelabelConfig{{
+				SourceLabels: []monitoringv1.LabelName{"__meta_kubernetes_service_name"},
+				TargetLabel:  "service",
+				Action:       "replace",
+			}},
 		}}))
+	})
+})
+
+var _ = Describe("monitoredRoles", func() {
+	It("keeps the endpoint role when it is the only role exposing the port", func() {
+		// A standard profile: the single engine role is the endpoint role, so
+		// excluding it (as the PD topology's router is excluded) would leave
+		// the ServiceMonitor with no target at all.
+		p := profileWithServices("engine", rolePort{"engine", testPortName})
+		Expect(monitoredRoles(p)).To(Equal([]string{"engine"}))
+	})
+
+	It("drops the endpoint role when other roles expose the port", func() {
+		// A PD profile: the endpoint role is the CPU-only router in front of
+		// the engine roles; its port answers /metrics with 404, so only the
+		// engine roles are scraped.
+		p := profileWithServices(testApplyRouterRole,
+			rolePort{testApplyPrefillRole, testPortName},
+			rolePort{testApplyDecodeRole, testPortName},
+			rolePort{testApplyRouterRole, testPortName},
+		)
+		Expect(monitoredRoles(p)).To(Equal([]string{testApplyDecodeRole, testApplyPrefillRole}))
+	})
+
+	It("skips roles without a service port of that name", func() {
+		p := profileWithServices(testApplyRouterRole,
+			rolePort{testApplyPrefillRole, testPortName},
+			rolePort{testApplyRouterRole, testPortName},
+			rolePort{"tools", "grpc"},
+			rolePort{"sidecar", ""},
+		)
+		Expect(monitoredRoles(p)).To(Equal([]string{testApplyPrefillRole}))
 	})
 })
 
@@ -209,5 +305,38 @@ var _ = Describe("ServiceMonitorAvailable", func() {
 		mapper := meta.NewDefaultRESTMapper(nil)
 		mapper.Add(monitoringv1.SchemeGroupVersion.WithKind("ServiceMonitor"), meta.RESTScopeNamespace)
 		Expect(ServiceMonitorAvailable(mapper)).To(BeTrue())
+	})
+})
+
+var _ = Describe("enqueueForServiceMonitorCRD", func() {
+	It("maps the ServiceMonitor CRD to every InferenceService and no other CRD", func() {
+		names := []string{"crd-map-a", "crd-map-b"}
+		for _, name := range names {
+			Expect(k8sClient.Create(ctx, isvcRefs(name))).To(Succeed())
+		}
+		defer func() {
+			for _, name := range names {
+				_ = k8sClient.Delete(ctx, isvcRefs(name))
+			}
+		}()
+		r := &InferenceServiceReconciler{Client: k8sClient, Scheme: testScheme}
+
+		// The matching CRD's creation or deletion re-runs every service: no
+		// service object changed, but the probe's answer did.
+		matching := &apiextensionsv1.CustomResourceDefinition{
+			ObjectMeta: metav1.ObjectMeta{Name: serviceMonitorCRDName},
+		}
+		requests := r.enqueueForServiceMonitorCRD(ctx, matching)
+		got := make([]string, 0, len(requests))
+		for _, req := range requests {
+			got = append(got, req.Namespace+"/"+req.Name)
+		}
+		Expect(got).To(ContainElements(testNamespace+"/crd-map-a", testNamespace+"/crd-map-b"))
+
+		// Any other CRD churn must not enqueue the inference controller.
+		other := &apiextensionsv1.CustomResourceDefinition{
+			ObjectMeta: metav1.ObjectMeta{Name: "widgets.example.com"},
+		}
+		Expect(r.enqueueForServiceMonitorCRD(ctx, other)).To(BeEmpty())
 	})
 })

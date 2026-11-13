@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 
@@ -44,7 +45,17 @@ type applyResult struct {
 	// ("" when nothing was applied); the aggregate step turns it into the
 	// Progressing condition.
 	Progressing ProgressingReason
+	// ServiceMonitorDeferred reports that the ServiceMonitor was skipped
+	// because the cluster does not serve its CRD (yet). The caller retries the
+	// pass so an install that lands after startup heals without a restart.
+	ServiceMonitorDeferred bool
 }
+
+// serviceMonitorRetryInterval is how often a pass that could not probe the
+// ServiceMonitor CRD is retried. It is deliberately longer than the
+// workload-readiness poll: a missing prometheus install is a configuration
+// state, not a transient rollout.
+const serviceMonitorRetryInterval = 5 * time.Minute
 
 // setProgressing records what the apply loop did this reconcile, keeping the
 // most significant reason when multiple roles acted: a template change
@@ -189,9 +200,11 @@ func (r *InferenceServiceReconciler) applyWorkloads(ctx context.Context, isvc *a
 		statuses = append(statuses, roleStatus(role, rr, isvc, existing, ready))
 	}
 
-	if err := r.applyServiceMonitor(ctx, isvc, profile); err != nil {
+	deferred, err := r.applyServiceMonitor(ctx, isvc, profile)
+	if err != nil {
 		return statuses, nil, err
 	}
+	res.ServiceMonitorDeferred = deferred
 	if err := r.cleanupOrphanWorkloads(ctx, isvc, desiredPrefixes, desiredKinds); err != nil {
 		return statuses, nil, err
 	}
@@ -202,11 +215,19 @@ func (r *InferenceServiceReconciler) applyWorkloads(ctx context.Context, isvc *a
 // service's role Services. It is monitoring infrastructure rather than part of
 // the service, so a cluster without the prometheus-operator CRDs skips it (see
 // ServiceMonitorAvailable) instead of failing the apply on an unknown kind.
-func (r *InferenceServiceReconciler) applyServiceMonitor(ctx context.Context, isvc *aiv1alpha1.InferenceService, profile *aiv1alpha1.InferenceRuntimeProfile) error {
-	if !r.ServiceMonitorAvailable {
-		return nil
+// The CRD is probed on every pass, not snapshotted at startup: the manager's
+// REST mapper re-discovers a missing kind, so an install that lands later is
+// picked up without an operator restart. deferred reports the skipped pass so
+// the caller can schedule a retry. A nil mapper means the reconciler was not
+// wired for optional-CRD resources: skip without scheduling a retry.
+func (r *InferenceServiceReconciler) applyServiceMonitor(ctx context.Context, isvc *aiv1alpha1.InferenceService, profile *aiv1alpha1.InferenceRuntimeProfile) (deferred bool, err error) {
+	if r.RESTMapper == nil {
+		return false, nil
 	}
-	return r.applyResource(ctx, isvc, desiredServiceMonitor(isvc, endpointPortName(profile), r.Scheme))
+	if !ServiceMonitorAvailable(r.RESTMapper) {
+		return true, nil
+	}
+	return false, r.applyResource(ctx, isvc, desiredServiceMonitor(isvc, profile, r.Scheme))
 }
 
 // applyService creates or updates the role's Service <isvc>-<role>, plus the
