@@ -17,6 +17,8 @@ limitations under the License.
 package controller
 
 import (
+	"time"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -39,9 +41,16 @@ import (
 // own status.
 const testFailedMountMessage = "hostPath type check failed: /mnt/cephfs/models/DeepSeek-V4-Flash-0731-W8A8 is not a directory"
 
+const (
+	testEngineContainer   = "engine"
+	testPodKind           = "Pod"
+	testFailedMountReason = "FailedMount"
+	testKubeletComponent  = "kubelet"
+)
+
 // stuckWorkloadPod creates the endpoint role's Pod stuck in ContainerCreating,
 // plus the kubelet Warning Event carrying the mount failure.
-func stuckWorkloadPod(name string) {
+func stuckWorkloadPod(name string) *corev1.Pod {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name + "-router-0",
@@ -51,12 +60,12 @@ func stuckWorkloadPod(name string) {
 				roleLabelKey:             testApplyRouterRole,
 			},
 		},
-		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "engine", Image: "engine:test"}}},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: testEngineContainer, Image: "engine:test"}}},
 	}
 	Expect(k8sClient.Create(ctx, pod)).To(Succeed())
 	pod.Status.Phase = corev1.PodPending
 	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
-		Name:  "engine",
+		Name:  testEngineContainer,
 		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}},
 	}}
 	Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
@@ -64,16 +73,17 @@ func stuckWorkloadPod(name string) {
 	now := metav1.Now()
 	evt := &corev1.Event{
 		ObjectMeta:     metav1.ObjectMeta{Name: name + "-failedmount", Namespace: testNamespace},
-		InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: pod.Name, Namespace: testNamespace},
-		Reason:         "FailedMount",
+		InvolvedObject: corev1.ObjectReference{Kind: testPodKind, Name: pod.Name, Namespace: testNamespace, UID: pod.UID},
+		Reason:         testFailedMountReason,
 		Message:        testFailedMountMessage,
 		Type:           corev1.EventTypeWarning,
-		Source:         corev1.EventSource{Component: "kubelet"},
+		Source:         corev1.EventSource{Component: testKubeletComponent},
 		FirstTimestamp: now,
 		LastTimestamp:  now,
 		Count:          1,
 	}
 	Expect(k8sClient.Create(ctx, evt)).To(Succeed())
+	return pod
 }
 
 // reconcileConvergenceResult reconciles through r, retrying the status-write
@@ -109,13 +119,85 @@ var _ = Describe("workload Pod failures", func() {
 		Expect(ready).NotTo(BeNil())
 		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
 		Expect(ready.Message).To(ContainSubstring(name + "-router-0"))
-		Expect(ready.Message).To(ContainSubstring("FailedMount"))
+		Expect(ready.Message).To(ContainSubstring(testFailedMountReason))
 		Expect(ready.Message).To(ContainSubstring(testFailedMountMessage))
 
 		endpoint := meta.FindStatusCondition(got.Status.Conditions, aiv1alpha1.ConditionEndpointReady)
 		Expect(endpoint).NotTo(BeNil())
-		Expect(endpoint.Message).To(ContainSubstring("FailedMount"))
+		Expect(endpoint.Message).To(ContainSubstring(testFailedMountReason))
 		Expect(endpoint.Message).To(ContainSubstring(testFailedMountMessage))
+	})
+
+	It("ignores Warning Events from a previous Pod with the same name", func() {
+		name := "pod-recreated"
+		convergenceISVC(name, false)
+		Expect(reconcileConvergence(name)).To(Succeed())
+		pod := stuckWorkloadPod(name)
+
+		// A stale Event left behind by an earlier Pod that had the same name,
+		// timestamped later: without the UID selector it would win.
+		later := metav1.NewTime(time.Now().Add(time.Minute))
+		stale := &corev1.Event{
+			ObjectMeta:     metav1.ObjectMeta{Name: name + "-stale", Namespace: testNamespace},
+			InvolvedObject: corev1.ObjectReference{Kind: testPodKind, Name: pod.Name, Namespace: testNamespace, UID: "stale-uid"},
+			Reason:         testFailedMountReason,
+			Message:        "stale failure",
+			Type:           corev1.EventTypeWarning,
+			Source:         corev1.EventSource{Component: testKubeletComponent},
+			FirstTimestamp: later,
+			LastTimestamp:  later,
+			Count:          1,
+		}
+		Expect(k8sClient.Create(ctx, stale)).To(Succeed())
+
+		Expect(reconcileConvergence(name)).To(Succeed())
+
+		got := &aiv1alpha1.InferenceService{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: testNamespace}, got)).To(Succeed())
+		ready := meta.FindStatusCondition(got.Status.Conditions, aiv1alpha1.ConditionReady)
+		Expect(ready).NotTo(BeNil())
+		Expect(ready.Message).To(ContainSubstring(testFailedMountMessage))
+		Expect(ready.Message).NotTo(ContainSubstring("stale failure"))
+	})
+
+	It("ranks an Event series by its latest occurrence", func() {
+		name := "pod-series"
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: name + "-pod", Namespace: testNamespace},
+			Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: testEngineContainer, Image: "engine:test"}}},
+		}
+		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+
+		start := time.Now().Add(-time.Hour)
+		event := func(suffix, message string, at time.Time, series *corev1.EventSeries) *corev1.Event {
+			return &corev1.Event{
+				ObjectMeta:          metav1.ObjectMeta{Name: name + "-" + suffix, Namespace: testNamespace},
+				InvolvedObject:      corev1.ObjectReference{Kind: testPodKind, Name: pod.Name, Namespace: testNamespace, UID: pod.UID},
+				Reason:              testFailedMountReason,
+				Message:             message,
+				Type:                corev1.EventTypeWarning,
+				Source:              corev1.EventSource{Component: testKubeletComponent},
+				EventTime:           metav1.NewMicroTime(at),
+				FirstTimestamp:      metav1.NewTime(at),
+				Series:              series,
+				ReportingController: testKubeletComponent,
+				ReportingInstance:   "node-1",
+				Action:              "Mount",
+			}
+		}
+		// The repeated Event was first seen before the single one but last
+		// observed after it: its series timestamp is the one that counts.
+		repeated := event("repeated", "repeated failure", start, &corev1.EventSeries{
+			Count:            2,
+			LastObservedTime: metav1.NewMicroTime(start.Add(10 * time.Minute)),
+		})
+		single := event("single", "later single failure", start.Add(5*time.Minute), nil)
+		Expect(k8sClient.Create(ctx, repeated)).To(Succeed())
+		Expect(k8sClient.Create(ctx, single)).To(Succeed())
+
+		problem := applyReconciler().podEventProblem(ctx, pod)
+		Expect(problem).NotTo(BeNil())
+		Expect(problem.Message).To(Equal("repeated failure"))
 	})
 
 	It("emits a Warning Event naming the stuck Pod and its cause", func() {
@@ -131,7 +213,7 @@ var _ = Describe("workload Pod failures", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Eventually(recorder.Events, "5s").Should(Receive(And(
 			ContainSubstring("Warning"),
-			ContainSubstring("FailedMount"),
+			ContainSubstring(testFailedMountReason),
 			ContainSubstring(testFailedMountMessage),
 		)))
 	})

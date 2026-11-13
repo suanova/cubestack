@@ -119,14 +119,18 @@ func podStatusProblem(pod *corev1.Pod) *workloadPodProblem {
 	return problem
 }
 
-// podEventProblem returns the latest Warning Event about the Pod. Event reads
-// are best-effort: a failed read leaves the status fallback in place rather
-// than failing the reconcile.
+// podEventProblem returns the latest Warning Event about the Pod. The Event
+// selector matches the Pod's UID as well as its name: a recreated Pod can
+// leave the previous Pod's Events behind under the same name, and those must
+// not be reported as the current Pod's failure. Event reads are best-effort: a
+// failed read leaves the status fallback in place rather than failing the
+// reconcile.
 func (r *InferenceServiceReconciler) podEventProblem(ctx context.Context, pod *corev1.Pod) *workloadPodProblem {
 	events := &corev1.EventList{}
 	if err := r.reader().List(ctx, events, client.InNamespace(pod.Namespace), client.MatchingFields{
 		"involvedObject.kind": "Pod",
 		"involvedObject.name": pod.Name,
+		"involvedObject.uid":  string(pod.UID),
 		"type":                corev1.EventTypeWarning,
 	}); err != nil {
 		return nil
@@ -147,9 +151,14 @@ func (r *InferenceServiceReconciler) podEventProblem(ctx context.Context, pod *c
 	return &workloadPodProblem{Pod: pod.Name, Reason: latest.Reason, Message: latest.Message}
 }
 
-// eventTimestamp returns the most recent time an Event was observed.
+// eventTimestamp returns the most recent time an Event was observed. For an
+// aggregated series that is Series.LastObservedTime: EventTime records the
+// first observation, so ranking by it would put an older repeated warning
+// ahead of a newer single one.
 func eventTimestamp(event *corev1.Event) time.Time {
 	switch {
+	case event.Series != nil && !event.Series.LastObservedTime.IsZero():
+		return event.Series.LastObservedTime.Time
 	case !event.LastTimestamp.IsZero():
 		return event.LastTimestamp.Time
 	case !event.EventTime.IsZero():
