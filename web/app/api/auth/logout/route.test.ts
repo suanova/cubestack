@@ -3,8 +3,10 @@ import { describe, expect, it } from "vitest";
 
 import { plainRequest } from "@/test/auth";
 
-// Logout requires no session; it always clears the cookie for same-origin
-// callers and rejects cross-site requests (CSRF).
+// Logout requires no session; it always clears the cookie for any caller. No
+// origin check: logout is idempotent and the session cookie is SameSite=Lax
+// already (an origin check against request.url misfires behind a rewrite host
+// proxy/ingress and silently leaves the session live).
 const { POST } = await import("./route");
 
 function logoutPost(init?: RequestInit) {
@@ -12,7 +14,7 @@ function logoutPost(init?: RequestInit) {
 }
 
 describe("POST /api/auth/logout", () => {
-  it("returns ok and clears the session cookie for a same-origin caller", async () => {
+  it("returns ok and clears the session cookie for a caller", async () => {
     const res = await POST(logoutPost({ headers: { origin: "http://localhost" } }));
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
@@ -37,14 +39,12 @@ describe("POST /api/auth/logout", () => {
     expect(res.status).toBe(200);
   });
 
-  it("rejects a cross-site request (attacker origin) without clearing the cookie", async () => {
-    const res = await POST(logoutPost({ headers: { origin: "https://evil.example" } }));
-    expect(res.status).toBe(403);
-    expect(res.headers.get("set-cookie")).toBeNull();
-  });
-
-  it("rejects a mismatched Referer (older browsers)", async () => {
-    const res = await POST(logoutPost({ headers: { referer: "https://evil.example/logout" } }));
-    expect(res.status).toBe(403);
+  it("clears the cookie for a caller behind a reverse proxy that rewrites the host", async () => {
+    // Regression for the rewrite-host proxy/ingress: the Origin no longer
+    // matches request.url, but the cookie must still clear (not 403), or the
+    // UI shows signed out while the session survives.
+    const res = await POST(logoutPost({ headers: { origin: "http://platform.example:8080" } }));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("set-cookie") ?? "").toMatch(/cubestack-session=;/);
   });
 })
