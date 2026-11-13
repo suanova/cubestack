@@ -71,7 +71,7 @@ var _ = Describe("checkEndpoint", func() {
 		Expect(check.Reason).To(BeEmpty())
 
 		conditions := []metav1.Condition{}
-		setEndpointReadyCondition(&conditions, check)
+		setEndpointReadyCondition(&conditions, check, nil)
 		Expect(meta.FindStatusCondition(conditions, aiv1alpha1.ConditionEndpointReady).Status).To(Equal(metav1.ConditionTrue))
 	})
 

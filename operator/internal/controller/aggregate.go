@@ -52,7 +52,11 @@ func allRolesReady(roles []aiv1alpha1.RoleStatus) bool {
 
 // setReadyCondition sets the Ready condition (design §3.3): True when every
 // role is ready, False/RolesNotReady with a message listing the unready ones.
-func setReadyCondition(conditions *[]metav1.Condition, roles []aiv1alpha1.RoleStatus) {
+// problems, when non-nil, carries each unready role's workload failure detail
+// and is appended to that role's entry: a Pod that never starts (a missing
+// model hostPath, for example) is then named here instead of only in the Pod's
+// own Events.
+func setReadyCondition(conditions *[]metav1.Condition, roles []aiv1alpha1.RoleStatus, problems map[string]*workloadPodProblem) {
 	if allRolesReady(roles) {
 		meta.SetStatusCondition(conditions, metav1.Condition{
 			Type:    aiv1alpha1.ConditionReady,
@@ -65,7 +69,11 @@ func setReadyCondition(conditions *[]metav1.Condition, roles []aiv1alpha1.RoleSt
 	var unready []string
 	for _, r := range roles {
 		if !r.Ready {
-			unready = append(unready, fmt.Sprintf("%s not ready (%d/%d)", r.Name, r.ReadyReplicas, r.Replicas))
+			entry := fmt.Sprintf("%s not ready (%d/%d)", r.Name, r.ReadyReplicas, r.Replicas)
+			if problem := problems[r.Name]; problem != nil {
+				entry += "; " + problem.String()
+			}
+			unready = append(unready, entry)
 		}
 	}
 	meta.SetStatusCondition(conditions, metav1.Condition{

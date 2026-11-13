@@ -80,6 +80,51 @@ function StatusChip({ phase }: { phase: string | null }) {
   );
 }
 
+// The condition that answers "why is it not up?" for the row: the first False
+// one in the pipeline's own order, then Ready, then the endpoint. The detail
+// panel's ConditionsCard lists every condition; the row carries only this one
+// line so the list itself can be read without opening a row.
+const STATUS_DETAIL_CONDITIONS = ["Resolved", "Rendered", "Provisioned", "WorkloadsApplied", "Ready", "EndpointReady"];
+
+function statusDetail(s: InferenceServiceSummary): string | null {
+  if (s.phase === "Ready") return null;
+  for (const type of STATUS_DETAIL_CONDITIONS) {
+    const condition = s.conditions.find((c) => c.type === type);
+    if (condition && condition.status === "False" && condition.message) return condition.message;
+  }
+  return null;
+}
+
+function StatusCell({ s }: { s: InferenceServiceSummary }) {
+  const detail = statusDetail(s);
+  return (
+    <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: "4px", minWidth: 0 }}>
+      <StatusChip phase={s.phase} />
+      {detail ? (
+        <Box
+          data-od-id={`svc-status-detail-${s.name}`}
+          title={detail}
+          sx={{
+            // Two lines, then clipped: the row states the cause without the
+            // whole condition sentence; hovering still carries all of it.
+            maxWidth: 280,
+            fontSize: 11,
+            lineHeight: 1.45,
+            color: "text.secondary",
+            display: "-webkit-box",
+            WebkitBoxOrient: "vertical",
+            WebkitLineClamp: 2,
+            overflow: "hidden",
+            overflowWrap: "anywhere",
+          }}
+        >
+          {detail}
+        </Box>
+      ) : null}
+    </Box>
+  );
+}
+
 // GPU facts per role. The API projects them from the profile; fixtures that
 // predate the field fall back to the single gpuPerPod/gpuModel pair.
 const gpuRoleFacts = (s: InferenceServiceSummary) =>
@@ -712,7 +757,7 @@ function ServiceTable({
                     </Box>
                   </td>
                   <td style={tdSx}>
-                    <StatusChip phase={s.phase} />
+                    <StatusCell s={s} />
                   </td>
                   <td style={tdSx}>{s.engine ?? "—"}</td>
                   <td style={{ ...tdSx, whiteSpace: "nowrap" }}>{gpuText(s)}</td>
