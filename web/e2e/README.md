@@ -1,6 +1,6 @@
 # E2E tests
 
-Two suites cover the overview landing at different layers:
+Three suites cover the portal at different layers:
 
 ## Suite A — `e2e/overview.ui.spec.ts` + `e2e/inference-services.ui.spec.ts` + `e2e/cubepilot.ui.spec.ts` + `e2e/cubepilot-tasks.ui.spec.ts` (CI-cheap, deterministic)
 
@@ -52,6 +52,56 @@ Requirements:
 
 Assertions are intentionally coarse (node total ≥ 0, a Ready/NotReady breakdown,
 trend shows a percentage) because the cluster numbers change.
+
+## Suite C — `e2e/cubepilot.integration.spec.ts` + `e2e/cubepilot-chat.integration.spec.ts` (cross-repo, opt-in)
+
+The only suite that runs the portal against a **real** cubepilot backend:
+Suite A stubs every `/api/cubepilot/*` response at the browser level, so the
+Next proxy, the cluster RBAC and the chart wiring are never exercised there.
+Suite C deploys the published cubepilot chart (operator + api + agent CRDs)
+and this portal from the working tree into one KinD cluster, both in
+namespace `cubestack-system`, and drives the portal with nothing stubbed.
+
+```sh
+bash e2e/deploy/integration/setup.sh        # one-shot bring-up (idempotent)
+E2E_MARKER=dev-local npm run test:e2e:integration
+```
+
+Layer 1 (default) covers the proxy boundary and the CR round-trips: the
+allow-list still refuses unknown upstream paths, an allow-listed path really
+reaches cubepilot-api, the config page writes the AgentInstance CR, and the
+tasks tab renders cluster CRs. Layer 2 (chat) drives a real model and is
+skipped unless `CUBEPILOT_E2E_CHAT=1`:
+
+```sh
+CUBEPILOT_LLM_APIKEY='sk-...' bash e2e/deploy/integration/setup.sh
+CUBEPILOT_E2E_CHAT=1 E2E_MARKER=dev-local npm run test:e2e:integration -- --grep "cubepilot chat"
+```
+
+Layer 2 shares one pinned conversation across its three tests, so a reply or a
+parked approval left over from an earlier run can satisfy an assertion, and one
+of the tests proves only that a turn stopped being parked rather than that it
+finished. A green Layer 2 run is therefore weaker than it looks on a cluster
+that has been used before; the first run against a fresh bring-up is the
+meaningful one.
+
+Requirements: `docker`, `kind`, `kubectl`, `helm`; the cluster is created by
+the script (`KIND_CLUSTER_NAME`, default `cubestack-e2e`).
+
+`E2E_MARKER` must be the same value for the bring-up and the test run: it is
+seeded into a Task CR and written by the spec into the AgentInstance, and the
+CI workflow greps the AgentInstance for it afterwards. The workflow is
+`.github/workflows/ci-cubepilot-integration.yml`; it is a separate workflow so
+the other portal jobs are unaffected. It installs the chart's **latest**
+release, so a red run there can mean a new cubepilot release rather than a
+portal regression — check which side moved before debugging the portal.
+
+Being honest about what has and has not been exercised: the Layer 2 tests have
+never actually run. They skip unless a provider key reaches the job, and GitHub
+withholds secrets from fork pull requests — so a PR run proves only the Layer 1
+tests and the gated (skipping) shape. The upstream repo has the key configured,
+so Layer 2 runs for real there, on the default branch: the weekly schedule, or a
+manual dispatch. Verify it locally too; the section above gives the two commands.
 
 ## One-time setup
 

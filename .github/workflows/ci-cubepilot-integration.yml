@@ -1,0 +1,120 @@
+# The cross-repo integration gate: a real cubepilot stack plus the portal built
+# from this pull request, on KinD, driven by Playwright with nothing stubbed.
+# It lives in its own workflow (own paths filter, own job) so the existing
+# ci-portal.yml jobs are neither slowed nor re-run by it.
+#
+# The conversational layer needs a real provider key (secret LLM_APIKEY, vars
+# LLM_ENDPOINT / LLM_MODEL).
+# Without it the job still runs the deploy path and the L1 specs.
+name: CI Portal x CubePilot integration
+
+on:
+  pull_request:
+    paths:
+      - 'web/**'
+      - '.github/workflows/ci-cubepilot-integration.yml'
+  workflow_dispatch:
+    inputs:
+      chartVersion:
+        description: 'cubepilot chart version (empty = newest published chart)'
+        required: false
+        type: string
+  # Weekly, off the hour: the cubepilot chart is not pinned, so this is also
+  # the drift check for "a new cubepilot release broke the portal".
+  schedule:
+    - cron: '23 3 * * 2'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-cubepilot-integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # Unique per run and shared by the seeded CR and the specs.
+      E2E_MARKER: ${{ github.run_id }}-${{ github.run_attempt }}
+      KIND_CLUSTER_NAME: cubestack-e2e
+      # The Harbor password, not the username, is the credential a fork PR
+      # loses: secrets are withheld while repository variables are not. A
+      # boolean here lets the login gate on the password; the `secrets` context
+      # is not available in a step `if`, so the login reads this instead.
+      CI_BOT_PASSWORD_SET: ${{ secrets.CI_BOT_PASSWORD != '' }}
+      CUBEPILOT_LLM_ENDPOINT: ${{ vars.LLM_ENDPOINT || 'https://api.deepseek.com' }}
+      CUBEPILOT_LLM_MODEL: ${{ vars.LLM_MODEL || 'deepseek-v4-flash' }}
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+        working-directory: web
+      - name: Install Playwright browser
+        run: npx playwright install chromium --only-shell
+        working-directory: web
+      - name: Set up KinD
+        uses: helm/kind-action@0b5c88445f37b7e12a2ce1ecca7805b9046a74db # v1
+        with:
+          install_only: true
+          version: v0.33.0
+      - name: Set up Helm
+        uses: azure/setup-helm@fe7b79cd5ee1e45176fcad797de68ecaf3ca4814 # v4.2.0
+        with:
+          version: v3.13.0
+      # Harbor serves the chart and the images; an anonymous pull works for the
+      # images, but the OCI chart may need the bot's read credentials. Gated on
+      # the password (see CI_BOT_PASSWORD_SET): a fork PR of the upstream repo
+      # withholds the secrets but keeps the variables, so a username-only guard
+      # would run the login with an empty password and fail the job,
+      # contradicting "fork PR: layer 2 skips, layer 1 still runs".
+      - name: Log in to Harbor (chart pulls)
+        if: env.CI_BOT_PASSWORD_SET == 'true'
+        env:
+          HARBOR_USER: ${{ vars.CI_BOT_NAME }}
+          HARBOR_PASSWORD: ${{ secrets.CI_BOT_PASSWORD }}
+        run: |
+          printf '%s' "$HARBOR_PASSWORD" | helm registry login harbor.isuanova.com \
+            --username "$HARBOR_USER" --password-stdin
+      - name: Bring up cubepilot + the portal
+        env:
+          # Optional manual override for the drift check; empty uses the chart
+          # the bring-up would pick on its own.
+          CUBEPILOT_CHART_VERSION: ${{ inputs.chartVersion }}
+          CUBEPILOT_LLM_APIKEY: ${{ secrets.LLM_APIKEY || 'sk-placeholder' }}
+        run: bash web/e2e/deploy/integration/setup.sh
+      # Only the chat layer needs a real key; a fork PR never has the secret,
+      # so that layer skips and the rest still runs.
+      - name: Run the integration suite
+        working-directory: web
+        env:
+          CUBEPILOT_E2E_CHAT: ${{ secrets.LLM_APIKEY != '' && '1' || '0' }}
+        run: npm run test:e2e:integration
+      # Independent of the portal: prove the CR the UI wrote really is in the
+      # cluster, so a portal-side bug cannot fake the assertion.
+      - name: Assert the AgentInstance the UI wrote
+        run: |
+          set -euo pipefail
+          got="$(kubectl -n cubestack-system get agentinstance admin-cubepilot \
+            -o jsonpath='{.spec.userInstructions}')"
+          case "$got" in
+            *"$E2E_MARKER"*) echo "ok: $got" ;;
+            *) echo "AgentInstance does not carry the marker: '$got'" >&2; exit 1 ;;
+          esac
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: playwright-integration-report
+          path: web/playwright-report
+          if-no-files-found: ignore
