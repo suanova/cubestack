@@ -11,6 +11,12 @@
 # keys are an ordinary Secret mount, which kubelet updates in place (see
 # images/README.md).
 #
+# The port sshd listens on is 2222 unless CUBSTACK_SSH_PORT says otherwise. The
+# operator sets it for a host-network environment — an RDMA one — whose sshd binds a
+# port on the node rather than in a namespace of its own, so the platform allocates
+# one per environment (operator ::reconcileHostPorts). -p is what states it: a
+# command-line port replaces the drop-in's Port directive rather than adding to it.
+#
 # Modes:
 #   jupyter  start sshd only when the operator mounted the ssh Secret, then hand
 #            off to the image CMD (the shared common/jupyter/start-jupyter.sh in
@@ -20,6 +26,9 @@
 set -euo pipefail
 
 mode="${CUBSTACK_TYPE:-${CUBESTACK_IMAGE:-ssh}}"
+# The operator sets this only for a host-network environment; 2222 is the
+# unprivileged port the drop-in names for every other one.
+ssh_port="${CUBSTACK_SSH_PORT:-2222}"
 
 # The operator mounts the ssh Secret's host key here. Images ship no host keys of
 # their own, so the file's presence means ssh is enabled.
@@ -46,11 +55,11 @@ case "$mode" in
       # serving on its own port — the environment reports ready with the published
       # ssh endpoint silently dead. The key's *absence* is the intentional
       # ssh-off case handled above; its presence means ssh was requested.
-      if ! /usr/sbin/sshd -t -f /etc/ssh/sshd_config; then
+      if ! /usr/sbin/sshd -t -f /etc/ssh/sshd_config -p "$ssh_port"; then
         echo "cubestack: sshd -t failed; refusing to run without a working ssh endpoint" >&2
         exit 1
       fi
-      /usr/sbin/sshd -D -e -f /etc/ssh/sshd_config &
+      /usr/sbin/sshd -D -e -f /etc/ssh/sshd_config -p "$ssh_port" &
     fi
     # Hand off to the image CMD (the image decides its launch chain).
     exec "$@"
@@ -62,7 +71,7 @@ case "$mode" in
       exit 1
     fi
     allow_root_login
-    exec /usr/sbin/sshd -D -e -f /etc/ssh/sshd_config
+    exec /usr/sbin/sshd -D -e -f /etc/ssh/sshd_config -p "$ssh_port"
     ;;
   *)
     echo "cubestack: unknown mode '$mode'" >&2

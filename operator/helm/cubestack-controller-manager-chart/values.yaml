@@ -65,6 +65,18 @@ l4PortRange:
   start: 20000  # --l4-port-range-start
   end: 20999    # --l4-port-range-end
 
+# Node port pool a host-network DevEnvironment draws its own ports from. A RoCE
+# environment shares the node's network namespace, so its notebook server and
+# sshd bind ports on the node rather than in a namespace of their own; the
+# controller allocates them per environment from this range, which is what lets
+# more than one such environment run on a node. Keep it clear of the L4 pool
+# above and of the ports the node's own services use: the allocation is
+# cluster-wide, so the width of the range bounds how many host-network
+# environments the cluster can hold.
+hostPortRange:
+  start: 21000  # --host-port-range-start
+  end: 29999    # --host-port-range-end
+
 # Extended resources a DevEnvironment's spec.network requests, as advertised by
 # the cluster's shared RDMA device plugin. The plugin's ConfigMap owns the
 # names, so change these if yours differ — the defaults are the platform's own,

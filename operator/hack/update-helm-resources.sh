@@ -143,6 +143,18 @@ awk '
   print ind "- --l4-port-range-end={{ .Values.l4PortRange.end }}"
   next
 }
+/^[[:space:]]*- --host-port-range-start=[0-9]+$/ {
+  if (host_start++) { print "duplicate --host-port-range-start line in kustomize output" > "/dev/stderr"; exit 1 }
+  ind = substr($0, 1, index($0, "-") - 1)
+  print ind "- --host-port-range-start={{ .Values.hostPortRange.start }}"
+  next
+}
+/^[[:space:]]*- --host-port-range-end=[0-9]+$/ {
+  if (host_end++) { print "duplicate --host-port-range-end line in kustomize output" > "/dev/stderr"; exit 1 }
+  ind = substr($0, 1, index($0, "-") - 1)
+  print ind "- --host-port-range-end={{ .Values.hostPortRange.end }}"
+  next
+}
 /^[[:space:]]*- --rdma-ib-resource=rdma\/ib_shared_devices$/ {
   if (rdma_ib++) { print "duplicate --rdma-ib-resource line in kustomize output" > "/dev/stderr"; exit 1 }
   ind = substr($0, 1, index($0, "-") - 1)
@@ -167,6 +179,10 @@ END {
   }
   if (l4_start != 1 || l4_end != 1) {
     print "l4 port range args not found in kustomize output — update needle in update-helm-resources.sh" > "/dev/stderr"
+    exit 1
+  }
+  if (host_start != 1 || host_end != 1) {
+    print "host port range args not found in kustomize output — update needle in update-helm-resources.sh" > "/dev/stderr"
     exit 1
   }
   if (rdma_ib != 1 || rdma_roce != 1) {
@@ -347,6 +363,14 @@ expect_render defaults present '^[[:space:]]*- --l4-port-range-start=20000$'
 expect_render defaults present '^[[:space:]]*- --l4-port-range-end=20999$'
 expect_render l4-range-custom present '^[[:space:]]*- --l4-port-range-start=30000$' --set l4PortRange.start=30000
 expect_render l4-range-custom present '^[[:space:]]*- --l4-port-range-end=30999$' --set l4PortRange.end=30999
+
+# The host port pool a RoCE environment draws its notebook and sshd ports from
+# always renders too, and follows its values verbatim: the range is what keeps
+# those ports clear of whatever else a node binds.
+expect_render defaults present '^[[:space:]]*- --host-port-range-start=21000$'
+expect_render defaults present '^[[:space:]]*- --host-port-range-end=29999$'
+expect_render host-range-custom present '^[[:space:]]*- --host-port-range-start=40000$' --set hostPortRange.start=40000
+expect_render host-range-custom present '^[[:space:]]*- --host-port-range-end=40999$' --set hostPortRange.end=40999
 
 # The RDMA extended resource names also always render, and follow their values
 # verbatim. They are defined by the cluster's shared device plugin, not by this
