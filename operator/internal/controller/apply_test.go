@@ -41,6 +41,7 @@ const (
 	testApplyPrefillSuffix = "-prefill"
 	testApplyRouterRole    = "router"
 	testApplyPrefillRole   = "prefill"
+	testApplyDecodeRole    = "decode"
 	testApplyModelPath     = "/models/m"
 	testEngineImageV2      = "registry.local/engine:v2"
 	testForeignLabelKey    = "app"

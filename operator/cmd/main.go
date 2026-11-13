@@ -27,6 +27,7 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/validate/content"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -56,6 +57,7 @@ var (
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
+	utilruntime.Must(apiextensionsv1.AddToScheme(scheme))
 	utilruntime.Must(aiv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(leaderworkersetv1.AddToScheme(scheme))
 	utilruntime.Must(gatewayv1.Install(scheme))
@@ -289,11 +291,10 @@ func main() {
 		// cluster that installs the CRDs later needs an operator restart to
 		// pick them up.
 		AgentRouterAvailable: controller.AgentRouterAvailable(mgr.GetRESTMapper()),
-		// Probe the optional ServiceMonitor CRD once: where it is not served,
-		// the controller skips the scrape monitors instead of failing every
-		// InferenceService on an unknown kind. A cluster that installs the
-		// CRDs later needs an operator restart to pick them up.
-		ServiceMonitorAvailable: controller.ServiceMonitorAvailable(mgr.GetRESTMapper()),
+		// Monitors are probed per reconcile (applyServiceMonitor), and the
+		// mapper re-discovers a missing kind, so a ServiceMonitor CRD installed
+		// after startup is picked up without an operator restart.
+		RESTMapper: mgr.GetRESTMapper(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "InferenceService")
 		os.Exit(1)
