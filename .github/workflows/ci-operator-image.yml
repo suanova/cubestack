@@ -57,7 +57,7 @@ jobs:
       contents: read
     runs-on: ubuntu-latest
     outputs:
-      latest_moved: ${{ steps.publish.outputs.latest_moved }}
+      images_json: ${{ steps.publish.outputs.images_json }}
     steps:
       - name: Clone the code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -81,7 +81,11 @@ jobs:
           set -euo pipefail
           MANAGER=harbor.isuanova.com/suanova/cubestack-controller-manager
           ACTIVITY_AGENT=harbor.isuanova.com/suanova/cubestack-activity-agent
-          SHA_TAG="${GITHUB_SHA}"
+          if [ -n "${RELEASE_VERSION}" ]; then
+            SHA_TAG="${GITHUB_SHA}"
+          else
+            SHA_TAG="${GITHUB_SHA::7}"
+          fi
 
           # Push the immutable, commit-addressed tags. Safe for any commit that
           # ever landed on main, even if a newer commit now exists.
@@ -99,86 +103,63 @@ jobs:
           make -C operator docker-build-activity-agent ACTIVITY_AGENT_IMAGE="${ACTIVITY_AGENT}:${SHA_TAG}"
           make -C operator docker-push-activity-agent ACTIVITY_AGENT_IMAGE="${ACTIVITY_AGENT}:${SHA_TAG}"
 
-          # A release publishes the version it names and does not move `latest`,
-          # which tracks main.
-          #
-          # "Is this commit still the head of main" is the wrong question. A later
-          # merge that changes nothing under these paths does not make these images
-          # newer, and skipping on it would strand `latest` on an older build until
-          # some future operator change happened along to move it — the deferral
-          # hands the tag to a run that then builds nothing.
-          #
-          # The question is whether main's copy of what decides these images still
-          # matches this commit's: if it does, they are the newest there are and
-          # `latest` is theirs to take. The pathspec is the `changes` filter above —
-          # the same rule that decided these images are being published at all,
-          # which is what keeps the gate from drifting from the trigger.
-          #
-          # Fetched rather than asked of the API so the answer is the trees
-          # themselves, with no cap on how many changed files a comparison will
-          # report. The repository is public, so this needs no credentials.
-          MOVE_LATEST=false
-          if [ -z "${RELEASE_VERSION}" ]; then
-            git fetch --no-tags --depth=1 origin main
-            if git diff --quiet "${GITHUB_SHA}" FETCH_HEAD -- operator Makefile .github; then
-              MOVE_LATEST=true
-            else
-              echo "Skipping 'latest': a later commit changed what these images are built from"
-            fi
-          fi
-
-          # Both images take the same tags. A release where one of them carried
-          # a version and the other did not would leave an environment running a
-          # sidecar from a different commit than its manager, which is the one
-          # pairing the controller's version sentinel cannot detect.
-          for IMAGE in "${MANAGER}" "${ACTIVITY_AGENT}"; do
-            if [ -n "${RELEASE_VERSION}" ]; then
+          # A release publishes the version it names; main publishes the
+          # commit-addressed tags and leaves the digests to the release bumper.
+          if [ -n "${RELEASE_VERSION}" ]; then
+            for IMAGE in "${MANAGER}" "${ACTIVITY_AGENT}"; do
               docker tag "${IMAGE}:${SHA_TAG}" "${IMAGE}:${RELEASE_APP_VERSION}"
               docker push "${IMAGE}:${RELEASE_APP_VERSION}"
-              continue
-            fi
-            if [ "${MOVE_LATEST}" = "true" ]; then
-              docker tag "${IMAGE}:${SHA_TAG}" "${IMAGE}:latest"
-              docker push "${IMAGE}:latest"
-            fi
-          done
-          echo "latest_moved=${MOVE_LATEST}" >> "$GITHUB_OUTPUT"
+            done
+            exit 0
+          fi
 
-  notify-installer:
+          json=""
+          for pair in "cubestack-controller-manager:${MANAGER}" "cubestack-activity-agent:${ACTIVITY_AGENT}"; do
+            name="${pair%%:*}"; repo="${pair#*:}"
+            digest="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${repo}:${SHA_TAG}" \
+              | awk -F@ -v r="${repo}" '$1==r {print $2; exit}')"
+            [ -n "${digest}" ] || { echo "::error::cannot resolve digest for ${repo}:${SHA_TAG}"; exit 1; }
+            item="$(jq -nc --arg n "${name}" --arg r "${repo}:${SHA_TAG}" --arg d "${digest}" '{name:$n,ref:$r,digest:$d}')"
+            if [ -z "${json}" ]; then json="${item}"; else json="${json},${item}"; fi
+          done
+          echo "images_json=[${json}]" >> "$GITHUB_OUTPUT"
+
+  notify-release:
     needs: build-push-image
-    if: "!cancelled() && github.ref_type == 'branch' && needs.build-push-image.outputs.latest_moved == 'true'"
+    if: "github.ref_type == 'branch'"
     runs-on: ubuntu-latest
     permissions:
       contents: read
     timeout-minutes: 10
     steps:
-      - name: Create an installation token for cubestack-installer
+      - name: Create an installation token for cubestack-release
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ vars.SUANOVA_BOT_CLIENT_ID }}
           private-key: ${{ secrets.SUANOVA_BOT_APP_PRIVATE_KEY }}
           owner: suanova
-          repositories: cubestack-installer
+          repositories: cubestack-release
           permission-contents: write
-      - name: Dispatch refresh-latest-offline
+      - name: Dispatch component-built
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          SOURCE_REPO: suanova/cubestack
-          COMPONENT: operator-image
+          IMAGES_JSON: ${{ needs.build-push-image.outputs.images_json }}
         run: |
           set -euo pipefail
           payload="$(jq -nc \
-            --arg r "${SOURCE_REPO}" --arg c "${COMPONENT}" \
-            --arg s "${GITHUB_SHA}" \
-            --arg u "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
-            '{event_type:"refresh-latest-offline",client_payload:{source_repo:$r,component:$c,sha:$s,run_url:$u}}')"
+            --arg repo "suanova/cubestack" \
+            --arg commit "${GITHUB_SHA}" \
+            --arg line "2.1" \
+            --arg component "cubestack-controller-manager" \
+            --argjson images "${IMAGES_JSON}" \
+            '{event_type:"component-built",client_payload:{repo:$repo,commit:$commit,line:$line,component:$component,images:$images}}')"
           for i in 1 2 3; do
             if printf '%s' "${payload}" | gh api --method POST \
-                repos/suanova/cubestack-installer/dispatches --input -; then
+                repos/suanova/cubestack-release/dispatches --input -; then
               exit 0
             fi
             sleep $((i * 5))
           done
-          echo "::error::repository_dispatch failed after 3 attempts"
+          echo "::error::component-built dispatch failed after 3 attempts"
           exit 1
