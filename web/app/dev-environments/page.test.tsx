@@ -67,6 +67,9 @@ describe("dev environments page", () => {
     HF_TOKEN: "hf_example",
   };
   const envRequests: string[] = [];
+  // The pod reason the status card asks for, and the requests made for it: a
+  // detail panel reads it whenever it opens.
+  const podRequests: string[] = [];
 
   function renderPage() {
     const container = document.createElement("div");
@@ -78,10 +81,11 @@ describe("dev environments page", () => {
     return { container, root };
   }
 
-  function stubData(items: unknown[], ok = true) {
+  function stubData(items: unknown[], ok = true, pod: { failure?: unknown; error?: string } = { failure: null }) {
     tokenRequests.length = 0;
     keyRequests.length = 0;
     envRequests.length = 0;
+    podRequests.length = 0;
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: unknown) => {
@@ -103,6 +107,12 @@ describe("dev environments page", () => {
           const q = new URL(String(url), "http://localhost").searchParams;
           envRequests.push(`${q.get("namespace")}/${q.get("name")}`);
           return { ok: true, status: 200, json: async () => ({ values: ENV_VALUES }) };
+        }
+        if (String(url).includes("/api/devenvironments/pod-status")) {
+          const q = new URL(String(url), "http://localhost").searchParams;
+          podRequests.push(`${q.get("namespace")}/${q.get("name")}`);
+          if (pod.error) return { ok: false, status: 500, json: async () => ({ error: pod.error }) };
+          return { ok: true, status: 200, json: async () => ({ failure: pod.failure ?? null }) };
         }
         return { ok, status: ok ? 200 : 500, json: async () => (ok ? { items } : { error: "boom" }) };
       }),
@@ -294,6 +304,59 @@ describe("dev environments page", () => {
     const dot = container.querySelector('[data-od-id="cond-Ready"] span');
     expect(dot?.getAttribute("aria-hidden")).toBe("true");
     expect(dot?.getAttribute("aria-label")).toBeNull();
+
+    act(() => root.unmount());
+  });
+
+  it("shows why the pod is not up, in the kubelet's own words", async () => {
+    stubData([devEnvironmentSummary({ name: "crashing-env" })], true, {
+      failure: {
+        container: "jupyter",
+        reason: "CrashLoopBackOff",
+        message: "back-off 5m0s restarting failed container",
+        exitCode: 137,
+      },
+    });
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    // The conditions stop where the controller's knowledge stops; this line is
+    // the pod's own account of the same failure. The reason and message are the
+    // kubelet's text — verbatim, like a condition's status — and only the label
+    // and the exit-code wording are the platform's.
+    const line = container.querySelector('[data-od-id="pod-reason"]') as HTMLElement;
+    expect(line).not.toBeNull();
+    expect(podRequests).toEqual(["project-a/crashing-env"]);
+    expect(line.textContent).toContain("Pod 状态");
+    expect(line.textContent).toContain("CrashLoopBackOff");
+    expect(line.textContent).toContain("jupyter: back-off 5m0s restarting failed container (退出码 137)");
+
+    act(() => root.unmount());
+  });
+
+  it("says nothing about a healthy pod, but still asks", async () => {
+    stubData([devEnvironmentSummary({ name: "healthy-env" })]);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    // A healthy pod has nothing to add: the conditions above already say it is
+    // up, and a line repeating that would read as a second problem.
+    expect(podRequests).toEqual(["project-a/healthy-env"]);
+    expect(container.querySelector('[data-od-id="pod-reason"]')).toBeNull();
+    expect(container.querySelector('[data-od-id="pod-reason-error"]')).toBeNull();
+
+    act(() => root.unmount());
+  });
+
+  it("reports a pod status it could not read instead of an empty line", async () => {
+    stubData([devEnvironmentSummary({ name: "opaque-env" })], true, { error: "podUnreadable" });
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    expect(container.querySelector('[data-od-id="pod-reason"]')).toBeNull();
+    expect(container.querySelector('[data-od-id="pod-reason-error"]')?.textContent).toBe(
+      "暂时无法读取 Pod 状态,请稍后重试。",
+    );
 
     act(() => root.unmount());
   });

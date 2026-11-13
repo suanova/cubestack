@@ -67,6 +67,15 @@ rules:
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["list"]
+  # The environment's own pod, for the status card's pod-reason line
+  # (/api/devenvironments/pod-status?namespace=&name=): a container that cannot
+  # pull its image, crashes on start or is OOM-killed is reported on the pod,
+  # never on the DevEnvironment. `list` only, and always filtered by the label
+  # the controller puts on environment pods — the route takes a DevEnvironment
+  # name, never a pod name, so this is not a way to browse pods in a namespace.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
   # The Secrets rule serves three uses in the namespace the user chooses, and
   # none of them is a general Secret browser:
   #
