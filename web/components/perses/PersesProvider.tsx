@@ -24,7 +24,6 @@ import {
   DataQueriesProvider,
   PluginRegistry,
   registerHostSharedModules,
-  remotePluginLoader,
   RouterProvider,
   TimeRangeProviderBasic,
   usePluginBuiltinVariableDefinitions,
@@ -36,8 +35,8 @@ import { forwardRef, ReactNode, useMemo } from "react";
 import type { AnchorHTMLAttributes, RefAttributes } from "react";
 
 import { withBasePath } from "@/lib/base-path";
-import { PERSES_PROXY_BASE_PATH } from "@/lib/perses/config";
 import { PortalDatasourceApi } from "@/lib/perses/datasource-api";
+import { createStaticPluginLoader } from "@/lib/perses/static-plugin-loader";
 import {
   buildPlatformChartsTheme,
   buildPlatformMuiTheme,
@@ -110,10 +109,9 @@ export function PersesProvider({
   const mode = usePlatformTheme();
   const muiTheme = useMemo(() => buildPlatformMuiTheme(mode), [mode]);
   const chartsTheme = useMemo(() => buildPlatformChartsTheme(mode), [mode]);
-  const pluginLoader = useMemo(
-    () => remotePluginLoader({ baseURL: PERSES_PROXY_BASE_PATH, apiPrefix: PERSES_PROXY_BASE_PATH }),
-    [],
-  );
+  // The dashboard's plugins are bundled with the portal rather than loaded from
+  // the Perses server at runtime; see lib/perses/static-plugin-loader.ts.
+  const pluginLoader = useMemo(() => createStaticPluginLoader(), []);
 
   return (
     <QueryClientProvider client={queryClient}>

@@ -63,17 +63,32 @@ export const platformPalette: Record<PaletteMode, PlatformPalette> = {
   },
 };
 
-// ECharts categorical palette, led by the platform accent and the hues
-// overview.html derives from it (cyan / violet / warn / ok / danger).
-const PLATFORM_CHART_COLORS = [
-  "#1677ff",
-  "#00b3a4",
-  "#8b5cf6",
-  "#f59e0b",
-  "#4ade80",
-  "#f43f5e",
-  "#94a3b8",
-];
+// ECharts categorical palette. The hues follow ECharts' own stacked-area
+// example (mint / cyan / blue / magenta / amber), which is what gives that
+// palette its bright, high-chroma look. Each mode gets its own lightness:
+// dark mode can take the near-neon tints because they sit on near-black,
+// while light mode needs the same hues deepened enough to hold contrast on
+// white. Slate and violet round the list out for series beyond five.
+const PLATFORM_CHART_COLORS: Record<PaletteMode, string[]> = {
+  light: [
+    "#2b7fff",
+    "#12b981",
+    "#00a6c8",
+    "#f59e0b",
+    "#e6399b",
+    "#7c5cff",
+    "#7c8ca3",
+  ],
+  dark: [
+    "#37a2ff",
+    "#80ffa5",
+    "#00ddff",
+    "#ffbf00",
+    "#ff3d9a",
+    "#b388ff",
+    "#9fb3c8",
+  ],
+};
 
 /**
  * MUI theme for the dashboards: perses's own theme (with its component
@@ -104,26 +119,58 @@ export function buildPlatformMuiTheme(mode: PaletteMode): Theme {
 
 /**
  * The bits of the ECharts theme that don't follow from the MUI palette:
- * axis/split-line colors use the platform border, and series colors are the
- * platform palette. (categoryAxis/timeAxis/valueAxis are ECharts theme keys,
- * not EChartsOption keys, hence the cast.)
+ * axis/split-line colors use the platform border, series colors are the
+ * platform palette, and line/bar series get a slightly refined default look.
+ * These act as defaults — any option a panel's spec sets explicitly still
+ * wins. (categoryAxis/timeAxis/valueAxis are ECharts theme keys, not
+ * EChartsOption keys, hence the cast.)
  */
 export function platformChartsThemeOverride(
   mode: PaletteMode,
 ): Partial<PersesChartsTheme> {
   const p = platformPalette[mode];
+  // Subtle splitline / axis grid; hidden ticks keep the canvas clean.
   const axis = {
     axisLine: { lineStyle: { color: p.border } },
-    splitLine: { lineStyle: { color: p.border } },
+    axisTick: { show: false },
+    axisLabel: { color: p.muted },
+    splitLine: { lineStyle: { color: p.border, opacity: 0.5, type: "dashed" as const } },
   };
   return {
     echartsTheme: {
-      color: PLATFORM_CHART_COLORS,
-      categoryAxis: axis,
+      color: PLATFORM_CHART_COLORS[mode],
+      textStyle: { color: p.fg, fontFamily: PLATFORM_FONT_FAMILY },
+      // Legend follows the grid text color instead of echarts' dark default.
+      legend: {
+        textStyle: { color: p.muted, fontSize: 11 },
+        pageTextStyle: { color: p.muted },
+      },
+      grid: { top: 20, right: 16, bottom: 0, left: 8, containLabel: true },
       timeAxis: axis,
-      valueAxis: { splitLine: { lineStyle: { color: p.border } } },
+      categoryAxis: axis,
+      valueAxis: { splitLine: { lineStyle: { color: p.border, opacity: 0.35 } } },
+      // Defaults for time-series panels (lines, area, bars). Panels reading
+      // the theme pick these up; a series that sets its own option wins over
+      // them. Wider rounded bars read better than hairline slivers.
+      line: {
+        showSymbol: true,
+        symbol: "circle" as const,
+        symbolSize: 4,
+        lineStyle: { width: 2 },
+        smooth: false,
+        emphasis: { lineStyle: { width: 2.5 } },
+      },
+      bar: {
+        barMaxWidth: 28,
+        itemStyle: { borderRadius: [3, 3, 0, 0] },
+      },
+      tooltip: {
+        textStyle: { color: p.fg },
+        borderColor: p.border,
+        backgroundColor: mode === "dark" ? "rgba(31,47,47,0.95)" : "rgba(255,255,255,0.96)",
+      },
     },
-    sparkline: { color: p.accent },
+    sparkline: { color: p.accent, width: 2 },
   } as unknown as Partial<PersesChartsTheme>;
 }
 
