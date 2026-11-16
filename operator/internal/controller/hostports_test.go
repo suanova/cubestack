@@ -341,6 +341,76 @@ var _ = Describe("host port allocation", func() {
 			}, "15s", "200ms").Should(Succeed())
 		})
 
+		It("keeps a port out of the pool while a workload on it is being replaced", func() {
+			// Another environment declaring the number in spec.ports moves this
+			// one's allocation off it: the declared number is the user's and cannot
+			// be moved, so the allocation yields. The workload on the old number is
+			// not replaced until the StatefulSet is rolled, but the record lets the
+			// number go as soon as the allocation moves — the pod still binding it
+			// is what has to keep it out of the pool in between.
+			env := validDevEnvironment("de-roce-displaced")
+			env.Spec.Network = roce()
+			Expect(k8sClient.Create(ctx, env)).To(Succeed())
+			defer deleteEnv(env.Name)
+
+			var held *aiv1alpha1.HostPorts
+			Eventually(func(g Gomega) {
+				observed := &aiv1alpha1.DevEnvironment{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), observed)).To(Succeed())
+				g.Expect(observed.Status.HostPorts).NotTo(BeNil())
+				held = observed.Status.HostPorts.DeepCopy()
+			}, "15s", "200ms").Should(Succeed())
+
+			createBoundPod(env, held)
+			// Tolerated, because the spec deletes the pod itself below.
+			defer func() {
+				pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: podName(env), Namespace: env.Namespace}}
+				_ = k8sClient.Delete(ctx, pod, client.GracePeriodSeconds(0))
+			}()
+
+			declaring := validDevEnvironment("de-roce-declares-held")
+			declaring.Spec.Network = roce()
+			declaring.Spec.Ports = []aiv1alpha1.PortSpec{{
+				Name: "nodeviz", Type: aiv1alpha1.PortTypeTCP, ContainerPort: held.Main,
+			}}
+			Expect(k8sClient.Create(ctx, declaring)).To(Succeed())
+			defer deleteEnv(declaring.Name)
+
+			Eventually(func(g Gomega) {
+				observed := &aiv1alpha1.DevEnvironment{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), observed)).To(Succeed())
+				g.Expect(observed.Status.HostPorts).NotTo(BeNil())
+				g.Expect(observed.Status.HostPorts.Main).NotTo(Equal(held.Main))
+			}, "15s", "200ms").Should(Succeed())
+
+			// With the declaration gone, no record names the number any more — only
+			// the pod standing on it.
+			updateEnvSpec(declaring.Name, func(e *aiv1alpha1.DevEnvironment) {
+				e.Spec.Ports = nil
+			})
+
+			next := validDevEnvironment("de-roce-wants-the-port")
+			next.Spec.Network = roce()
+			only := &DevEnvironmentReconciler{
+				Client:    k8sClient,
+				APIReader: k8sClient,
+				Config:    DevEnvironmentControllerConfig{HostPortRangeStart: held.Main, HostPortRangeEnd: held.Main},
+			}
+			Eventually(func(g Gomega) {
+				_, err := only.hostPortsForPass(ctx, next)
+				g.Expect(err).To(MatchError(ContainSubstring("no free host port")))
+			}, "15s", "200ms").Should(Succeed())
+
+			deleteBoundPod(env)
+
+			// Once the workload on it is gone, the pool may hand the number out.
+			Eventually(func(g Gomega) {
+				allocated, err := only.hostPortsForPass(ctx, next)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(allocated.Main).To(Equal(held.Main))
+			}, "15s", "200ms").Should(Succeed())
+		})
+
 		It("keeps an allocation until the workload that binds it is gone", func() {
 			// The apply does not free the node's port: a StatefulSet replaces its
 			// pod by deleting it and creating the next one, so the pass that applies

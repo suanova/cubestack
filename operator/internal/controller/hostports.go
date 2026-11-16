@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	aiv1alpha1 "github.com/suanova/cubestack/api/v1alpha1"
 )
@@ -170,7 +171,8 @@ func (r *DevEnvironmentReconciler) hostPortsForPass(ctx context.Context, env *ai
 //
 // Two sources are read: the allocation each environment records, and the ports a
 // host-network environment declares in spec.ports, which are the user's numbers
-// and would otherwise be invisible to the pool.
+// and would otherwise be invisible to the pool. A third closes the gap the first
+// two leave: the numbers a pod still binds (::boundByPods).
 //
 // The List goes through APIReader rather than the cache, for the reason
 // ::usedPorts does: allocation is a read followed by a status write, and an
@@ -203,6 +205,9 @@ func (r *DevEnvironmentReconciler) usedHostPorts(ctx context.Context, env *aiv1a
 			}
 		}
 	}
+	if err := r.boundByPods(ctx, env, used); err != nil {
+		return nil, err
+	}
 	// The environment's own declared ports are its to bind too, and an allocation
 	// landing on one of them would keep its own application off the node. The
 	// exception is a number it already holds: that entry is the exposure the
@@ -217,6 +222,42 @@ func (r *DevEnvironmentReconciler) usedHostPorts(ctx context.Context, env *aiv1a
 		used[p.ContainerPort] = true
 	}
 	return used, nil
+}
+
+// boundByPods marks the numbers an environment's workload still binds on the
+// node. Neither record above can stand in for it: an allocation moves off a
+// number another environment declares in spec.ports — the declaration is the
+// user's and cannot be moved, so the allocation yields — and the environment's
+// status lets the old number go as soon as the allocation moves, while the pod
+// on it is only replaced when the StatefulSet is rolled. The pod is all that is
+// left saying the number is taken, and handing it to a third environment in the
+// meantime leaves one of the two unable to bind.
+//
+// The environment's own pods are skipped. Its allocation is drawn with the
+// numbers it holds kept, so counting its own workload would move it off the port
+// it is running on: the schedule of its own outgoing numbers is
+// ::announcedAllocation and ::settledAllocation.
+func (r *DevEnvironmentReconciler) boundByPods(ctx context.Context, env *aiv1alpha1.DevEnvironment, used map[int32]bool) error {
+	var pods corev1.PodList
+	if err := r.APIReader.List(ctx, &pods, client.HasLabels{devEnvironmentLabelKey}); err != nil {
+		return err
+	}
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		// A pod that has ended holds nothing, whether or not it has been collected.
+		if !pod.Spec.HostNetwork || pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		if pod.Namespace == env.Namespace && pod.Labels[devEnvironmentLabelKey] == env.Name {
+			continue
+		}
+		for _, container := range pod.Spec.Containers {
+			for _, p := range container.Ports {
+				used[p.ContainerPort] = true
+			}
+		}
+	}
+	return nil
 }
 
 // allocateHostPort reuses the port the environment already holds when it is
