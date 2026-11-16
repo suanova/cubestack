@@ -83,6 +83,29 @@ var _ = Describe("host port allocation", func() {
 		})
 	})
 
+	Describe("settledAllocation", func() {
+		// The replacement declares the main port from its first moment and may have
+		// no sshd at all, so each number is judged on its own. A rule that kept the
+		// record whole while any part of it was bound would never release the port
+		// the pass dropped, and the spec below fails on it.
+		It("drops a number the replacement pod does not bind", func() {
+			pod := &corev1.Pod{Spec: corev1.PodSpec{
+				HostNetwork: true,
+				Containers: []corev1.Container{{Ports: []corev1.ContainerPort{
+					{ContainerPort: 21000},
+				}}},
+			}}
+			settled := settledAllocation(
+				&aiv1alpha1.HostPorts{Main: 21000},
+				&aiv1alpha1.HostPorts{Main: 21000, SSH: 21001},
+				pod,
+			)
+			Expect(settled).NotTo(BeNil())
+			Expect(settled.Main).To(Equal(int32(21000)))
+			Expect(settled.SSH).To(BeZero())
+		})
+	})
+
 	Describe("the allocation on a live environment", func() {
 		It("gives two RoCE environments distinct node ports", func() {
 			first := validDevEnvironment("de-roce-first")
