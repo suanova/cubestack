@@ -1410,7 +1410,7 @@ function OpenJupyterRow({ name, namespace }: { name: string; namespace: string }
         {busy ? t("dev.conn.jupyterOpening") : t("dev.conn.jupyterOpen")}
       </Button>
       {error ? (
-        <Typography data-od-id="jupyter-open-error" sx={{ display: "block", fontSize: 11, lineHeight: 1.7, color: STATUS_ERR, mt: "8px" }}>
+        <Typography role="alert" data-od-id="jupyter-open-error" sx={{ display: "block", fontSize: 11, lineHeight: 1.7, color: STATUS_ERR, mt: "8px" }}>
           {error}
         </Typography>
       ) : null}
