@@ -60,6 +60,33 @@ func (r *DevEnvironmentReconciler) reconcileHostPorts(ctx context.Context, env *
 	return ports, nil
 }
 
+// announcedAllocation is what a status write before the apply may state: the
+// allocation this pass resolved, or the one the environment already holds while
+// it resolves none. A move off the host network resolves no ports, and the
+// workload on the old allocation keeps binding them until the StatefulSet is
+// re-applied — releasing the number first would hand it back to the pool while a
+// pod still holds it, and the environment that drew it would not schedule. The
+// release is the assignment after that apply (::Reconcile).
+func announcedAllocation(resolved, held *aiv1alpha1.HostPorts) *aiv1alpha1.HostPorts {
+	if resolved != nil {
+		return resolved
+	}
+	return held
+}
+
+// withHostPorts returns a copy of env that resolves ports against the allocation
+// a pass computed rather than against the one the status still records. A pass
+// that moves an environment off the host network reads an allocation that is on
+// its way out — the workload it belongs to is still running until the
+// StatefulSet is re-applied — so anything reasoning about which container port
+// the platform's Service forwards to has to be handed what this pass resolved
+// (::reconcileHostPorts, ::resolvedMainPort).
+func withHostPorts(env *aiv1alpha1.DevEnvironment, hostPorts *aiv1alpha1.HostPorts) *aiv1alpha1.DevEnvironment {
+	resolved := env.DeepCopy()
+	resolved.Status.HostPorts = hostPorts
+	return resolved
+}
+
 // hostPortsForPass resolves the ports the pass needs, and tolerates a failed
 // allocation on a pass that only scales the environment down. A stop is the user
 // asking for the one state a failed allocation would deny — nothing running — so

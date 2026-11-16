@@ -9,6 +9,8 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	aiv1alpha1 "github.com/suanova/cubestack/api/v1alpha1"
@@ -143,6 +145,106 @@ var _ = Describe("host port allocation", func() {
 
 			err := k8sClient.Get(ctx, envKey(env.Name), &appsv1.StatefulSet{})
 			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "the gate must decide before anything is applied")
+		})
+
+		It("keeps an allocation until the pass that replaces the workload", func() {
+			// A move off the host network resolves no ports, but the workload on
+			// the old allocation keeps binding them until the StatefulSet is
+			// re-applied below. The first pass here refuses the spec, so that
+			// apply never happens: releasing the number then would hand it back
+			// to the pool while a pod still holds it, and one whose workload is
+			// never replaced would keep holding a port nothing recorded.
+			env := validDevEnvironment("de-roce-released")
+			env.Spec.Network = roce()
+			Expect(k8sClient.Create(ctx, env)).To(Succeed())
+			defer deleteEnv(env.Name)
+
+			var held *aiv1alpha1.HostPorts
+			Eventually(func(g Gomega) {
+				observed := &aiv1alpha1.DevEnvironment{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), observed)).To(Succeed())
+				g.Expect(observed.Status.HostPorts).NotTo(BeNil())
+				held = observed.Status.HostPorts.DeepCopy()
+
+				sts := &appsv1.StatefulSet{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), sts)).To(Succeed())
+				g.Expect(sts.Spec.Template.Spec.HostNetwork).To(BeTrue())
+			}, "15s", "200ms").Should(Succeed())
+
+			updateEnvSpec(env.Name, func(e *aiv1alpha1.DevEnvironment) {
+				e.Spec.Network = nil
+				// A name the platform publishes for this environment, refused
+				// before anything is applied.
+				e.Spec.Ports = []aiv1alpha1.PortSpec{{
+					Name: mainPortName, Type: aiv1alpha1.PortTypeTCP, ContainerPort: 9091,
+				}}
+			})
+
+			Eventually(func(g Gomega) {
+				observed := &aiv1alpha1.DevEnvironment{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), observed)).To(Succeed())
+				g.Expect(observed.Status.Phase).NotTo(BeNil())
+				g.Expect(observed.Status.Phase.Name).To(Equal(aiv1alpha1.PhaseFailed))
+				g.Expect(observed.Status.HostPorts).NotTo(BeNil())
+				g.Expect(observed.Status.HostPorts.Main).To(Equal(held.Main))
+
+				sts := &appsv1.StatefulSet{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), sts)).To(Succeed())
+				g.Expect(sts.Spec.Template.Spec.HostNetwork).To(BeTrue())
+			}, "15s", "200ms").Should(Succeed())
+
+			// Getting as far as the apply is what releases it.
+			updateEnvSpec(env.Name, func(e *aiv1alpha1.DevEnvironment) {
+				e.Spec.Ports = nil
+			})
+
+			Eventually(func(g Gomega) {
+				observed := &aiv1alpha1.DevEnvironment{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), observed)).To(Succeed())
+				g.Expect(observed.Status.HostPorts).To(BeNil())
+
+				sts := &appsv1.StatefulSet{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), sts)).To(Succeed())
+				g.Expect(sts.Spec.Template.Spec.HostNetwork).To(BeFalse())
+			}, "15s", "200ms").Should(Succeed())
+		})
+
+		It("compares spec.ports against the port the environment will bind", func() {
+			// An allocation on its way out is not the container port the
+			// Service forwards to. Read against it, an entry on the fixed port
+			// the environment is moving to looks like a second exposure of some
+			// other number, and the pass refuses a spec that is the lossless
+			// fold the platform already serves.
+			env := validDevEnvironment("de-roce-fold")
+			env.Spec.Network = roce()
+			Expect(k8sClient.Create(ctx, env)).To(Succeed())
+			defer deleteEnv(env.Name)
+
+			Eventually(func(g Gomega) {
+				observed := &aiv1alpha1.DevEnvironment{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), observed)).To(Succeed())
+				g.Expect(observed.Status.HostPorts).NotTo(BeNil())
+			}, "15s", "200ms").Should(Succeed())
+
+			updateEnvSpec(env.Name, func(e *aiv1alpha1.DevEnvironment) {
+				e.Spec.Network = nil
+				e.Spec.Ports = []aiv1alpha1.PortSpec{{
+					Name: "notebook", Type: aiv1alpha1.PortTypeHTTP, ContainerPort: mainContainerPort(aiv1alpha1.DevEnvironmentTypeJupyter),
+				}}
+			})
+
+			Eventually(func(g Gomega) {
+				observed := &aiv1alpha1.DevEnvironment{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), observed)).To(Succeed())
+				accepted := meta.FindStatusCondition(observed.Status.Conditions, aiv1alpha1.ConditionAccepted)
+				g.Expect(accepted).NotTo(BeNil())
+				g.Expect(accepted.Status).To(Equal(metav1.ConditionTrue))
+				g.Expect(accepted.Reason).To(Equal(reasonOverridden))
+
+				sts := &appsv1.StatefulSet{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), sts)).To(Succeed())
+				g.Expect(sts.Spec.Template.Spec.HostNetwork).To(BeFalse())
+			}, "15s", "200ms").Should(Succeed())
 		})
 
 		It("drops a node port the spec declares", func() {

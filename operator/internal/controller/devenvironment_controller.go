@@ -536,19 +536,24 @@ func (r *DevEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if err != nil {
 		return r.recordStepFailure(ctx, &env, desired, err)
 	}
-	desired.Status.HostPorts = hostPorts
 	// The allocation is recorded before anything is applied with it. A workload
 	// launched on these ports while the status saying they are taken is still
 	// unwritten leaves a port the pool can hand to another environment: a pass
 	// that dies in between writes no status at all when the cause is retryable
 	// (::recordStepFailure), and one whose status write fails leaves the
 	// allocation unrecorded too. The write is skipped when the status already
-	// says this, so a pass that changed nothing still writes nothing.
+	// says this, so a pass that changed nothing still writes nothing. What it may
+	// say is ::announcedAllocation — a port is announced here, never withdrawn;
+	// the release waits for the apply in step 3.
+	desired.Status.HostPorts = announcedAllocation(hostPorts, env.Status.HostPorts)
 	if err := r.updateStatusIfChanged(ctx, &env, desired); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	findings := specFindings(desired)
+	// The gate decides on the ports this pass resolved, not on what the status
+	// still records for the workload being replaced: an allocation on its way out
+	// is not the container port the Service forwards to any more.
+	findings := specFindings(withHostPorts(desired, hostPorts))
 	if blocking := mustUpdateFindings(findings); len(blocking) > 0 {
 		if err := r.stopCompute(ctx, &env); err != nil {
 			return r.recordStepFailure(ctx, &env, desired, err)
@@ -643,6 +648,11 @@ func (r *DevEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if err := r.applyStatefulSet(ctx, render); err != nil {
 		return r.recordStepFailure(ctx, &env, desired, err)
 	}
+	// The workload now carries the ports this pass resolved, so the status says
+	// the same: an allocation the apply no longer uses goes back to the pool here
+	// and not a step earlier (::announcedAllocation). It lands with the status
+	// write at the end of the pass.
+	desired.Status.HostPorts = hostPorts
 
 	// 4. Gateway routes: best-effort, never fails the reconcile (design §6.2).
 	if err := r.reconcileGatewayRoutes(ctx, &env, &desired.Status); err != nil {
