@@ -78,6 +78,7 @@ func main() {
 	var gatewayName, gatewayNamespace, gatewayDataplaneNamespace, gatewayCatalogHostname string
 	var l4PortRangeStart, l4PortRangeEnd int
 	var rdmaIBResource, rdmaRoCEResource string
+	var activityAgentImage, permissionInitImage string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&gatewayName, "gateway-name", "",
@@ -109,6 +110,14 @@ func main() {
 			"are this platform's own: no convention exists for naming an RDMA resource after its fabric, "+
 			"so the pair is deliberately symmetric rather than copied from the plugin's own examples, "+
 			"which distinguish pools by instance (hca_shared_devices_a and _b).")
+	flag.StringVar(&activityAgentImage, "activity-agent-image", "",
+		"Image reference for the idle-timeout sidecar, as repository:tag (or repository@digest). "+
+			"Empty keeps the reference baked into this binary. The operator chart renders it from "+
+			"activityAgent.image, so the platform operator can re-point it at a cluster registry.")
+	flag.StringVar(&permissionInitImage, "permission-init-image", "",
+		"Image reference for the init containers that set the workspace claim's ownership, as "+
+			"repository:tag (or repository@digest). Empty keeps the reference baked into this "+
+			"binary. The operator chart renders it from permissionInit.image.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
@@ -166,6 +175,15 @@ func main() {
 			setupLog.Error(err, "Invalid flag")
 			os.Exit(1)
 		}
+	}
+
+	// Applied before any controller is built: the two references are read per
+	// reconcile, so overriding them after this point would only affect
+	// environments reconciled later in this process's life.
+	if activityAgentImage != "" || permissionInitImage != "" {
+		controller.SetInjectedImages(activityAgentImage, permissionInitImage)
+		setupLog.Info("image references overridden by flags",
+			"activity-agent", activityAgentImage, "permission-init", permissionInitImage)
 	}
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled

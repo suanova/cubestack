@@ -153,6 +153,17 @@ awk '
   if (rdma_roce++) { print "duplicate --rdma-roce-resource line in kustomize output" > "/dev/stderr"; exit 1 }
   ind = substr($0, 1, index($0, "-") - 1)
   print ind "- --rdma-roce-resource={{ .Values.rdma.roceResource }}"
+  # The two image references the manager names for the pods it creates have no
+  # line in the kustomize base: they are defaults compiled into the binary
+  # (internal/controller/assets.go), and this chart renders them only when
+  # values name one. Emitting them here keeps the arg list in one place; a
+  # base without them simply means "use the baked-in reference".
+  print ind "{{- with .Values.activityAgent.image.repository }}"
+  print ind "- --activity-agent-image={{ . }}:{{ $.Values.activityAgent.image.tag | default $.Chart.AppVersion }}"
+  print ind "{{- end }}"
+  print ind "{{- with .Values.permissionInit.image.repository }}"
+  print ind "- --permission-init-image={{ . }}:{{ $.Values.permissionInit.image.tag | default $.Chart.AppVersion }}"
+  print ind "{{- end }}"
   next
 }
 { print }

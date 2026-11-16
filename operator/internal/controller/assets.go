@@ -107,16 +107,6 @@ const (
 	// workspace claim's root ownership before the environment starts.
 	permissionInitContainerName = "initialize-managed-volume"
 
-	// permissionInitImage is the image the platform's init containers run: the
-	// upstream busybox base, mirrored into the platform registry so nodes never
-	// reach Docker Hub. It is deliberately not the environment's own image — a
-	// bring-your-own image may be distroless, and the init containers fail closed,
-	// so an image without a shell would leave the environment unable to start at
-	// all. An offline deployment mirrors it under the same name/host as its other
-	// images. ::desiredPermissionInitContainer and
-	// ::desiredSudoersInitContainer both use it.
-	permissionInitImage = "harbor.isuanova.com/mirrors/docker.io/library/busybox:1.38.0"
-
 	// activityAgentContainerName is the idle-timeout sidecar. It shares the pod's
 	// process and network namespaces and reports activity by annotating the pod
 	// with activity.AnnotationKey; the controller reads that annotation, and
@@ -217,6 +207,37 @@ const (
 // names nothing — a local make docker-build — keeps the default, because it has
 // no better answer than the latest published agent.
 var activityAgentImage = "harbor.isuanova.com/suanova/cubestack-activity-agent:latest"
+
+// permissionInitImage is the image the platform's init containers run: the
+// upstream busybox base, mirrored into the platform registry so nodes never
+// reach Docker Hub. It is deliberately not the environment's own image — a
+// bring-your-own image may be distroless, and the init containers fail closed,
+// so an image without a shell would leave the environment unable to start at
+// all. ::desiredPermissionInitContainer and ::desiredSudoersInitContainer both
+// use it.
+//
+// A variable for the same reason ::activityAgentImage is one: the reference has
+// to be nameable at install time. An offline cluster reaches neither Docker Hub
+// nor the platform registry, and it has both images under its own registry —
+// so the operator chart renders the reference from values and the platform
+// operator rewrites its registry, exactly as it does for component images.
+var permissionInitImage = "harbor.isuanova.com/mirrors/docker.io/library/busybox:1.38.0"
+
+// SetInjectedImages overrides the two image references this package names for
+// itself. Empty arguments keep the defaults above, which is what a build that
+// names nothing (local make docker-build, the e2e) relies on.
+//
+// Called once at startup, before any controller runs, so the values read here
+// are the ones every environment created afterwards carries. It is not a
+// package-level knob for tests: those assign the variables directly.
+func SetInjectedImages(activityAgent, permissionInit string) {
+	if activityAgent != "" {
+		activityAgentImage = activityAgent
+	}
+	if permissionInit != "" {
+		permissionInitImage = permissionInit
+	}
+}
 
 // permissionInitScript establishes the workspace claim's root ownership: the
 // account the environment runs as has to own the directory it works in.

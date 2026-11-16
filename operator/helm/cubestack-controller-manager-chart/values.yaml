@@ -10,6 +10,30 @@ image:
   # picked up without deleting the pod.
   pullPolicy: IfNotPresent
 
+# Images the manager names for the pods it creates. Both default to "" so the
+# chart renders no flag and the manager keeps the reference compiled into it —
+# right for online installs, where the sidecar and the mirrored busybox live in
+# the platform registry the binary already names.
+#
+# An offline install sets them: its cluster cannot reach that registry, and both
+# images are already in the cluster's own one. The platform operator's
+# spec.global.imageRegistry rewrites the repository part on these same two value
+# paths, so pointing a value at the cluster registry there is enough.
+#
+# repository without a tag takes .Chart.AppVersion, the tag the release names.
+activityAgent:
+  image:
+    repository: ""
+    tag: ""
+# The init containers' shell image: upstream busybox, mirrored into the platform
+# registry so nodes never reach Docker Hub. The tag is not .Chart.AppVersion —
+# busybox is not one of our artifacts — so it is named explicitly and must match
+# the version the installer ships (versions/base.yaml).
+permissionInit:
+  image:
+    repository: ""
+    tag: 1.38.0
+
 # Platform Gateway the operator publishes InferenceService catalog entries to
 # (services with a non-empty spec.route.aigatewayRouter), and that
 # DevEnvironment ListenerSets attach to.
