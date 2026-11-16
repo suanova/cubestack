@@ -61,6 +61,31 @@ function isDatasourceQuery(path: string[]): boolean {
   return path[0] === "proxy";
 }
 
+/**
+ * Headers for the forwarded body.
+ *
+ * The proxy used to forward only content-type, which stripped every cache
+ * directive and validator Perses sends and left the browser unable to
+ * revalidate. Pass the caching headers through so resource responses keep the
+ * freshness Perses declares.
+ *
+ * `content-encoding` and `content-length` are deliberately not forwarded:
+ * fetch has already decoded the upstream body, so replaying them would
+ * describe the compressed bytes and corrupt the response.
+ */
+function forwardedHeaders(upstream: Response): Headers {
+  const headers = new Headers();
+  headers.set("content-type", upstream.headers.get("content-type") ?? "application/json");
+  for (const name of ["etag", "last-modified", "expires"]) {
+    const value = upstream.headers.get(name);
+    if (value) headers.set(name, value);
+  }
+  // Resource/datasource responses stay as dynamic as Perses declares them
+  // (default `no-cache` when it says nothing).
+  headers.set("cache-control", upstream.headers.get("cache-control") ?? "no-cache");
+  return headers;
+}
+
 async function proxy(request: NextRequest, path: string[]) {
   const upstreamUrl = `${PERSES_SERVER_URL}/${resolveProjectPath(path).join("/")}${request.nextUrl.search}`;
 
@@ -92,9 +117,7 @@ async function proxy(request: NextRequest, path: string[]) {
 
     return new Response(upstream.body, {
       status: upstream.status,
-      headers: {
-        "content-type": upstream.headers.get("content-type") ?? "application/json",
-      },
+      headers: forwardedHeaders(upstream),
     });
   } catch (err) {
     console.error(`Perses proxy failed for ${request.method} ${upstreamUrl}:`, err);
