@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import DevEnvironmentsPage from "./page";
 import { withBasePath } from "@/lib/base-path";
+import { setPlatformLocale } from "@/lib/i18n/locale";
 import { devEnvironmentList, devEnvironmentSummary } from "@/test/fixtures/devenvironments";
 
 // The test files avoid JSX because tsconfig sets jsx: "preserve" (for Next),
@@ -399,6 +400,29 @@ describe("dev environments page", () => {
     expect(container.querySelector('[data-od-id="pod-reason"]')).toBeNull();
     expect(container.querySelector('[data-od-id="pod-reason-error"]')?.textContent).toBe(
       "暂时无法读取 Pod 状态,请稍后重试。",
+    );
+
+    act(() => root.unmount());
+  });
+
+  it("reports a failed poll in the language the console is in now", async () => {
+    vi.useFakeTimers();
+    // The read repeats on a timer whose callback is made once, when the card
+    // opens: a sentence built from the `t` captured then would keep the language
+    // the card was opened in, while the card around it followed the switcher.
+    const pod: { failure?: unknown; error?: string } = { failure: null };
+    stubData([devEnvironmentSummary({ name: "opaque-env" })], true, pod);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    act(() => setPlatformLocale("en"));
+    pod.error = "podUnreadable";
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+
+    expect(container.querySelector('[data-od-id="pod-reason-error"]')?.textContent).toBe(
+      "Could not read the pod status; please retry later.",
     );
 
     act(() => root.unmount());

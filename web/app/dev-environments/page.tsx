@@ -1818,6 +1818,15 @@ function StatusCard({ e }: { e: DevEnvironmentSummary }) {
 const POD_STATUS_POLL_MS = 30_000;
 
 /**
+ * A failed pod read, kept as the facts the sentence is made from rather than as
+ * the sentence: the read outlives the locale it was made under, so what it
+ * stores is what `validationMessage` takes.
+ */
+type PodReadError =
+  | { kind: "unreadable" }
+  | { kind: "http"; body: ValidationErrorBody; status: number };
+
+/**
  * Why the environment's pod is not up, in the kubelet's own words.
  *
  * The conditions above stop where the controller's knowledge stops: a container
@@ -1830,7 +1839,7 @@ const POD_STATUS_POLL_MS = 30_000;
 function PodReason({ namespace, name }: { namespace: string; name: string }) {
   const { t } = useI18n();
   const [failure, setFailure] = useState<PodStatusResponse["failure"]>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<PodReadError | null>(null);
   // The read repeats for as long as the card is open, on the list poll's cadence:
   // the pod changes under a detail that a poll does not remount, so a container
   // first seen creating would keep the card empty after it moved to
@@ -1838,7 +1847,7 @@ function PodReason({ namespace, name }: { namespace: string; name: string }) {
   // overtaken by the next tick — and React's development StrictMode, which runs
   // every effect twice, attaches to the same promise instead of issuing a second
   // read, so the second run still applies the first one's answer.
-  const requestRef = useRef<Promise<{ failure: PodStatusResponse["failure"] } | { error: string }> | null>(null);
+  const requestRef = useRef<Promise<{ failure: PodStatusResponse["failure"] } | { error: PodReadError }> | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -1849,10 +1858,10 @@ function PodReason({ namespace, name }: { namespace: string; name: string }) {
         )
           .then(async (res) => {
             const body = (await res.json().catch(() => ({}))) as ValidationErrorBody & PodStatusResponse;
-            if (!res.ok) return { error: validationMessage(t, body, res.status, "dev") };
+            if (!res.ok) return { error: { kind: "http" as const, body, status: res.status } };
             return { failure: body.failure ?? null };
           })
-          .catch(() => ({ error: t("dev.err.podUnreadable") }));
+          .catch(() => ({ error: { kind: "unreadable" as const } }));
         requestRef.current = request;
         // Cleared before the answer is applied, so the next tick asks again.
         void request.then(() => {
@@ -1875,15 +1884,17 @@ function PodReason({ namespace, name }: { namespace: string; name: string }) {
       cancelled = true;
       clearInterval(timer);
     };
-    // `t` is rebuilt on every render by useI18n; the reads are keyed to the
-    // environment alone.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // The reads are keyed to the environment alone. The sentence a failure is
+    // reported in is built at render, so a locale switched while the card is
+    // open reaches the next failed poll as well as the card itself.
   }, [namespace, name]);
 
   if (error) {
     return (
       <Typography data-od-id="pod-reason-error" sx={{ fontSize: 12, color: STATUS_ERR }}>
-        {error}
+        {error.kind === "http"
+          ? validationMessage(t, error.body, error.status, "dev")
+          : t("dev.err.podUnreadable")}
       </Typography>
     );
   }

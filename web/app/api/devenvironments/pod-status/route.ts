@@ -100,8 +100,17 @@ function failureOf(cs: ContainerStatus, container: string, zeroExitIsSuccess: bo
     };
   }
   const terminated = cs.state?.terminated;
-  if (terminated?.reason && !(zeroExitIsSuccess && terminated.exitCode === 0)) {
-    return { container, reason: terminated.reason, message: terminated.message, exitCode: terminated.exitCode };
+  // The reason is optional in the API, so it cannot be what decides whether
+  // there is a failure to report: a container that exited non-zero without one
+  // still names its exit code and message. "Error" is the reason the API itself
+  // states for that case.
+  if (terminated && !(zeroExitIsSuccess && terminated.exitCode === 0)) {
+    return {
+      container,
+      reason: terminated.reason ?? "Error",
+      message: terminated.message,
+      exitCode: terminated.exitCode,
+    };
   }
   return null;
 }

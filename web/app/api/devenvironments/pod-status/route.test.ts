@@ -103,6 +103,22 @@ describe("GET /api/devenvironments/pod-status", () => {
     });
   });
 
+  it("reports a container that terminated without a reason", async () => {
+    // The reason is optional in the API: a container that exited non-zero and
+    // said only why is still a failure the card has to show, so the guard cannot
+    // be on the reason.
+    stubCluster([
+      pod({
+        containerStatuses: [{ name: "jupyter", state: { terminated: { exitCode: 1, message: "permission denied" } } }],
+      }),
+    ]);
+    const { GET } = await import("./route");
+    const res = await GET(await authedRequest({ method: "GET" }, ENV_URL), undefined);
+    expect(await res.json()).toEqual({
+      failure: { container: "jupyter", reason: "Error", message: "permission denied", exitCode: 1 },
+    });
+  });
+
   it("reports a container that was OOM-killed", async () => {
     stubCluster([
       pod({ containerStatuses: [{ name: "jupyter", state: { terminated: { reason: "OOMKilled", exitCode: 137 } } }] }),
