@@ -21,10 +21,7 @@
 // resolves an implementation by plugin name, which is exactly the package
 // namespace, so the namespace doubles as the module's plugin map.
 
-import * as GaugeChartPlugin from "@perses-dev/gauge-chart-plugin";
 import * as PrometheusPlugin from "@perses-dev/prometheus-plugin";
-import * as StatChartPlugin from "@perses-dev/stat-chart-plugin";
-import * as StatusHistoryChartPlugin from "@perses-dev/status-history-chart-plugin";
 import * as TimeSeriesChartPlugin from "@perses-dev/timeseries-chart-plugin";
 import type { PluginLoader, PluginModuleResource } from "@perses-dev/plugin-system";
 import { dynamicImportPluginLoader } from "@perses-dev/plugin-system";
@@ -35,14 +32,13 @@ interface BundledPluginPackage {
 }
 
 // The dashboards under assets/observability/dashboards/perses use exactly
-// these five modules. Adding a panel that renders a new plugin kind means
-// adding its package here as well.
+// these two modules: Prometheus (datasource, query, label-values variable) and
+// TimeSeriesChart (every panel). Adding a panel that renders a new plugin kind
+// means adding its package here as well — the loader only hands the registry
+// what is listed, so an omitted module simply fails to resolve at runtime.
 const BUNDLED_PLUGINS = [
   PrometheusPlugin,
   TimeSeriesChartPlugin,
-  GaugeChartPlugin,
-  StatChartPlugin,
-  StatusHistoryChartPlugin,
 ] as unknown as BundledPluginPackage[];
 
 /** A plugin loader backed by the portal's own bundle. */
