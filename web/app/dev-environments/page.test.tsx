@@ -615,6 +615,84 @@ describe("dev environments page", () => {
     act(() => root.unmount());
   });
 
+  it("says so when the console is served over HTTP and the endpoint over HTTPS", async () => {
+    // Same host, so the cookie's scope is right — but the route marks it Secure
+    // for an HTTPS endpoint, and a browser on an HTTP console drops a Secure
+    // cookie. Navigating anyway lands the user on Jupyter's login page with
+    // nothing to explain it.
+    stubData(devEnvironmentList());
+    const original = window.location;
+    const assign = vi.fn();
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: { assign, href: "http://gateway.example.dev:8080/cubestack/dev-environments", origin: "http://gateway.example.dev:8080", protocol: "http:", host: "gateway.example.dev:8080", hostname: "gateway.example.dev", pathname: "/cubestack/dev-environments", search: "" },
+    });
+    const real = globalThis.fetch as unknown as (u: unknown, i?: unknown) => Promise<unknown>;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown, init?: unknown) => {
+        if (String(url).includes("/api/devenvironments/jupyter-session")) {
+          return { ok: true, status: 200, json: async () => ({ url: "https://gateway.example.dev:8080/dev/project-a/jupyter-nlp-ln/lab" }) };
+        }
+        return real(url, init);
+      }),
+    );
+
+    const { container, root } = renderPage();
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="jupyter-open"]') as HTMLElement).click();
+    });
+
+    expect(container.querySelector('[data-od-id="jupyter-open-error"]')?.textContent).toContain("浏览器会丢弃登录状态");
+    expect(assign).not.toHaveBeenCalled();
+
+    Object.defineProperty(window, "location", { configurable: true, value: original });
+    act(() => root.unmount());
+  });
+
+  it("does not navigate once the row has been left", async () => {
+    // Selecting another environment replaces the row while its session request
+    // is still in flight; the late answer must not drag the browser to the
+    // environment the user has just moved away from.
+    stubData(devEnvironmentList());
+    const original = window.location;
+    const assign = vi.fn();
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: { assign, href: "http://gateway.example.dev:8080/cubestack/dev-environments", origin: "http://gateway.example.dev:8080", protocol: "http:", host: "gateway.example.dev:8080", hostname: "gateway.example.dev", pathname: "/cubestack/dev-environments", search: "" },
+    });
+    const real = globalThis.fetch as unknown as (u: unknown, i?: unknown) => Promise<unknown>;
+    let answer: (() => void) | undefined;
+    const held = new Promise<void>((resolve) => {
+      answer = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown, init?: unknown) => {
+        if (String(url).includes("/api/devenvironments/jupyter-session")) {
+          await held;
+          return { ok: true, status: 200, json: async () => ({ url: JUPYTER_URL }) };
+        }
+        return real(url, init);
+      }),
+    );
+
+    const { container, root } = renderPage();
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="jupyter-open"]') as HTMLElement).click();
+    });
+    act(() => root.unmount());
+    await act(async () => {
+      answer?.();
+    });
+
+    expect(assign).not.toHaveBeenCalled();
+
+    Object.defineProperty(window, "location", { configurable: true, value: original });
+  });
+
   it("offers no JupyterLab button for an ssh environment", async () => {
     stubData(devEnvironmentList());
     const { container, root } = renderPage();

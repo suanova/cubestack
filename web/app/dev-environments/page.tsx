@@ -1334,6 +1334,19 @@ function OpenJupyterRow({ name, namespace }: { name: string; namespace: string }
   const { t } = useI18n();
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // The session request outlives the row that started it: the row is keyed by
+  // environment, so selecting another one or closing the detail replaces it,
+  // and an answer that arrives afterwards must not navigate the browser back to
+  // the environment the user has just left. The flag is cleared on mount
+  // because StrictMode runs the effect twice (mount, simulated unmount, mount)
+  // and a flag that stayed set would leave the button dead in development.
+  const abandoned = useRef(false);
+  useEffect(() => {
+    abandoned.current = false;
+    return () => {
+      abandoned.current = true;
+    };
+  }, []);
 
   const open = async () => {
     setBusy(true);
@@ -1342,6 +1355,7 @@ function OpenJupyterRow({ name, namespace }: { name: string; namespace: string }
       const res = await apiFetch(
         `/api/devenvironments/jupyter-session?namespace=${encodeURIComponent(namespace)}&name=${encodeURIComponent(name)}`,
       );
+      if (abandoned.current) return;
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as ValidationErrorBody;
         setError(validationMessage(t, body, res.status, "dev"));
@@ -1352,23 +1366,34 @@ function OpenJupyterRow({ name, namespace }: { name: string; namespace: string }
         setError(t("dev.err.jupyterUnreachable"));
         return;
       }
+      const target = new URL(body.url);
       // The session cookie was set on this console's host, and a cookie is
       // never sent to another one: a deployment that serves the console and the
       // environments under different names would drop the user on Jupyter's
       // login page with no explanation. Say so instead. (Ports do not matter —
       // a cookie's scope is its host and path.)
-      if (new URL(body.url).hostname !== window.location.hostname) {
+      if (target.hostname !== window.location.hostname) {
         setError(t("dev.err.jupyterHostMismatch"));
         return;
       }
+      // That cookie is also Secure for an HTTPS endpoint — the route marks it
+      // from the environment's scheme — and a browser on an HTTP console
+      // discards it, which ends in the same unexplained login page. The
+      // console's own scheme is the thing to fix; dropping Secure here would
+      // hand the session to the network instead.
+      if (target.protocol === "https:" && window.location.protocol !== "https:") {
+        setError(t("dev.err.jupyterInsecureConsole"));
+        return;
+      }
+      if (abandoned.current) return;
       // A full navigation: the session cookie is installed for this origin by
       // the response above, and the browser has to carry it to the gateway's
       // path for Jupyter to accept the user.
       window.location.assign(body.url);
     } catch {
-      setError(t("dev.err.jupyterUnreachable"));
+      if (!abandoned.current) setError(t("dev.err.jupyterUnreachable"));
     } finally {
-      setBusy(false);
+      if (!abandoned.current) setBusy(false);
     }
   };
 
