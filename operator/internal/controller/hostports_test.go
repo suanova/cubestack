@@ -128,6 +128,38 @@ var _ = Describe("host port allocation", func() {
 			}, "15s", "200ms").Should(Succeed())
 		})
 
+		It("states a node port ahead of an entry that names it", func() {
+			// The kubelet expands $(VAR) in a single pass down the list, so an entry
+			// written in terms of the port resolves only against a statement it has
+			// already passed: appended, it would keep the literal text while the
+			// container, the probe and the Service all followed the number.
+			env := validDevEnvironment("de-roce-env-order")
+			env.Spec.Network = roce()
+			env.Spec.Runtime = &aiv1alpha1.RuntimeSpec{Env: []corev1.EnvVar{
+				{Name: "APP_PORT", Value: "$(" + mainPortEnv + ")"},
+			}}
+			Expect(k8sClient.Create(ctx, env)).To(Succeed())
+			defer deleteEnv(env.Name)
+
+			Eventually(func(g Gomega) {
+				sts := &appsv1.StatefulSet{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), sts)).To(Succeed())
+				g.Expect(sts.Spec.Template.Spec.Containers).NotTo(BeEmpty())
+				stated, declared := -1, -1
+				for i, v := range sts.Spec.Template.Spec.Containers[0].Env {
+					switch v.Name {
+					case mainPortEnv:
+						stated = i
+					case "APP_PORT":
+						declared = i
+					}
+				}
+				g.Expect(stated).To(BeNumerically(">=", 0), "the allocation is stated")
+				g.Expect(declared).To(BeNumerically(">=", 0), "the declared entry survives")
+				g.Expect(stated).To(BeNumerically("<", declared))
+			}, "15s", "200ms").Should(Succeed())
+		})
+
 		It("gives sshd a node port of its own and points the Service at both", func() {
 			env := validDevEnvironment("de-roce-ssh")
 			env.Spec.Network = roce()

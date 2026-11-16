@@ -1874,9 +1874,16 @@ func withNotebookBaseURL(envVars []corev1.EnvVar, path string) []corev1.EnvVar {
 // treatment CUBSTACK_TYPE and JUPYTER_TOKEN get, for the same reason: the
 // render path derived a port, a probe and a Service from its own value, so a
 // declared one could only contradict them.
+//
+// The statement goes first, ahead of every declared entry, because the kubelet
+// expands $(VAR) in a single pass down the list (::withWorkspaceHome): an entry
+// a spec writes as `APP_PORT=$(CUBSTACK_MAIN_PORT)` resolves only against a
+// port it has already passed, and appending would leave it naming the literal
+// text. The stated value itself reads no variable, so it resolves the same
+// wherever it sits.
 func withControllerEnv(envVars []corev1.EnvVar, name, value string) []corev1.EnvVar {
 	envVars = slices.DeleteFunc(envVars, func(v corev1.EnvVar) bool { return v.Name == name })
-	return append(envVars, corev1.EnvVar{Name: name, Value: value})
+	return append([]corev1.EnvVar{{Name: name, Value: value}}, envVars...)
 }
 
 // withWorkspaceHome states the environment's home on the container. The claim

@@ -62,9 +62,17 @@ cd "$HOME"
 # states the port it allocated through CUBSTACK_MAIN_PORT. It cannot come through NOTEBOOK_ARGS
 # instead: jupyter merges repeated assignments of one trait into a list and refuses to start, so
 # the flag below has to carry the value rather than be overridden further down the command line.
+#
+# An allocated port is not the launcher's to move. Jupyter's default is 50 retries, so a port
+# some process outside the platform already listens on would leave the server on a neighbouring
+# number while the probe and the Service still follow the allocated one — and a TCP probe that
+# passes against the foreign listener reports an environment running that nothing reaches.
+# Refusing to start is the failure that names the port. On the pod network the port is the
+# image's own and the default retry keeps a restart from failing over a socket it just released.
 exec jupyter lab \
   --ip=0.0.0.0 \
   --port="${CUBSTACK_MAIN_PORT:-8888}" \
+  ${CUBSTACK_MAIN_PORT:+--ServerApp.port_retries=0} \
   --no-browser \
   --ServerApp.allow_remote_access=True \
   --ServerApp.root_dir="$HOME" \
