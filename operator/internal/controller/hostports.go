@@ -85,30 +85,45 @@ func announcedAllocation(resolved, held *aiv1alpha1.HostPorts) *aiv1alpha1.HostP
 }
 
 // settledAllocation is what the status may record once the workload has been
-// re-applied: the allocation this pass resolved, as soon as no pod binds the one
-// still announced. A StatefulSet replaces its pod by deleting it and creating the
-// next, so the pass that applies a new template still sees the outgoing pod; a
-// later pass finds it gone and the numbers go back to the pool with that write.
+// re-applied: the allocation this pass resolved, plus any number it no longer
+// uses while a pod still declares it. Each outgoing number is judged on its own,
+// because the replacement declares the main port from its first moment while the
+// ssh one may be gone — a rule that kept the record whole while any part of it
+// was bound would never release the port the pass dropped. A StatefulSet replaces
+// its pod by deleting it and creating the next, so the pass that applies a new
+// template still sees the outgoing pod.
 func settledAllocation(resolved, announced *aiv1alpha1.HostPorts, pod *corev1.Pod) *aiv1alpha1.HostPorts {
-	if announced == nil || !bindsPort(pod, announced) {
+	if announced == nil {
 		return resolved
 	}
-	return announced
+	settled := aiv1alpha1.HostPorts{}
+	if resolved != nil {
+		settled = *resolved
+	}
+	// A main port with no successor in this pass is one the workload on its way
+	// out still holds; it keeps its place while that pod declares it.
+	if settled.Main == 0 && bindsPort(pod, announced.Main) {
+		settled.Main = announced.Main
+	}
+	if settled.SSH == 0 && bindsPort(pod, announced.SSH) {
+		settled.SSH = announced.SSH
+	}
+	if settled.Main == 0 && settled.SSH == 0 {
+		return nil
+	}
+	return &settled
 }
 
-// bindsPort reports whether the pod still holds one of an allocation's numbers
-// on its node. A pod on the pod network has a network namespace of its own, so
-// none of its ports is the node's.
-func bindsPort(pod *corev1.Pod, ports *aiv1alpha1.HostPorts) bool {
-	if pod == nil || !pod.Spec.HostNetwork {
+// bindsPort reports whether the pod still holds the number on its node. A pod on
+// the pod network has a network namespace of its own, so none of its ports is
+// the node's.
+func bindsPort(pod *corev1.Pod, port int32) bool {
+	if pod == nil || port == 0 || !pod.Spec.HostNetwork {
 		return false
 	}
 	for _, container := range pod.Spec.Containers {
 		for _, p := range container.Ports {
-			if ports.Main != 0 && p.ContainerPort == ports.Main {
-				return true
-			}
-			if ports.SSH != 0 && p.ContainerPort == ports.SSH {
+			if p.ContainerPort == port {
 				return true
 			}
 		}
@@ -189,8 +204,16 @@ func (r *DevEnvironmentReconciler) usedHostPorts(ctx context.Context, env *aiv1a
 		}
 	}
 	// The environment's own declared ports are its to bind too, and an allocation
-	// landing on one of them would keep its own application off the node.
+	// landing on one of them would keep its own application off the node. The
+	// exception is a number it already holds: that entry is the exposure the
+	// platform is already publishing, not a second claim on it, and marking it
+	// would move the allocation off the port the user just named — off a port the
+	// running pod still binds.
+	held := env.Status.HostPorts
 	for _, p := range env.Spec.Ports {
+		if held != nil && (p.ContainerPort == held.Main || p.ContainerPort == held.SSH) {
+			continue
+		}
 		used[p.ContainerPort] = true
 	}
 	return used, nil

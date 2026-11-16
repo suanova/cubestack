@@ -280,6 +280,16 @@ var _ = Describe("host port allocation", func() {
 			}, "15s", "200ms").Should(Succeed())
 
 			deleteBoundPod(env)
+			Eventually(func(g Gomega) {
+				err := k8sClient.Get(ctx, envKey(podName(env)), &corev1.Pod{})
+				g.Expect(apierrors.IsNotFound(err)).To(BeTrue())
+			}, "15s", "200ms").Should(Succeed())
+
+			// The replacement declares the main port from its first moment and has
+			// no sshd, so the record has to drop the ssh port here while keeping the
+			// main one: a release that reads the record whole would see the main
+			// port bound and never let the ssh port go.
+			createBoundPod(env, &aiv1alpha1.HostPorts{Main: held.Main})
 
 			Eventually(func(g Gomega) {
 				observed := &aiv1alpha1.DevEnvironment{}
@@ -287,6 +297,47 @@ var _ = Describe("host port allocation", func() {
 				g.Expect(observed.Status.HostPorts).NotTo(BeNil())
 				g.Expect(observed.Status.HostPorts.Main).To(Equal(held.Main))
 				g.Expect(observed.Status.HostPorts.SSH).To(BeZero())
+			}, "15s", "200ms").Should(Succeed())
+		})
+
+		It("keeps the port a spec.ports entry names", func() {
+			// An entry naming the number the environment already holds is the
+			// exposure the platform publishes, not a second claim on it. Reading it
+			// as one moves the allocation off a port the running pod binds — and
+			// withdraws that number from the pool while the pod still holds it.
+			env := validDevEnvironment("de-roce-declared-held")
+			env.Spec.Network = roce()
+			Expect(k8sClient.Create(ctx, env)).To(Succeed())
+			defer deleteEnv(env.Name)
+
+			var held *aiv1alpha1.HostPorts
+			Eventually(func(g Gomega) {
+				observed := &aiv1alpha1.DevEnvironment{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), observed)).To(Succeed())
+				g.Expect(observed.Status.HostPorts).NotTo(BeNil())
+				held = observed.Status.HostPorts.DeepCopy()
+			}, "15s", "200ms").Should(Succeed())
+
+			updateEnvSpec(env.Name, func(e *aiv1alpha1.DevEnvironment) {
+				e.Spec.Ports = []aiv1alpha1.PortSpec{{
+					Name: "notebook-host", Type: aiv1alpha1.PortTypeTCP, ContainerPort: held.Main,
+				}}
+			})
+
+			Eventually(func(g Gomega) {
+				observed := &aiv1alpha1.DevEnvironment{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), observed)).To(Succeed())
+				g.Expect(observed.Status.HostPorts).NotTo(BeNil())
+				g.Expect(observed.Status.HostPorts.Main).To(Equal(held.Main))
+				accepted := meta.FindStatusCondition(observed.Status.Conditions, aiv1alpha1.ConditionAccepted)
+				g.Expect(accepted).NotTo(BeNil())
+				g.Expect(accepted.Status).To(Equal(metav1.ConditionTrue))
+
+				sts := &appsv1.StatefulSet{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), sts)).To(Succeed())
+				g.Expect(sts.Spec.Template.Spec.HostNetwork).To(BeTrue())
+				g.Expect(sts.Spec.Template.Spec.Containers[0].Ports).To(ContainElement(
+					HaveField("ContainerPort", held.Main)))
 			}, "15s", "200ms").Should(Succeed())
 		})
 
