@@ -63,30 +63,34 @@ export const platformPalette: Record<PaletteMode, PlatformPalette> = {
   },
 };
 
-// ECharts categorical palette. The hues follow ECharts' own stacked-area
-// example (mint / cyan / blue / magenta / amber), which is what gives that
-// palette its bright, high-chroma look. Each mode gets its own lightness:
-// dark mode can take the near-neon tints because they sit on near-black,
-// while light mode needs the same hues deepened enough to hold contrast on
-// white. Slate and violet round the list out for series beyond five.
+// ECharts categorical palette. The hues are sampled from the reference
+// dashboard the team pointed at: deep maroon / purple / burnt orange / ochre /
+// navy, with a soft salmon fill between them. They are deliberately deeper and
+// less saturated than the earlier near-neon set — on a white canvas that is
+// what produces contrast, where bright tints washed out. Dark mode keeps the
+// same hues at a lighter weight so they read against near-black.
+//
+// Note: a TimeSeriesChart only uses this list when its panel sets
+// `visual.palette.mode: "categorical"`; the default `auto` mode derives a
+// color per series name instead.
 const PLATFORM_CHART_COLORS: Record<PaletteMode, string[]> = {
   light: [
-    "#2b7fff",
-    "#12b981",
-    "#00a6c8",
-    "#f59e0b",
-    "#e6399b",
-    "#7c5cff",
-    "#7c8ca3",
+    "#801429",
+    "#9a559e",
+    "#c4571e",
+    "#bc8725",
+    "#3f487e",
+    "#2f6f6a",
+    "#6b7280",
   ],
   dark: [
-    "#37a2ff",
-    "#80ffa5",
-    "#00ddff",
-    "#ffbf00",
-    "#ff3d9a",
-    "#b388ff",
-    "#9fb3c8",
+    "#e56b7d",
+    "#c78fd0",
+    "#ff8f5f",
+    "#e0b45f",
+    "#8b9ae8",
+    "#57bfb2",
+    "#9aa4b2",
   ],
 };
 
