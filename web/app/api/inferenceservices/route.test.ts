@@ -936,6 +936,55 @@ describe("inference services create (POST)", () => {
     });
   });
 
+  it("passes service-level env vars through to the CR", async () => {
+    const { POST } = await importRoute();
+    const res = await POST(
+      await buildPost({
+        namespace: "project-a",
+        name: "new-serve",
+        profileRef: "metax-sglang-dsv4-pd",
+        modelRef: "deepseek-v4-flash-w8a8-v1",
+        env: [
+          { name: "MY_FLAG", value: "on" },
+          { name: "TEMP", value: "{{ overrides.tpSize }}" },
+        ],
+      }),
+      undefined,
+    );
+    expect(res.status).toBe(201);
+    expect(createNamespacedCustomObject.mock.calls[0][0].body.spec).toMatchObject({
+      env: [
+        { name: "MY_FLAG", value: "on" },
+        { name: "TEMP", value: "{{ overrides.tpSize }}" },
+      ],
+    });
+  });
+
+  it("rejects env with duplicate names, a bad name, or an omitted env field typed wrong", async () => {
+    const { POST } = await importRoute();
+    const cases = [
+      { env: [{ name: "A", value: "1" }, { name: "A", value: "2" }], code: "envNameDuplicate" },
+      { env: [{ name: "1BAD", value: "x" }], code: "envNameInvalid" },
+      { env: [{ name: "OK", value: "x" }, { name: { n: 1 }, value: "y" }], code: "envNameInvalid" },
+      { env: "not-an-array", code: "envInvalid" },
+      { env: [{ name: "A", value: 7 }], code: "envValueInvalid" },
+    ];
+    for (const c of cases) {
+      const res = await POST(
+        await buildPost({
+          namespace: "project-a",
+          name: "new-serve",
+          profileRef: "metax-sglang-dsv4-pd",
+          modelRef: "deepseek-v4-flash-w8a8-v1",
+          ...c,
+        }),
+        undefined,
+      );
+      expect(res.status).toBe(400);
+      expect(createNamespacedCustomObject).not.toHaveBeenCalled();
+    }
+  });
+
   it("rejects a scalar for a stringList override", async () => {
     const { POST } = await importRoute();
     const res = await POST(

@@ -43,6 +43,9 @@ export interface InferenceServiceSummary {
   routeModelName: string | null;
   timeoutSeconds: number | null;
   idleTimeoutSeconds: number | null;
+  // service-level env vars (spec.env), set on every role's container; empty
+  // when the service declares none.
+  env: Array<{ name: string; value: string }>;
   createdAt: string | null;
   // resolved profile facts
   engine: string | null;
@@ -127,6 +130,9 @@ interface IsvcSpec {
   modelRef?: string;
   profileRef?: string;
   overrides?: Record<string, unknown>;
+  // spec.env: static name/value pairs set on every role's container. Optional;
+  // absent for services created without env vars.
+  env?: Array<{ name?: string; value?: string }>;
   route?: {
     aigatewayRouter?: string;
     modelName?: string;
@@ -350,6 +356,30 @@ function jsonPointerEscape(key: string): string {
   return key.replace(/~/g, "~0").replace(/\//g, "~1");
 }
 
+// An env var name, matching the operator's CRD: starts with a letter, underscore,
+// dot or dash and holds only those plus digits. A service-level env must not
+// duplicate a name (the CRD keys the list on it); reject here rather than
+// persisting a value the operator later rejects.
+const ENV_NAME_RE = /^[-._a-zA-Z][-._a-zA-Z0-9]*$/;
+
+/**
+ * Validate the env name/value pairs of a create body. Returns the code of the
+ * first violation, or null when every entry is a well-formed, unique name with a
+ * string value.
+ */
+function envError(env: NonNullable<CreateBody["env"]>): ValidationCode | null {
+  const seen = new Set<string>();
+  for (const e of env) {
+    if (typeof e.name !== "string" || !ENV_NAME_RE.test(e.name)) {
+      return { code: "envNameInvalid" };
+    }
+    if (seen.has(e.name)) return { code: "envNameDuplicate" };
+    seen.add(e.name);
+    if (typeof e.value !== "string") return { code: "envValueInvalid" };
+  }
+  return null;
+}
+
 /** Project one InferenceService + its resolved profile into a page-ready record. */
 function project(
   isvc: Isvc,
@@ -437,6 +467,7 @@ function project(
     routeModelName: spec.route?.modelName ?? null,
     timeoutSeconds: spec.route?.timeoutSeconds ?? null,
     idleTimeoutSeconds: spec.route?.idleTimeoutSeconds ?? null,
+    env: (spec.env ?? []).map((e) => ({ name: e.name ?? "", value: e.value ?? "" })),
     createdAt: isvc.metadata?.creationTimestamp ?? null,
     engine: profile?.spec?.engine?.name ?? null,
     engineVersion: profile?.spec?.engine?.version ?? null,
@@ -624,6 +655,9 @@ interface CreateBody {
   profileRef?: string;
   modelRef?: string;
   overrides?: Record<string, number | string | boolean>;
+  // spec.env: static name/value pairs set on every role's container. Optional;
+  // sent only when the user added at least one filled row.
+  env?: Array<{ name?: string; value?: string }>;
   route?: {
     aigatewayRouter?: string;
     modelName?: string;
@@ -697,6 +731,15 @@ export const POST = withAuth(async (req) => {
     const oerr = overrideError(body.overrides ?? {}, profile);
     if (oerr) return ValidationError(oerr.code, oerr.params);
 
+    // Env is untrusted JSON: reject a non-array promptly so a malformed payload
+    // fails with a 400 rather than throwing into the 500 handler. Each entry
+    // must carry a unique, well-formed name and a string value.
+    if (body.env !== undefined) {
+      if (!Array.isArray(body.env)) return ValidationError("envInvalid");
+      const eerr = envError(body.env);
+      if (eerr) return ValidationError(eerr.code, eerr.params);
+    }
+
     // Route: a non-empty aigatewayRouter publishes the service into the model
     // catalog attached to that pre-installed AIGatewayRoute, which requires a
     // valid catalog model name and at least one exposed path. An absent router
@@ -734,6 +777,7 @@ export const POST = withAuth(async (req) => {
         modelRef: body.modelRef,
         profileRef: body.profileRef,
         overrides: body.overrides ?? {},
+        ...(body.env && body.env.length ? { env: body.env } : {}),
         ...(route ? { route } : {}),
       },
     };

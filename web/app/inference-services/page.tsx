@@ -1378,6 +1378,7 @@ function ParamsCard({ s }: { s: InferenceServiceSummary }) {
           [t("inf.params.timeout"), timeout],
           [t("inf.params.idleTimeout"), idleTimeout],
           [t("inf.params.maxModelLen"), maxLen],
+          [t("inf.params.env"), s.env.map((e) => `${e.name}=${e.value}`).join(", ") || "—"],
         ]}
       />
     </Card>
@@ -1480,6 +1481,11 @@ function ConditionsCard({ s }: { s: InferenceServiceSummary }) {
 // ── deploy wizard ──────────────────────────────────────────────────────────
 
 const DNS_LABEL_RE = /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/;
+// An env var name: must start with a letter, underscore, dot or dash and hold
+// only those plus digits — the subset the operator's EnvVar CRD admits (it is
+// not a Kubernetes identifier, so values like "MY_FLAG" or "node.port" are
+// fine). Mirrors the dev-environments wizard's rule.
+const ENV_NAME_RE = /^[-._a-zA-Z][-._a-zA-Z0-9]*$/;
 // The namespace select's "create a new one" entry. A name cannot carry an
 // underscore (the API server takes a DNS-1123 label), so it can never collide
 // with a namespace the cluster has, and it is never sent anywhere: `create()`
@@ -1492,12 +1498,21 @@ interface DeployDraft {
   profileRef: string;
   modelRef: string;
   overrides: Record<string, OverrideValue>;
+  // Environment variables set on every role's container. Rows are the draft's
+  // own (the id is a local key); only filled, valid rows are sent.
+  envs: EnvRow[];
   // Publishing to the model catalog is mandatory, so the route is always set.
   aigatewayRouter: AIGatewayRouter;
   modelName: string;
   // The client paths the catalog entry exposes; publishing starts with all of
   // them selected, and the service must expose at least one.
   paths: CatalogPath[];
+}
+
+interface EnvRow {
+  id: number;
+  name: string;
+  value: string;
 }
 
 type OverrideDecl = CreateOptionsResponse["profiles"][number]["overrides"][number];
@@ -1524,12 +1539,16 @@ function DeployWizard({
     profileRef: "",
     modelRef: "",
     overrides: {},
+    envs: [],
     aigatewayRouter: AIGATEWAY_ROUTER_PRIVATE,
     modelName: "",
     paths: [...CATALOG_PATHS],
   });
   const [nameError, setNameError] = useState(false);
   const [modelError, setModelError] = useState(false);
+  // Env validity is enforced only once the user leaves the step (a fresh row
+  // with an empty name must not flag an error before it is typed).
+  const [envError, setEnvError] = useState(false);
   // The select offers `default` plus "create a new one": the tenant namespaces
   // the platform does not manage are not listed, because a denylist of the ones
   // it does manage was always one install behind (issue #367). A namespace the
@@ -1615,6 +1634,32 @@ function DeployWizard({
   const setField = <K extends keyof DeployDraft>(key: K, value: DeployDraft[K]) =>
     setDraft((prev) => ({ ...prev, [key]: value }));
 
+  // Env rows are the draft's own editing cells (the id is a local key); each
+  // row carries a blank name/value that the user fills in. Only filled rows
+  // with unique, well-formed names are sent.
+  let envId = 0;
+  const addEnv = () =>
+    setField("envs", [...draft.envs, { id: ++envId, name: "", value: "" }]);
+  const patchEnv = (id: number, patch: Partial<Omit<EnvRow, "id">>) =>
+    setField(
+      "envs",
+      draft.envs.map((r) => (r.id === id ? { ...r, ...patch } : r)),
+    );
+  const removeEnv = (id: number) => setField("envs", draft.envs.filter((r) => r.id !== id));
+  const filledEnvs = draft.envs.filter((r) => r.name.trim() !== "" || r.value.trim() !== "");
+  // An env row is valid when its name is well-formed and unique among the
+  // filled rows; an empty value is a deliberate empty string, not an error.
+  const envValid = (() => {
+    const seen = new Set<string>();
+    for (const r of filledEnvs) {
+      const name = r.name.trim();
+      if (!ENV_NAME_RE.test(name)) return false;
+      if (seen.has(name)) return false;
+      seen.add(name);
+    }
+    return true;
+  })();
+
   // Picking the select's last entry opens the new-namespace box instead of
   // setting a namespace: the name is not known until it is typed, and until
   // then the draft keeps the namespace it had, so nothing half-named is sent.
@@ -1643,7 +1688,7 @@ function DeployWizard({
     !!effectiveNamespace &&
     newNamespaceValid &&
     !!draft.profileRef;
-  const step2Valid = !!draft.modelRef;
+  const step2Valid = !!draft.modelRef && envValid;
 
   // The value an override holds from the user or the profile, before the
   // wizard's own auto-injection. GPU-model selection reads this one: an
@@ -1893,8 +1938,9 @@ function DeployWizard({
       setNameError(false);
       setNamespaceError(false);
     } else if (step === 2 && !step2Valid) {
-      setModelError(true);
-      return; // model is required to proceed
+      setModelError(!draft.modelRef);
+      setEnvError(!envValid);
+      return; // a valid model (and env, if any) is required to proceed
     }
     setStep((s) => Math.min(3, s + 1));
   };
@@ -1920,6 +1966,8 @@ function DeployWizard({
       profileRef: draft.profileRef,
       modelRef: draft.modelRef,
       overrides,
+      // Only filled, valid rows are sent, as spec.env (name/value pairs).
+      ...(filledEnvs.length ? { env: filledEnvs.map((r) => ({ name: r.name.trim(), value: r.value })) } : {}),
       route: { aigatewayRouter: draft.aigatewayRouter, modelName: draft.modelName.trim(), paths: draft.paths },
     };
     // The namespace first, then the service in it: the wizard no longer offers
@@ -2093,6 +2141,48 @@ function DeployWizard({
                     )}
                   </Select>
                 </WizField>
+
+                <Box sx={{ mt: 3, border: 1, borderColor: "divider", borderRadius: "var(--radius)", p: "14px" }}>
+                  <Typography sx={{ fontSize: 12.5, fontWeight: 600 }}>{t("inf.deploy.env")}</Typography>
+                  <Box mt="12px" role="group" aria-label={t("inf.deploy.env")} data-od-id="deploy-env-editor">
+                    {draft.envs.map((r) => (
+                      <Box key={r.id} sx={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: "8px", alignItems: "center", mb: "8px" }}>
+                        <TextField
+                          size="small"
+                          fullWidth
+                          data-od-id="deploy-env-name"
+                          placeholder={t("inf.deploy.envNamePh")}
+                          value={r.name}
+                          onChange={(e) => {
+                            setEnvError(false);
+                            patchEnv(r.id, { name: e.target.value });
+                          }}
+                        />
+                        <TextField
+                          size="small"
+                          fullWidth
+                          data-od-id="deploy-env-value"
+                          placeholder={t("inf.deploy.envValuePh")}
+                          value={r.value}
+                          onChange={(e) => patchEnv(r.id, { value: e.target.value })}
+                        />
+                        <EnvRowDelete label={t("inf.deploy.removeEnv")} onClick={() => removeEnv(r.id)} />
+                      </Box>
+                    ))}
+                    <Button data-od-id="deploy-env-add" size="small" variant="outlined" sx={{ mb: envError ? "4px" : 0, textTransform: "none", fontSize: 12.5 }} onClick={addEnv}>
+                      + {t("inf.deploy.addEnv")}
+                    </Button>
+                    {envError ? (
+                      <Typography data-od-id="deploy-env-error" sx={{ fontSize: 11.5, color: soft(STATUS_ERR, 75), fontWeight: 550, mt: "6px" }}>
+                        {t("inf.deploy.errEnv")}
+                      </Typography>
+                    ) : (
+                      <Typography sx={{ fontSize: 11.5, color: "text.secondary", mt: "6px" }}>
+                        {t("inf.deploy.envHint")}
+                      </Typography>
+                    )}
+                  </Box>
+                </Box>
 
                 {profile?.servingMode === "pd-separation" ? (
                   <Box sx={{ mt: 3 }}>
@@ -2281,6 +2371,37 @@ function profileSummary(p: CreateOptionsResponse["profiles"][number]): string {
   const acc = [p.vendor, p.models.join("/")].filter(Boolean).join(" · ");
   const gpu = p.gpuPerPod ? ` · ${p.gpuPerPod}/pod` : "";
   return `${p.engine ?? ""} ${p.engineVersion ?? ""} · ${acc}${gpu}`;
+}
+
+// A per-row remove button of the deploy wizard's env editor — a compact,
+// accessible × target matching the dev-environments wizard's RowDelete.
+function EnvRowDelete({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <Box
+      component="button"
+      type="button"
+      aria-label={label}
+      title={label}
+      data-od-id="deploy-env-del"
+      onClick={onClick}
+      sx={{
+        width: 32,
+        height: 32,
+        flex: "none",
+        border: 1,
+        borderColor: "divider",
+        borderRadius: "var(--radius)",
+        bgcolor: "transparent",
+        color: "text.secondary",
+        fontSize: 15,
+        lineHeight: 1,
+        cursor: "pointer",
+        "&:hover": { color: STATUS_ERR, borderColor: soft(STATUS_ERR, 55) },
+      }}
+    >
+      ×
+    </Box>
+  );
 }
 
 /**

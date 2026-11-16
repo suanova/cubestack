@@ -149,6 +149,35 @@ var _ = Describe("Render", func() {
 		Expect(res.Assets).To(Equal(map[string]map[string]string{bootstrapAsset: {assetDataKey: assetDataValue}}))
 	})
 
+	It("merges service-level env over the profile's, templated like the profile's own", func() {
+		isvc := renderISVC()
+		isvc.Spec.Env = []aiv1alpha1.EnvVar{
+			envValue("MY_FLAG", "{{ service.namespace }}"),
+			// Overrides the profile's same-named variable on the router role.
+			envValue("LAUNCHER", "custom"),
+		}
+		res := Render(isvc, renderProfile(), renderModel(), map[string]map[string]string{bootstrapAsset: {assetDataKey: assetDataValue}})
+		Expect(res.Errors).To(BeEmpty())
+
+		// Every role receives the service-level env vars, values templated. On the
+		// router the overridden LAUNCHER is removed — the profile's surviving
+		// entries (MODEL_NAME …) keep their order, then the service's two append.
+		router := res.Roles[0].PodTemplate.Env
+		Expect(router).To(HaveLen(7))
+		Expect(router[0].Name).To(Equal("MODEL_NAME"))
+		Expect(router[5].Name).To(Equal("MY_FLAG"))
+		Expect(router[5].Value).To(Equal(stringPtr("project-a")))
+		Expect(router[6].Name).To(Equal("LAUNCHER"))
+		Expect(router[6].Value).To(Equal(stringPtr("custom")))
+
+		// prefill keeps its own two env entries and receives the service's two
+		// appended (no profile entry was overridden).
+		prefill := res.Roles[1].PodTemplate.Env
+		Expect(prefill).To(HaveLen(4))
+		Expect(prefill[2].Name).To(Equal("MY_FLAG"))
+		Expect(prefill[3].Name).To(Equal("LAUNCHER"))
+	})
+
 	It("resolves a templated gpuPerPod to a concrete Int without mutating the input", func() {
 		p := renderProfile()
 		tpl := intstr.FromString("{{ overrides.prefillReplicas }}")

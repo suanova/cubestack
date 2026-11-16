@@ -151,6 +151,19 @@ type InferenceServiceSpec struct {
 	// +optional
 	Overrides map[string]apiextensionsv1.JSON `json:"overrides,omitempty"`
 
+	// Env lists environment variables set on every role's pod container, on
+	// top of the profile's podTemplate.env. They are service-level: each one
+	// is applied to the main container of every role's workload (LeaderWorkerSet
+	// or Deployment) in addition to — and, by name, overriding — the same-named
+	// variable the Profile's podTemplate already declares. Each entry is a
+	// static value or a fieldRef; secret references belong on the Profile, not
+	// here, so a reproducer keeps its secrets where its Profile puts them.
+	// A variable is identified by its name, which must therefore be unique.
+	// +listType=map
+	// +listMapKey=name
+	// +optional
+	Env []EnvVar `json:"env,omitempty"`
+
 	// Route defines the public gateway route of the service.
 	// +optional
 	Route *RouteSpec `json:"route,omitempty"`

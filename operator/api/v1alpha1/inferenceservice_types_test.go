@@ -107,6 +107,31 @@ var _ = Describe("InferenceService", func() {
 			Expect(k8sClient.Delete(ctx, isvc)).To(Succeed())
 		})
 
+		It("round-trips service-level env vars and rejects a repeated name", func() {
+			isvc := validInferenceService("isvc-env")
+			isvc.Spec.Env = []EnvVar{
+				{Name: "MY_FLAG", Value: ptrTo("on")},
+				{Name: "MAX_BATCH", Value: ptrTo("64")},
+			}
+
+			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
+			got := &InferenceService{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: isvc.Name, Namespace: testNamespace}, got)).To(Succeed())
+			Expect(got.Spec.Env).To(Equal([]EnvVar{
+				{Name: "MY_FLAG", Value: ptrTo("on")},
+				{Name: "MAX_BATCH", Value: ptrTo("64")},
+			}))
+			Expect(k8sClient.Delete(ctx, isvc)).To(Succeed())
+
+			// listMapKey=name: a repeated name is refused, not silently merged.
+			dup := validInferenceService("isvc-env-dup")
+			dup.Spec.Env = []EnvVar{
+				{Name: "A", Value: ptrTo("1")},
+				{Name: "A", Value: ptrTo("2")},
+			}
+			Expect(k8sClient.Create(ctx, dup)).NotTo(Succeed())
+		})
+
 		It("defaults a route with no aigatewayRouter to unpublished, timeoutSeconds to 0 and idleTimeoutSeconds to 0", func() {
 			isvc := validInferenceService("isvc-defaults")
 			isvc.Spec.Route = &RouteSpec{ModelName: "dsv4-flash"}

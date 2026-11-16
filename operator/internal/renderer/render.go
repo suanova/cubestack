@@ -157,6 +157,15 @@ func Render(isvc *aiv1alpha1.InferenceService, profile *aiv1alpha1.InferenceRunt
 	for i := range profile.Spec.Roles {
 		role := profile.Spec.Roles[i]
 		rr := RenderedRole{Name: role.Name, PodTemplate: role.PodTemplate}
+		// The service-level env vars are applied to every role's container, on
+		// top of the profile's podTemplate.env. Merging them in before the
+		// template render means their values are templated like the profile's
+		// own env (design §3.2: the full variable set), and — by name — they
+		// override a same-named profile variable so a service can point one knob
+		// at its own value. The Profile's fieldRef (e.g. status.hostIP) stays
+		// untouched: the override is by name, so the service env replaces the
+		// whole entry.
+		rr.PodTemplate.Env = mergeEnv(rr.PodTemplate.Env, isvc.Spec.Env)
 		rr.Replicas, res.Errors = resolveReplicas(ctx, role.Name, role.Workload.Replicas, res.Errors)
 
 		roleV := &roleVars{name: role.Name}
@@ -901,6 +910,33 @@ func renderPodTemplate(ctx *renderContext, pt aiv1alpha1.PodTemplate, errs []Err
 		}
 	}
 	return pt, errs
+}
+
+// mergeEnv merges the service-level env vars over the profile's env: the
+// service's entry for a name replaces the profile's (the entries are keyed by
+// name, listMapKey=name), and names the service does not set keep the
+// profile's value. Order is stable — the profile's remaining entries first
+// (in their declared order), then the service's overriding ones — so the
+// rendered pod template is deterministic. The caller passes a fresh slice, so
+// neither input is mutated.
+func mergeEnv(profile, service []aiv1alpha1.EnvVar) []aiv1alpha1.EnvVar {
+	if len(service) == 0 {
+		return profile
+	}
+	// Drop the profile entries the service overrides (by name), keeping the
+	// rest in order, then append the service's own entries.
+	overridden := make(map[string]bool, len(service))
+	for _, e := range service {
+		overridden[e.Name] = true
+	}
+	out := make([]aiv1alpha1.EnvVar, 0, len(profile)+len(service))
+	for _, e := range profile {
+		if overridden[e.Name] {
+			continue
+		}
+		out = append(out, e)
+	}
+	return append(out, service...)
 }
 
 func renderEach(items []string, render func(string) string) []string {
