@@ -1637,9 +1637,11 @@ function DeployWizard({
   // Env rows are the draft's own editing cells (the id is a local key); each
   // row carries a blank name/value that the user fills in. Only filled rows
   // with unique, well-formed names are sent.
-  let envId = 0;
+  // The id counter must survive renders — a local let would reset and hand out
+  // duplicate ids across unrelated add cycles.
+  const envIdRef = useRef(0);
   const addEnv = () =>
-    setField("envs", [...draft.envs, { id: ++envId, name: "", value: "" }]);
+    setField("envs", [...draft.envs, { id: ++envIdRef.current, name: "", value: "" }]);
   const patchEnv = (id: number, patch: Partial<Omit<EnvRow, "id">>) =>
     setField(
       "envs",

@@ -160,22 +160,46 @@ var _ = Describe("Render", func() {
 		Expect(res.Errors).To(BeEmpty())
 
 		// Every role receives the service-level env vars, values templated. On the
-		// router the overridden LAUNCHER is removed — the profile's surviving
-		// entries (MODEL_NAME …) keep their order, then the service's two append.
+		// router the overridden LAUNCHER keeps its original slot — the earlier
+		// profile variables aren't shifted, and the append-only MY_FLAG lands
+		// after the profile's surviving topology (MODEL_NAME … MODEL_PATH).
 		router := res.Roles[0].PodTemplate.Env
 		Expect(router).To(HaveLen(7))
-		Expect(router[0].Name).To(Equal("MODEL_NAME"))
-		Expect(router[5].Name).To(Equal("MY_FLAG"))
-		Expect(router[5].Value).To(Equal(stringPtr("project-a")))
-		Expect(router[6].Name).To(Equal("LAUNCHER"))
-		Expect(router[6].Value).To(Equal(stringPtr("custom")))
+		Expect(router[0].Name).To(Equal("LAUNCHER"))
+		Expect(router[0].Value).To(Equal(stringPtr("custom")))
+		Expect(router[1].Name).To(Equal("MODEL_NAME"))
+		Expect(router[5].Name).To(Equal("MODEL_PATH"))
+		Expect(router[6].Name).To(Equal("MY_FLAG"))
+		Expect(router[6].Value).To(Equal(stringPtr("project-a")))
 
 		// prefill keeps its own two env entries and receives the service's two
-		// appended (no profile entry was overridden).
+		// appended (neither name was a profile entry).
 		prefill := res.Roles[1].PodTemplate.Env
 		Expect(prefill).To(HaveLen(4))
 		Expect(prefill[2].Name).To(Equal("MY_FLAG"))
 		Expect(prefill[3].Name).To(Equal("LAUNCHER"))
+	})
+
+	It("keeps an in-place overridden entry ordered before later profile variables", func() {
+		// A later profile variable B references the profile's LAUNCHER — which the
+		// service overrides — by Kubernetes' $(NAME) env expansion. The renderer
+		// does not expand $(...) (a runtime feature the kubelet resolves in list
+		// order), so mergeEnv must keep the service's overriding LAUNCHER in its
+		// original slot, ahead of B, so the kubelet resolves B against the
+		// overridden value top to bottom.
+		p := renderProfile()
+		p.Spec.Roles[0].PodTemplate.Env = append(p.Spec.Roles[0].PodTemplate.Env, envValue("B", "$(LAUNCHER) profile"))
+		isvc := renderISVC()
+		isvc.Spec.Env = []aiv1alpha1.EnvVar{envValue("LAUNCHER", "custom")}
+
+		res := Render(isvc, p, renderModel(), map[string]map[string]string{bootstrapAsset: {assetDataKey: assetDataValue}})
+		Expect(res.Errors).To(BeEmpty())
+		router := res.Roles[0].PodTemplate.Env
+		// LAUNCHER overridden in place (slot 0); the referencing B follows it.
+		Expect(router[0].Name).To(Equal("LAUNCHER"))
+		Expect(router[0].Value).To(Equal(stringPtr("custom")))
+		Expect(router[len(router)-1].Name).To(Equal("B"))
+		Expect(router[len(router)-1].Value).To(Equal(stringPtr("$(LAUNCHER) profile")))
 	})
 
 	It("resolves a templated gpuPerPod to a concrete Int without mutating the input", func() {

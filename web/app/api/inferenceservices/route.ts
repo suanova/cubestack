@@ -370,7 +370,7 @@ const ENV_NAME_RE = /^[-._a-zA-Z][-._a-zA-Z0-9]*$/;
 function envError(env: NonNullable<CreateBody["env"]>): ValidationCode | null {
   const seen = new Set<string>();
   for (const e of env) {
-    if (typeof e.name !== "string" || !ENV_NAME_RE.test(e.name)) {
+    if (typeof e !== "object" || e === null || typeof e.name !== "string" || !ENV_NAME_RE.test(e.name)) {
       return { code: "envNameInvalid" };
     }
     if (seen.has(e.name)) return { code: "envNameDuplicate" };

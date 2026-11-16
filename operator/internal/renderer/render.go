@@ -912,31 +912,43 @@ func renderPodTemplate(ctx *renderContext, pt aiv1alpha1.PodTemplate, errs []Err
 	return pt, errs
 }
 
-// mergeEnv merges the service-level env vars over the profile's env: the
-// service's entry for a name replaces the profile's (the entries are keyed by
-// name, listMapKey=name), and names the service does not set keep the
-// profile's value. Order is stable — the profile's remaining entries first
-// (in their declared order), then the service's overriding ones — so the
-// rendered pod template is deterministic. The caller passes a fresh slice, so
-// neither input is mutated.
+// mergeEnv merges the service-level env vars over the profile's. A service
+// entry with a name the profile already declares replaces that profile entry
+// squarely in place — so a later profile variable whose value references the
+// replaced name by `$(NAME)` resolves against the new value — while a service
+// entry whose name the profile does not declare is appended. Order is
+// otherwise stable and deterministic: the profile's entries keep their declared
+// order (surviving ones and in-place replacements), then the service's new
+// entries. The caller passes a fresh slice, so neither input is mutated.
 func mergeEnv(profile, service []aiv1alpha1.EnvVar) []aiv1alpha1.EnvVar {
 	if len(service) == 0 {
 		return profile
 	}
-	// Drop the profile entries the service overrides (by name), keeping the
-	// rest in order, then append the service's own entries.
-	overridden := make(map[string]bool, len(service))
+	// Index the service entries by name: a name that exists in the profile is
+	// an override (replaces that profile entry in its position); one that does
+	// not is a new variable appended after the profile's.
+	override := make(map[string]aiv1alpha1.EnvVar, len(service))
 	for _, e := range service {
-		overridden[e.Name] = true
+		override[e.Name] = e
 	}
+	used := make(map[string]bool, len(profile))
 	out := make([]aiv1alpha1.EnvVar, 0, len(profile)+len(service))
 	for _, e := range profile {
-		if overridden[e.Name] {
-			continue
+		used[e.Name] = true
+		if sv, ok := override[e.Name]; ok {
+			out = append(out, sv)
+		} else {
+			out = append(out, e)
 		}
-		out = append(out, e)
 	}
-	return append(out, service...)
+	// The service's brand-new entries (names the profile never declared) go on
+	// the end, preserving the service's own declared order.
+	for _, e := range service {
+		if !used[e.Name] {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 func renderEach(items []string, render func(string) string) []string {

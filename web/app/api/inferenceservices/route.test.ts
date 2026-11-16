@@ -966,6 +966,7 @@ describe("inference services create (POST)", () => {
       { env: [{ name: "A", value: "1" }, { name: "A", value: "2" }], code: "envNameDuplicate" },
       { env: [{ name: "1BAD", value: "x" }], code: "envNameInvalid" },
       { env: [{ name: "OK", value: "x" }, { name: { n: 1 }, value: "y" }], code: "envNameInvalid" },
+      { env: [null], code: "envNameInvalid" },
       { env: "not-an-array", code: "envInvalid" },
       { env: [{ name: "A", value: 7 }], code: "envValueInvalid" },
     ];
