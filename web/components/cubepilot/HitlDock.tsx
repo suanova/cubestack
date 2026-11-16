@@ -439,6 +439,11 @@ export function HitlDock({
         flexDirection: "column",
         gap: "8px",
         mb: "8px",
+        // The dock is the shrinkable partner: when the input row below needs
+        // its space back, this box gives up height (minHeight: 0) and the cards
+        // scroll inside it rather than being pushed out of the window with it.
+        minHeight: 0,
+        flexShrink: 1,
         // The dock caps its own height and scrolls past it. Unstacked, several
         // cards (a reload can attach a pending approval AND a pending question)
         // push the composer down until the cards leave the visible area — which

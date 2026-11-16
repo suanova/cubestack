@@ -209,11 +209,19 @@ const qpsFmt = (n: number | null): string =>
 // to the first match and could scale the wrong namespace's service.
 const svcKey = (s: { namespace: string; name: string }): string => `${s.namespace}/${s.name}`;
 
+/** Where the selected service survives a refresh (see SEL_STORAGE_KEY usage). */
+const SEL_STORAGE_KEY = "cubestack.inference-services.selected";
+
 export default function InferenceServicesPage() {
   const { t } = useI18n();
 
   const [items, setItems] = useState<InferenceServiceSummary[]>([]);
-  const [selKey, setSelKey] = useState<string | null>(null);
+  // Carry the selection across a refresh in localStorage (same convention as
+  // the locale), so reopening the page lands on the service the reader was on
+  // instead of silently jumping back to the first one.
+  const [selKey, setSelKey] = useState<string | null>(() =>
+    typeof window !== "undefined" ? window.localStorage.getItem(SEL_STORAGE_KEY) : null,
+  );
   const [filter, setFilter] = useState<Filter>("all");
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
@@ -293,6 +301,21 @@ export default function InferenceServicesPage() {
   }, [reloadKey]);
 
   const selected = items.find((s) => svcKey(s) === selKey) ?? null;
+
+  // Keep the selection in step with what is stored so a refresh (or a reload
+  // after opening a second service) lands back on the same one, not the first.
+  useEffect(() => {
+    // Persist the choice once the list exists; on the first pass items is empty
+    // and we would wipe a previously stored selection for a service not yet
+    // loaded. Drop the stored key when the service is no longer present so the
+    // page never tries to reopen a deleted one.
+    if (items.length === 0) return;
+    if (selKey && items.some((s) => svcKey(s) === selKey)) {
+      window.localStorage.setItem(SEL_STORAGE_KEY, selKey);
+    } else {
+      window.localStorage.removeItem(SEL_STORAGE_KEY);
+    }
+  }, [selKey, items]);
 
   const visible = items.filter((s) => {
     if (filter === "ready") return s.phase === "Ready";

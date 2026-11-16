@@ -134,6 +134,9 @@ function StatusChip({ phase }: { phase: string | null }) {
 
 const envKey = (e: { namespace: string; name: string }) => `${e.namespace}/${e.name}`;
 
+/** Where the selected environment survives a refresh (SEL_STORAGE_KEY). */
+const SEL_STORAGE_KEY = "cubestack.dev-environments.selected";
+
 function fmtAge(createdAt: string | null): string {
   if (!createdAt) return "—";
   const diff = Date.now() - new Date(createdAt).getTime();
@@ -148,7 +151,12 @@ export default function DevEnvironmentsPage() {
   const { t } = useI18n();
 
   const [items, setItems] = useState<DevEnvironmentSummary[]>([]);
-  const [selKey, setSelKey] = useState<string | null>(null);
+  // Carry the selection across a refresh in localStorage (same convention as the
+  // locale), so reopening the page lands on the environment the reader was on
+  // rather than silently jumping back to the first one.
+  const [selKey, setSelKey] = useState<string | null>(() =>
+    typeof window !== "undefined" ? window.localStorage.getItem(SEL_STORAGE_KEY) : null,
+  );
   const [filter, setFilter] = useState<Filter>("all");
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
@@ -232,6 +240,22 @@ export default function DevEnvironmentsPage() {
   }, []);
 
   const selected = items.find((e) => envKey(e) === selKey) ?? null;
+
+  // Mirror the selection into storage so a refresh reopens the same
+  // environment instead of resetting to the first.
+  useEffect(() => {
+    // Don't fire before the list loads, or the ?env the URL carried in would be
+    // dropped (items is empty on the first pass).
+    if (items.length === 0) return;
+    // Persist the choice once the list exists; on the first pass items is empty
+    // and we would wipe a previously stored selection. Drop the stored key when
+    // the environment is gone so the page never reopens a deleted one.
+    if (selKey && items.some((e) => envKey(e) === selKey)) {
+      window.localStorage.setItem(SEL_STORAGE_KEY, selKey);
+    } else {
+      window.localStorage.removeItem(SEL_STORAGE_KEY);
+    }
+  }, [selKey, items]);
 
   const visible = items.filter((e) => {
     if (filter === "Running") return e.phase === "Running";

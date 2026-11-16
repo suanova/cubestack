@@ -2416,7 +2416,20 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
               top-border row; the thread scrolls above it. In model mode the
               sampling params collapse into a chip in the bar's bottom row
               (DSH's access-mode look) and open in a popover. */}
-          <Box sx={{ p: "10px 14px 12px", flex: "none" }}>
+          <Box
+            sx={{
+              p: "10px 14px 12px",
+              // 输入条必须始终钉在卡片底部：允许多个审批卡把输入条挤出
+              // 卡片/视口外。这里让本盒可收缩，其内部 HitlDock（自带滚动）
+              // 让出空间，输入条保持可见。
+              flex: "0 1 auto",
+              minHeight: 0,
+              display: "flex",
+              flexDirection: "column",
+              justifyContent: "flex-end",
+              overflow: "hidden",
+            }}
+          >
             {/* The cards a turn is parked on, docked above the composer rather
                 than in the bubble that raised them: the thread scrolls, so a
                 card drawn in it is a card the user has to go looking for — and
@@ -2523,6 +2536,10 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
                 display: "flex",
                 flexDirection: "column",
                 gap: "6px",
+                // Keep the input row pinned and whole: when the dock above runs
+                // out of room, it shrinks and scrolls — this row must not, or
+                // the input would get squashed or pushed out of the window.
+                flexShrink: 0,
                 border: 1,
                 borderColor: "divider",
                 borderRadius: "16px",
