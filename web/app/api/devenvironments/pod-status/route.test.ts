@@ -146,6 +146,15 @@ describe("GET /api/devenvironments/pod-status", () => {
     });
   });
 
+  it("reports the reason alone when the scheduler stated no message", async () => {
+    // The condition's message is optional in the API; the reason is still the
+    // fact that says why the environment never reaches a node.
+    stubCluster([pod({ conditions: [{ type: "PodScheduled", status: "False", reason: "Unschedulable" }] })]);
+    const { GET } = await import("./route");
+    const res = await GET(await authedRequest({ method: "GET" }, ENV_URL), undefined);
+    expect(await res.json()).toEqual({ failure: { reason: "Unschedulable" } });
+  });
+
   it("reads the newest pod, so a roll does not report the container it replaces", async () => {
     stubCluster([
       pod({ containerStatuses: [{ name: "jupyter", state: { terminated: { reason: "OOMKilled", exitCode: 137 } } }] }, "2026-11-13T01:00:00Z"),

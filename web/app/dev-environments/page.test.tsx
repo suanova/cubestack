@@ -46,6 +46,7 @@ describe("dev environments page", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     document.body.innerHTML = "";
   });
@@ -356,6 +357,36 @@ describe("dev environments page", () => {
     expect(podRequests).toEqual(["project-a/healthy-env"]);
     expect(container.querySelector('[data-od-id="pod-reason"]')).toBeNull();
     expect(container.querySelector('[data-od-id="pod-reason-error"]')).toBeNull();
+
+    act(() => root.unmount());
+  });
+
+  it("keeps the pod's account current while the detail stays open", async () => {
+    vi.useFakeTimers();
+    // The first read finds the container merely creating, which the route does
+    // not report as a failure; the pull then fails. Nothing remounts the detail
+    // — the list poll only re-renders it — so the card has to ask again itself.
+    const pod: { failure?: unknown } = { failure: null };
+    stubData([devEnvironmentSummary({ name: "pulling-env" })], true, pod);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    expect(podRequests).toEqual(["project-a/pulling-env"]);
+    expect(container.querySelector('[data-od-id="pod-reason"]')).toBeNull();
+
+    pod.failure = {
+      container: "jupyter",
+      reason: "ImagePullBackOff",
+      message: 'Back-off pulling image "harbor.isuanova.com/suanova/jupyter-minimal:latest"',
+    };
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+
+    const line = container.querySelector('[data-od-id="pod-reason"]') as HTMLElement;
+    expect(line).not.toBeNull();
+    expect(line.textContent).toContain("ImagePullBackOff");
+    expect(podRequests).toEqual(["project-a/pulling-env", "project-a/pulling-env"]);
 
     act(() => root.unmount());
   });

@@ -126,9 +126,10 @@ function podFailure(pod: Pod): PodFailure | null {
   // Nothing to blame on a container: a scheduler that could not place the pod
   // is the reason an environment stays Pending, and it is on the condition
   // rather than on any container. An eviction or a lost node states its reason
-  // on the pod itself.
+  // on the pod itself. The condition's message is optional in the API, so the
+  // reason is shown on its own when a scheduler states only that.
   const scheduled = status?.conditions?.find((c) => c.type === "PodScheduled" && c.status === "False");
-  if (scheduled?.message) return { reason: scheduled.reason ?? "Unschedulable", message: scheduled.message };
+  if (scheduled) return { reason: scheduled.reason ?? "Unschedulable", message: scheduled.message };
   if (status?.reason) return { reason: status.reason, message: status.message };
   return null;
 }

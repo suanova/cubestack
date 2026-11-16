@@ -1814,6 +1814,9 @@ function StatusCard({ e }: { e: DevEnvironmentSummary }) {
   );
 }
 
+/** The list poll's cadence; the pod read below follows it (::load). */
+const POD_STATUS_POLL_MS = 30_000;
+
 /**
  * Why the environment's pod is not up, in the kubelet's own words.
  *
@@ -1828,39 +1831,51 @@ function PodReason({ namespace, name }: { namespace: string; name: string }) {
   const { t } = useI18n();
   const [failure, setFailure] = useState<PodStatusResponse["failure"]>(null);
   const [error, setError] = useState<string | null>(null);
-  // One request per mounted status card. React's development StrictMode runs
-  // every effect twice (mount, simulated unmount, mount); sharing the in-flight
-  // promise keeps the second run from issuing another read — and lets it still
-  // apply the first one's answer, which a per-run cancellation flag would
-  // discard.
+  // The read repeats for as long as the card is open, on the list poll's cadence:
+  // the pod changes under a detail that a poll does not remount, so a container
+  // first seen creating would keep the card empty after it moved to
+  // ImagePullBackOff. The ref holds only the read in flight, so a slow one is not
+  // overtaken by the next tick — and React's development StrictMode, which runs
+  // every effect twice, attaches to the same promise instead of issuing a second
+  // read, so the second run still applies the first one's answer.
   const requestRef = useRef<Promise<{ failure: PodStatusResponse["failure"] } | { error: string }> | null>(null);
 
   useEffect(() => {
-    if (requestRef.current === null) {
-      requestRef.current = apiFetch(
-        `/api/devenvironments/pod-status?namespace=${encodeURIComponent(namespace)}&name=${encodeURIComponent(name)}`,
-      )
-        .then(async (res) => {
-          const body = (await res.json().catch(() => ({}))) as ValidationErrorBody & PodStatusResponse;
-          if (!res.ok) return { error: validationMessage(t, body, res.status, "dev") };
-          return { failure: body.failure ?? null };
-        })
-        .catch(() => ({ error: t("dev.err.podUnreadable") }));
-    }
     let cancelled = false;
-    void requestRef.current.then((result) => {
-      if (cancelled) return;
-      if ("failure" in result) {
-        setFailure(result.failure);
-        setError(null);
-      } else {
-        setError(result.error);
+    const read = () => {
+      if (requestRef.current === null) {
+        const request = apiFetch(
+          `/api/devenvironments/pod-status?namespace=${encodeURIComponent(namespace)}&name=${encodeURIComponent(name)}`,
+        )
+          .then(async (res) => {
+            const body = (await res.json().catch(() => ({}))) as ValidationErrorBody & PodStatusResponse;
+            if (!res.ok) return { error: validationMessage(t, body, res.status, "dev") };
+            return { failure: body.failure ?? null };
+          })
+          .catch(() => ({ error: t("dev.err.podUnreadable") }));
+        requestRef.current = request;
+        // Cleared before the answer is applied, so the next tick asks again.
+        void request.then(() => {
+          requestRef.current = null;
+        });
       }
-    });
+      void requestRef.current.then((result) => {
+        if (cancelled) return;
+        if ("failure" in result) {
+          setFailure(result.failure);
+          setError(null);
+        } else {
+          setError(result.error);
+        }
+      });
+    };
+    read();
+    const timer = setInterval(read, POD_STATUS_POLL_MS);
     return () => {
       cancelled = true;
+      clearInterval(timer);
     };
-    // `t` is rebuilt on every render by useI18n; the fetch is keyed to the
+    // `t` is rebuilt on every render by useI18n; the reads are keyed to the
     // environment alone.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [namespace, name]);
