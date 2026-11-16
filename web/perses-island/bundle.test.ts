@@ -34,10 +34,10 @@ beforeAll(() => {
 
 describe("react-18 perses island bundle", () => {
   it("bundles the real react 18.3.1, not Next's react 19", () => {
-    // esbuild emits a module header for node_modules/react. Next's bundled
-    // react lives under next/dist/compiled and must not be here.
-    expect(bundle).toContain("// node_modules/react/index.js");
-    expect(bundle).toContain(`version: "${reactVersion}"`);
+    // The bundle is minified, so esbuild's module-header comments are gone;
+    // assert on the inlined version string instead. Next's bundled react (19.x)
+    // lives under next/dist/compiled and must not be inlined here.
+    expect(bundle).toMatch(new RegExp(`version:\\s*"${reactVersion.replaceAll(".", "\\.")}"`));
     expect(bundle).not.toContain("next/dist/compiled");
   });
 

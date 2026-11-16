@@ -68,10 +68,13 @@ await esbuild.build({
     ".ttf": "file",
     ".eot": "file",
   },
-  // The perses zustand store breaks under minification (`get is not a function`
-  // in view-panel-slice.js), the same reason next.config.mjs disables webpack
-  // minification. esbuild leaves function params untouched without minify.
-  minify: false,
+  // The island is the largest cost of a cold dashboard load (17.2 MB raw,
+  // 3.25 MB gzipped), and most of it is vendor code that compresses well:
+  // minifying takes it to 7.4 MB / 2.18 MB. It used to be off because the
+  // perses zustand store broke under webpack's minifier (`get is not a
+  // function` in view-panel-slice.js); esbuild's minifier was verified
+  // separately.
+  minify: true,
   sourcemap: true,
   // zustand/react-router use import.meta.env / import.meta.hot; in an IIFE
   // esbuild substitutes import.meta with {} (guards just take the dev path).
