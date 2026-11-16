@@ -544,7 +544,7 @@ func (r *DevEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// allocation unrecorded too. The write is skipped when the status already
 	// says this, so a pass that changed nothing still writes nothing. What it may
 	// say is ::announcedAllocation — a port is announced here, never withdrawn;
-	// the release waits for the apply in step 3.
+	// the release waits until no pod binds it any more (::settledAllocation).
 	desired.Status.HostPorts = announcedAllocation(hostPorts, env.Status.HostPorts)
 	if err := r.updateStatusIfChanged(ctx, &env, desired); err != nil {
 		return ctrl.Result{}, err
@@ -648,11 +648,6 @@ func (r *DevEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if err := r.applyStatefulSet(ctx, render); err != nil {
 		return r.recordStepFailure(ctx, &env, desired, err)
 	}
-	// The workload now carries the ports this pass resolved, so the status says
-	// the same: an allocation the apply no longer uses goes back to the pool here
-	// and not a step earlier (::announcedAllocation). It lands with the status
-	// write at the end of the pass.
-	desired.Status.HostPorts = hostPorts
 
 	// 4. Gateway routes: best-effort, never fails the reconcile (design §6.2).
 	if err := r.reconcileGatewayRoutes(ctx, &env, &desired.Status); err != nil {
@@ -664,6 +659,11 @@ func (r *DevEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if err != nil {
 		return r.recordStepFailure(ctx, &env, desired, err)
 	}
+	// The allocation the workload being replaced still binds leaves the status
+	// here, on the pass that finds it gone and not the one that re-applied the
+	// StatefulSet: a roll deletes the pod before it creates the next one, so the
+	// apply alone does not mean the node's port is free (::settledAllocation).
+	desired.Status.HostPorts = settledAllocation(hostPorts, desired.Status.HostPorts, pod)
 	setPodScheduledCondition(&desired.Status.Conditions, pod)
 	r.setPhaseAndReady(&env, &desired.Status, pod)
 	// The phase is the one statement of what state the environment is in, so what

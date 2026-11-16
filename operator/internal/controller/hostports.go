@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
+
 	aiv1alpha1 "github.com/suanova/cubestack/api/v1alpha1"
 )
 
@@ -61,17 +63,57 @@ func (r *DevEnvironmentReconciler) reconcileHostPorts(ctx context.Context, env *
 }
 
 // announcedAllocation is what a status write before the apply may state: the
-// allocation this pass resolved, or the one the environment already holds while
-// it resolves none. A move off the host network resolves no ports, and the
-// workload on the old allocation keeps binding them until the StatefulSet is
-// re-applied — releasing the number first would hand it back to the pool while a
-// pod still holds it, and the environment that drew it would not schedule. The
-// release is the assignment after that apply (::Reconcile).
+// allocation this pass resolved, plus any number it no longer uses but whose
+// workload has not been replaced yet. A move off the host network resolves no
+// ports, and turning SSH off drops the sshd port alone; the workload on either
+// keeps binding them until the StatefulSet is re-applied — releasing the number
+// first would hand it back to the pool while a pod still holds it, and the
+// environment that drew it would not schedule. The release is ::settledAllocation.
 func announcedAllocation(resolved, held *aiv1alpha1.HostPorts) *aiv1alpha1.HostPorts {
-	if resolved != nil {
+	if resolved == nil {
+		return held
+	}
+	if held == nil || held.SSH == 0 || resolved.SSH != 0 {
 		return resolved
 	}
-	return held
+	// Only the ssh port can be dropped this way: ::allocateHostPort keeps the main
+	// one whenever the pool still contains it, and a number the pool no longer
+	// contains is one it cannot hand out again.
+	announced := *resolved
+	announced.SSH = held.SSH
+	return &announced
+}
+
+// settledAllocation is what the status may record once the workload has been
+// re-applied: the allocation this pass resolved, as soon as no pod binds the one
+// still announced. A StatefulSet replaces its pod by deleting it and creating the
+// next, so the pass that applies a new template still sees the outgoing pod; a
+// later pass finds it gone and the numbers go back to the pool with that write.
+func settledAllocation(resolved, announced *aiv1alpha1.HostPorts, pod *corev1.Pod) *aiv1alpha1.HostPorts {
+	if announced == nil || !bindsPort(pod, announced) {
+		return resolved
+	}
+	return announced
+}
+
+// bindsPort reports whether the pod still holds one of an allocation's numbers
+// on its node. A pod on the pod network has a network namespace of its own, so
+// none of its ports is the node's.
+func bindsPort(pod *corev1.Pod, ports *aiv1alpha1.HostPorts) bool {
+	if pod == nil || !pod.Spec.HostNetwork {
+		return false
+	}
+	for _, container := range pod.Spec.Containers {
+		for _, p := range container.Ports {
+			if ports.Main != 0 && p.ContainerPort == ports.Main {
+				return true
+			}
+			if ports.SSH != 0 && p.ContainerPort == ports.SSH {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // withHostPorts returns a copy of env that resolves ports against the allocation

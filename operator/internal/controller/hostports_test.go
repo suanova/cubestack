@@ -24,6 +24,36 @@ var _ = Describe("host port allocation", func() {
 		return &aiv1alpha1.NetworkSpec{RDMAEnabled: true, RDMAType: aiv1alpha1.RDMATypeRoCE}
 	}
 
+	// createBoundPod stands in for the StatefulSet controller, which envtest does
+	// not run: the workload still on the node's network and still on the numbers
+	// an allocation records.
+	createBoundPod := func(env *aiv1alpha1.DevEnvironment, held *aiv1alpha1.HostPorts) {
+		ports := []corev1.ContainerPort{{Name: mainPortName, ContainerPort: held.Main}}
+		if held.SSH != 0 {
+			ports = append(ports, corev1.ContainerPort{Name: sshPortName, ContainerPort: held.SSH})
+		}
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: podName(env), Namespace: env.Namespace,
+				Labels: map[string]string{devEnvironmentLabelKey: env.Name},
+			},
+			Spec: corev1.PodSpec{
+				HostNetwork: true,
+				NodeName:    "node-a",
+				Containers:  []corev1.Container{{Name: testJupyterName, Image: testDevImage, Ports: ports}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+	}
+
+	// deleteBoundPod removes it. The zero grace period is not incidental: the pod
+	// is bound to a node and envtest runs no kubelet to confirm the termination,
+	// so an ordinary delete would leave it Terminating forever.
+	deleteBoundPod := func(env *aiv1alpha1.DevEnvironment) {
+		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: podName(env), Namespace: env.Namespace}}
+		Expect(k8sClient.Delete(ctx, pod, client.GracePeriodSeconds(0))).To(Succeed())
+	}
+
 	Describe("allocateHostPort", func() {
 		It("keeps the port the environment already holds while it is free", func() {
 			used := map[int32]bool{}
@@ -206,6 +236,100 @@ var _ = Describe("host port allocation", func() {
 				sts := &appsv1.StatefulSet{}
 				g.Expect(k8sClient.Get(ctx, envKey(env.Name), sts)).To(Succeed())
 				g.Expect(sts.Spec.Template.Spec.HostNetwork).To(BeFalse())
+			}, "15s", "200ms").Should(Succeed())
+		})
+
+		It("keeps the ssh port a workload still binds after SSH is turned off", func() {
+			// Turning SSH off resolves the main port alone, so the ssh port this
+			// pass no longer uses leaves the status with the write that follows the
+			// apply — unless the workload being replaced is still standing on it,
+			// which is what the record is there to keep out of the pool.
+			env := validDevEnvironment("de-roce-ssh-off")
+			env.Spec.Network = roce()
+			env.Spec.SSH = &aiv1alpha1.SSHSpec{Enabled: true}
+			Expect(k8sClient.Create(ctx, env)).To(Succeed())
+			defer deleteEnv(env.Name)
+
+			var held *aiv1alpha1.HostPorts
+			Eventually(func(g Gomega) {
+				observed := &aiv1alpha1.DevEnvironment{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), observed)).To(Succeed())
+				g.Expect(observed.Status.HostPorts).NotTo(BeNil())
+				g.Expect(observed.Status.HostPorts.SSH).NotTo(BeZero())
+				held = observed.Status.HostPorts.DeepCopy()
+			}, "15s", "200ms").Should(Succeed())
+
+			createBoundPod(env, held)
+			updateEnvSpec(env.Name, func(e *aiv1alpha1.DevEnvironment) {
+				e.Spec.SSH = &aiv1alpha1.SSHSpec{Enabled: false}
+			})
+
+			Eventually(func(g Gomega) {
+				// The workload no longer launches sshd, so the port is not the
+				// platform's to keep — only the pod's, until it is gone.
+				sts := &appsv1.StatefulSet{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), sts)).To(Succeed())
+				for _, e := range sts.Spec.Template.Spec.Containers[0].Env {
+					g.Expect(e.Name).NotTo(Equal(sshPortEnv))
+				}
+
+				observed := &aiv1alpha1.DevEnvironment{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), observed)).To(Succeed())
+				g.Expect(observed.Status.HostPorts).NotTo(BeNil())
+				g.Expect(observed.Status.HostPorts.SSH).To(Equal(held.SSH))
+			}, "15s", "200ms").Should(Succeed())
+
+			deleteBoundPod(env)
+
+			Eventually(func(g Gomega) {
+				observed := &aiv1alpha1.DevEnvironment{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), observed)).To(Succeed())
+				g.Expect(observed.Status.HostPorts).NotTo(BeNil())
+				g.Expect(observed.Status.HostPorts.Main).To(Equal(held.Main))
+				g.Expect(observed.Status.HostPorts.SSH).To(BeZero())
+			}, "15s", "200ms").Should(Succeed())
+		})
+
+		It("keeps an allocation until the workload that binds it is gone", func() {
+			// The apply does not free the node's port: a StatefulSet replaces its
+			// pod by deleting it and creating the next one, so the pass that applies
+			// a pod-network template still finds the old pod on the allocation. The
+			// number leaves the status on the later pass that finds it gone.
+			env := validDevEnvironment("de-roce-bound")
+			env.Spec.Network = roce()
+			Expect(k8sClient.Create(ctx, env)).To(Succeed())
+			defer deleteEnv(env.Name)
+
+			var held *aiv1alpha1.HostPorts
+			Eventually(func(g Gomega) {
+				observed := &aiv1alpha1.DevEnvironment{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), observed)).To(Succeed())
+				g.Expect(observed.Status.HostPorts).NotTo(BeNil())
+				held = observed.Status.HostPorts.DeepCopy()
+			}, "15s", "200ms").Should(Succeed())
+
+			createBoundPod(env, held)
+			updateEnvSpec(env.Name, func(e *aiv1alpha1.DevEnvironment) {
+				e.Spec.Network = nil
+			})
+
+			Eventually(func(g Gomega) {
+				sts := &appsv1.StatefulSet{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), sts)).To(Succeed())
+				g.Expect(sts.Spec.Template.Spec.HostNetwork).To(BeFalse())
+
+				observed := &aiv1alpha1.DevEnvironment{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), observed)).To(Succeed())
+				g.Expect(observed.Status.HostPorts).NotTo(BeNil())
+				g.Expect(observed.Status.HostPorts.Main).To(Equal(held.Main))
+			}, "15s", "200ms").Should(Succeed())
+
+			deleteBoundPod(env)
+
+			Eventually(func(g Gomega) {
+				observed := &aiv1alpha1.DevEnvironment{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), observed)).To(Succeed())
+				g.Expect(observed.Status.HostPorts).To(BeNil())
 			}, "15s", "200ms").Should(Succeed())
 		})
 
