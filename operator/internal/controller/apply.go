@@ -220,6 +220,11 @@ func (r *InferenceServiceReconciler) applyWorkloads(ctx context.Context, isvc *a
 // picked up without an operator restart. deferred reports the skipped pass so
 // the caller can schedule a retry. A nil mapper means the reconciler was not
 // wired for optional-CRD resources: skip without scheduling a retry.
+//
+// The mapper caches positive mappings and only re-discovers on a miss, so a
+// CRD removed while the operator runs can keep passing the probe while the API
+// answers NotFound. That is the dependency disappearing, not a service
+// failure: treat it as deferred too instead of aborting the whole apply.
 func (r *InferenceServiceReconciler) applyServiceMonitor(ctx context.Context, isvc *aiv1alpha1.InferenceService, profile *aiv1alpha1.InferenceRuntimeProfile) (deferred bool, err error) {
 	if r.RESTMapper == nil {
 		return false, nil
@@ -227,7 +232,11 @@ func (r *InferenceServiceReconciler) applyServiceMonitor(ctx context.Context, is
 	if !ServiceMonitorAvailable(r.RESTMapper) {
 		return true, nil
 	}
-	return false, r.applyResource(ctx, isvc, desiredServiceMonitor(isvc, profile, r.Scheme))
+	err = r.applyResource(ctx, isvc, desiredServiceMonitor(isvc, profile, r.Scheme))
+	if apierrors.IsNotFound(err) {
+		return true, nil
+	}
+	return false, err
 }
 
 // applyService creates or updates the role's Service <isvc>-<role>, plus the

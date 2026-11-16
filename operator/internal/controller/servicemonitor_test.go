@@ -17,6 +17,9 @@ limitations under the License.
 package controller
 
 import (
+	"context"
+	"errors"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -27,6 +30,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -82,6 +86,18 @@ func profileWithServices(endpointRole string, roles ...rolePort) *aiv1alpha1.Inf
 		irp.Spec.Roles = append(irp.Spec.Roles, role)
 	}
 	return irp
+}
+
+// createErrClient overrides Create with a fixed error, simulating the API
+// surface disappearing from under a cached REST mapping: the dynamic mapper
+// only re-discovers on NoMatch, so a removed CRD keeps its positive mapping.
+type createErrClient struct {
+	client.Client
+	err error
+}
+
+func (c createErrClient) Create(_ context.Context, _ client.Object, _ ...client.CreateOption) error {
+	return c.err
 }
 
 var _ = Describe("ServiceMonitor", func() {
@@ -194,6 +210,33 @@ var _ = Describe("ServiceMonitor", func() {
 		_, err = reconcileWith(ctx, r, name, testNamespace)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: testNamespace}, sm)).To(Succeed())
+	})
+
+	It("treats a NotFound from the removed ServiceMonitor API as a deferred pass", func() {
+		// The mapper caches a positive mapping and only re-discovers on
+		// NoMatch, so after the CRD is removed the probe still passes and the
+		// API answers NotFound. That is monitoring infrastructure disappearing,
+		// not a service failure: it must defer the monitor (and its retry)
+		// instead of aborting the apply and flipping WorkloadsApplied to False.
+		r := &InferenceServiceReconciler{
+			Client: createErrClient{Client: k8sClient, err: apierrors.NewNotFound(
+				schema.GroupResource{Group: "monitoring.coreos.com", Resource: "servicemonitors"}, "sm-api-gone")},
+			Scheme:     testScheme,
+			RESTMapper: testMgr.GetRESTMapper(),
+		}
+		deferred, err := r.applyServiceMonitor(ctx, isvcRefs("sm-api-gone"), smProfile("sm-api-gone-prof", false))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(deferred).To(BeTrue())
+	})
+
+	It("propagates an apply error that is not NotFound", func() {
+		r := &InferenceServiceReconciler{
+			Client:     createErrClient{Client: k8sClient, err: errors.New("write rejected")},
+			Scheme:     testScheme,
+			RESTMapper: testMgr.GetRESTMapper(),
+		}
+		_, err := r.applyServiceMonitor(ctx, isvcRefs("sm-apply-fail"), smProfile("sm-apply-fail-prof", false))
+		Expect(err).To(MatchError("write rejected"))
 	})
 
 	It("repairs an externally edited selector", func() {
