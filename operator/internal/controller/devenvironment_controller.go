@@ -525,7 +525,30 @@ func (r *DevEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// Failed phase reflects reality: the workload is stopped and the routes
 	// removed. A finding the controller resolved is reported on the same condition
 	// without blocking, because the environment runs with the controller's value.
-	findings := specFindings(&env)
+	//
+	// The host-port allocation is resolved before the gate rather than after it:
+	// the gate compares a spec.ports entry against the container port the
+	// platform's Service forwards to, and on the host network that port is the
+	// allocation (::reconcileHostPorts). Deciding on the type's fixed port first
+	// and on the allocation afterwards would fail an unchanged spec on the pass
+	// that records it.
+	hostPorts, err := r.hostPortsForPass(ctx, &env)
+	if err != nil {
+		return r.recordStepFailure(ctx, &env, desired, err)
+	}
+	desired.Status.HostPorts = hostPorts
+	// The allocation is recorded before anything is applied with it. A workload
+	// launched on these ports while the status saying they are taken is still
+	// unwritten leaves a port the pool can hand to another environment: a pass
+	// that dies in between writes no status at all when the cause is retryable
+	// (::recordStepFailure), and one whose status write fails leaves the
+	// allocation unrecorded too. The write is skipped when the status already
+	// says this, so a pass that changed nothing still writes nothing.
+	if err := r.updateStatusIfChanged(ctx, &env, desired); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	findings := specFindings(desired)
 	if blocking := mustUpdateFindings(findings); len(blocking) > 0 {
 		if err := r.stopCompute(ctx, &env); err != nil {
 			return r.recordStepFailure(ctx, &env, desired, err)
@@ -552,17 +575,6 @@ func (r *DevEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	} else {
 		setAcceptedCondition(&desired.Status.Conditions, metav1.ConditionTrue, reasonOverridden, findingsMessage(findings))
 	}
-
-	// 1b. Host ports: an RDMA environment on the host network binds the node's
-	// ports, so the platform allocates its own instead of taking the type's fixed
-	// ones, which only one environment per node could hold (::reconcileHostPorts).
-	// The allocation is recorded on the status that is written; the render path
-	// below reads it off the copy it is handed, for the reason given there.
-	hostPorts, err := r.reconcileHostPorts(ctx, &env)
-	if err != nil {
-		return r.recordStepFailure(ctx, &env, desired, err)
-	}
-	desired.Status.HostPorts = hostPorts
 
 	// 2. SSH secrets: a managed host keypair and the authorized_keys source when
 	// SSH is exposed (design §6.3).
@@ -617,10 +629,9 @@ func (r *DevEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return r.recordStepFailure(ctx, &env, desired, err)
 	}
 	// The Service and the pod template read the host-port allocation off the
-	// environment they are handed, so they get a copy carrying the status it is
-	// recorded on. env itself stays exactly as it was read: updateStatusIfChanged
-	// diffs the write against it, and a base that already carried the allocation
-	// would drop the very change the diff is meant to publish.
+	// environment they are handed, so they get a copy carrying it. env itself
+	// stays exactly as it was read, which is what updateStatusIfChanged diffs the
+	// final write against.
 	render := env.DeepCopy()
 	render.Status.HostPorts = hostPorts
 	if err := r.applyService(ctx, render); err != nil {
@@ -2324,8 +2335,17 @@ func (r *DevEnvironmentReconciler) desiredPodSpec(env *aiv1alpha1.DevEnvironment
 	// A host-network environment binds the ports the platform allocated it rather
 	// than the type's fixed ones, and the launchers have to be told which
 	// (::reconcileHostPorts). Both names are controller-owned like CUBSTACK_TYPE:
-	// a declared value could contradict the probe, the Service and the activity
-	// agent, which all follow the allocation.
+	// the probe, the Service and the activity agent all follow the platform's
+	// number — the type's fixed one on the pod network, the allocation on the host
+	// network — so where one of the platform's own launchers reads them a declared
+	// value is dropped, and the variable is stated only where the number is not
+	// that launcher's default. A type whose image the platform does not implement
+	// has no launcher of ours to contradict, so its env list is left alone.
+	if _, launcher := containerTypeEnv(env); launcher {
+		envVars = slices.DeleteFunc(envVars, func(v corev1.EnvVar) bool {
+			return v.Name == mainPortEnv || v.Name == sshPortEnv
+		})
+	}
 	if env.Status.HostPorts != nil {
 		envVars = withControllerEnv(envVars, mainPortEnv, strconv.Itoa(int(mainPort)))
 		if sshExposed(env) {

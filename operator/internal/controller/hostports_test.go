@@ -8,6 +8,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	aiv1alpha1 "github.com/suanova/cubestack/api/v1alpha1"
@@ -117,8 +118,125 @@ var _ = Describe("host port allocation", func() {
 				g.Expect(sts.Spec.Template.Spec.Containers[0].Ports).To(BeEmpty())
 			}, "15s", "200ms").Should(Succeed())
 		})
+
+		It("blocks a spec.ports entry against the allocated port from the first pass", func() {
+			// The main entry's targetPort is the allocation on the host network, so
+			// an entry reusing the published 8888 is not the lossless fold it would
+			// be on the pod network. Resolving the allocation before the gate keeps
+			// that decision the same on every pass: the environment never
+			// provisions, rather than running once and failing later on a spec
+			// nobody changed.
+			env := validDevEnvironment("de-roce-port-collision")
+			env.Spec.Network = roce()
+			env.Spec.Ports = []aiv1alpha1.PortSpec{{Name: "notebook-again", Type: aiv1alpha1.PortTypeTCP, ContainerPort: 8888}}
+			Expect(k8sClient.Create(ctx, env)).To(Succeed())
+			defer deleteEnv(env.Name)
+
+			Eventually(func(g Gomega) {
+				observed := &aiv1alpha1.DevEnvironment{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), observed)).To(Succeed())
+				g.Expect(observed.Status.Phase).NotTo(BeNil())
+				g.Expect(observed.Status.Phase.Name).To(Equal(aiv1alpha1.PhaseFailed))
+				// Recorded before the gate ran, which is what the gate read.
+				g.Expect(observed.Status.HostPorts).NotTo(BeNil())
+			}, "15s", "200ms").Should(Succeed())
+
+			err := k8sClient.Get(ctx, envKey(env.Name), &appsv1.StatefulSet{})
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "the gate must decide before anything is applied")
+		})
+
+		It("drops a node port the spec declares", func() {
+			// A declared port would move the container off the number the probe,
+			// the Service and the activity agent all read, so it is dropped like
+			// CUBSTACK_TYPE: the environment still becomes Ready. On a pod-network
+			// environment the platform states no port at all, which is the case the
+			// drop has to cover even though no host port is involved.
+			env := validDevEnvironment("de-podnet-declared-port")
+			env.Spec.Runtime = &aiv1alpha1.RuntimeSpec{Env: []corev1.EnvVar{
+				{Name: mainPortEnv, Value: "7777"},
+				{Name: sshPortEnv, Value: "7778"},
+			}}
+			Expect(k8sClient.Create(ctx, env)).To(Succeed())
+			defer deleteEnv(env.Name)
+
+			Eventually(func(g Gomega) {
+				sts := &appsv1.StatefulSet{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), sts)).To(Succeed())
+				g.Expect(sts.Spec.Template.Spec.Containers).NotTo(BeEmpty())
+				g.Expect(portEnv(sts.Spec.Template.Spec.Containers[0])).To(BeEmpty())
+			}, "15s", "200ms").Should(Succeed())
+		})
+	})
+
+	Describe("hostPortsForPass", func() {
+		// A pool one port wide that the cluster has already given away, so every
+		// allocation this reconciler attempts fails.
+		exhausted := func(taken int32) *DevEnvironmentReconciler {
+			return &DevEnvironmentReconciler{
+				Client:    k8sClient,
+				APIReader: k8sClient,
+				Config:    DevEnvironmentControllerConfig{HostPortRangeStart: taken, HostPortRangeEnd: taken},
+			}
+		}
+
+		It("reports an exhausted pool for an environment the pass wants running", func() {
+			holder := validDevEnvironment("de-roce-holder")
+			holder.Spec.Network = roce()
+			Expect(k8sClient.Create(ctx, holder)).To(Succeed())
+			defer deleteEnv(holder.Name)
+
+			var taken int32
+			Eventually(func(g Gomega) {
+				observed := &aiv1alpha1.DevEnvironment{}
+				g.Expect(k8sClient.Get(ctx, envKey(holder.Name), observed)).To(Succeed())
+				g.Expect(observed.Status.HostPorts).NotTo(BeNil())
+				taken = observed.Status.HostPorts.Main
+			}, "15s", "200ms").Should(Succeed())
+
+			wanted := validDevEnvironment("de-roce-wanted")
+			wanted.Spec.Network = roce()
+			_, err := exhausted(taken).hostPortsForPass(ctx, wanted)
+			Expect(err).To(MatchError(ContainSubstring("no free host port")))
+		})
+
+		It("lets a stop through and keeps what the environment already holds", func() {
+			holder := validDevEnvironment("de-roce-holder-stopped")
+			holder.Spec.Network = roce()
+			Expect(k8sClient.Create(ctx, holder)).To(Succeed())
+			defer deleteEnv(holder.Name)
+
+			var taken int32
+			Eventually(func(g Gomega) {
+				observed := &aiv1alpha1.DevEnvironment{}
+				g.Expect(k8sClient.Get(ctx, envKey(holder.Name), observed)).To(Succeed())
+				g.Expect(observed.Status.HostPorts).NotTo(BeNil())
+				taken = observed.Status.HostPorts.Main
+			}, "15s", "200ms").Should(Succeed())
+
+			stopped := validDevEnvironment("de-roce-stopped")
+			stopped.Spec.Network = roce()
+			stopped.Spec.Running = false
+			stopped.Status.HostPorts = &aiv1alpha1.HostPorts{Main: taken - 1}
+
+			hostPorts, err := exhausted(taken).hostPortsForPass(ctx, stopped)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(hostPorts).NotTo(BeNil())
+			Expect(hostPorts.Main).To(Equal(taken - 1))
+		})
 	})
 })
+
+// portEnv lists the node-port variables a container carries, rendered as
+// name=value so a wrong value fails as loudly as a missing one.
+func portEnv(container corev1.Container) []string {
+	var stated []string
+	for _, v := range container.Env {
+		if v.Name == mainPortEnv || v.Name == sshPortEnv {
+			stated = append(stated, v.Name+"="+v.Value)
+		}
+	}
+	return stated
+}
 
 // servicePorts maps each Service port name to its published port and the
 // container port it forwards to.

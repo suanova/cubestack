@@ -60,6 +60,25 @@ func (r *DevEnvironmentReconciler) reconcileHostPorts(ctx context.Context, env *
 	return ports, nil
 }
 
+// hostPortsForPass resolves the ports the pass needs, and tolerates a failed
+// allocation on a pass that only scales the environment down. A stop is the user
+// asking for the one state a failed allocation would deny — nothing running — so
+// it goes ahead with what is already recorded: the workload is scaled to zero,
+// and the next pass that wants the environment to run reports the failure.
+func (r *DevEnvironmentReconciler) hostPortsForPass(ctx context.Context, env *aiv1alpha1.DevEnvironment) (*aiv1alpha1.HostPorts, error) {
+	hostPorts, err := r.reconcileHostPorts(ctx, env)
+	if err == nil {
+		return hostPorts, nil
+	}
+	if env.Spec.Running && !autoStopped(env) {
+		return nil, err
+	}
+	if held := env.Status.HostPorts; held != nil {
+		return held.DeepCopy(), nil
+	}
+	return nil, nil
+}
+
 // usedHostPorts is every host port the cluster is known to bind, so the pool is
 // drawn from cluster-wide rather than per node. An environment is scheduled onto
 // a node only after it is created, and keeping the allocation unique across the
