@@ -106,7 +106,9 @@ jobs:
             echo "dev=false" >> "${GITHUB_OUTPUT}"
           else
             VERSION="$(grep '^version:' helm/cubestack-controller-manager-chart/Chart.yaml | awk '{print $2}')"
-            APP_VERSION="v${VERSION}"
+            # appVersion is the default image tag, so it must name a tag that
+            # exists: a main build publishes sha-<7>, not v<version>.
+            APP_VERSION="sha-${GITHUB_SHA::7}"
             echo "dev=true" >> "${GITHUB_OUTPUT}"
           fi
           make helm-package HELM_CHART_VERSION="${VERSION}" HELM_CHART_APP_VERSION="${APP_VERSION}"
