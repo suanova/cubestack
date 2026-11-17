@@ -100,26 +100,28 @@ jobs:
             APP_VERSION="${RELEASE_APP_VERSION}"
             echo "dev=false" >> "$GITHUB_OUTPUT"
           else
-            # One chart per commit is what offline packaging pins: the release
-            # lock records this version, the installer pushes it into the
-            # cluster registry under it, and the CR names it back. `latest` must
-            # not reach any of those, so the commit goes in the version.
+            # One chart per commit, and that commit is in the version: the
+            # release lock records this version, the installer pushes the chart
+            # into the cluster registry under it, and the CR names it back, so
+            # the tag has to be unique per commit and never `latest`.
             BASE="$(grep '^version:' Chart.yaml | awk '{print $2}')"
             VERSION="${BASE}-sha${GITHUB_SHA::7}"
-            APP_VERSION="sha-${GITHUB_SHA::7}"
-            # Main additionally publishes the rolling channel an open-source
-            # `helm install` resolves: same templates, appVersion `latest`.
+            # appVersion stays `latest`, deliberately. These repos build each
+            # image only when its own paths change (`operator/**`, `web/**`), so
+            # a commit-addressed tag may exist for one image and not the other;
+            # `latest` always exists. Commercial installs never read appVersion
+            # (spec.global.images injects the tag), so this only decides what a
+            # bare `helm install` pulls.
+            APP_VERSION="latest"
+            # Main also publishes the rolling name an open-source install uses.
             if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
               EXTRA_VERSION="${BASE}-latest"
-              EXTRA_APP_VERSION="latest"
             fi
             echo "dev=true" >> "$GITHUB_OUTPUT"
           fi
           helm package . --version "${VERSION}" --app-version "${APP_VERSION}"
           if [ -n "${EXTRA_VERSION:-}" ]; then
-            helm package . --version "${EXTRA_VERSION}" --app-version "${EXTRA_APP_VERSION}"
-            echo "extra-version=${EXTRA_VERSION}" >> "$GITHUB_OUTPUT"
-            echo "extra-tgz=cubestack-portal-chart-${EXTRA_VERSION}.tgz" >> "$GITHUB_OUTPUT"
+            echo "extra-version=${EXTRA_VERSION}" >> "${GITHUB_OUTPUT}"
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tgz=cubestack-portal-chart-${VERSION}.tgz" >> "$GITHUB_OUTPUT"
@@ -138,7 +140,6 @@ jobs:
           CHART_VERSION: ${{ steps.package.outputs.version }}
           CHART_TGZ: ${{ steps.package.outputs.tgz }}
           EXTRA_VERSION: ${{ steps.package.outputs.extra-version }}
-          EXTRA_TGZ: ${{ steps.package.outputs.extra-tgz }}
         run: |
           set -euo pipefail
           chart_repo="harbor.isuanova.com/suanova/cubestack-portal-chart"
@@ -153,11 +154,11 @@ jobs:
           meta = yaml.safe_load(open("Chart.yaml"))
           json.dump(meta, open(os.path.join(os.environ["RUNNER_TEMP"], "helm-config.json"), "w"), separators=(",", ":"))
           PY2
-          # Every OCI tag is the chart's own version, so pulling by tag and
-          # reading Chart.yaml agree.
+          # Two tags, one package: the commit-addressed one the release lock
+          # records, and on main the rolling name an open-source install uses.
           out="$(push_chart "${CHART_VERSION}" "${CHART_TGZ}")"
-          if [ -n "${EXTRA_TGZ}" ]; then
-            push_chart "${EXTRA_VERSION}" "${EXTRA_TGZ}" >/dev/null
+          if [ -n "${EXTRA_VERSION}" ]; then
+            push_chart "${EXTRA_VERSION}" "${CHART_TGZ}" >/dev/null
           fi
           manifest_digest="$(printf '%s' "$out" | sed -n 's/^Digest: //p' | tail -1)"
           [ -n "$manifest_digest" ] || { echo "::error::cannot resolve chart manifest digest"; exit 1; }
