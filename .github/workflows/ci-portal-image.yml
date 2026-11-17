@@ -119,7 +119,21 @@ jobs:
 
           # The rolling tag, main only: the chart's appVersion default is
           # `latest`, so it has to exist, and only main may move it.
+          #
+          # Within main, only the newest commit that decides this image may
+          # move it: a re-run of an older run finishes after main has advanced,
+          # and pushing its image as `latest` would mislabel which commit is
+          # newest. The pathspec is the `changes` filter above.
+          MOVE_LATEST=false
           if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            git fetch --no-tags --depth=1 origin main
+            if git diff --quiet "${GITHUB_SHA}" FETCH_HEAD -- web .github; then
+              MOVE_LATEST=true
+            else
+              echo "Skipping 'latest': a later commit changed what this image is built from"
+            fi
+          fi
+          if [ "${MOVE_LATEST}" = "true" ]; then
             docker tag "${IMAGE}:${SHA_TAG}" "${IMAGE}:latest"
             docker push "${IMAGE}:latest"
           fi

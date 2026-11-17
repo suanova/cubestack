@@ -83,7 +83,7 @@ jobs:
           fi
           echo "line=${line}" >> "${GITHUB_OUTPUT}"
       - name: Install oras
-        uses: oras-project/setup-oras@v1
+        uses: oras-project/setup-oras@ca28077386065e263c03428f4ae0c09024817c93 # v1.2.0
         with:
           version: 1.2.0
       - name: Resolve the release version

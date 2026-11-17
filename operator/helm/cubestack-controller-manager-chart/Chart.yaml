@@ -6,5 +6,8 @@ version: 2.1.0
 # The tag the manager image defaults to, so it names a real image tag: no `v`
 # prefix, which the release tag carries but the image tag does not. Both fields
 # are overridden at package time; keeping them in step names the rolling chart.
-appVersion: v2.1.0
+# The tag a bare `helm install ./operator/helm/cubestack-controller-manager-chart` resolves to. `latest` is what
+# main publishes and always exists; CI overrides this at package time
+# (a release uses the Git tag), so this only affects local installs.
+appVersion: "latest"
 kubeVersion: ">=1.30.0-0"

@@ -135,10 +135,23 @@ jobs:
             exit 0
           fi
 
-          # The rolling tag, main only. A release branch never moves it: the
-          # chart's appVersion default is `latest`, and a branch that re-pointed
-          # it would hand an open-source install the next branch's code.
+          # The rolling tag, main only. A release branch never moves it.
+          #
+          # Within main, only the newest commit that decides these images may
+          # move it: a re-run of an older run finishes after main has advanced,
+          # and pushing its image as `latest` would mislabel which commit is
+          # newest. The pathspec is the `changes` filter above, so the gate
+          # cannot drift from the trigger.
+          MOVE_LATEST=false
           if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            git fetch --no-tags --depth=1 origin main
+            if git diff --quiet "${GITHUB_SHA}" FETCH_HEAD -- operator Makefile .github; then
+              MOVE_LATEST=true
+            else
+              echo "Skipping 'latest': a later commit changed what these images are built from"
+            fi
+          fi
+          if [ "${MOVE_LATEST}" = "true" ]; then
             for IMAGE in "${MANAGER}" "${ACTIVITY_AGENT}"; do
               docker tag "${IMAGE}:${SHA_TAG}" "${IMAGE}:latest"
               docker push "${IMAGE}:latest"
