@@ -20,8 +20,12 @@ name: Vendor charts into cubestack-operator
 # starts the chart publish and this workflow together.
 on:
   push:
-    branches: [main, 'release-*']
-    tags: ['v*']
+    # 2.1 dropped the embedded charts (cubestack-operator#289), so main no longer
+    # vendors them and its refresh PRs fail the content-free guard (#300, #301).
+    # release-2.0 still embeds them and carries its own copy of this file, which
+    # is the one that runs on a push there.
+    branches: ['release-2.0']
+    tags: ['v2.0.*']
     paths:
       # The controller-manager chart is generated from operator/config by
       # hack/update-helm-resources.sh, so a change to any of these moves it;
@@ -46,10 +50,9 @@ jobs:
     # a manual run cannot package a feature branch or tag over the rolling chart.
     if: >-
       (github.event_name == 'push' &&
-       (github.ref == 'refs/heads/main' ||
-        startsWith(github.ref, 'refs/heads/release-') ||
-        startsWith(github.ref, 'refs/tags/v'))) ||
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+       (github.ref == 'refs/heads/release-2.0' ||
+        startsWith(github.ref, 'refs/tags/v2.0.'))) ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release-2.0')
     # Read-only for the GITHUB_TOKEN: it fetches this repo and nothing else.
     # Every write below — branch, pull request — goes through the App token.
     permissions:
