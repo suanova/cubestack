@@ -10,7 +10,7 @@ name: CI Portal Chart
 # as `<Chart.yaml version>-latest`; a `vX.Y.Z` tag packages the release version.
 on:
   push:
-    branches: [main]
+    branches: [main, 'release-*']
     tags: ['v*']
 
 permissions: {}
@@ -100,12 +100,23 @@ jobs:
             APP_VERSION="${RELEASE_APP_VERSION}"
             echo "dev=false" >> "$GITHUB_OUTPUT"
           else
-            # A rolling channel: the chart and the images it resolves to roll
-            # together on main, so a bare `helm install` finds both. `version`
-            # must be SemVer, which rules out a bare commit tag; `-latest` is a
-            # valid prerelease and keeps this off the released `<version>`.
-            VERSION="$(grep '^version:' Chart.yaml | awk '{print $2}')-latest"
-            APP_VERSION="latest"
+            BASE="$(grep '^version:' Chart.yaml | awk '{print $2}')"
+            if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+              # The rolling channel: chart and images roll together on main, so a
+              # bare `helm install` finds both. `version` must be SemVer, which
+              # rules out a bare commit tag; `-latest` is a valid prerelease and
+              # keeps this off the released `<version>`.
+              VERSION="${BASE}-latest"
+              APP_VERSION="latest"
+            else
+              # A release branch publishes what offline packaging pins: a chart
+              # per commit, resolving to the images that commit pushed. It must
+              # not reuse `${BASE}-latest` (main channel), `${BASE}` (the tag the
+              # `v${BASE}` release pushes) or `latest` (an open-source install
+              # would get this branch instead of main).
+              VERSION="${BASE}-sha${GITHUB_SHA::7}"
+              APP_VERSION="sha-${GITHUB_SHA::7}"
+            fi
             echo "dev=true" >> "$GITHUB_OUTPUT"
           fi
           helm package . --version "${VERSION}" --app-version "${APP_VERSION}"
@@ -129,8 +140,8 @@ jobs:
           set -euo pipefail
           chart_repo="harbor.isuanova.com/suanova/cubestack-portal-chart"
           # The OCI tag is the packaged version, so a pull by tag and the
-          # chart's own version agree -- the rolling channel is `<version>-latest`
-          # on both axes rather than a tag that names something else.
+          # chart's own version agree: `<version>-latest` on main, and
+          # `<version>-sha<7>` on a release branch.
           chart_channel="${CHART_VERSION}"
           python3 -m pip install --quiet pyyaml
           python3 - <<'PY2'
