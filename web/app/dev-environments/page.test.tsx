@@ -816,6 +816,86 @@ describe("dev environments page", () => {
     act(() => root.unmount());
   });
 
+  it("carries a stored selection across a mount, in localStorage", async () => {
+    localStorage.setItem("cubestack.dev-environments.selected", "project-a/ssh-dataset-prep");
+    stubData(devEnvironmentList());
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    // The stored key survives the initial load (not wiped as "empty items"),
+    // so the second environment — not the first — is the one selected.
+    const row = container.querySelector('[data-od-id="dev-row-ssh-dataset-prep"]') as HTMLElement;
+    expect(row.style.background).toBe("var(--accent-soft)");
+    expect(container.textContent).toContain("连接信息");
+
+    act(() => root.unmount());
+  });
+
+  it("drops the stored selection when a successful response has no items", async () => {
+    localStorage.setItem("cubestack.dev-environments.selected", "project-a/ssh-dataset-prep");
+    stubData([]);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    expect(container.querySelector('[data-od-id="dev-table"]')?.textContent).toContain("暂无开发环境");
+    // The deleted environment's key no longer lingers, so a later refresh will
+    // not try to reopen it.
+    expect(localStorage.getItem("cubestack.dev-environments.selected")).toBeNull();
+
+    act(() => root.unmount());
+  });
+
+  it("keeps the stored selection when the initial list request fails", async () => {
+    localStorage.setItem("cubestack.dev-environments.selected", "project-a/ssh-dataset-prep");
+    stubData([], false);
+    const { root } = renderPage();
+    await act(async () => {});
+
+    // A 500 says nothing about whether the environment still exists, so the key
+    // must survive for the next successful load to restore.
+    expect(localStorage.getItem("cubestack.dev-environments.selected")).toBe("project-a/ssh-dataset-prep");
+
+    act(() => root.unmount());
+  });
+
+  it("survives a storage getter that throws, and renders with no selection", async () => {
+    const real = Storage.prototype.getItem;
+    const realSet = Storage.prototype.setItem;
+    const realRemove = Storage.prototype.removeItem;
+    // Only the selection key is denied: the locale read must keep working or the
+    // page renders in English and the assertions below target the wrong strings.
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation((key: string) => {
+      if (key === "cubestack.dev-environments.selected" || key === "cubestack.inference-services.selected") {
+        throw new Error("denied");
+      }
+      return real.call(window.localStorage, key);
+    });
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation((key: string, value: string) => {
+      if (key === "cubestack.dev-environments.selected" || key === "cubestack.inference-services.selected") {
+        throw new Error("denied");
+      }
+      return realSet.call(window.localStorage, key, value);
+    });
+    vi.spyOn(Storage.prototype, "removeItem").mockImplementation((key: string) => {
+      if (key === "cubestack.dev-environments.selected" || key === "cubestack.inference-services.selected") {
+        throw new Error("denied");
+      }
+      return realRemove.call(window.localStorage, key);
+    });
+    try {
+      stubData(devEnvironmentList());
+      const { container, root } = renderPage();
+      await act(async () => {});
+      expect(container.textContent).toContain("jupyter-nlp-ln");
+      // No stored selection read + no write of one, but the page still renders
+      // and picks the default (first) environment.
+      expect(container.textContent).toContain("连接信息");
+      act(() => root.unmount());
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
   it("carries the detail under its own row, and closes it on a second click", async () => {
     stubData(devEnvironmentList());
     const { container, root } = renderPage();

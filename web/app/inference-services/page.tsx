@@ -209,11 +209,26 @@ const qpsFmt = (n: number | null): string =>
 // to the first match and could scale the wrong namespace's service.
 const svcKey = (s: { namespace: string; name: string }): string => `${s.namespace}/${s.name}`;
 
+/** Where the selected service survives a refresh (see SEL_STORAGE_KEY usage). */
+const SEL_STORAGE_KEY = "cubestack.inference-services.selected";
+
 export default function InferenceServicesPage() {
   const { t } = useI18n();
 
   const [items, setItems] = useState<InferenceServiceSummary[]>([]);
-  const [selKey, setSelKey] = useState<string | null>(null);
+  // Carry the selection across a refresh in localStorage (same convention as
+  // the locale), so reopening the page lands on the service the reader was on
+  // instead of silently jumping back to the first one.
+  const [selKey, setSelKey] = useState<string | null>(() => {
+    // Storage can be denied by browser policy, and the getter itself can throw;
+    // a read failure is just "no remembered selection", not a crashing page.
+    if (typeof window === "undefined") return null;
+    try {
+      return window.localStorage.getItem(SEL_STORAGE_KEY);
+    } catch {
+      return null;
+    }
+  });
   const [filter, setFilter] = useState<Filter>("all");
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
@@ -293,6 +308,32 @@ export default function InferenceServicesPage() {
   }, [reloadKey]);
 
   const selected = items.find((s) => svcKey(s) === selKey) ?? null;
+
+  // Keep the selection in step with what is stored so a refresh (or a reload
+  // after opening a second service) lands back on the same one, not the first.
+  useEffect(() => {
+    // Don't fire while the list is still loading: an empty items on the first
+    // pass means "not loaded yet", not "nothing exists", and wiping the storage
+    // then would drop the selection a previous visit stored.
+    if (loading) return;
+    // A failed request is not an empty list either: items still describes the
+    // last successful response, so only a successful response may drop the key.
+    if (failed) return;
+    // Persist the choice once the list has settled; if the service is gone
+    // (including a last-item delete, where an empty list is a real answer not an
+    // in-flight state) drop the stored key so the page never reopens a deleted
+    // one.
+    try {
+      if (selKey && items.some((s) => svcKey(s) === selKey)) {
+        window.localStorage.setItem(SEL_STORAGE_KEY, selKey);
+      } else {
+        window.localStorage.removeItem(SEL_STORAGE_KEY);
+      }
+    } catch {
+      // Storage may be full or denied; a failed write must not change the
+      // in-memory selection nor interrupt the page.
+    }
+  }, [failed, loading, selKey, items]);
 
   const visible = items.filter((s) => {
     if (filter === "ready") return s.phase === "Ready";

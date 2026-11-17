@@ -134,6 +134,9 @@ function StatusChip({ phase }: { phase: string | null }) {
 
 const envKey = (e: { namespace: string; name: string }) => `${e.namespace}/${e.name}`;
 
+/** Where the selected environment survives a refresh (SEL_STORAGE_KEY). */
+const SEL_STORAGE_KEY = "cubestack.dev-environments.selected";
+
 function fmtAge(createdAt: string | null): string {
   if (!createdAt) return "—";
   const diff = Date.now() - new Date(createdAt).getTime();
@@ -148,7 +151,19 @@ export default function DevEnvironmentsPage() {
   const { t } = useI18n();
 
   const [items, setItems] = useState<DevEnvironmentSummary[]>([]);
-  const [selKey, setSelKey] = useState<string | null>(null);
+  // Carry the selection across a refresh in localStorage (same convention as the
+  // locale), so reopening the page lands on the environment the reader was on
+  // rather than silently jumping back to the first one.
+  const [selKey, setSelKey] = useState<string | null>(() => {
+    // Storage can be denied by browser policy, and the getter itself can throw;
+    // a read failure is just "no remembered selection", not a crashing page.
+    if (typeof window === "undefined") return null;
+    try {
+      return window.localStorage.getItem(SEL_STORAGE_KEY);
+    } catch {
+      return null;
+    }
+  });
   const [filter, setFilter] = useState<Filter>("all");
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
@@ -232,6 +247,32 @@ export default function DevEnvironmentsPage() {
   }, []);
 
   const selected = items.find((e) => envKey(e) === selKey) ?? null;
+
+  // Mirror the selection into storage so a refresh reopens the same
+  // environment instead of resetting to the first.
+  useEffect(() => {
+    // Don't fire while the list is still loading: an empty items on the
+    // first pass means "not loaded yet", not "nothing exists", and wiping the
+    // storage then would drop the selection a previous visit stored.
+    if (loading) return;
+    // A failed request is not an empty list either: items still describes the
+    // last successful response, so only a successful response may drop the key.
+    if (failed) return;
+    // Persist the choice once the list has settled; if the environment is gone
+    // (including a last-item delete, where an empty list is a real answer not an
+    // in-flight state) drop the stored key so the page never reopens a deleted
+    // one.
+    try {
+      if (selKey && items.some((e) => envKey(e) === selKey)) {
+        window.localStorage.setItem(SEL_STORAGE_KEY, selKey);
+      } else {
+        window.localStorage.removeItem(SEL_STORAGE_KEY);
+      }
+    } catch {
+      // Storage may be full or denied; a failed write must not change the
+      // in-memory selection nor interrupt the page.
+    }
+  }, [failed, loading, selKey, items]);
 
   const visible = items.filter((e) => {
     if (filter === "Running") return e.phase === "Running";

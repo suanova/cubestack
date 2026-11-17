@@ -2331,17 +2331,27 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
               // be seen growing into it (and collapsing back out of it). The model
               // playground below is a different surface and stays unnamed.
               ...(isAgent ? { viewTransitionName: AGENT_CHAT_TRANSITION } : {}),
-              // 480px basis keeps the thread sized when the card has no
-              // definite height (narrow layout); otherwise it flex-fills and
-              // scrolls inside its own scrollbar.
-              flex: "1 1 480px",
-              minHeight: 160,
+              // The thread takes the leftover height and scrolls inside its own
+              // scrollbar. On desktop the card has a definite height, so the
+              // basis is 0: the thread is the only flexible region, and the
+              // fixed input row takes its height first. Narrow layouts give the
+              // card no definite height, so there the 480px basis is what sizes
+              // the thread.
+              flex: "1 1 0%",
+              // A short window lets the thread yield height, so the composer's
+              // input row still fits instead of the card keeping a thread it
+              // cannot afford.
+              minHeight: "min(160px, 25vh)",
               overflowY: "auto",
-              p: "18px",
+              // No bottom padding: the sticky composer block at the end of the
+              // thread supplies it, so the block can sit flush with the bottom
+              // edge while the conversation scrolls behind it.
+              p: "18px 18px 0",
               display: "flex",
               flexDirection: "column",
               gap: "14px",
               bgcolor: "var(--surface)",
+              "@media (max-width: 1180px)": { flex: "1 1 480px" },
             }}
           >
             {agentNotice ? (
@@ -2409,6 +2419,107 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
                 </Box>
               </Box>
             ) : null}
+            {/* The dock and the go-config callout live at the end of the thread
+                and float at its bottom edge, so they stay in view while the
+                conversation scrolls behind them. They are one block inside the
+                thread rather than a second scroll area beside it; the input row
+                below stays pinned. flexShrink: 0 keeps the thread scrolling
+                rather than squeezing the cards. */}
+            <Box
+              data-od-id="composer-scroll"
+              sx={{
+                position: "sticky",
+                bottom: 0,
+                zIndex: 1,
+                // Sit at the bottom even when the conversation is too short to
+                // scroll; sticky alone only pins it once the thread overflows.
+                mt: "auto",
+                flexShrink: 0,
+                // Never grow taller than the thread it floats in: a tall set of
+                // cards then scrolls inside this block instead of pushing its
+                // top (the oldest, still actionable card) out of view.
+                maxHeight: "100%",
+                overflowY: "auto",
+                display: "flex",
+                flexDirection: "column",
+                // Span the thread's side padding so messages cannot show
+                // through beside the cards as they scroll past.
+                mx: "-18px",
+                px: "18px",
+                pb: "18px",
+                bgcolor: "var(--surface)",
+              }}
+            >
+              {/* The cards a turn is parked on end the thread instead of
+                  staying in the bubble that raised them: they are still in the
+                  one conversation, at its newest end, and the thread's
+                  follow-the-newest scroll is what brings them into view. */}
+              {isAgent ? (
+                <HitlDock
+                  approvals={dockApprovals}
+                  questions={dockQuestions}
+                  sessionKey={agentSessionKey}
+                  now={now}
+                  allowAlwaysOk={confirmPolicy === "Allowlist"}
+                  onDecide={(callId, decision) => void decideApproval(callId, decision)}
+                  onAnswer={(callId, answers, cancel) => void submitQuestion(callId, answers, cancel)}
+                />
+              ) : null}
+              {isAgent && !agentReady ? (
+                // A callout, not a line of grey text: it is the only thing the
+                // reader can act on until the instance is Ready. Amber for "not
+                // there yet", the danger tone for a start that failed.
+                <Box
+                  data-od-id="agent-not-ready"
+                  sx={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "12px",
+                    mb: "8px",
+                    border: 1,
+                    borderColor:
+                      agentStatus?.phase === "Failed"
+                        ? "color-mix(in oklch, #e15c5c 45%, var(--border))"
+                        : "color-mix(in oklch, #e0a13a 45%, var(--border))",
+                    bgcolor:
+                      agentStatus?.phase === "Failed"
+                        ? "color-mix(in oklch, #e15c5c 8%, transparent)"
+                        : "color-mix(in oklch, #e0a13a 8%, transparent)",
+                    borderRadius: "8px",
+                    p: "10px 12px",
+                  }}
+                >
+                  {/* A start in progress is the one state worth animating: it is
+                      the only one that ends by itself. */}
+                  {agentStatus?.exists && agentStatus.phase !== "Failed" && agentStatus.modelConfigured !== false ? <Spinner size={14} /> : null}
+                  <Box sx={{ flex: 1, fontSize: 13, fontWeight: 600, lineHeight: 1.6 }}>
+                    {!agentStatus
+                      ? t("cubepilot.chat.agentMetaLoading")
+                      : !agentStatus.exists
+                        ? t("cubepilot.chat.notReadyMissing")
+                        : agentStatus.phase === "Failed"
+                          ? t("cubepilot.chat.notReadyFailed")
+                          : agentStatus.modelConfigured === false
+                            ? agentStatus.modelMessage ||
+                              t("cubepilot.chat.notReadyNoModel")
+                            : t("cubepilot.chat.agentStarting", {
+                                secs: String(waitingSeconds(agentStatus.startedAt, now) ?? 0),
+                              })}
+                  </Box>
+                  {/* A Ready-but-model-less instance is done starting, so it is the
+                      one case that can be acted on: send the reader to the config
+                      tab to pick the model it is missing. The spinner belongs only
+                      to a start still in flight. */}
+                  {agentStatus && agentStatus.exists && agentStatus.phase !== "Failed" && agentStatus.modelConfigured !== false ? (
+                    null
+                  ) : (
+                    <Btn variant="primary" onClick={() => setStoredTab("config")} data-od-id="agent-go-config">
+                      {t("cubepilot.chat.goConfig")}
+                    </Btn>
+                  )}
+                </Box>
+              ) : null}
+            </Box>
           </Box>
 
           {/* Composer: a floating bar pinned to the window's bottom edge (the
@@ -2416,254 +2527,189 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
               top-border row; the thread scrolls above it. In model mode the
               sampling params collapse into a chip in the bar's bottom row
               (DSH's access-mode look) and open in a popover. */}
-          <Box sx={{ p: "10px 14px 12px", flex: "none" }}>
-            {/* The cards a turn is parked on, docked above the composer rather
-                than in the bubble that raised them: the thread scrolls, so a
-                card drawn in it is a card the user has to go looking for — and
-                the turn stays parked for exactly as long as they are looking. */}
-            {isAgent ? (
-              <HitlDock
-                approvals={dockApprovals}
-                questions={dockQuestions}
-                sessionKey={agentSessionKey}
-                now={now}
-                allowAlwaysOk={confirmPolicy === "Allowlist"}
-                onDecide={(callId, decision) => void decideApproval(callId, decision)}
-                onAnswer={(callId, answers, cancel) => void submitQuestion(callId, answers, cancel)}
-              />
-            ) : null}
-            {isAgent && !agentReady ? (
-              // A callout, not a line of grey text: it is the only thing the
-              // reader can act on until the instance is Ready. Amber for "not
-              // there yet", the danger tone for a start that failed.
-              <Box
-                data-od-id="agent-not-ready"
-                sx={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "12px",
-                  mb: "8px",
-                  border: 1,
-                  borderColor:
-                    agentStatus?.phase === "Failed"
-                      ? "color-mix(in oklch, #e15c5c 45%, var(--border))"
-                      : "color-mix(in oklch, #e0a13a 45%, var(--border))",
-                  bgcolor:
-                    agentStatus?.phase === "Failed"
-                      ? "color-mix(in oklch, #e15c5c 8%, transparent)"
-                      : "color-mix(in oklch, #e0a13a 8%, transparent)",
-                  borderRadius: "8px",
-                  p: "10px 12px",
-                }}
-              >
-                {/* A start in progress is the one state worth animating: it is
-                    the only one that ends by itself. */}
-                {agentStatus?.exists && agentStatus.phase !== "Failed" && agentStatus.modelConfigured !== false ? <Spinner size={14} /> : null}
-                <Box sx={{ flex: 1, fontSize: 13, fontWeight: 600, lineHeight: 1.6 }}>
-                  {!agentStatus
-                    ? t("cubepilot.chat.agentMetaLoading")
-                    : !agentStatus.exists
-                      ? t("cubepilot.chat.notReadyMissing")
-                      : agentStatus.phase === "Failed"
-                        ? t("cubepilot.chat.notReadyFailed")
-                        : agentStatus.modelConfigured === false
-                          ? agentStatus.modelMessage ||
-                            t("cubepilot.chat.notReadyNoModel")
-                          : t("cubepilot.chat.agentStarting", {
-                              secs: String(waitingSeconds(agentStatus.startedAt, now) ?? 0),
-                            })}
-                </Box>
-                {/* A Ready-but-model-less instance is done starting, so it is the
-                    one case that can be acted on: send the reader to the config
-                    tab to pick the model it is missing. The spinner belongs only
-                    to a start still in flight. */}
-                {agentStatus && agentStatus.exists && agentStatus.phase !== "Failed" && agentStatus.modelConfigured !== false ? (
-                  null
-                ) : (
-                  <Btn variant="primary" onClick={() => setStoredTab("config")} data-od-id="agent-go-config">
-                    {t("cubepilot.chat.goConfig")}
-                  </Btn>
-                )}
-              </Box>
-            ) : null}
-            {/* The state of the turn, above the composer rather than in the
-                card's frame: the thread scrolls, and this line is read exactly
-                when a long turn has been quiet and the reader has started to
-                wonder whether it is still going — which is when their eyes are
-                here, at the input. This dock is outside the scroll area, so the
-                line is as always-visible here as it was up there. */}
-            {isAgent ? (
-              <Box
-                data-od-id="agent-status"
-                aria-live="polite"
-                sx={{ display: "flex", alignItems: "center", gap: "8px", mb: "8px" }}
-              >
-                <Pill variant={STATUS_PILL[status.tone]} dot pulse={status.tone === "run"}>
-                  {t(status.key, status.vars)}
-                </Pill>
-                {/* The two ways on from a check that could not answer, beside the
-                    status they belong to. Retry is the way back to an answer, and
-                    Dismiss the way out of an alarm that cannot resolve itself —
-                    a channel this pane cannot use fails every retry the same way,
-                    and without it the status would sit here forever. */}
-                {turnCheckFailed ? (
-                  <Box sx={{ display: "flex", alignItems: "center", gap: "4px", ml: "auto" }}>
-                    <Btn variant="ghost" small onClick={retryTurnCheck} data-od-id="turn-retry">
-                      {t("cubepilot.chat.retry")}
-                    </Btn>
-                    <Btn variant="ghost" small onClick={dismissTurnCheck} data-od-id="turn-dismiss">
-                      {t("cubepilot.chat.dismiss")}
-                    </Btn>
-                  </Box>
-                ) : null}
-              </Box>
-            ) : null}
+          {/* The state of the turn, above the composer rather than in the
+              card's frame: the thread scrolls, and this line is read exactly
+              when a long turn has been quiet and the reader has started to
+              wonder whether it is still going — which is when their eyes are
+              here, at the input. It sits outside the thread, so the line stays
+              as always-visible here as it was up there. */}
+          {isAgent ? (
             <Box
-              sx={{
-                display: "flex",
-                flexDirection: "column",
-                gap: "6px",
-                border: 1,
-                borderColor: "divider",
-                borderRadius: "16px",
-                bgcolor: "background.default",
-                boxShadow: (theme) =>
-                  `0 1px 2px ${theme.palette.mode === "dark" ? "rgba(0,0,0,0.45)" : "rgba(0,0,0,0.05)"}, 0 8px 20px ${
-                    theme.palette.mode === "dark" ? "rgba(0,0,0,0.5)" : "rgba(0,0,0,0.09)"
-                  }`,
-                p: "6px 8px",
-                "&:focus-within": { borderColor: "var(--accent)" },
-              }}
+              data-od-id="agent-status"
+              aria-live="polite"
+              sx={{ display: "flex", alignItems: "center", gap: "8px", mb: "8px", px: "14px" }}
             >
-              <CpTextArea
-                ref={inputEl}
-                rows={1}
-                value={input}
-                onChange={(e) => {
-                  setInput(e.target.value);
-                  autoGrow();
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-                    e.preventDefault();
-                    sendMessage();
-                  }
-                }}
-                placeholder={t("cubepilot.chat.placeholder")}
-                aria-label={t("cubepilot.chat.placeholder")}
-                data-od-id="chat-input"
-                sx={{
-                  width: "100%",
-                  resize: "none",
-                  border: 0,
-                  boxShadow: "none",
-                  bgcolor: "transparent",
-                  padding: "6px 4px",
-                  minHeight: 34,
-                  maxHeight: 120,
-                  fontSize: 13.5,
-                  "&:focus": { borderColor: "divider", boxShadow: "none" },
-                }}
-              />
-              <Box sx={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                {isModel ? (
+              <Pill variant={STATUS_PILL[status.tone]} dot pulse={status.tone === "run"}>
+                {t(status.key, status.vars)}
+              </Pill>
+              {/* The two ways on from a check that could not answer, beside the
+                  status they belong to. Retry is the way back to an answer, and
+                  Dismiss the way out of an alarm that cannot resolve itself —
+                  a channel this pane cannot use fails every retry the same way,
+                  and without it the status would sit here forever. */}
+              {turnCheckFailed ? (
+                <Box sx={{ display: "flex", alignItems: "center", gap: "4px", ml: "auto" }}>
+                  <Btn variant="ghost" small onClick={retryTurnCheck} data-od-id="turn-retry">
+                    {t("cubepilot.chat.retry")}
+                  </Btn>
+                  <Btn variant="ghost" small onClick={dismissTurnCheck} data-od-id="turn-dismiss">
+                    {t("cubepilot.chat.dismiss")}
+                  </Btn>
+                </Box>
+              ) : null}
+            </Box>
+          ) : null}
+          <Box
+            sx={{
+              display: "flex",
+              flexDirection: "column",
+              gap: "6px",
+              // Keep the input row pinned and whole: the thread above gives up
+              // height instead — this row must not, or the input would be
+              // squashed or pushed out of the card.
+              flexShrink: 0,
+              mx: "14px",
+              mb: "12px",
+              border: 1,
+              borderColor: "divider",
+              borderRadius: "16px",
+              bgcolor: "background.default",
+              boxShadow: (theme) =>
+                `0 1px 2px ${theme.palette.mode === "dark" ? "rgba(0,0,0,0.45)" : "rgba(0,0,0,0.05)"}, 0 8px 20px ${
+                  theme.palette.mode === "dark" ? "rgba(0,0,0,0.5)" : "rgba(0,0,0,0.09)"
+                }`,
+              p: "6px 8px",
+              "&:focus-within": { borderColor: "var(--accent)" },
+            }}
+          >
+            <CpTextArea
+              ref={inputEl}
+              rows={1}
+              value={input}
+              onChange={(e) => {
+                setInput(e.target.value);
+                autoGrow();
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  sendMessage();
+                }
+              }}
+              placeholder={t("cubepilot.chat.placeholder")}
+              aria-label={t("cubepilot.chat.placeholder")}
+              data-od-id="chat-input"
+              sx={{
+                width: "100%",
+                resize: "none",
+                border: 0,
+                boxShadow: "none",
+                bgcolor: "transparent",
+                padding: "6px 4px",
+                minHeight: 34,
+                maxHeight: 120,
+                fontSize: 13.5,
+                "&:focus": { borderColor: "divider", boxShadow: "none" },
+              }}
+            />
+            <Box sx={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              {isModel ? (
+                <Box
+                  ref={paramsChipRef}
+                  component="button"
+                  type="button"
+                  data-od-id="params-chip"
+                  aria-haspopup="dialog"
+                  aria-expanded={paramsAnchor !== null}
+                  onClick={() => setParamsAnchor(paramsAnchor ? null : paramsChipRef.current)}
+                  sx={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "4px",
+                    height: 28,
+                    px: "8px",
+                    border: "none",
+                    borderRadius: "24px",
+                    bgcolor: "transparent",
+                    color: "text.secondary",
+                    fontSize: 13,
+                    lineHeight: "20px",
+                    fontWeight: 500,
+                    cursor: "pointer",
+                    flex: "none",
+                    "&:hover": { bgcolor: "action.hover" },
+                    "&:focus-visible": { boxShadow: "0 0 0 2px var(--border)" },
+                  }}
+                >
+                  {SLIDERS_ICON}
+                  <Box component="span">{t("cubepilot.playground.paramsTitle")}</Box>
                   <Box
-                    ref={paramsChipRef}
-                    component="button"
-                    type="button"
-                    data-od-id="params-chip"
-                    aria-haspopup="dialog"
-                    aria-expanded={paramsAnchor !== null}
-                    onClick={() => setParamsAnchor(paramsAnchor ? null : paramsChipRef.current)}
+                    component="span"
                     sx={{
                       display: "inline-flex",
-                      alignItems: "center",
-                      gap: "4px",
-                      height: 28,
-                      px: "8px",
-                      border: "none",
-                      borderRadius: "24px",
-                      bgcolor: "transparent",
-                      color: "text.secondary",
-                      fontSize: 13,
-                      lineHeight: "20px",
-                      fontWeight: 500,
-                      cursor: "pointer",
-                      flex: "none",
-                      "&:hover": { bgcolor: "action.hover" },
-                      "&:focus-visible": { boxShadow: "0 0 0 2px var(--border)" },
+                      color: "text.disabled",
+                      transform: paramsAnchor !== null ? "rotate(180deg)" : "none",
+                      transition: "transform 120ms ease",
                     }}
                   >
-                    {SLIDERS_ICON}
-                    <Box component="span">{t("cubepilot.playground.paramsTitle")}</Box>
-                    <Box
-                      component="span"
-                      sx={{
-                        display: "inline-flex",
-                        color: "text.disabled",
-                        transform: paramsAnchor !== null ? "rotate(180deg)" : "none",
-                        transition: "transform 120ms ease",
-                      }}
-                    >
-                      {CHEVRON_DOWN_ICON}
-                    </Box>
+                    {CHEVRON_DOWN_ICON}
                   </Box>
-                ) : null}
-                <Box sx={{ flex: 1 }} />
-                {/* Stop is offered for a turn this pane is streaming, and for
-                    one it merely knows about — a turn that survived a reload, or
-                    that another tab started, is still this session's turn and
-                    this is still the control that ends it. Only a CONFIRMED one:
-                    when the check itself failed, nothing established that a turn
-                    is running, and the abort would need the very channel whose
-                    absence is what failed the check, so Send stays and the
-                    header offers Retry instead. */}
-                {isAgent && (sending || (runningElsewhere && !turnCheckFailed)) ? (
-                  <Btn
-                    variant="secondary"
-                    small
-                    disabled={stoppingElsewhere}
-                    onClick={() => void (sending ? stopAgent() : stopElsewhere())}
-                    data-od-id="stop-btn"
-                  >
-                    {t("cubepilot.chat.stop")}
-                  </Btn>
-                ) : (
-                  <Btn
-                    variant="primary"
-                    small
-                    disabled={sending || !objKind || (isAgent && !agentReady)}
-                    onClick={() => sendMessage()}
-                    data-od-id="send-btn"
-                  >
-                    {t("cubepilot.chat.send")}
-                  </Btn>
-                )}
-              </Box>
+                </Box>
+              ) : null}
+              <Box sx={{ flex: 1 }} />
+              {/* Stop is offered for a turn this pane is streaming, and for
+                  one it merely knows about — a turn that survived a reload, or
+                  that another tab started, is still this session's turn and
+                  this is still the control that ends it. Only a CONFIRMED one:
+                  when the check itself failed, nothing established that a turn
+                  is running, and the abort would need the very channel whose
+                  absence is what failed the check, so Send stays and the
+                  header offers Retry instead. */}
+              {isAgent && (sending || (runningElsewhere && !turnCheckFailed)) ? (
+                <Btn
+                  variant="secondary"
+                  small
+                  disabled={stoppingElsewhere}
+                  onClick={() => void (sending ? stopAgent() : stopElsewhere())}
+                  data-od-id="stop-btn"
+                >
+                  {t("cubepilot.chat.stop")}
+                </Btn>
+              ) : (
+                <Btn
+                  variant="primary"
+                  small
+                  disabled={sending || !objKind || (isAgent && !agentReady)}
+                  onClick={() => sendMessage()}
+                  data-od-id="send-btn"
+                >
+                  {t("cubepilot.chat.send")}
+                </Btn>
+              )}
             </Box>
-            <Popover
-              open={paramsAnchor !== null}
-              anchorEl={paramsAnchor}
-              onClose={() => setParamsAnchor(null)}
-              anchorOrigin={{ vertical: "top", horizontal: "left" }}
-              transformOrigin={{ vertical: "bottom", horizontal: "left" }}
-              slotProps={{
-                paper: {
-                  sx: {
-                    p: "10px 12px",
-                    border: 1,
-                    borderColor: "divider",
-                    borderRadius: "var(--radius)",
-                    bgcolor: "background.default",
-                  },
-                },
-              }}
-            >
-              <Box sx={{ width: 320 }}>
-                <ParamsPanel params={params} onChange={(patch) => setParams((p) => ({ ...p, ...patch }))} />
-              </Box>
-            </Popover>
           </Box>
+          <Popover
+            open={paramsAnchor !== null}
+            anchorEl={paramsAnchor}
+            onClose={() => setParamsAnchor(null)}
+            anchorOrigin={{ vertical: "top", horizontal: "left" }}
+            transformOrigin={{ vertical: "bottom", horizontal: "left" }}
+            slotProps={{
+              paper: {
+                sx: {
+                  p: "10px 12px",
+                  border: 1,
+                  borderColor: "divider",
+                  borderRadius: "var(--radius)",
+                  bgcolor: "background.default",
+                },
+              },
+            }}
+          >
+            <Box sx={{ width: 320 }}>
+              <ParamsPanel params={params} onChange={(patch) => setParams((p) => ({ ...p, ...patch }))} />
+            </Box>
+          </Popover>
         </Card>
       </Box>
     </Box>
