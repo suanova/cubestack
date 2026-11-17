@@ -124,13 +124,19 @@ jobs:
             fi
             echo "dev=true" >> "${GITHUB_OUTPUT}"
           fi
-          tgz_dir=helm/cubestack-controller-manager-chart
+          # operator/Makefile's helm-package starts with
+          # `rm -f helm/cubestack-controller-manager-chart/*.tgz`, so a second
+          # run deletes the first package. Move each one out of the chart dir
+          # before packaging the next.
           make helm-package HELM_CHART_VERSION="${VERSION}" HELM_CHART_APP_VERSION="${APP_VERSION}"
-          tgz="${tgz_dir}/cubestack-controller-manager-chart-${VERSION}.tgz"
+          tgz="${RUNNER_TEMP}/cubestack-controller-manager-chart-${VERSION}.tgz"
+          mv "helm/cubestack-controller-manager-chart/cubestack-controller-manager-chart-${VERSION}.tgz" "${tgz}"
           if [ -n "${EXTRA_VERSION:-}" ]; then
             make helm-package HELM_CHART_VERSION="${EXTRA_VERSION}" HELM_CHART_APP_VERSION="${APP_VERSION}"
+            extra_tgz="${RUNNER_TEMP}/cubestack-controller-manager-chart-${EXTRA_VERSION}.tgz"
+            mv "helm/cubestack-controller-manager-chart/cubestack-controller-manager-chart-${EXTRA_VERSION}.tgz" "${extra_tgz}"
             echo "extra-version=${EXTRA_VERSION}" >> "${GITHUB_OUTPUT}"
-            echo "extra-tgz=${tgz_dir}/cubestack-controller-manager-chart-${EXTRA_VERSION}.tgz" >> "${GITHUB_OUTPUT}"
+            echo "extra-tgz=${extra_tgz}" >> "${GITHUB_OUTPUT}"
           fi
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
           echo "tgz=${tgz}" >> "${GITHUB_OUTPUT}"
