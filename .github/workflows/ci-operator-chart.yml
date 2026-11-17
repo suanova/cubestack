@@ -136,9 +136,16 @@ jobs:
             # (spec.global.images injects the tag), so this only decides what a
             # bare `helm install` pulls.
             APP_VERSION="latest"
-            # Main also publishes the rolling name an open-source install uses.
+            # Main also publishes the rolling name an open-source install uses,
+            # but only from the newest commit that decides this chart: a re-run
+            # of an older run must not roll `<version>-latest` back.
             if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
-              EXTRA_VERSION="${BASE}-latest"
+              git fetch --no-tags --depth=1 origin main
+              if git diff --quiet "${GITHUB_SHA}" FETCH_HEAD -- operator/helm operator/config operator/hack operator/Makefile .github/workflows/ci-operator-chart.yml; then
+                EXTRA_VERSION="${BASE}-latest"
+              else
+                echo "Skipping '${BASE}-latest': a later commit changed this chart"
+              fi
             fi
             echo "dev=true" >> "${GITHUB_OUTPUT}"
           fi
