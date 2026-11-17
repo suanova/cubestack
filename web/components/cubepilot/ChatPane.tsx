@@ -2435,6 +2435,11 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
                 // scroll; sticky alone only pins it once the thread overflows.
                 mt: "auto",
                 flexShrink: 0,
+                // Never grow taller than the thread it floats in: a tall set of
+                // cards then scrolls inside this block instead of pushing its
+                // top (the oldest, still actionable card) out of view.
+                maxHeight: "100%",
+                overflowY: "auto",
                 display: "flex",
                 flexDirection: "column",
                 // Span the thread's side padding so messages cannot show
