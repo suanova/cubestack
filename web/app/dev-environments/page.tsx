@@ -154,9 +154,16 @@ export default function DevEnvironmentsPage() {
   // Carry the selection across a refresh in localStorage (same convention as the
   // locale), so reopening the page lands on the environment the reader was on
   // rather than silently jumping back to the first one.
-  const [selKey, setSelKey] = useState<string | null>(() =>
-    typeof window !== "undefined" ? window.localStorage.getItem(SEL_STORAGE_KEY) : null,
-  );
+  const [selKey, setSelKey] = useState<string | null>(() => {
+    // Storage can be denied by browser policy, and the getter itself can throw;
+    // a read failure is just "no remembered selection", not a crashing page.
+    if (typeof window === "undefined") return null;
+    try {
+      return window.localStorage.getItem(SEL_STORAGE_KEY);
+    } catch {
+      return null;
+    }
+  });
   const [filter, setFilter] = useState<Filter>("all");
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
@@ -244,18 +251,25 @@ export default function DevEnvironmentsPage() {
   // Mirror the selection into storage so a refresh reopens the same
   // environment instead of resetting to the first.
   useEffect(() => {
-    // Don't fire before the list loads, or the ?env the URL carried in would be
-    // dropped (items is empty on the first pass).
-    if (items.length === 0) return;
-    // Persist the choice once the list exists; on the first pass items is empty
-    // and we would wipe a previously stored selection. Drop the stored key when
-    // the environment is gone so the page never reopens a deleted one.
-    if (selKey && items.some((e) => envKey(e) === selKey)) {
-      window.localStorage.setItem(SEL_STORAGE_KEY, selKey);
-    } else {
-      window.localStorage.removeItem(SEL_STORAGE_KEY);
+    // Don't fire while the list is still loading: an empty items on the
+    // first pass means "not loaded yet", not "nothing exists", and wiping the
+    // storage then would drop the selection a previous visit stored.
+    if (loading) return;
+    // Persist the choice once the list has settled; if the environment is gone
+    // (including a last-item delete, where an empty list is a real answer not an
+    // in-flight state) drop the stored key so the page never reopens a deleted
+    // one.
+    try {
+      if (selKey && items.some((e) => envKey(e) === selKey)) {
+        window.localStorage.setItem(SEL_STORAGE_KEY, selKey);
+      } else {
+        window.localStorage.removeItem(SEL_STORAGE_KEY);
+      }
+    } catch {
+      // Storage may be full or denied; a failed write must not change the
+      // in-memory selection nor interrupt the page.
     }
-  }, [selKey, items]);
+  }, [loading, selKey, items]);
 
   const visible = items.filter((e) => {
     if (filter === "Running") return e.phase === "Running";

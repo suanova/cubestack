@@ -2419,15 +2419,23 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
           <Box
             sx={{
               p: "10px 14px 12px",
-              // 输入条必须始终钉在卡片底部：允许多个审批卡把输入条挤出
-              // 卡片/视口外。这里让本盒可收缩，其内部 HitlDock（自带滚动）
-              // 让出空间，输入条保持可见。
+              // The input row must stay pinned to the card's bottom: several
+              // parked approval cards must not be able to push it off the card
+              // (or the viewport). This box may shrink, letting its internal
+              // HitlDock (which scrolls) give up the space so the input row
+              // stays visible.
               flex: "0 1 auto",
               minHeight: 0,
               display: "flex",
               flexDirection: "column",
               justifyContent: "flex-end",
-              overflow: "hidden",
+              // When the card is too short to show every parked card plus the
+              // input row, scroll the composer's own overflow instead of
+              // clipping it: the reviewer said the go-config callout and the
+              // pending-approval buttons must stay reachable at minimum
+              // height. The input row is pinned below (flexShrink: 0), so
+              // scrolling surfaces the docked cards above it.
+              overflowY: "auto",
             }}
           >
             {/* The cards a turn is parked on, docked above the composer rather

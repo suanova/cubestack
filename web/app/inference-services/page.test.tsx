@@ -335,6 +335,38 @@ describe("inference services page", () => {
     act(() => root.unmount());
   });
 
+  it("survives a storage getter that throws, and renders with no selection", async () => {
+    const real = Storage.prototype.getItem;
+    const realSet = Storage.prototype.setItem;
+    const realRemove = Storage.prototype.removeItem;
+    // Only the selection key is denied: the locale read must keep working or the
+    // page renders in English and the assertions below target the wrong strings.
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation((key: string) => {
+      if (key === "cubestack.inference-services.selected") throw new Error("denied");
+      return real.call(window.localStorage, key);
+    });
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation((key: string, value: string) => {
+      if (key === "cubestack.inference-services.selected") throw new Error("denied");
+      return realSet.call(window.localStorage, key, value);
+    });
+    vi.spyOn(Storage.prototype, "removeItem").mockImplementation((key: string) => {
+      if (key === "cubestack.inference-services.selected") throw new Error("denied");
+      return realRemove.call(window.localStorage, key);
+    });
+    try {
+      stubData(inferenceServiceList());
+      const { container, root } = renderPage();
+      await act(async () => {});
+      expect(container.textContent).toContain("dsv4-flash-pd");
+      act(() => root.unmount());
+    } finally {
+      (Storage.prototype as unknown)["getItem"] = real;
+      (Storage.prototype as unknown)["setItem"] = realSet;
+      (Storage.prototype as unknown)["removeItem"] = realRemove;
+      vi.restoreAllMocks();
+    }
+  });
+
   it("switching from a service with no declared overrides keeps scale inputs controlled", async () => {
     // An unresolvable profileRef (e.g. an inline profile the cluster cannot
     // resolve) projects an empty override set. Switching from such a service to
