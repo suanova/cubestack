@@ -1207,10 +1207,21 @@ const shQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 // The whole sequence runs in a subshell: the pasted line lands in the user's
 // interactive shell, and a bare `exit` would close it — on a failed login too,
 // before the error could be read — and would leave `tmp`/`rc` set.
+//
+// StrictHostKeyChecking=no, not accept-new, and the two differ only in what a
+// *changed* host key does: accept-new refuses the login, =no proceeds and prints
+// ssh's host-identification warning. The address this command logs in to is a
+// pooled one — an L4 port, or a host-network port, each allocated per environment
+// and returned to the pool when it is deleted — so the same <host>:<port> serves
+// a different environment, with a different host key, later. That is ordinary use
+// of a dev environment, and accept-new would turn it into a login that fails long
+// after the key was recorded, with nothing in the console to clear the stale
+// entry. The prompt is also a hang rather than a keystroke wherever this line is
+// pasted into a script or a CI step, which either flag fixes.
 function sshCommand(key: string, parts: { user: string; host: string; port: string }): string {
   return (
     `(tmp=$(mktemp) && chmod 600 "$tmp" && printf '%s\\n' ${shQuote(key)} > "$tmp" && ` +
-    `ssh -i "$tmp" -p ${parts.port} ${shQuote(`${parts.user}@${parts.host}`)}; ` +
+    `ssh -i "$tmp" -o StrictHostKeyChecking=no -p ${parts.port} ${shQuote(`${parts.user}@${parts.host}`)}; ` +
     `rc=$?; rm -f "$tmp"; exit "$rc")`
   );
 }
@@ -1243,7 +1254,10 @@ function SshKeyRow({
   const [busy, setBusy] = useState(false);
   const parts = sshParts(address);
   // The command the downloaded key is used with: the file is the fixed target of
-  // the download above, so only user, host and port vary.
+  // the download above, so only user, host and port vary. The dictionary string
+  // carries the same host-key policy as sshCommand — no, not accept-new — so the
+  // two commands cannot disagree about what a changed host key does; the reason
+  // for that choice is stated on sshCommand.
   const login = parts
     ? t("dev.conn.sshLoginCommand", { user: parts.user, host: parts.host, port: parts.port })
     : address;
