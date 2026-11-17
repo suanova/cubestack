@@ -92,6 +92,20 @@ spec:
         # Registry/project the dev-environment image catalog is published to.
         - name: CUBESTACK_DEV_IMAGE_REGISTRY
           value: {{ .Values.image.registry | quote }}
+        # Per-family tags of that catalog. A release pins each one; empty leaves
+        # the catalog on `latest`, which is what a development deployment pushes.
+        {{- with .Values.devImages.cpu.tag }}
+        - name: CUBESTACK_DEV_IMAGE_CPU_TAG
+          value: {{ . | quote }}
+        {{- end }}
+        {{- with .Values.devImages.cuda.tag }}
+        - name: CUBESTACK_DEV_IMAGE_CUDA_TAG
+          value: {{ . | quote }}
+        {{- end }}
+        {{- with .Values.devImages.maca.tag }}
+        - name: CUBESTACK_DEV_IMAGE_MACA_TAG
+          value: {{ . | quote }}
+        {{- end }}
         {{- if .Values.agentApiUrl }}
         # CubePilot agent API (chat backend); unset = in-cluster Service DNS.
         - name: CUBESTACK_PILOT_URL

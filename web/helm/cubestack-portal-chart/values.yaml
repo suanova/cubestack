@@ -22,6 +22,21 @@ image:
   tag: ""
   pullPolicy: Always
 
+# Tags of the three dev-environment family images the catalog offers. A release
+# pins one tag per family (they roll independently), so the catalog reads these
+# rather than naming a tag of its own: an offline install ships exactly the tags
+# its release tree locked, and a hardcoded `latest` would point at an image
+# nobody published.
+#
+# Empty means `latest`, which is what a development deployment pushes.
+devImages:
+  cpu:
+    tag: ""
+  cuda:
+    tag: ""
+  maca:
+    tag: ""
+
 # Number of replicas
 replicaCount: 1
 

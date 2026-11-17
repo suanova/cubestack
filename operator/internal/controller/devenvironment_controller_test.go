@@ -1643,6 +1643,22 @@ var _ = Describe("DevEnvironment object rendering and publishing", func() {
 			// it never runs.
 			Expect(hash(nil)).To(Equal(withoutAgent))
 		})
+
+		It("digests the init container's image reference, which every environment carries", func() {
+			before := hash(nil)
+			original := permissionInitImage
+			DeferCleanup(func() { permissionInitImage = original })
+			// The reference an offline install names: its own registry in place of
+			// the one the build bakes in.
+			permissionInitImage = "cluster.example/busybox:1.38.0"
+			Expect(hash(nil)).NotTo(Equal(before))
+			// Unlike the sidecar's, this container runs in every environment, so
+			// there is no environment left on the reference the old manager baked
+			// in — the reason the field is hashed plainly rather than omitted when
+			// empty.
+			permissionInitImage = original
+			Expect(hash(nil)).To(Equal(before))
+		})
 	})
 
 	Describe("rdmaResource", func() {

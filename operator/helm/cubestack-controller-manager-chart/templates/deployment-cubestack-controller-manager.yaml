@@ -55,6 +55,12 @@ spec:
         - --host-port-range-end={{ .Values.hostPortRange.end }}
         - --rdma-ib-resource={{ .Values.rdma.ibResource }}
         - --rdma-roce-resource={{ .Values.rdma.roceResource }}
+        {{- with .Values.activityAgent.image.repository }}
+        - --activity-agent-image={{ . }}:{{ $.Values.activityAgent.image.tag | default $.Chart.AppVersion }}
+        {{- end }}
+        {{- with .Values.permissionInit.image.repository }}
+        - --permission-init-image={{ . }}:{{ $.Values.permissionInit.image.tag | default $.Chart.AppVersion }}
+        {{- end }}
         command:
         - /manager
         image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"

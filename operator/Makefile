@@ -198,11 +198,14 @@ DEV_ENV_IMAGE_TAG ?= e2e
 # exec format error, not at load. Override to build for another platform
 # deliberately.
 DEV_ENV_PLATFORM ?= linux/$(shell uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
-# permissionInitImage in internal/controller/assets.go: the hardcoded busybox the
+# permissionInitImage in internal/controller/assets.go: the busybox the
 # workspace-ownership init container runs. Read out of the source rather than
 # restated, so a change there cannot leave this loading a reference nothing pulls:
 # the init container fails closed, so the environment would never start.
-PERMISSION_INIT_IMAGE ?= $(shell sed -n 's/^[[:space:]]*permissionInitImage[[:space:]]*=[[:space:]]*"\(.*\)"$$/\1/p' internal/controller/assets.go)
+#
+# The pattern allows a leading `var`, like ACTIVITY_AGENT_IMAGE: the chart
+# overrides the reference at install time, so it is a variable, not a const.
+PERMISSION_INIT_IMAGE ?= $(shell sed -n 's/^[[:space:]]*\(var[[:space:]]*\)\{0,1\}permissionInitImage[[:space:]]*=[[:space:]]*"\(.*\)"$$/\2/p' internal/controller/assets.go)
 # What the images below are built FROM: `<the Dockerfile's build arg>=<the
 # platform registry's copy, pinned by digest>=<the upstream reference that copy
 # mirrors>`. The copies live in the shared mirrors project, each repo named for

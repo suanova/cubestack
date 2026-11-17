@@ -3527,6 +3527,14 @@ func (r *DevEnvironmentReconciler) stsSpecHash(env *aiv1alpha1.DevEnvironment) s
 		// early, leaving every environment that carries the sidecar on the
 		// reference the previous manager baked in.
 		ActivityAgentImage string `json:"activityAgentImage,omitempty"`
+		// PermissionInitImage is ::permissionInitImage, and is the init
+		// container's reference. Like the sidecar's it is a reference nothing in
+		// the spec moves, but unlike the sidecar it is present in every
+		// environment: the container that takes ownership of the workspace claim
+		// always runs. Hashed plainly, not omitted when empty — it never is — so a
+		// manager whose flags name another registry re-applies every environment
+		// rather than leaving them on the reference the previous manager baked in.
+		PermissionInitImage string `json:"permissionInitImage,omitempty"`
 		// ServiceAccount is the account the pod template names, and is empty for
 		// every environment that runs under the namespace's default. It is the one
 		// pod-spec field here that is neither the spec nor a constant, so nothing
@@ -3610,6 +3618,7 @@ func (r *DevEnvironmentReconciler) stsSpecHash(env *aiv1alpha1.DevEnvironment) s
 		ShareProcessNamespace: activityAgentEnabled(env),
 		ActivityAgent:         activityAgent,
 		ActivityAgentImage:    activityAgentRef,
+		PermissionInitImage:   permissionInitImage,
 		ServiceAccount:        serviceAccount,
 		Sudoers:               sudoers,
 	}))

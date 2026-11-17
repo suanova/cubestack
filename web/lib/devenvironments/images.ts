@@ -66,6 +66,23 @@ const DEFAULT_REGISTRY = "harbor.isuanova.com";
 const REGISTRY =
   (process.env.CUBESTACK_DEV_IMAGE_REGISTRY ?? "").trim().replace(/\/+$/, "") || DEFAULT_REGISTRY;
 
+// The tag each family image carries. A release pins one per family — the three
+// stacks roll independently — so the catalog reads them from the environment
+// (helm: devImages.*.tag) rather than naming a tag here: an offline install
+// ships exactly the tags its release tree locked, and a hardcoded `latest`
+// would point at an image nobody published.
+//
+// Empty means `latest`, which is what a development deployment pushes. The 2.0
+// line relied on both sides being `latest`; 2.1 pins immutable tags per family,
+// so this side has to follow the pin.
+const DEFAULT_TAG = "latest";
+const envTag = (name: string): string => (process.env[name] ?? "").trim() || DEFAULT_TAG;
+const DEV_IMAGE_TAGS = {
+  cpu: envTag("CUBESTACK_DEV_IMAGE_CPU_TAG"),
+  nvidia: envTag("CUBESTACK_DEV_IMAGE_CUDA_TAG"),
+  metax: envTag("CUBESTACK_DEV_IMAGE_MACA_TAG"),
+} as const;
+
 // The platform's published set (images/README.md), CPU first and then the two
 // vendor pairs, in the order the wizard's own accelerator select offers them.
 // The superseded base-cuda / base-maca are not here: they are bare vendor SDK
@@ -73,7 +90,7 @@ const REGISTRY =
 // DevEnvironment can be pointed at (docs/design/devenv-images/decision.md).
 export const DEV_IMAGES: DevImage[] = [
   {
-    tag: `${REGISTRY}/suanova/cpu-pytorch:latest`,
+    tag: `${REGISTRY}/suanova/cpu-pytorch:${DEV_IMAGE_TAGS.cpu}`,
     label: "suanova/cpu-pytorch · CPU · JupyterLab (ubuntu)",
     // Stock-derived overlay: docker-stacks' jovyan is uid 1000 / gid *100*, and
     // no other spec field implies that gid — the platform default is 1000.
@@ -82,7 +99,7 @@ export const DEV_IMAGES: DevImage[] = [
     vendor: "cpu",
   },
   {
-    tag: `${REGISTRY}/suanova/cpu-pytorch:latest`,
+    tag: `${REGISTRY}/suanova/cpu-pytorch:${DEV_IMAGE_TAGS.cpu}`,
     label: "suanova/cpu-pytorch · CPU · SSH (ubuntu)",
     // Self-authored family: account ubuntu, uid/gid 1000 — the platform default.
     user: "ubuntu",
@@ -90,28 +107,28 @@ export const DEV_IMAGES: DevImage[] = [
     vendor: "cpu",
   },
   {
-    tag: `${REGISTRY}/suanova/cuda-pytorch:latest`,
+    tag: `${REGISTRY}/suanova/cuda-pytorch:${DEV_IMAGE_TAGS.nvidia}`,
     label: "suanova/cuda-pytorch · NVIDIA CUDA · JupyterLab (ubuntu)",
     user: "ubuntu",
     interface: "jupyter",
     vendor: "nvidia",
   },
   {
-    tag: `${REGISTRY}/suanova/cuda-pytorch:latest`,
+    tag: `${REGISTRY}/suanova/cuda-pytorch:${DEV_IMAGE_TAGS.nvidia}`,
     label: "suanova/cuda-pytorch · NVIDIA CUDA · SSH (ubuntu)",
     user: "ubuntu",
     interface: "ssh",
     vendor: "nvidia",
   },
   {
-    tag: `${REGISTRY}/suanova/maca-pytorch:latest`,
+    tag: `${REGISTRY}/suanova/maca-pytorch:${DEV_IMAGE_TAGS.metax}`,
     label: "suanova/maca-pytorch · Metax MACA · JupyterLab (ubuntu)",
     user: "ubuntu",
     interface: "jupyter",
     vendor: "metax",
   },
   {
-    tag: `${REGISTRY}/suanova/maca-pytorch:latest`,
+    tag: `${REGISTRY}/suanova/maca-pytorch:${DEV_IMAGE_TAGS.metax}`,
     label: "suanova/maca-pytorch · Metax MACA · SSH (ubuntu)",
     user: "ubuntu",
     interface: "ssh",

@@ -94,6 +94,48 @@ describe("CUBESTACK_DEV_IMAGE_REGISTRY", () => {
   });
 });
 
+describe("CUBESTACK_DEV_IMAGE_*_TAG", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  // A release pins one tag per family, so an offline install ships exactly the
+  // tags its release tree locked. Reading `latest` instead would point the
+  // catalog at an image nobody published, and the environment would never pull.
+  it("uses the pinned tag of each family", async () => {
+    vi.resetModules();
+    vi.stubEnv("CUBESTACK_DEV_IMAGE_CPU_TAG", "py312-torch2.6-v2.1.0");
+    vi.stubEnv("CUBESTACK_DEV_IMAGE_CUDA_TAG", "26.10-v2.1.0");
+    vi.stubEnv("CUBESTACK_DEV_IMAGE_MACA_TAG", "3.8.5.2-py312-torch2.8-v2.1.0");
+    const { DEV_IMAGES: images } = await import("./images");
+    const tags = images.map((image) => image.tag);
+    expect(tags).toContain("harbor.isuanova.com/suanova/cpu-pytorch:py312-torch2.6-v2.1.0");
+    expect(tags).toContain("harbor.isuanova.com/suanova/cuda-pytorch:26.10-v2.1.0");
+    expect(tags).toContain("harbor.isuanova.com/suanova/maca-pytorch:3.8.5.2-py312-torch2.8-v2.1.0");
+  });
+
+  it("falls back to latest when a family names no tag", async () => {
+    vi.resetModules();
+    vi.stubEnv("CUBESTACK_DEV_IMAGE_CPU_TAG", "");
+    vi.stubEnv("CUBESTACK_DEV_IMAGE_CUDA_TAG", "  ");
+    const { DEV_IMAGES: images } = await import("./images");
+    const cpu = images.filter((image) => image.vendor === "cpu");
+    const cuda = images.filter((image) => image.vendor === "nvidia");
+    expect(cpu.every((image) => image.tag.endsWith(":latest"))).toBe(true);
+    expect(cuda.every((image) => image.tag.endsWith(":latest"))).toBe(true);
+  });
+
+  it("keeps the pair of a family on one tag", async () => {
+    vi.resetModules();
+    vi.stubEnv("CUBESTACK_DEV_IMAGE_CUDA_TAG", "26.10-v2.1.0");
+    const { DEV_IMAGES: images } = await import("./images");
+    const cuda = images.filter((image) => image.vendor === "nvidia");
+    expect(cuda).toHaveLength(2);
+    expect(new Set(cuda.map((image) => image.tag)).size).toBe(1);
+  });
+});
+
 describe("devImageFor", () => {
   it("resolves each catalog tag, with one image serving both interfaces", () => {
     // A vendor image is listed twice — once per interface — so the pair shares
