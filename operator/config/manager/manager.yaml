@@ -81,6 +81,11 @@ spec:
           # flags from its l4PortRange.* values instead.
           - --l4-port-range-start=20000
           - --l4-port-range-end=20999
+          # Node port pool a host-network (RoCE) DevEnvironment draws its own
+          # notebook and sshd ports from. The helm chart renders these two flags
+          # from its hostPortRange.* values instead.
+          - --host-port-range-start=21000
+          - --host-port-range-end=29999
           # Extended resources a DevEnvironment's spec.network requests, as
           # advertised by the cluster's shared RDMA device plugin (whose
           # ConfigMap owns the names). The helm chart renders these two flags

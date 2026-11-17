@@ -115,6 +115,17 @@ type DevEnvironmentControllerConfig struct {
 	// port becomes a listener the environment's own ListenerSet declares on the
 	// shared Gateway, so nothing has to pre-create listeners in this range.
 	L4PortRangeEnd int32
+	// HostPortRangeStart is the first port of the pool a host-network
+	// environment draws its own node ports from — the notebook server's and
+	// sshd's (::reconcileHostPorts). It is a different pool from the L4 one: these
+	// ports are bound on the node rather than declared as Gateway listeners, and
+	// the range must stay clear of both the L4 pool and the ports a node runs its
+	// own services on.
+	HostPortRangeStart int32
+	// HostPortRangeEnd is the last port of that pool. The allocation is
+	// cluster-wide, so the range bounds how many host-network environments the
+	// cluster can hold: two ports for a jupyter environment with ssh exposed.
+	HostPortRangeEnd int32
 	// RDMAIBResource is the extended resource an InfiniBand environment requests
 	// from the cluster's shared device plugin. It is a cluster property, not a
 	// platform one: the device plugin declares the name in its own
@@ -353,6 +364,14 @@ const (
 	// probe, Service and routes the controller derived from spec.type.
 	cubstackTypeEnv = "CUBSTACK_TYPE"
 
+	// mainPortEnv and sshPortEnv carry the ports a host-network environment binds
+	// in place of the type's fixed ones (::reconcileHostPorts): the notebook
+	// launcher serves on the first (images/common/jupyter/start-jupyter.sh) and
+	// the images' entrypoint starts sshd on the second. Both are controller-owned
+	// like CUBSTACK_TYPE, so a declared value is dropped rather than honoured.
+	mainPortEnv = "CUBSTACK_MAIN_PORT"
+	sshPortEnv  = "CUBSTACK_SSH_PORT"
+
 	// notebookArgsEnv is the variable the stock Jupyter launcher appends to the
 	// notebook command line, and notebookBaseURLFlag the launcher flag that makes
 	// Jupyter serve under a URL prefix. The web route forwards its path prefix
@@ -506,7 +525,35 @@ func (r *DevEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// Failed phase reflects reality: the workload is stopped and the routes
 	// removed. A finding the controller resolved is reported on the same condition
 	// without blocking, because the environment runs with the controller's value.
-	findings := specFindings(&env)
+	//
+	// The host-port allocation is resolved before the gate rather than after it:
+	// the gate compares a spec.ports entry against the container port the
+	// platform's Service forwards to, and on the host network that port is the
+	// allocation (::reconcileHostPorts). Deciding on the type's fixed port first
+	// and on the allocation afterwards would fail an unchanged spec on the pass
+	// that records it.
+	hostPorts, err := r.hostPortsForPass(ctx, &env)
+	if err != nil {
+		return r.recordStepFailure(ctx, &env, desired, err)
+	}
+	// The allocation is recorded before anything is applied with it. A workload
+	// launched on these ports while the status saying they are taken is still
+	// unwritten leaves a port the pool can hand to another environment: a pass
+	// that dies in between writes no status at all when the cause is retryable
+	// (::recordStepFailure), and one whose status write fails leaves the
+	// allocation unrecorded too. The write is skipped when the status already
+	// says this, so a pass that changed nothing still writes nothing. What it may
+	// say is ::announcedAllocation — a port is announced here, never withdrawn;
+	// the release waits until no pod binds it any more (::settledAllocation).
+	desired.Status.HostPorts = announcedAllocation(hostPorts, env.Status.HostPorts)
+	if err := r.updateStatusIfChanged(ctx, &env, desired); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// The gate decides on the ports this pass resolved, not on what the status
+	// still records for the workload being replaced: an allocation on its way out
+	// is not the container port the Service forwards to any more.
+	findings := specFindings(withHostPorts(desired, hostPorts))
 	if blocking := mustUpdateFindings(findings); len(blocking) > 0 {
 		if err := r.stopCompute(ctx, &env); err != nil {
 			return r.recordStepFailure(ctx, &env, desired, err)
@@ -586,13 +633,19 @@ func (r *DevEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if err := r.reconcileActivityAgentRBAC(ctx, &env); err != nil {
 		return r.recordStepFailure(ctx, &env, desired, err)
 	}
-	if err := r.applyService(ctx, &env); err != nil {
+	// The Service and the pod template read the host-port allocation off the
+	// environment they are handed, so they get a copy carrying it. env itself
+	// stays exactly as it was read, which is what updateStatusIfChanged diffs the
+	// final write against.
+	render := env.DeepCopy()
+	render.Status.HostPorts = hostPorts
+	if err := r.applyService(ctx, render); err != nil {
 		return r.recordStepFailure(ctx, &env, desired, err)
 	}
 	if err := r.applyNetworkPolicy(ctx, &env); err != nil {
 		return r.recordStepFailure(ctx, &env, desired, err)
 	}
-	if err := r.applyStatefulSet(ctx, &env); err != nil {
+	if err := r.applyStatefulSet(ctx, render); err != nil {
 		return r.recordStepFailure(ctx, &env, desired, err)
 	}
 
@@ -606,6 +659,11 @@ func (r *DevEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if err != nil {
 		return r.recordStepFailure(ctx, &env, desired, err)
 	}
+	// The allocation the workload being replaced still binds leaves the status
+	// here, on the pass that finds it gone and not the one that re-applied the
+	// StatefulSet: a roll deletes the pod before it creates the next one, so the
+	// apply alone does not mean the node's port is free (::settledAllocation).
+	desired.Status.HostPorts = settledAllocation(hostPorts, desired.Status.HostPorts, pod)
 	setPodScheduledCondition(&desired.Status.Conditions, pod)
 	r.setPhaseAndReady(&env, &desired.Status, pod)
 	// The phase is the one statement of what state the environment is in, so what
@@ -927,6 +985,17 @@ func (r *DevEnvironmentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return fmt.Errorf("the L4 port range is empty: start %d is greater than end %d",
 			cfg.L4PortRangeStart, cfg.L4PortRangeEnd)
 	}
+	// The host port pool is a range too, and an inverted one fails the same way:
+	// reconcileHostPorts reports "no free host port in the range 30000-20000",
+	// which reads as a full cluster rather than a bad flag.
+	if cfg.HostPortRangeStart < 1 || cfg.HostPortRangeEnd > 65535 {
+		return fmt.Errorf("the host port range %d-%d is outside the usable ports 1-65535",
+			cfg.HostPortRangeStart, cfg.HostPortRangeEnd)
+	}
+	if cfg.HostPortRangeStart > cfg.HostPortRangeEnd {
+		return fmt.Errorf("the host port range is empty: start %d is greater than end %d",
+			cfg.HostPortRangeStart, cfg.HostPortRangeEnd)
+	}
 	if r.Recorder == nil {
 		r.Recorder = mgr.GetEventRecorder(devEnvManagedByValue)
 	}
@@ -1235,6 +1304,10 @@ func sshMountKey(env *aiv1alpha1.DevEnvironment) string {
 // (design §6.1, Gap B). It is the port the container listens on, which is what
 // the readiness probe targets; the Service publishes ssh on sshServicePort
 // instead, since only the container side had to move.
+//
+// A host-network environment does not listen on it: the platform allocates the
+// port per environment (::resolvedMainPort, ::reconcileHostPorts), because a
+// fixed one would be taken on the whole node.
 func mainContainerPort(t aiv1alpha1.DevEnvironmentType) int32 {
 	switch t {
 	case aiv1alpha1.DevEnvironmentTypeJupyter:
@@ -1328,9 +1401,11 @@ func desiredNodeSelector(env *aiv1alpha1.DevEnvironment) map[string]string {
 // declares it. Such an environment binds these ports on the node rather than in
 // a namespace of its own, and the scheduler counts a host-network pod's
 // declared container ports as host ports. Declaring them is therefore what
-// keeps a second environment wanting the same fixed port off the node —
-// mainContainerPort is 8888, 8080 or 2222 by type — and turns a runtime bind
-// failure into a pod that stays Pending/NotScheduled. hostPort is set to match,
+// turns a runtime bind failure into a pod that stays Pending/NotScheduled
+// when two environments do want the same port on a node — which, for the ports
+// the platform owns, is not meant to happen: it allocates them per environment
+// (::reconcileHostPorts), and this list is what it allocates. spec.ports stay
+// the user's numbers, so those can still collide. hostPort is set to match,
 // as podspec.go does for InferenceService, though kubelet does not forward it
 // for a host-network pod: the declaration is what the scheduler reads. On the
 // pod network the list would say nothing the Service does not already say, so
@@ -1355,9 +1430,9 @@ func desiredContainerPorts(env *aiv1alpha1.DevEnvironment) []corev1.ContainerPor
 			Name: name, ContainerPort: port, Protocol: protocol, HostPort: port,
 		})
 	}
-	add(mainPortName, mainContainerPort(env.Spec.Type), corev1.ProtocolTCP)
+	add(mainPortName, resolvedMainPort(env), corev1.ProtocolTCP)
 	if sshExposed(env) && env.Spec.Type != aiv1alpha1.DevEnvironmentTypeSSH {
-		add(sshPortName, sshContainerPort, corev1.ProtocolTCP)
+		add(sshPortName, resolvedSSHPort(env), corev1.ProtocolTCP)
 	}
 	for _, p := range env.Spec.Ports {
 		add(p.Name, p.ContainerPort, portProtocol(p))
@@ -1794,6 +1869,23 @@ func withNotebookBaseURL(envVars []corev1.EnvVar, path string) []corev1.EnvVar {
 	return append(envVars, corev1.EnvVar{Name: notebookArgsEnv, Value: notebookBaseURLFlag + path})
 }
 
+// withControllerEnv states a controller-owned variable on the environment's env
+// list, dropping any value the spec declared under that name first — the same
+// treatment CUBSTACK_TYPE and JUPYTER_TOKEN get, for the same reason: the
+// render path derived a port, a probe and a Service from its own value, so a
+// declared one could only contradict them.
+//
+// The statement goes first, ahead of every declared entry, because the kubelet
+// expands $(VAR) in a single pass down the list (::withWorkspaceHome): an entry
+// a spec writes as `APP_PORT=$(CUBSTACK_MAIN_PORT)` resolves only against a
+// port it has already passed, and appending would leave it naming the literal
+// text. The stated value itself reads no variable, so it resolves the same
+// wherever it sits.
+func withControllerEnv(envVars []corev1.EnvVar, name, value string) []corev1.EnvVar {
+	envVars = slices.DeleteFunc(envVars, func(v corev1.EnvVar) bool { return v.Name == name })
+	return append([]corev1.EnvVar{{Name: name, Value: value}}, envVars...)
+}
+
 // withWorkspaceHome states the environment's home on the container. The claim
 // the platform mounts is the environment's workspace, so the path it mounts at
 // is what HOME has to name (::resolveMountPath, ::resolvedHome): a launcher that
@@ -2190,7 +2282,7 @@ func containerTypeEnv(env *aiv1alpha1.DevEnvironment) (string, bool) {
 // timeout carries the activity agent as a second container
 // (::desiredActivityAgent).
 func (r *DevEnvironmentReconciler) desiredPodSpec(env *aiv1alpha1.DevEnvironment) corev1.PodSpec {
-	mainPort := mainContainerPort(env.Spec.Type)
+	mainPort := resolvedMainPort(env)
 	rdma, hostNetwork := r.rdmaResource(env)
 	securityContext := desiredSecurityContext(env.Spec.Runtime)
 	if rdma != "" {
@@ -2256,6 +2348,26 @@ func (r *DevEnvironmentReconciler) desiredPodSpec(env *aiv1alpha1.DevEnvironment
 	// where it declares none.
 	if home, ok := resolvedHome(env); ok {
 		envVars = withWorkspaceHome(envVars, home)
+	}
+	// A host-network environment binds the ports the platform allocated it rather
+	// than the type's fixed ones, and the launchers have to be told which
+	// (::reconcileHostPorts). Both names are controller-owned like CUBSTACK_TYPE:
+	// the probe, the Service and the activity agent all follow the platform's
+	// number — the type's fixed one on the pod network, the allocation on the host
+	// network — so where one of the platform's own launchers reads them a declared
+	// value is dropped, and the variable is stated only where the number is not
+	// that launcher's default. A type whose image the platform does not implement
+	// has no launcher of ours to contradict, so its env list is left alone.
+	if _, launcher := containerTypeEnv(env); launcher {
+		envVars = slices.DeleteFunc(envVars, func(v corev1.EnvVar) bool {
+			return v.Name == mainPortEnv || v.Name == sshPortEnv
+		})
+	}
+	if env.Status.HostPorts != nil {
+		envVars = withControllerEnv(envVars, mainPortEnv, strconv.Itoa(int(mainPort)))
+		if sshExposed(env) {
+			envVars = withControllerEnv(envVars, sshPortEnv, strconv.Itoa(int(resolvedSSHPort(env))))
+		}
 	}
 	container.Env = envVars
 	if env.Spec.Storage != nil {
@@ -2429,10 +2541,11 @@ func (r *DevEnvironmentReconciler) desiredPodSpec(env *aiv1alpha1.DevEnvironment
 //
 // The watched ports are given rather than discovered because the agent cannot
 // guess them: they are the ports the environment's own services bind inside the
-// pod, which is mainContainerPort plus sshContainerPort when ssh is exposed —
-// sshContainerPort and not the port the Service publishes it on, since the
+// pod, which is the main container's port plus sshd's when ssh is exposed —
+// sshd's own port and not the one the Service publishes it on, since the
 // published one is bound by a proxy outside the pod and never appears in the
-// pod's own socket table. Ports an environment declares through spec.ports are
+// pod's own socket table. Both follow the platform's allocation on the host
+// network (::resolvedMainPort). Ports an environment declares through spec.ports are
 // deliberately not among them: those are the tenant's own services rather than
 // the platform's, and making them part of the sidecar's arguments would make
 // every edit to a user's exposure part of the pod template, rolling the workload
@@ -2446,9 +2559,9 @@ func (r *DevEnvironmentReconciler) desiredPodSpec(env *aiv1alpha1.DevEnvironment
 // that is throttled skips a sample, and one that is evicted for asking for more
 // memory than the node has takes the environment with it.
 func (r *DevEnvironmentReconciler) desiredActivityAgent(env *aiv1alpha1.DevEnvironment) corev1.Container {
-	ports := []int32{mainContainerPort(env.Spec.Type)}
+	ports := []int32{resolvedMainPort(env)}
 	if sshExposed(env) && env.Spec.Type != aiv1alpha1.DevEnvironmentTypeSSH {
-		ports = append(ports, sshContainerPort)
+		ports = append(ports, resolvedSSHPort(env))
 	}
 	watched := make([]string, 0, len(ports))
 	for _, port := range ports {
@@ -2543,9 +2656,12 @@ func servicePortKey(port int32, protocol corev1.Protocol) string {
 // platform's own account, and so what a spec.ports entry can find already taken:
 // the type's main port, and the number sshd is bridged from when one is exposed.
 //
-// It is a function of the spec and not of cluster state, which is what lets
-// specFindings report on the collisions such an entry causes before anything is
-// applied, and lets desiredService render from it rather than repeat it.
+// It is a function of the spec and not of cluster state — the published ports
+// and the names are — which is what lets specFindings report on the collisions
+// such an entry causes before anything is applied, and lets desiredService
+// render from it rather than repeat it. targetPort is the container's port, so
+// it is the one field that follows the host-port allocation (::resolvedMainPort):
+// what a client dials stays the conventional number.
 func platformServicePorts(env *aiv1alpha1.DevEnvironment) []corev1.ServicePort {
 	mainPort := mainContainerPort(env.Spec.Type)
 	// The ssh container listens on the unprivileged sshContainerPort but is
@@ -2556,14 +2672,14 @@ func platformServicePorts(env *aiv1alpha1.DevEnvironment) []corev1.ServicePort {
 		mainServicePort = sshServicePort
 	}
 	ports := []corev1.ServicePort{
-		{Name: mainPortName, Port: mainServicePort, TargetPort: intstr.FromInt32(mainPort), Protocol: corev1.ProtocolTCP},
+		{Name: mainPortName, Port: mainServicePort, TargetPort: intstr.FromInt32(resolvedMainPort(env)), Protocol: corev1.ProtocolTCP},
 	}
 	// The ssh entry is guarded by type, as the container port list guards its
 	// own: for the ssh type the two entries are the same port, and the main one
 	// is what names it.
 	if sshExposed(env) && env.Spec.Type != aiv1alpha1.DevEnvironmentTypeSSH {
 		ports = append(ports, corev1.ServicePort{
-			Name: sshPortName, Port: sshServicePort, TargetPort: intstr.FromInt32(sshContainerPort), Protocol: corev1.ProtocolTCP,
+			Name: sshPortName, Port: sshServicePort, TargetPort: intstr.FromInt32(resolvedSSHPort(env)), Protocol: corev1.ProtocolTCP,
 		})
 	}
 	return ports
@@ -5296,6 +5412,12 @@ func (r *DevEnvironmentReconciler) defaultedConfig() DevEnvironmentControllerCon
 	}
 	if cfg.L4PortRangeEnd == 0 {
 		cfg.L4PortRangeEnd = 20999
+	}
+	if cfg.HostPortRangeStart == 0 {
+		cfg.HostPortRangeStart = 21000
+	}
+	if cfg.HostPortRangeEnd == 0 {
+		cfg.HostPortRangeEnd = 29999
 	}
 	if cfg.RDMAIBResource == "" {
 		cfg.RDMAIBResource = defaultRDMAIBResource

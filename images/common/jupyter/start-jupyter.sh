@@ -18,6 +18,9 @@
 #                  unquoted expansion below, which is why shellcheck is silenced for that line:
 #                  quoting it would pass the whole string as one flag.
 #
+#   CUBSTACK_MAIN_PORT  the port to serve on, set only for a host-network environment, where the
+#                  operator allocates one per environment instead of using 8888.
+#
 # --ServerApp.root_dir is the workspace: $HOME is the account's home, where the platform mounts
 # the PVC, so a user's notebooks land on durable storage rather than in the image.
 set -euo pipefail
@@ -54,9 +57,22 @@ fi
 cd "$HOME"
 
 # shellcheck disable=SC2086
+# The port to serve on. 8888 is the platform's fixed one and what an environment on the pod
+# network gets; a host-network environment (an RDMA one) binds the node's ports, so the operator
+# states the port it allocated through CUBSTACK_MAIN_PORT. It cannot come through NOTEBOOK_ARGS
+# instead: jupyter merges repeated assignments of one trait into a list and refuses to start, so
+# the flag below has to carry the value rather than be overridden further down the command line.
+#
+# An allocated port is not the launcher's to move. Jupyter's default is 50 retries, so a port
+# some process outside the platform already listens on would leave the server on a neighbouring
+# number while the probe and the Service still follow the allocated one — and a TCP probe that
+# passes against the foreign listener reports an environment running that nothing reaches.
+# Refusing to start is the failure that names the port. On the pod network the port is the
+# image's own and the default retry keeps a restart from failing over a socket it just released.
 exec jupyter lab \
   --ip=0.0.0.0 \
-  --port=8888 \
+  --port="${CUBSTACK_MAIN_PORT:-8888}" \
+  ${CUBSTACK_MAIN_PORT:+--ServerApp.port_retries=0} \
   --no-browser \
   --ServerApp.allow_remote_access=True \
   --ServerApp.root_dir="$HOME" \

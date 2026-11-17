@@ -51,6 +51,8 @@ spec:
         {{- end }}
         - --l4-port-range-start={{ .Values.l4PortRange.start }}
         - --l4-port-range-end={{ .Values.l4PortRange.end }}
+        - --host-port-range-start={{ .Values.hostPortRange.start }}
+        - --host-port-range-end={{ .Values.hostPortRange.end }}
         - --rdma-ib-resource={{ .Values.rdma.ibResource }}
         - --rdma-roce-resource={{ .Values.rdma.roceResource }}
         command:

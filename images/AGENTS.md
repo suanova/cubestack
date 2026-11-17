@@ -44,8 +44,9 @@ Every image:
   falling back to the baked `CUBESTACK_IMAGE` when run by hand); mode `ssh` runs sshd and never a
   notebook; mode `jupyter` starts sshd only when the ssh host key is mounted, then hands off to the
   shared launcher. An unknown mode exits non-zero rather than guessing
-- satisfies readiness = TCP listening on the image's main port (jupyter `8888`, ssh `2222`) — and
-  therefore an ssh-type environment must expose no notebook on 8888
+- satisfies readiness = TCP listening on the image's main port (jupyter `8888`, ssh `2222`; or
+  `CUBSTACK_MAIN_PORT` / `CUBSTACK_SSH_PORT` when the controller sets them for an environment on the
+  node's network) — and therefore an ssh-type environment must expose no notebook on 8888
 - reads the operator's ssh Secrets **directly off Secret mounts**, with no staging:
   `ssh_host_ed25519_key` at `/etc/ssh/ssh_host_ed25519_key` (a `subPath` file mount, since sshd wants
   one exact path) and the authorized-keys entry at the absolute `/run/ssh/authorized_keys` (a

@@ -536,6 +536,37 @@ helm install cubestack ./helm/cubestack-controller-manager-chart -n cubestack-sy
 The kustomize deployment (`make deploy`) carries the same two args in
 `operator/config/manager/manager.yaml`.
 
+### Host port pool (RoCE / host-network environments)
+
+A RoCE DevEnvironment runs with `hostNetwork`, so its notebook server and sshd
+bind ports on the node itself rather than on a pod address. Fixed ports would
+make the node exclusive to one environment; the manager instead allocates both
+per environment from a second cluster-wide pool, fed by the `hostPortRange.*`
+values — these always render:
+
+| Key | Manager flag | Default |
+|---|---|---|
+| `hostPortRange.start` | `--host-port-range-start` | `21000` |
+| `hostPortRange.end` | `--host-port-range-end` | `29999` |
+
+The notebook port is allocated for every host-network environment; the sshd
+port only when `spec.ssh` is enabled and the type is not `ssh`, whose single
+service keeps one port. An allocated port stays with the environment across
+restarts and is published in `status.hostPorts`. `status.hostPorts` is absent
+for an environment on the pod network, which keeps the type's fixed ports. Keep
+the range clear of the L4 pool above and of the ports the node's own services
+use: a port number has to be unique across the whole pool, so the allocation is
+cluster-wide and the width of the range bounds how many host-network
+environments can run.
+
+```bash
+helm install cubestack ./helm/cubestack-controller-manager-chart -n cubestack-system \
+  --create-namespace --set hostPortRange.start=21000 --set hostPortRange.end=29999
+```
+
+The kustomize deployment (`make deploy`) carries the same two args in
+`operator/config/manager/manager.yaml`.
+
 ### RDMA (DevEnvironment accelerator fabric)
 
 A DevEnvironment asks for RDMA with `spec.network`. The manager learns which

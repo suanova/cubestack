@@ -868,6 +868,35 @@ spec:
                   - name
                   type: object
                 type: array
+              hostPorts:
+                description: |-
+                  HostPorts is the node ports the environment listens on, and absent for one
+                  with a network namespace of its own, where the type's fixed container
+                  ports suffice. An RDMA environment that shares the node's network binds
+                  the node's ports instead, so the controller allocates them from its own
+                  pool — which is what lets more than one such environment run on a node.
+
+                  The record is the allocation, which the controller reuses while the port
+                  is still free, so it is stable for as long as the environment exists. It is
+                  the port inside the container, not an address: what a client dials is in
+                  status.endpoints.
+                properties:
+                  main:
+                    description: |-
+                      Main is the port the environment's main container listens on: the notebook
+                      server's for jupyter.
+                    format: int32
+                    type: integer
+                  ssh:
+                    description: |-
+                      SSH is the port sshd listens on when ssh is exposed beside another type.
+                      Absent when the type is ssh — Main is the sshd port then — and when ssh is
+                      not exposed at all.
+                    format: int32
+                    type: integer
+                required:
+                - main
+                type: object
               jupyterTokenSecret:
                 description: |-
                   JupyterTokenSecret is the Secret the environment's Jupyter token comes from,

@@ -3961,6 +3961,14 @@ var _ = Describe("DevEnvironmentReconciler construction", func() {
 		Expect(r.SetupWithManager(testMgr)).To(
 			MatchError(ContainSubstring("outside the usable ports")))
 	})
+
+	It("rejects a host port range with no ports in it", func() {
+		r := &DevEnvironmentReconciler{
+			Config: DevEnvironmentControllerConfig{HostPortRangeStart: 30000, HostPortRangeEnd: 20000},
+		}
+		Expect(r.SetupWithManager(testMgr)).To(
+			MatchError(ContainSubstring("host port range is empty")))
+	})
 })
 
 // countingClient counts the writes a reconciler issues. "Issued no write"
@@ -4089,7 +4097,12 @@ var _ = Describe("DevEnvironment controller", func() {
 			Expect(k8sClient.Create(ctx, env)).To(Succeed())
 			defer deleteEnv(env.Name)
 
+			var allocated aiv1alpha1.HostPorts
 			Eventually(func(g Gomega) {
+				observed := &aiv1alpha1.DevEnvironment{}
+				g.Expect(k8sClient.Get(ctx, envKey(env.Name), observed)).To(Succeed())
+				g.Expect(observed.Status.HostPorts).NotTo(BeNil())
+				allocated = *observed.Status.HostPorts
 				sts := &appsv1.StatefulSet{}
 				g.Expect(k8sClient.Get(ctx, envKey(env.Name), sts)).To(Succeed())
 				tmpl := sts.Spec.Template.Spec
@@ -4103,8 +4116,16 @@ var _ = Describe("DevEnvironment controller", func() {
 				g.Expect(requested.Value()).To(Equal(int64(1)))
 				g.Expect(c.Resources.Limits).NotTo(HaveKey(corev1.ResourceName(testRDMAIBResource)))
 				g.Expect(c.SecurityContext.Capabilities.Add).To(ContainElement(corev1.Capability("IPC_LOCK")))
+				// The node's ports are the platform's to allocate, so the pod does
+				// not take the type's fixed 8888 (::reconcileHostPorts). What it
+				// binds is what the status records, what the probe targets and what
+				// the launcher is told to serve on.
 				g.Expect(c.Ports).To(ContainElement(corev1.ContainerPort{
-					Name: mainPortName, ContainerPort: 8888, HostPort: 8888, Protocol: corev1.ProtocolTCP,
+					Name: mainPortName, ContainerPort: allocated.Main, HostPort: allocated.Main, Protocol: corev1.ProtocolTCP,
+				}))
+				g.Expect(c.ReadinessProbe.TCPSocket.Port.IntVal).To(Equal(allocated.Main))
+				g.Expect(c.Env).To(ContainElement(corev1.EnvVar{
+					Name: mainPortEnv, Value: strconv.Itoa(int(allocated.Main)),
 				}))
 			}, "15s", "200ms").Should(Succeed())
 		})

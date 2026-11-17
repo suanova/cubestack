@@ -128,6 +128,9 @@ vendor image is that its stack exists for the GPU.
 - Readiness = TCP listening on the image's main port (8888 / 2222). A `type: ssh` environment is
   probed on 2222 and never 8888, which is why the ssh mode must not start a notebook at all — the
   merge makes that a runtime property to assert, not something the catalogue's image choice implies.
+  Both numbers are defaults: an environment that shares the node's network (RoCE) is given
+  `CUBSTACK_MAIN_PORT` / `CUBSTACK_SSH_PORT` by the controller and the launcher serves those instead,
+  which is what lets two such environments run on one node.
 - sshd listens on the **unprivileged `2222`**, never `:22`: a non-root process cannot bind a privileged
   port without `CAP_NET_BIND_SERVICE`, so no image needs that capability granted. The platform's
   Service carries `port: 22` → `targetPort: 2222`, which is invisible to users — the ssh endpoint is
