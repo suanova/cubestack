@@ -89,8 +89,10 @@ jobs:
             SHA_TAG="sha-${GITHUB_SHA::7}"
           fi
 
-          # Push the immutable, commit-addressed tags. Safe for any commit that
-          # ever landed on main, even if a newer commit now exists.
+          # Push the immutable, commit-addressed tag. Safe for any commit that
+          # ever landed on main, even if a newer commit now exists. `latest` is
+          # what a bare `helm install` resolves to (the chart's appVersion), so
+          # it has to exist; it is moved below, main only.
           #
           # Both images are built here, from one commit and one checkout, and the
           # manager is told which sidecar it is paired with: the commit-addressed
@@ -113,6 +115,16 @@ jobs:
               docker push "${IMAGE}:${RELEASE_APP_VERSION}"
             done
             exit 0
+          fi
+
+          # The rolling tag, main only. A release branch never moves it: the
+          # chart's appVersion default is `latest`, and a branch that re-pointed
+          # it would hand an open-source install the next branch's code.
+          if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            for IMAGE in "${MANAGER}" "${ACTIVITY_AGENT}"; do
+              docker tag "${IMAGE}:${SHA_TAG}" "${IMAGE}:latest"
+              docker push "${IMAGE}:latest"
+            done
           fi
 
           json=""

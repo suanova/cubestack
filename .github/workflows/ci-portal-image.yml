@@ -100,6 +100,13 @@ jobs:
             exit 0
           fi
 
+          # The rolling tag, main only: the chart's appVersion default is
+          # `latest`, so it has to exist, and only main may move it.
+          if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            docker tag "${IMAGE}:${SHA_TAG}" "${IMAGE}:latest"
+            docker push "${IMAGE}:latest"
+          fi
+
           digest="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${IMAGE}:${SHA_TAG}" \
             | awk -F@ -v r="${IMAGE}" '$1==r {print $2; exit}')"
           [ -n "${digest}" ] || { echo "::error::cannot resolve digest for ${IMAGE}:${SHA_TAG}"; exit 1; }
