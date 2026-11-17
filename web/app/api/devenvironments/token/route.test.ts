@@ -140,9 +140,11 @@ describe("GET /api/devenvironments/token", () => {
   it("has a dictionary sentence for every code it can answer with", async () => {
     // The console builds its message from these codes (lib/api-error.ts), so a
     // code without a `dev.err.<code>` entry reaches the user as the bare word.
-    // This scan is that tie — the same guard the sibling routes carry.
-    const source = await readFile(new URL("./route.ts", import.meta.url), "utf8");
-    const codes = [...source.matchAll(/refuse\("(\w+)"/g)].map((m) => m[1]);
+    // This scan is that tie — the same guard the sibling routes carry. The
+    // credential is read in lib/jupyter.ts, so its refusals are scanned too.
+    const route = await readFile(new URL("./route.ts", import.meta.url), "utf8");
+    const read = await readFile(new URL("../../../../lib/jupyter.ts", import.meta.url), "utf8");
+    const codes = [...`${route}\n${read}`.matchAll(/(?:refuse\(|error: )"(\w+)"/g)].map((m) => m[1]);
     expect(codes.length).toBeGreaterThanOrEqual(5);
     for (const code of new Set(codes)) {
       expect(dictionaries["zh-CN"], `dev.err.${code}`).toHaveProperty(`dev.err.${code}`);
