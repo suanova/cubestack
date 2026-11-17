@@ -2333,17 +2333,20 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
               ...(isAgent ? { viewTransitionName: AGENT_CHAT_TRANSITION } : {}),
               // The thread takes the leftover height and scrolls inside its own
               // scrollbar. On desktop the card has a definite height, so the
-              // basis is 0: a fixed 480px basis would shrink the composer
-              // alongside it and clip the composer's callout. Narrow layouts
-              // give the card no definite height, so there the 480px basis is
-              // what sizes the thread.
+              // basis is 0: the thread is the only flexible region, and the
+              // fixed input row takes its height first. Narrow layouts give the
+              // card no definite height, so there the 480px basis is what sizes
+              // the thread.
               flex: "1 1 0%",
               // A short window lets the thread yield height, so the composer's
               // input row still fits instead of the card keeping a thread it
               // cannot afford.
               minHeight: "min(160px, 25vh)",
               overflowY: "auto",
-              p: "18px",
+              // No bottom padding: the sticky composer block at the end of the
+              // thread supplies it, so the block can sit flush with the bottom
+              // edge while the conversation scrolls behind it.
+              p: "18px 18px 0",
               display: "flex",
               flexDirection: "column",
               gap: "14px",
@@ -2416,6 +2419,102 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
                 </Box>
               </Box>
             ) : null}
+            {/* The dock and the go-config callout live at the end of the thread
+                and float at its bottom edge, so they stay in view while the
+                conversation scrolls behind them. They are one block inside the
+                thread rather than a second scroll area beside it; the input row
+                below stays pinned. flexShrink: 0 keeps the thread scrolling
+                rather than squeezing the cards. */}
+            <Box
+              data-od-id="composer-scroll"
+              sx={{
+                position: "sticky",
+                bottom: 0,
+                zIndex: 1,
+                // Sit at the bottom even when the conversation is too short to
+                // scroll; sticky alone only pins it once the thread overflows.
+                mt: "auto",
+                flexShrink: 0,
+                display: "flex",
+                flexDirection: "column",
+                // Span the thread's side padding so messages cannot show
+                // through beside the cards as they scroll past.
+                mx: "-18px",
+                px: "18px",
+                pb: "18px",
+                bgcolor: "var(--surface)",
+              }}
+            >
+              {/* The cards a turn is parked on end the thread instead of
+                  staying in the bubble that raised them: they are still in the
+                  one conversation, at its newest end, and the thread's
+                  follow-the-newest scroll is what brings them into view. */}
+              {isAgent ? (
+                <HitlDock
+                  approvals={dockApprovals}
+                  questions={dockQuestions}
+                  sessionKey={agentSessionKey}
+                  now={now}
+                  allowAlwaysOk={confirmPolicy === "Allowlist"}
+                  onDecide={(callId, decision) => void decideApproval(callId, decision)}
+                  onAnswer={(callId, answers, cancel) => void submitQuestion(callId, answers, cancel)}
+                />
+              ) : null}
+              {isAgent && !agentReady ? (
+                // A callout, not a line of grey text: it is the only thing the
+                // reader can act on until the instance is Ready. Amber for "not
+                // there yet", the danger tone for a start that failed.
+                <Box
+                  data-od-id="agent-not-ready"
+                  sx={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "12px",
+                    mb: "8px",
+                    border: 1,
+                    borderColor:
+                      agentStatus?.phase === "Failed"
+                        ? "color-mix(in oklch, #e15c5c 45%, var(--border))"
+                        : "color-mix(in oklch, #e0a13a 45%, var(--border))",
+                    bgcolor:
+                      agentStatus?.phase === "Failed"
+                        ? "color-mix(in oklch, #e15c5c 8%, transparent)"
+                        : "color-mix(in oklch, #e0a13a 8%, transparent)",
+                    borderRadius: "8px",
+                    p: "10px 12px",
+                  }}
+                >
+                  {/* A start in progress is the one state worth animating: it is
+                      the only one that ends by itself. */}
+                  {agentStatus?.exists && agentStatus.phase !== "Failed" && agentStatus.modelConfigured !== false ? <Spinner size={14} /> : null}
+                  <Box sx={{ flex: 1, fontSize: 13, fontWeight: 600, lineHeight: 1.6 }}>
+                    {!agentStatus
+                      ? t("cubepilot.chat.agentMetaLoading")
+                      : !agentStatus.exists
+                        ? t("cubepilot.chat.notReadyMissing")
+                        : agentStatus.phase === "Failed"
+                          ? t("cubepilot.chat.notReadyFailed")
+                          : agentStatus.modelConfigured === false
+                            ? agentStatus.modelMessage ||
+                              t("cubepilot.chat.notReadyNoModel")
+                            : t("cubepilot.chat.agentStarting", {
+                                secs: String(waitingSeconds(agentStatus.startedAt, now) ?? 0),
+                              })}
+                  </Box>
+                  {/* A Ready-but-model-less instance is done starting, so it is the
+                      one case that can be acted on: send the reader to the config
+                      tab to pick the model it is missing. The spinner belongs only
+                      to a start still in flight. */}
+                  {agentStatus && agentStatus.exists && agentStatus.phase !== "Failed" && agentStatus.modelConfigured !== false ? (
+                    null
+                  ) : (
+                    <Btn variant="primary" onClick={() => setStoredTab("config")} data-od-id="agent-go-config">
+                      {t("cubepilot.chat.goConfig")}
+                    </Btn>
+                  )}
+                </Box>
+              ) : null}
+            </Box>
           </Box>
 
           {/* Composer: a floating bar pinned to the window's bottom edge (the
@@ -2423,106 +2522,12 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
               top-border row; the thread scrolls above it. In model mode the
               sampling params collapse into a chip in the bar's bottom row
               (DSH's access-mode look) and open in a popover. */}
-          {/* The dock and the go-config callout scroll as one block when the
-              card is too short to show them: both stay reachable instead of
-              being clipped above the composer. The status line and input row
-              sit outside this area, so they stay visible while it scrolls. It
-              is a flex item of the CARD, not a wrapper around the input row: a
-              wrapper would inherit the dock's height as its minimum and push
-              the input below the fold instead of scrolling. */}
-          <Box
-            data-od-id="composer-scroll"
-            sx={{
-              flex: "0 1 auto",
-              // A scroll area only a few pixels tall is not reachable either.
-              // Reserve enough for the first row of a card / the go-config
-              // callout; when even that does not fit, the overflow extends the
-              // page and scrolling it keeps the input reachable too.
-              minHeight:
-                isAgent && (!agentReady || dockApprovals.length > 0 || dockQuestions.length > 0) ? 60 : 0,
-              overflowY: "auto",
-              display: "flex",
-              flexDirection: "column",
-              px: "14px",
-              pt: "10px",
-            }}
-          >
-            {/* The cards a turn is parked on, docked above the composer rather
-                than in the bubble that raised them: the thread scrolls, so a
-                card drawn in it is a card the user has to go looking for — and
-                the turn stays parked for exactly as long as they are looking. */}
-            {isAgent ? (
-              <HitlDock
-                approvals={dockApprovals}
-                questions={dockQuestions}
-                sessionKey={agentSessionKey}
-                now={now}
-                allowAlwaysOk={confirmPolicy === "Allowlist"}
-                onDecide={(callId, decision) => void decideApproval(callId, decision)}
-                onAnswer={(callId, answers, cancel) => void submitQuestion(callId, answers, cancel)}
-              />
-            ) : null}
-            {isAgent && !agentReady ? (
-              // A callout, not a line of grey text: it is the only thing the
-              // reader can act on until the instance is Ready. Amber for "not
-              // there yet", the danger tone for a start that failed.
-              <Box
-                data-od-id="agent-not-ready"
-                sx={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "12px",
-                  mb: "8px",
-                  border: 1,
-                  borderColor:
-                    agentStatus?.phase === "Failed"
-                      ? "color-mix(in oklch, #e15c5c 45%, var(--border))"
-                      : "color-mix(in oklch, #e0a13a 45%, var(--border))",
-                  bgcolor:
-                    agentStatus?.phase === "Failed"
-                      ? "color-mix(in oklch, #e15c5c 8%, transparent)"
-                      : "color-mix(in oklch, #e0a13a 8%, transparent)",
-                  borderRadius: "8px",
-                  p: "10px 12px",
-                }}
-              >
-                {/* A start in progress is the one state worth animating: it is
-                    the only one that ends by itself. */}
-                {agentStatus?.exists && agentStatus.phase !== "Failed" && agentStatus.modelConfigured !== false ? <Spinner size={14} /> : null}
-                <Box sx={{ flex: 1, fontSize: 13, fontWeight: 600, lineHeight: 1.6 }}>
-                  {!agentStatus
-                    ? t("cubepilot.chat.agentMetaLoading")
-                    : !agentStatus.exists
-                      ? t("cubepilot.chat.notReadyMissing")
-                      : agentStatus.phase === "Failed"
-                        ? t("cubepilot.chat.notReadyFailed")
-                        : agentStatus.modelConfigured === false
-                          ? agentStatus.modelMessage ||
-                            t("cubepilot.chat.notReadyNoModel")
-                          : t("cubepilot.chat.agentStarting", {
-                              secs: String(waitingSeconds(agentStatus.startedAt, now) ?? 0),
-                            })}
-                </Box>
-                {/* A Ready-but-model-less instance is done starting, so it is the
-                    one case that can be acted on: send the reader to the config
-                    tab to pick the model it is missing. The spinner belongs only
-                    to a start still in flight. */}
-                {agentStatus && agentStatus.exists && agentStatus.phase !== "Failed" && agentStatus.modelConfigured !== false ? (
-                  null
-                ) : (
-                  <Btn variant="primary" onClick={() => setStoredTab("config")} data-od-id="agent-go-config">
-                    {t("cubepilot.chat.goConfig")}
-                  </Btn>
-                )}
-              </Box>
-            ) : null}
-          </Box>
           {/* The state of the turn, above the composer rather than in the
               card's frame: the thread scrolls, and this line is read exactly
               when a long turn has been quiet and the reader has started to
               wonder whether it is still going — which is when their eyes are
-              here, at the input. It is outside the composer's scroll area, so
-              the line stays as always-visible here as it was up there. */}
+              here, at the input. It sits outside the thread, so the line stays
+              as always-visible here as it was up there. */}
           {isAgent ? (
             <Box
               data-od-id="agent-status"
@@ -2554,9 +2559,9 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
               display: "flex",
               flexDirection: "column",
               gap: "6px",
-              // Keep the input row pinned and whole: the scroll area above
-              // gives up height instead — this row must not, or the input
-              // would be squashed or pushed out of the card.
+              // Keep the input row pinned and whole: the thread above gives up
+              // height instead — this row must not, or the input would be
+              // squashed or pushed out of the card.
               flexShrink: 0,
               mx: "14px",
               mb: "12px",

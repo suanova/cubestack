@@ -439,9 +439,9 @@ export function HitlDock({
         flexDirection: "column",
         gap: "8px",
         mb: "8px",
-        // The composer's own scroll area is what gives up height when the card
-        // is short, so keep this block its full height here: collapsing the dock
-        // to zero would take the cards' scrollbar with it.
+        // The thread scrolls when the card is short, so keep this block at its
+        // full height here: squeezing the dock would take the cards' own
+        // scrollbar with it.
         flexShrink: 0,
         // The dock caps its own height and scrolls past it. Unstacked, several
         // cards (a reload can attach a pending approval AND a pending question)
