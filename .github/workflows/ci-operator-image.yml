@@ -58,12 +58,29 @@ jobs:
       contents: read
     runs-on: ubuntu-latest
     outputs:
+      line: ${{ steps.line.outputs.line }}
       images_json: ${{ steps.publish.outputs.images_json }}
     steps:
       - name: Clone the code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      - name: Resolve the line
+        id: line
+        run: |
+          # The line this tree belongs to. Read here rather than in the notify
+          # job: that one has no checkout, so VERSION_LINE is not in its
+          # workspace. Without it the release receiver falls back to its
+          # `CUBESTACK_CURRENT_LINE`, so a release branch merge would pin
+          # whatever line is current then.
+          line="$(tr -d '[:space:]' < VERSION_LINE)"
+          [[ "${line}" =~ ^[0-9]+\.[0-9]+$ ]] \
+            || { echo "::error::invalid VERSION_LINE: '${line}'"; exit 1; }
+          if [[ "${GITHUB_REF_NAME}" == release-* && "${GITHUB_REF_NAME}" != "release-${line}" ]]; then
+            echo "::error::VERSION_LINE=${line} does not match ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+          echo "line=${line}" >> "${GITHUB_OUTPUT}"
       - name: Resolve the release version
         id: release
         uses: ./.github/actions/resolve-release-version
@@ -162,20 +179,10 @@ jobs:
           IMAGES_JSON: ${{ needs.build-push-image.outputs.images_json }}
         run: |
           set -euo pipefail
-          # The line this tree belongs to. Without it the release receiver
-          # falls back to its `CUBESTACK_CURRENT_LINE`, so a release branch merge
-          # would pin whatever line is current then.
-          line="$(tr -d '[:space:]' < VERSION_LINE)"
-          [[ "${line}" =~ ^[0-9]+\.[0-9]+$ ]] \
-            || { echo "::error::invalid VERSION_LINE: '${line}'"; exit 1; }
-          if [[ "${GITHUB_REF_NAME}" == release-* && "${GITHUB_REF_NAME}" != "release-${line}" ]]; then
-            echo "::error::VERSION_LINE=${line} does not match ${GITHUB_REF_NAME}"
-            exit 1
-          fi
           payload="$(jq -nc \
             --arg repo "suanova/cubestack" \
             --arg commit "${GITHUB_SHA}" \
-            --arg line "${line}" \
+            --arg line "${{ needs.build-push-image.outputs.line }}" \
             --arg component "cubestack-controller-manager" \
             --argjson images "${IMAGES_JSON}" \
             '{event_type:"component-built",client_payload:{repo:$repo,commit:$commit,line:$line,component:$component,images:$images}}')"
