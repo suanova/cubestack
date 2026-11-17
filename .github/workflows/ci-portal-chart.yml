@@ -201,10 +201,20 @@ jobs:
           CHART_JSON: ${{ needs.build-push-chart.outputs.chart_json }}
         run: |
           set -euo pipefail
+          # The line this tree belongs to. Without it the release receiver
+          # falls back to its `CUBESTACK_CURRENT_LINE`, so a release branch merge
+          # would pin whatever line is current then.
+          line="$(tr -d '[:space:]' < VERSION_LINE)"
+          [[ "${line}" =~ ^[0-9]+\.[0-9]+$ ]] \
+            || { echo "::error::invalid VERSION_LINE: '${line}'"; exit 1; }
+          if [[ "${GITHUB_REF_NAME}" == release-* && "${GITHUB_REF_NAME}" != "release-${line}" ]]; then
+            echo "::error::VERSION_LINE=${line} does not match ${GITHUB_REF_NAME}"
+            exit 1
+          fi
           payload="$(jq -nc \
             --arg repo "suanova/cubestack" \
             --arg commit "${GITHUB_SHA}" \
-            --arg line "2.1" \
+            --arg line "${line}" \
             --arg component "cubestack-portal" \
             --argjson chart "${CHART_JSON}" \
             '{event_type:"component-built",client_payload:{repo:$repo,commit:$commit,line:$line,component:$component,chart:$chart}}')"

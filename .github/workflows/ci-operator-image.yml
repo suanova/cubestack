@@ -4,8 +4,9 @@ name: CI Operator Image
 # and e2e checks run in ci-operator.yml on the same push; the make docker-build
 # here also validates the operator compiles before anything is pushed.
 #
-# Two triggers, two kinds of tag: a merge to main publishes this commit's rolling
-# tags; a `vX.Y.Z` tag publishes the release version it names.
+# Two triggers, two kinds of tag: a merge to main or to a release branch
+# publishes this commit's `sha-<7>` tag, and main also moves `latest`; a
+# `vX.Y.Z` tag publishes the release version it names.
 on:
   push:
     branches: [main, 'release-*']
@@ -161,10 +162,20 @@ jobs:
           IMAGES_JSON: ${{ needs.build-push-image.outputs.images_json }}
         run: |
           set -euo pipefail
+          # The line this tree belongs to. Without it the release receiver
+          # falls back to its `CUBESTACK_CURRENT_LINE`, so a release branch merge
+          # would pin whatever line is current then.
+          line="$(tr -d '[:space:]' < VERSION_LINE)"
+          [[ "${line}" =~ ^[0-9]+\.[0-9]+$ ]] \
+            || { echo "::error::invalid VERSION_LINE: '${line}'"; exit 1; }
+          if [[ "${GITHUB_REF_NAME}" == release-* && "${GITHUB_REF_NAME}" != "release-${line}" ]]; then
+            echo "::error::VERSION_LINE=${line} does not match ${GITHUB_REF_NAME}"
+            exit 1
+          fi
           payload="$(jq -nc \
             --arg repo "suanova/cubestack" \
             --arg commit "${GITHUB_SHA}" \
-            --arg line "2.1" \
+            --arg line "${line}" \
             --arg component "cubestack-controller-manager" \
             --argjson images "${IMAGES_JSON}" \
             '{event_type:"component-built",client_payload:{repo:$repo,commit:$commit,line:$line,component:$component,images:$images}}')"

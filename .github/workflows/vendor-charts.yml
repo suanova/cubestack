@@ -37,22 +37,22 @@ on:
       - 'web/helm/**'
       # Included so a fix to this workflow re-runs it on the merge that carries it.
       - '.github/workflows/vendor-charts.yml'
-  # Not path-filtered, so it always runs — this is how the workflow is exercised
-  # on demand. It only becomes dispatchable once it is on the default branch.
-  workflow_dispatch:
 
 permissions: {}
 
 jobs:
   vendor:
     runs-on: ubuntu-latest
-    # Push triggers are already filtered; only a dispatch needs the ref gate, so
-    # a manual run cannot package a feature branch or tag over the rolling chart.
+    # Push triggers are already filtered to the refs this line vendors. No
+    # workflow_dispatch: a manual run loads the copy on the ref it is dispatched
+    # from, and the only ref this copy accepts is `release-2.0` -- which loads
+    # release-2.0's own copy instead. The two copies would each require the
+    # other, so the path cannot run. 2.1 does not vendor at all
+    # (cubestack-operator#289); release-2.0 keeps its own copy.
     if: >-
-      (github.event_name == 'push' &&
-       (github.ref == 'refs/heads/release-2.0' ||
-        startsWith(github.ref, 'refs/tags/v2.0.'))) ||
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release-2.0')
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/release-2.0' ||
+       startsWith(github.ref, 'refs/tags/v2.0.'))
     # Read-only for the GITHUB_TOKEN: it fetches this repo and nothing else.
     # Every write below — branch, pull request — goes through the App token.
     permissions:
