@@ -45,6 +45,14 @@ runs:
           exit 1
         fi
 
+        # `<version>-latest` and `<version>-sha<7>` are the chart tags main
+        # publishes. A release tag shaped like either is valid semver but would
+        # push the chart over that channel, replacing what main put there.
+        case "${VERSION}" in
+          *-latest|*-sha[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+            echo "::error::'${VERSION}' collides with a main chart tag"; exit 1 ;;
+        esac
+
         # Docker image tags are capped at 128 characters; the images Makefile
         # prefixes the release tag with toolchain axes, so leave room for those.
         if [ "${#GITHUB_REF_NAME}" -gt 96 ]; then
