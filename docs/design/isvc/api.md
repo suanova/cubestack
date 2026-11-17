@@ -816,7 +816,7 @@ env:
 
 全部带 ownerReference → InferenceService（GC 与 reconcile 归属）。
 
-**ServiceMonitor 抓取约定**：Controller 为每个 InferenceService 生成一个 ServiceMonitor，抓取端口名取 `endpoint.portName`（默认 `http`）、路径固定 `/metrics`，且只选择本 namespace 内本服务的 Service。因此 Profile 必须把引擎暴露指标的端口声明成与 `endpoint.portName` 同名的 Service 端口；端口名不一致的 role Service 会被 Prometheus 静默跳过（不报错，指标缺失）。selector 排除 headless Service（`<isvc>-<role>-hl`）：其 selector 不做 leader 过滤，endpoints 含组内 worker，而 worker 不服务该 role 的端点（§3.2 `roles[].service.headless`）。集群未安装 prometheus-operator 时不生成该对象，也不影响服务本体。
+**ServiceMonitor 抓取约定**：Controller 为每个 InferenceService 生成一个 ServiceMonitor，抓取端口名取 `endpoint.portName`（默认 `http`）、路径固定 `/metrics`，且只选择本 namespace 内本服务的 Service。selector 只覆盖声明了该端口名的 role Service；当 endpoint role 之外还有别的 role 声明同名端口时，endpoint role 被排除——这种拓扑下它是聚合层（如 PD 的 router），其端口不提供引擎指标。因此 Profile 必须把引擎暴露指标的端口声明成与 `endpoint.portName` 同名的 Service 端口；端口名不一致的 role Service 不会被选中（不报错，指标缺失）。selector 排除 headless Service（`<isvc>-<role>-hl`）：其 selector 不做 leader 过滤，endpoints 含组内 worker，而 worker 不服务该 role 的端点（§3.2 `roles[].service.headless`）。抓取结果通过 relabel 把 Service 名写入 `service` 标签，供 Grafana 的 `$service` 变量读取（prometheus-operator 默认只注入 `job`）。集群未安装 prometheus-operator 时不生成该对象，也不影响服务本体；CRD 后装时后续调谐会补建。
 
 #### role 到工作负载字段映射
 

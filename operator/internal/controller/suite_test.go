@@ -26,6 +26,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -85,6 +86,7 @@ var _ = BeforeSuite(func() {
 
 	testScheme = runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(testScheme))
+	utilruntime.Must(apiextensionsv1.AddToScheme(testScheme))
 	utilruntime.Must(aiv1alpha1.AddToScheme(testScheme))
 	utilruntime.Must(leaderworkersetv1.AddToScheme(testScheme))
 	utilruntime.Must(gatewayv1.Install(testScheme))

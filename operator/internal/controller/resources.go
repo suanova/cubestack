@@ -19,6 +19,7 @@ package controller
 import (
 	"fmt"
 	"maps"
+	"slices"
 
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 
@@ -153,10 +154,49 @@ func endpointPortName(profile *aiv1alpha1.InferenceRuntimeProfile) string {
 	return DefaultEndpointPortName
 }
 
+// monitoredRoles returns the role names whose Services the ServiceMonitor
+// selects: every role declaring a Service port named endpointPortName. The
+// endpoint role is dropped when another role declares the same port — an
+// endpoint role sharing its API port with other roles is the topology's
+// aggregation layer (the PD router), whose port answers /metrics with 404 —
+// while a sole endpoint role (a standard profile's engine) stays scraped.
+func monitoredRoles(profile *aiv1alpha1.InferenceRuntimeProfile) []string {
+	portName := endpointPortName(profile)
+	names := make([]string, 0, len(profile.Spec.Roles))
+	for i := range profile.Spec.Roles {
+		role := &profile.Spec.Roles[i]
+		if role.Service == nil {
+			continue
+		}
+		if slices.ContainsFunc(role.Service.Ports, func(p aiv1alpha1.ServicePort) bool { return p.Name == portName }) {
+			names = append(names, role.Name)
+		}
+	}
+	if len(names) > 1 {
+		names = slices.DeleteFunc(names, func(name string) bool { return name == profile.Spec.Endpoint.Role })
+	}
+	slices.Sort(names)
+	return names
+}
+
 // desiredServiceMonitor builds the ServiceMonitor scraping the role Services of
 // this service. It lives in the service's own namespace and selects only from
 // it, so one service's monitor can never reach another's Services.
-func desiredServiceMonitor(isvc *aiv1alpha1.InferenceService, portName string, scheme *runtime.Scheme) *monitoringv1.ServiceMonitor {
+func desiredServiceMonitor(isvc *aiv1alpha1.InferenceService, profile *aiv1alpha1.InferenceRuntimeProfile, scheme *runtime.Scheme) *monitoringv1.ServiceMonitor {
+	matchExpressions := []metav1.LabelSelectorRequirement{{
+		Key:      headlessServiceLabelKey,
+		Operator: metav1.LabelSelectorOpDoesNotExist,
+	}}
+	// An empty In list is not a valid label requirement, so leave the
+	// expression out when no role declares the port; nothing would be scraped
+	// anyway.
+	if roles := monitoredRoles(profile); len(roles) > 0 {
+		matchExpressions = append(matchExpressions, metav1.LabelSelectorRequirement{
+			Key:      roleLabelKey,
+			Operator: metav1.LabelSelectorOpIn,
+			Values:   roles,
+		})
+	}
 	sm := &monitoringv1.ServiceMonitor{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      isvc.Name,
@@ -174,12 +214,23 @@ func desiredServiceMonitor(isvc *aiv1alpha1.InferenceService, portName string, s
 					inferenceServiceLabelKey: isvc.Name,
 					managedByLabelKey:        managedByValue,
 				},
-				MatchExpressions: []metav1.LabelSelectorRequirement{{
-					Key:      headlessServiceLabelKey,
-					Operator: metav1.LabelSelectorOpDoesNotExist,
-				}},
+				MatchExpressions: matchExpressions,
 			},
-			Endpoints: []monitoringv1.Endpoint{{Port: portName, Path: "/metrics"}},
+			Endpoints: []monitoringv1.Endpoint{{
+				Port: endpointPortName(profile),
+				Path: "/metrics",
+				// Prometheus-operator injects only `job` by default; the
+				// SGLang PD dashboards' $service variable reads `service`.
+				// The action is spelled out because the CRD defaults it to
+				// "replace", and serviceMonitorNeedsUpdate compares endpoints
+				// exactly — an omitted action would rewrite the object on
+				// every reconcile.
+				RelabelConfigs: []monitoringv1.RelabelConfig{{
+					SourceLabels: []monitoringv1.LabelName{"__meta_kubernetes_service_name"},
+					TargetLabel:  "service",
+					Action:       "replace",
+				}},
+			}},
 		},
 	}
 	_ = ctrl.SetControllerReference(isvc, sm, scheme)

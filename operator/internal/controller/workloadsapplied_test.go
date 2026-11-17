@@ -42,12 +42,11 @@ func reconcileISVC(ctx context.Context, name string) (reconcile.Result, error) {
 }
 
 func reconcileISVCInNamespace(ctx context.Context, name, ns string) (reconcile.Result, error) {
-	// ServiceMonitorAvailable is set here but deliberately left at its zero
-	// value on the suite manager (suite_test.go): the direct call owns every
-	// ServiceMonitor assertion, so the concurrent manager reconcile cannot
-	// create one behind a spec's back.
+	// RESTMapper is set here but deliberately left nil on the suite manager
+	// (suite_test.go): the direct call owns every ServiceMonitor assertion, so
+	// the concurrent manager reconcile cannot create one behind a spec's back.
 	return reconcileWith(ctx, &InferenceServiceReconciler{
-		Client: k8sClient, Scheme: testScheme, ServiceMonitorAvailable: true,
+		Client: k8sClient, Scheme: testScheme, RESTMapper: testMgr.GetRESTMapper(),
 	}, name, ns)
 }
 
