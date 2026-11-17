@@ -316,6 +316,9 @@ export default function InferenceServicesPage() {
     // pass means "not loaded yet", not "nothing exists", and wiping the storage
     // then would drop the selection a previous visit stored.
     if (loading) return;
+    // A failed request is not an empty list either: items still describes the
+    // last successful response, so only a successful response may drop the key.
+    if (failed) return;
     // Persist the choice once the list has settled; if the service is gone
     // (including a last-item delete, where an empty list is a real answer not an
     // in-flight state) drop the stored key so the page never reopens a deleted
@@ -330,7 +333,7 @@ export default function InferenceServicesPage() {
       // Storage may be full or denied; a failed write must not change the
       // in-memory selection nor interrupt the page.
     }
-  }, [loading, selKey, items]);
+  }, [failed, loading, selKey, items]);
 
   const visible = items.filter((s) => {
     if (filter === "ready") return s.phase === "Ready";

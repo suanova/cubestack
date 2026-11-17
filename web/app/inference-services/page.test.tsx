@@ -335,6 +335,19 @@ describe("inference services page", () => {
     act(() => root.unmount());
   });
 
+  it("keeps the stored service when the initial list request fails", async () => {
+    localStorage.setItem("cubestack.inference-services.selected", "project-a/dsv4-flash-pd");
+    stubData([], false);
+    const { root } = renderPage();
+    await act(async () => {});
+
+    // A 500 says nothing about whether the service still exists, so the key
+    // must survive for the next successful load to restore.
+    expect(localStorage.getItem("cubestack.inference-services.selected")).toBe("project-a/dsv4-flash-pd");
+
+    act(() => root.unmount());
+  });
+
   it("survives a storage getter that throws, and renders with no selection", async () => {
     const real = Storage.prototype.getItem;
     const realSet = Storage.prototype.setItem;
@@ -360,9 +373,6 @@ describe("inference services page", () => {
       expect(container.textContent).toContain("dsv4-flash-pd");
       act(() => root.unmount());
     } finally {
-      (Storage.prototype as unknown)["getItem"] = real;
-      (Storage.prototype as unknown)["setItem"] = realSet;
-      (Storage.prototype as unknown)["removeItem"] = realRemove;
       vi.restoreAllMocks();
     }
   });

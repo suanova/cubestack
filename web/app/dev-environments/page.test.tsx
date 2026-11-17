@@ -653,6 +653,19 @@ describe("dev environments page", () => {
     act(() => root.unmount());
   });
 
+  it("keeps the stored selection when the initial list request fails", async () => {
+    localStorage.setItem("cubestack.dev-environments.selected", "project-a/ssh-dataset-prep");
+    stubData([], false);
+    const { root } = renderPage();
+    await act(async () => {});
+
+    // A 500 says nothing about whether the environment still exists, so the key
+    // must survive for the next successful load to restore.
+    expect(localStorage.getItem("cubestack.dev-environments.selected")).toBe("project-a/ssh-dataset-prep");
+
+    act(() => root.unmount());
+  });
+
   it("survives a storage getter that throws, and renders with no selection", async () => {
     const real = Storage.prototype.getItem;
     const realSet = Storage.prototype.setItem;
@@ -687,9 +700,6 @@ describe("dev environments page", () => {
       expect(container.textContent).toContain("连接信息");
       act(() => root.unmount());
     } finally {
-      (Storage.prototype as unknown)["getItem"] = real;
-      (Storage.prototype as unknown)["setItem"] = realSet;
-      (Storage.prototype as unknown)["removeItem"] = realRemove;
       vi.restoreAllMocks();
     }
   });
