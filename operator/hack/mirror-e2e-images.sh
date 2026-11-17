@@ -51,9 +51,10 @@ METALLB_REGISTRY="${METALLB_REGISTRY:-harbor.isuanova.com/mirrors}"
 # different images. Read as <build arg>=<mirror>=<upstream>.
 BASE_MIRRORS="$(sed -n 's/^BASE_MIRRORS *= *//p' Makefile)"
 
-# The init container's busybox, read out of the controller's own constant the
-# way the Makefile reads it. Upstream carries it under the same tag.
-BUSYBOX_IMAGE="$(sed -n 's/^[[:space:]]*permissionInitImage[[:space:]]*=[[:space:]]*"\(.*\)"$/\1/p' internal/controller/assets.go)"
+# The init container's busybox, read out of the controller's own variable the
+# way the Makefile reads it (a leading `var` allowed, as there). Upstream
+# carries it under the same tag.
+BUSYBOX_IMAGE="$(sed -n 's/^[[:space:]]*\(var[[:space:]]*\)\{0,1\}permissionInitImage[[:space:]]*=[[:space:]]*"\(.*\)"$/\2/p' internal/controller/assets.go)"
 
 for v in "${BASE_MIRRORS}" "${BUSYBOX_IMAGE}"; do
   [ -n "${v}" ] || { echo "could not read BASE_MIRRORS from the Makefile or permissionInitImage from internal/controller/assets.go — one of them changed shape" >&2; exit 1; }
