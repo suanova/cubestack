@@ -121,7 +121,9 @@ jobs:
           fi
           helm package . --version "${VERSION}" --app-version "${APP_VERSION}"
           if [ -n "${EXTRA_VERSION:-}" ]; then
-            echo "extra-version=${EXTRA_VERSION}" >> "${GITHUB_OUTPUT}"
+            helm package . --version "${EXTRA_VERSION}" --app-version "${APP_VERSION}"
+            echo "extra-version=${EXTRA_VERSION}" >> "$GITHUB_OUTPUT"
+            echo "extra-tgz=cubestack-portal-chart-${EXTRA_VERSION}.tgz" >> "$GITHUB_OUTPUT"
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tgz=cubestack-portal-chart-${VERSION}.tgz" >> "$GITHUB_OUTPUT"
@@ -140,25 +142,34 @@ jobs:
           CHART_VERSION: ${{ steps.package.outputs.version }}
           CHART_TGZ: ${{ steps.package.outputs.tgz }}
           EXTRA_VERSION: ${{ steps.package.outputs.extra-version }}
+          EXTRA_TGZ: ${{ steps.package.outputs.extra-tgz }}
         run: |
           set -euo pipefail
           chart_repo="harbor.isuanova.com/suanova/cubestack-portal-chart"
+          python3 -m pip install --quiet pyyaml
+          # The OCI config is the chart's metadata, so it comes out of the
+          # package being pushed: the source Chart.yaml still carries the file's
+          # own version and appVersion, which `helm package` overrode without
+          # rewriting it. Built per package, so each tag's config names its own
+          # version.
           push_chart() {
-            oras push "${chart_repo}:$1" \
-              "$2:application/vnd.cncf.helm.chart.content.v1.tar+gzip" \
+            local tag="$1" pkg="$2"
+            python3 - "$pkg" "${RUNNER_TEMP}/helm-config.json" <<'PY2'
+          import json, sys, tarfile, yaml
+          with tarfile.open(sys.argv[1]) as tf:
+              top = tf.getnames()[0].split("/")[0]
+              meta = yaml.safe_load(tf.extractfile(f"{top}/Chart.yaml"))
+          json.dump(meta, open(sys.argv[2], "w"), separators=(",", ":"))
+          PY2
+            oras push "${chart_repo}:${tag}" \
+              "${pkg}:application/vnd.cncf.helm.chart.content.v1.tar+gzip" \
               --config "${RUNNER_TEMP}/helm-config.json:application/vnd.cncf.helm.config.v1+json"
           }
-          python3 -m pip install --quiet pyyaml
-          python3 - <<'PY2'
-          import json, os, yaml
-          meta = yaml.safe_load(open("Chart.yaml"))
-          json.dump(meta, open(os.path.join(os.environ["RUNNER_TEMP"], "helm-config.json"), "w"), separators=(",", ":"))
-          PY2
-          # Two tags, one package: the commit-addressed one the release lock
-          # records, and on main the rolling name an open-source install uses.
+          # The commit-addressed tag the release lock records, plus the rolling
+          # name an open-source install uses (main only).
           out="$(push_chart "${CHART_VERSION}" "${CHART_TGZ}")"
           if [ -n "${EXTRA_VERSION}" ]; then
-            push_chart "${EXTRA_VERSION}" "${CHART_TGZ}" >/dev/null
+            push_chart "${EXTRA_VERSION}" "${EXTRA_TGZ}" >/dev/null
           fi
           manifest_digest="$(printf '%s' "$out" | sed -n 's/^Digest: //p' | tail -1)"
           [ -n "$manifest_digest" ] || { echo "::error::cannot resolve chart manifest digest"; exit 1; }

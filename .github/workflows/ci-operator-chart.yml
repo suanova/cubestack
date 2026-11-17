@@ -124,12 +124,16 @@ jobs:
             fi
             echo "dev=true" >> "${GITHUB_OUTPUT}"
           fi
+          tgz_dir=helm/cubestack-controller-manager-chart
           make helm-package HELM_CHART_VERSION="${VERSION}" HELM_CHART_APP_VERSION="${APP_VERSION}"
+          tgz="${tgz_dir}/cubestack-controller-manager-chart-${VERSION}.tgz"
           if [ -n "${EXTRA_VERSION:-}" ]; then
+            make helm-package HELM_CHART_VERSION="${EXTRA_VERSION}" HELM_CHART_APP_VERSION="${APP_VERSION}"
             echo "extra-version=${EXTRA_VERSION}" >> "${GITHUB_OUTPUT}"
+            echo "extra-tgz=${tgz_dir}/cubestack-controller-manager-chart-${EXTRA_VERSION}.tgz" >> "${GITHUB_OUTPUT}"
           fi
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
-          echo "tgz=helm/cubestack-controller-manager-chart/cubestack-controller-manager-chart-${VERSION}.tgz" >> "${GITHUB_OUTPUT}"
+          echo "tgz=${tgz}" >> "${GITHUB_OUTPUT}"
       - name: Log in to Harbor (helm + oras)
         working-directory: operator
         env:
@@ -156,25 +160,33 @@ jobs:
           CHART_VERSION: ${{ steps.package.outputs.version }}
           CHART_TGZ: ${{ steps.package.outputs.tgz }}
           EXTRA_VERSION: ${{ steps.package.outputs.extra-version }}
+          EXTRA_TGZ: ${{ steps.package.outputs.extra-tgz }}
         run: |
           set -euo pipefail
           chart_repo="harbor.isuanova.com/suanova/cubestack-controller-manager-chart"
           python3 -m pip install --quiet pyyaml
-          python3 - <<'PY2'
-          import json, os, yaml
-          meta = yaml.safe_load(open("helm/cubestack-controller-manager-chart/Chart.yaml"))
-          json.dump(meta, open(os.path.join(os.environ["RUNNER_TEMP"], "helm-config.json"), "w"), separators=(",", ":"))
-          PY2
+          # The OCI config is the chart's metadata, so it comes out of the
+          # package being pushed: the source Chart.yaml still carries the file's
+          # own version and appVersion, which `helm package` overrode without
+          # rewriting it. Per-package rather than once, because the rolling tag
+          # and the commit tag are the same bytes only by coincidence of
+          # appVersion -- their versions differ.
           push_chart() {
-            oras push "${chart_repo}:$1" \
-              "$2:application/vnd.cncf.helm.chart.content.v1.tar+gzip" \
+            local tag="$1" pkg="$2"
+            python3 - "$pkg" "${RUNNER_TEMP}/helm-config.json" <<'PY2'
+          import json, sys, tarfile, yaml
+          with tarfile.open(sys.argv[1]) as tf:
+              top = tf.getnames()[0].split("/")[0]
+              meta = yaml.safe_load(tf.extractfile(f"{top}/Chart.yaml"))
+          json.dump(meta, open(sys.argv[2], "w"), separators=(",", ":"))
+          PY2
+            oras push "${chart_repo}:${tag}" \
+              "${pkg}:application/vnd.cncf.helm.chart.content.v1.tar+gzip" \
               --config "${RUNNER_TEMP}/helm-config.json:application/vnd.cncf.helm.config.v1+json"
           }
-          # Two tags, one package: the commit-addressed one the release lock
-          # records, and on main the rolling name an open-source install uses.
           out="$(push_chart "${CHART_VERSION}" "${CHART_TGZ}")"
           if [ -n "${EXTRA_VERSION}" ]; then
-            push_chart "${EXTRA_VERSION}" "${CHART_TGZ}" >/dev/null
+            push_chart "${EXTRA_VERSION}" "${EXTRA_TGZ}" >/dev/null
           fi
           manifest_digest="$(printf '%s' "$out" | sed -n 's/^Digest: //p' | tail -1)"
           [ -n "$manifest_digest" ] || { echo "::error::cannot resolve chart manifest digest"; exit 1; }
