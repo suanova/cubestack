@@ -215,7 +215,9 @@ jobs:
               meta = yaml.safe_load(tf.extractfile(f"{top}/Chart.yaml"))
           json.dump(meta, open(sys.argv[2], "w"), separators=(",", ":"))
           PY2
-            oras push "${chart_repo}:${tag}" \
+            # The package lives in RUNNER_TEMP, so its path is absolute; oras
+            # rejects that unless validation is off.
+            oras push --disable-path-validation "${chart_repo}:${tag}" \
               "${pkg}:application/vnd.cncf.helm.chart.content.v1.tar+gzip" \
               --config "${RUNNER_TEMP}/helm-config.json:application/vnd.cncf.helm.config.v1+json"
           }
