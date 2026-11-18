@@ -4,10 +4,14 @@ description: A Helm chart for deploying CubeStack Portal (UI)
 
 type: application
 
-version: 2.0.0
-# The tag the UI image defaults to, so it names a real image tag. Both fields
-# are overridden at package time; keeping them in step names the rolling chart.
-appVersion: "v2.0.0"
+# `version` is a prefix, not a tag: main publishes `<version>-sha<7>` and
+# `<version>-latest`, and a `vX.Y.Z` release publishes `X.Y.Z`. CI overrides
+# both fields at package time, so this value only matters for a local
+# `helm install`.
+version: 2.1.0
+# The tag the UI image defaults to, so it names a real image tag: `latest` is
+# what main publishes and always exists.
+appVersion: "latest"
 
 annotations:
   artifacthub.io/license: Apache-2.0

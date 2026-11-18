@@ -2,9 +2,12 @@ apiVersion: v2
 name: cubestack-controller-manager-chart
 description: CubeStack operator — installs the ai.cubestack.io CRDs, VAPs and controller manager
 type: application
-version: 2.0.0
-# The tag the manager image defaults to, so it names a real image tag: no `v`
-# prefix, which the release tag carries but the image tag does not. Both fields
-# are overridden at package time; keeping them in step names the rolling chart.
-appVersion: v2.0.0
+# `version` is a prefix, not a tag: main publishes `<version>-sha<7>` and
+# `<version>-latest`, and a `vX.Y.Z` release publishes `X.Y.Z`. CI overrides
+# both fields at package time, so this value only matters for a local
+# `helm install`.
+version: 2.1.0
+# The tag the charts' images default to, so it names a real image tag: `latest`
+# is what main publishes and always exists.
+appVersion: "latest"
 kubeVersion: ">=1.30.0-0"

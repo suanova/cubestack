@@ -9,11 +9,12 @@ name: CI Operator Chart
 # workflow-only fix re-triggers a publish. Everything else under operator/ is
 # covered by the image and CI workflows.
 #
-# Two triggers, two kinds of version: a merge to main packages the rolling chart
-# as `<Chart.yaml version>-latest`; a `vX.Y.Z` tag packages the release version.
+# Two triggers, two kinds of version: a merge to main or to a release branch
+# packages `<Chart.yaml version>-sha<7>`, and main also packages
+# `<Chart.yaml version>-latest`; a `vX.Y.Z` tag packages that release version.
 on:
   push:
-    branches: [main]
+    branches: [main, 'release-*']
     tags: ['v*']
 
 permissions: {}
@@ -63,14 +64,38 @@ jobs:
     permissions:
       contents: read
     runs-on: ubuntu-latest
+    outputs:
+      line: ${{ steps.line.outputs.line }}
+      dev: ${{ steps.package.outputs.dev }}
+      chart_json: ${{ steps.push.outputs.chart_json }}
     steps:
       - name: Clone the code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      - name: Resolve the line
+        id: line
+        run: |
+          # The line this tree belongs to. Read here rather than in the notify
+          # job: that one has no checkout, so VERSION_LINE is not in its
+          # workspace. Without it the release receiver falls back to its
+          # `CUBESTACK_CURRENT_LINE`, so a release branch merge would pin
+          # whatever line is current then.
+          line="$(tr -d '[:space:]' < VERSION_LINE)"
+          [[ "${line}" =~ ^[0-9]+\.[0-9]+$ ]] \
+            || { echo "::error::invalid VERSION_LINE: '${line}'"; exit 1; }
+          if [[ "${GITHUB_REF_NAME}" == release-* && "${GITHUB_REF_NAME}" != "release-${line}" ]]; then
+            echo "::error::VERSION_LINE=${line} does not match ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+          echo "line=${line}" >> "${GITHUB_OUTPUT}"
       - name: Resolve the release version
         id: release
         uses: ./.github/actions/resolve-release-version
+      - name: Install oras
+        uses: oras-project/setup-oras@ca28077386065e263c03428f4ae0c09024817c93 # v1.2.0
+        with:
+          version: 1.2.0
       - name: Setup Go
         uses: ./.github/actions/setup-go
         with:
@@ -96,38 +121,153 @@ jobs:
           if [ -n "${RELEASE_VERSION}" ]; then
             VERSION="${RELEASE_VERSION}"
             APP_VERSION="${RELEASE_APP_VERSION}"
+            echo "dev=false" >> "${GITHUB_OUTPUT}"
           else
-            VERSION="$(grep '^version:' helm/cubestack-controller-manager-chart/Chart.yaml | awk '{print $2}')-latest"
-            APP_VERSION=latest
+            # One chart per commit, and that commit is in the version: the
+            # release lock records this version, the installer pushes the chart
+            # into the cluster registry under it, and the CR names it back, so
+            # the tag has to be unique per commit and never `latest`.
+            BASE="$(grep '^version:' helm/cubestack-controller-manager-chart/Chart.yaml | awk '{print $2}')"
+            VERSION="${BASE}-sha${GITHUB_SHA::7}"
+            # appVersion stays `latest`, deliberately. These repos build each
+            # image only when its own paths change (`operator/**`, `web/**`), so
+            # a commit-addressed tag may exist for one image and not the other;
+            # `latest` always exists. Commercial installs never read appVersion
+            # (spec.global.images injects the tag), so this only decides what a
+            # bare `helm install` pulls.
+            APP_VERSION="latest"
+            # Main also publishes the rolling name an open-source install uses,
+            # but only from the newest commit that decides this chart: a re-run
+            # of an older run must not roll `<version>-latest` back.
+            if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+              git fetch --no-tags --depth=1 origin main
+              if git diff --quiet "${GITHUB_SHA}" FETCH_HEAD -- operator/helm operator/config operator/hack operator/Makefile .github/workflows/ci-operator-chart.yml; then
+                EXTRA_VERSION="${BASE}-latest"
+              else
+                echo "Skipping '${BASE}-latest': a later commit changed this chart"
+              fi
+            fi
+            echo "dev=true" >> "${GITHUB_OUTPUT}"
           fi
+          # operator/Makefile's helm-package starts with
+          # `rm -f helm/cubestack-controller-manager-chart/*.tgz`, so a second
+          # run deletes the first package. Move each one out of the chart dir
+          # before packaging the next.
           make helm-package HELM_CHART_VERSION="${VERSION}" HELM_CHART_APP_VERSION="${APP_VERSION}"
+          tgz="${RUNNER_TEMP}/cubestack-controller-manager-chart-${VERSION}.tgz"
+          mv "helm/cubestack-controller-manager-chart/cubestack-controller-manager-chart-${VERSION}.tgz" "${tgz}"
+          if [ -n "${EXTRA_VERSION:-}" ]; then
+            make helm-package HELM_CHART_VERSION="${EXTRA_VERSION}" HELM_CHART_APP_VERSION="${APP_VERSION}"
+            extra_tgz="${RUNNER_TEMP}/cubestack-controller-manager-chart-${EXTRA_VERSION}.tgz"
+            mv "helm/cubestack-controller-manager-chart/cubestack-controller-manager-chart-${EXTRA_VERSION}.tgz" "${extra_tgz}"
+            echo "extra-version=${EXTRA_VERSION}" >> "${GITHUB_OUTPUT}"
+            echo "extra-tgz=${extra_tgz}" >> "${GITHUB_OUTPUT}"
+          fi
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
-      # helm is preinstalled on ubuntu-24.04 runners — no install step needed.
-      - name: Log in to Harbor (helm registry)
+          echo "tgz=${tgz}" >> "${GITHUB_OUTPUT}"
+      - name: Log in to Harbor (helm + oras)
         working-directory: operator
         env:
-          # Pass credentials through the environment, never inline: Harbor
-          # robot account names contain a literal '$' (robot$<name>) and
-          # passwords may contain any shell metacharacter. Env values bypass
-          # shell parsing; only the variable reference is expanded below.
           HARBOR_USERNAME: ${{ vars.CI_BOT_NAME }}
           HARBOR_PASSWORD: ${{ secrets.CI_BOT_PASSWORD }}
         run: |
           set -euo pipefail
           helm registry login harbor.isuanova.com \
             -u "$HARBOR_USERNAME" -p "$HARBOR_PASSWORD"
-      # Push the packaged chart as an OCI artifact. The OCI repository name is
-      # deliberately the chart name (cubestack-controller-manager-chart), kept distinct
-      # from the container image repository cubestack-controller-manager in
-      # project suanova — Harbor serves chart-OCI and image artifacts under
-      # the same repo name within a project.
-      - name: Push chart to Harbor
+          printf '%s' "$HARBOR_PASSWORD" | oras login harbor.isuanova.com \
+            -u "$HARBOR_USERNAME" --password-stdin
+      - name: Push release chart (OCI)
+        if: steps.package.outputs.dev != 'true'
         working-directory: operator
-        env:
-          # The version the chart was packaged under -- not read back from
-          # Chart.yaml, which carries neither the tag nor the -latest suffix.
-          PACKAGED_VERSION: ${{ steps.package.outputs.version }}
         run: |
           set -euo pipefail
-          helm push "helm/cubestack-controller-manager-chart/cubestack-controller-manager-chart-${PACKAGED_VERSION}.tgz" \
+          helm push "${{ steps.package.outputs.tgz }}" \
             oci://harbor.isuanova.com/suanova
+      - name: Push dev charts with channel tags
+        id: push
+        if: steps.package.outputs.dev == 'true'
+        working-directory: operator
+        env:
+          CHART_VERSION: ${{ steps.package.outputs.version }}
+          CHART_TGZ: ${{ steps.package.outputs.tgz }}
+          EXTRA_VERSION: ${{ steps.package.outputs.extra-version }}
+          EXTRA_TGZ: ${{ steps.package.outputs.extra-tgz }}
+        run: |
+          set -euo pipefail
+          chart_repo="harbor.isuanova.com/suanova/cubestack-controller-manager-chart"
+          # A Debian-packaged python refuses a system-wide install (PEP 668);
+          # hosted runners pre-install PyYAML and never reach the install.
+          python3 -c 'import yaml' 2>/dev/null \
+            || python3 -m pip install --quiet pyyaml \
+            || python3 -m pip install --quiet --break-system-packages pyyaml
+          # The OCI config is the chart's metadata, so it comes out of the
+          # package being pushed: the source Chart.yaml still carries the file's
+          # own version and appVersion, which `helm package` overrode without
+          # rewriting it. Per-package rather than once, because the rolling tag
+          # and the commit tag are the same bytes only by coincidence of
+          # appVersion -- their versions differ.
+          push_chart() {
+            local tag="$1" pkg="$2"
+            python3 - "$pkg" "${RUNNER_TEMP}/helm-config.json" <<'PY2'
+          import json, sys, tarfile, yaml
+          with tarfile.open(sys.argv[1]) as tf:
+              top = tf.getnames()[0].split("/")[0]
+              meta = yaml.safe_load(tf.extractfile(f"{top}/Chart.yaml"))
+          json.dump(meta, open(sys.argv[2], "w"), separators=(",", ":"))
+          PY2
+            # Run from the package's directory so the OCI layer title is the
+            # basename, not an absolute path.
+            ( cd "$(dirname "${pkg}")" && oras push "${chart_repo}:${tag}" \
+              "$(basename "${pkg}"):application/vnd.cncf.helm.chart.content.v1.tar+gzip" \
+              --config "${RUNNER_TEMP}/helm-config.json:application/vnd.cncf.helm.config.v1+json" )
+          }
+          out="$(push_chart "${CHART_VERSION}" "${CHART_TGZ}")"
+          if [ -n "${EXTRA_VERSION}" ]; then
+            push_chart "${EXTRA_VERSION}" "${EXTRA_TGZ}" >/dev/null
+          fi
+          manifest_digest="$(printf '%s' "$out" | sed -n 's/^Digest: //p' | tail -1)"
+          [ -n "$manifest_digest" ] || { echo "::error::cannot resolve chart manifest digest"; exit 1; }
+          tgz_digest="sha256:$(sha256sum "$CHART_TGZ" | awk '{print $1}')"
+          jq -nc --arg v "$CHART_VERSION" --arg d "$tgz_digest" --arg m "$manifest_digest" \
+            '{version:$v,digest:$d,manifest_digest:$m}' > "${RUNNER_TEMP}/chart.json"
+          echo "chart_json=$(cat "${RUNNER_TEMP}/chart.json")" >> "$GITHUB_OUTPUT"
+
+  notify-release:
+    needs: build-push-chart
+    if: needs.build-push-chart.outputs.dev == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - name: Create an installation token for cubestack-release
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.SUANOVA_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.SUANOVA_BOT_APP_PRIVATE_KEY }}
+          owner: suanova
+          repositories: cubestack-release
+          permission-contents: write
+      - name: Dispatch component-built
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          CHART_JSON: ${{ needs.build-push-chart.outputs.chart_json }}
+        run: |
+          set -euo pipefail
+          payload="$(jq -nc \
+            --arg repo "suanova/cubestack" \
+            --arg commit "${GITHUB_SHA}" \
+            --arg line "${{ needs.build-push-chart.outputs.line }}" \
+            --arg component "cubestack-controller-manager" \
+            --argjson chart "${CHART_JSON}" \
+            '{event_type:"component-built",client_payload:{repo:$repo,commit:$commit,line:$line,component:$component,chart:$chart}}')"
+          for i in 1 2 3; do
+            if printf '%s' "${payload}" | gh api --method POST \
+                repos/suanova/cubestack-release/dispatches --input -; then
+              exit 0
+            fi
+            sleep $((i * 5))
+          done
+          echo "::error::component-built dispatch failed after 3 attempts"
+          exit 1
