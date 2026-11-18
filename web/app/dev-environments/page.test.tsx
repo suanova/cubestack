@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import DevEnvironmentsPage from "./page";
 import { withBasePath } from "@/lib/base-path";
+import { setPlatformLocale } from "@/lib/i18n/locale";
 import { devEnvironmentList, devEnvironmentSummary } from "@/test/fixtures/devenvironments";
 
 // The test files avoid JSX because tsconfig sets jsx: "preserve" (for Next),
@@ -46,6 +47,7 @@ describe("dev environments page", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     document.body.innerHTML = "";
   });
@@ -71,6 +73,9 @@ describe("dev environments page", () => {
   // for it: opening JupyterLab is one click, not a token to copy.
   const JUPYTER_URL = "http://gateway.example.dev:8080/dev/project-a/jupyter-nlp-ln/lab";
   const openRequests: string[] = [];
+  // The pod reason the status card asks for, and the requests made for it: a
+  // detail panel reads it whenever it opens.
+  const podRequests: string[] = [];
 
   function renderPage() {
     const container = document.createElement("div");
@@ -82,11 +87,12 @@ describe("dev environments page", () => {
     return { container, root };
   }
 
-  function stubData(items: unknown[], ok = true) {
+  function stubData(items: unknown[], ok = true, pod: { failure?: unknown; error?: string } = { failure: null }) {
     tokenRequests.length = 0;
     keyRequests.length = 0;
     envRequests.length = 0;
     openRequests.length = 0;
+    podRequests.length = 0;
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: unknown) => {
@@ -115,6 +121,12 @@ describe("dev environments page", () => {
           const q = new URL(String(url), "http://localhost").searchParams;
           envRequests.push(`${q.get("namespace")}/${q.get("name")}`);
           return { ok: true, status: 200, json: async () => ({ values: ENV_VALUES }) };
+        }
+        if (String(url).includes("/api/devenvironments/pod-status")) {
+          const q = new URL(String(url), "http://localhost").searchParams;
+          podRequests.push(`${q.get("namespace")}/${q.get("name")}`);
+          if (pod.error) return { ok: false, status: 500, json: async () => ({ error: pod.error }) };
+          return { ok: true, status: 200, json: async () => ({ failure: pod.failure ?? null }) };
         }
         return { ok, status: ok ? 200 : 500, json: async () => (ok ? { items } : { error: "boom" }) };
       }),
@@ -306,6 +318,112 @@ describe("dev environments page", () => {
     const dot = container.querySelector('[data-od-id="cond-Ready"] span');
     expect(dot?.getAttribute("aria-hidden")).toBe("true");
     expect(dot?.getAttribute("aria-label")).toBeNull();
+
+    act(() => root.unmount());
+  });
+
+  it("shows why the pod is not up, in the kubelet's own words", async () => {
+    stubData([devEnvironmentSummary({ name: "crashing-env" })], true, {
+      failure: {
+        container: "jupyter",
+        reason: "CrashLoopBackOff",
+        message: "back-off 5m0s restarting failed container",
+        exitCode: 137,
+      },
+    });
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    // The conditions stop where the controller's knowledge stops; this line is
+    // the pod's own account of the same failure. The reason and message are the
+    // kubelet's text — verbatim, like a condition's status — and only the label
+    // and the exit-code wording are the platform's.
+    const line = container.querySelector('[data-od-id="pod-reason"]') as HTMLElement;
+    expect(line).not.toBeNull();
+    expect(podRequests).toEqual(["project-a/crashing-env"]);
+    expect(line.textContent).toContain("Pod 状态");
+    expect(line.textContent).toContain("CrashLoopBackOff");
+    expect(line.textContent).toContain("jupyter: back-off 5m0s restarting failed container (退出码 137)");
+
+    act(() => root.unmount());
+  });
+
+  it("says nothing about a healthy pod, but still asks", async () => {
+    stubData([devEnvironmentSummary({ name: "healthy-env" })]);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    // A healthy pod has nothing to add: the conditions above already say it is
+    // up, and a line repeating that would read as a second problem.
+    expect(podRequests).toEqual(["project-a/healthy-env"]);
+    expect(container.querySelector('[data-od-id="pod-reason"]')).toBeNull();
+    expect(container.querySelector('[data-od-id="pod-reason-error"]')).toBeNull();
+
+    act(() => root.unmount());
+  });
+
+  it("keeps the pod's account current while the detail stays open", async () => {
+    vi.useFakeTimers();
+    // The first read finds the container merely creating, which the route does
+    // not report as a failure; the pull then fails. Nothing remounts the detail
+    // — the list poll only re-renders it — so the card has to ask again itself.
+    const pod: { failure?: unknown } = { failure: null };
+    stubData([devEnvironmentSummary({ name: "pulling-env" })], true, pod);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    expect(podRequests).toEqual(["project-a/pulling-env"]);
+    expect(container.querySelector('[data-od-id="pod-reason"]')).toBeNull();
+
+    pod.failure = {
+      container: "jupyter",
+      reason: "ImagePullBackOff",
+      message: 'Back-off pulling image "harbor.isuanova.com/suanova/jupyter-minimal:latest"',
+    };
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+
+    const line = container.querySelector('[data-od-id="pod-reason"]') as HTMLElement;
+    expect(line).not.toBeNull();
+    expect(line.textContent).toContain("ImagePullBackOff");
+    expect(podRequests).toEqual(["project-a/pulling-env", "project-a/pulling-env"]);
+
+    act(() => root.unmount());
+  });
+
+  it("reports a pod status it could not read instead of an empty line", async () => {
+    stubData([devEnvironmentSummary({ name: "opaque-env" })], true, { error: "podUnreadable" });
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    expect(container.querySelector('[data-od-id="pod-reason"]')).toBeNull();
+    expect(container.querySelector('[data-od-id="pod-reason-error"]')?.textContent).toBe(
+      "暂时无法读取 Pod 状态,请稍后重试。",
+    );
+
+    act(() => root.unmount());
+  });
+
+  it("reports a failed poll in the language the console is in now", async () => {
+    vi.useFakeTimers();
+    // The read repeats on a timer whose callback is made once, when the card
+    // opens: a sentence built from the `t` captured then would keep the language
+    // the card was opened in, while the card around it followed the switcher.
+    const pod: { failure?: unknown; error?: string } = { failure: null };
+    stubData([devEnvironmentSummary({ name: "opaque-env" })], true, pod);
+    const { container, root } = renderPage();
+    await act(async () => {});
+
+    act(() => setPlatformLocale("en"));
+    pod.error = "podUnreadable";
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+
+    expect(container.querySelector('[data-od-id="pod-reason-error"]')?.textContent).toBe(
+      "Could not read the pod status; please retry later.",
+    );
 
     act(() => root.unmount());
   });

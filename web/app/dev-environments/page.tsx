@@ -36,6 +36,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 
 import type { DevEnvironmentSummary } from "@/app/api/devenvironments/route";
 import type { DevEnvImageOption, DevEnvOptionsResponse } from "@/app/api/devenvironments/options/route";
+import type { PodStatusResponse } from "@/app/api/devenvironments/pod-status/route";
 import { validationMessage, type ValidationErrorBody } from "@/lib/api-error";
 import { apiFetch, withBasePath } from "@/lib/base-path";
 import { copyText } from "@/lib/clipboard";
@@ -1805,8 +1806,140 @@ function StatusCard({ e }: { e: DevEnvironmentSummary }) {
             );
           })
         )}
+        {/* Below the conditions, because that is where the controller's own
+            account of the environment ends and the pod's begins. */}
+        <PodReason namespace={e.namespace} name={e.name} />
       </Box>
     </Card>
+  );
+}
+
+/** The list poll's cadence; the pod read below follows it (::load). */
+const POD_STATUS_POLL_MS = 30_000;
+
+/**
+ * A failed pod read, kept as the facts the sentence is made from rather than as
+ * the sentence: the read outlives the locale it was made under, so what it
+ * stores is what `validationMessage` takes.
+ */
+type PodReadError =
+  | { kind: "unreadable" }
+  | { kind: "http"; body: ValidationErrorBody; status: number };
+
+/**
+ * Why the environment's pod is not up, in the kubelet's own words.
+ *
+ * The conditions above stop where the controller's knowledge stops: a container
+ * that cannot pull its image, crashes on start or is OOM-killed is reported on
+ * the pod, and that is the fact a red environment is diagnosed from. The reason
+ * and message are rendered verbatim — they are the kubelet's enum and text, the
+ * same in every locale, as a condition's status already is — while the label
+ * around them is the platform's own.
+ */
+function PodReason({ namespace, name }: { namespace: string; name: string }) {
+  const { t } = useI18n();
+  const [failure, setFailure] = useState<PodStatusResponse["failure"]>(null);
+  const [error, setError] = useState<PodReadError | null>(null);
+  // The read repeats for as long as the card is open, on the list poll's cadence:
+  // the pod changes under a detail that a poll does not remount, so a container
+  // first seen creating would keep the card empty after it moved to
+  // ImagePullBackOff. The ref holds only the read in flight, so a slow one is not
+  // overtaken by the next tick — and React's development StrictMode, which runs
+  // every effect twice, attaches to the same promise instead of issuing a second
+  // read, so the second run still applies the first one's answer.
+  const requestRef = useRef<Promise<{ failure: PodStatusResponse["failure"] } | { error: PodReadError }> | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const read = () => {
+      if (requestRef.current === null) {
+        const request = apiFetch(
+          `/api/devenvironments/pod-status?namespace=${encodeURIComponent(namespace)}&name=${encodeURIComponent(name)}`,
+        )
+          .then(async (res) => {
+            const body = (await res.json().catch(() => ({}))) as ValidationErrorBody & PodStatusResponse;
+            if (!res.ok) return { error: { kind: "http" as const, body, status: res.status } };
+            return { failure: body.failure ?? null };
+          })
+          .catch(() => ({ error: { kind: "unreadable" as const } }));
+        requestRef.current = request;
+        // Cleared before the answer is applied, so the next tick asks again.
+        void request.then(() => {
+          requestRef.current = null;
+        });
+      }
+      void requestRef.current.then((result) => {
+        if (cancelled) return;
+        if ("failure" in result) {
+          setFailure(result.failure);
+          setError(null);
+        } else {
+          setError(result.error);
+        }
+      });
+    };
+    read();
+    const timer = setInterval(read, POD_STATUS_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+    // The reads are keyed to the environment alone. The sentence a failure is
+    // reported in is built at render, so a locale switched while the card is
+    // open reaches the next failed poll as well as the card itself.
+  }, [namespace, name]);
+
+  if (error) {
+    return (
+      <Typography data-od-id="pod-reason-error" sx={{ fontSize: 12, color: STATUS_ERR }}>
+        {error.kind === "http"
+          ? validationMessage(t, error.body, error.status, "dev")
+          : t("dev.err.podUnreadable")}
+      </Typography>
+    );
+  }
+  // A healthy or still-starting pod has nothing to say here: the conditions
+  // above already state that it is not ready yet, and a line repeating that
+  // would read as a second problem.
+  if (!failure) return null;
+
+  const detail = [
+    [failure.container, failure.message].filter(Boolean).join(": "),
+    failure.exitCode !== undefined ? `(${t("dev.pod.exitCode", { code: failure.exitCode })})` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  return (
+    <Box
+      data-od-id="pod-reason"
+      sx={{
+        display: "flex",
+        alignItems: "center",
+        gap: "6px",
+        flexWrap: "wrap",
+        fontSize: 12,
+        color: "text.secondary",
+        lineHeight: 2,
+      }}
+    >
+      <Box component="span" sx={{ opacity: 0.7 }}>{t("dev.pod.title")}</Box>
+      <Box
+        component="span"
+        sx={{
+          px: "9px",
+          py: "2px",
+          borderRadius: 999,
+          fontWeight: 600,
+          bgcolor: soft(STATUS_ERR),
+          color: `color-mix(in oklch, ${STATUS_ERR} 66%, var(--fg))`,
+          whiteSpace: "nowrap",
+        }}
+      >
+        {failure.reason}
+      </Box>
+      {detail ? <Box component="span" sx={{ overflowWrap: "anywhere" }}>{detail}</Box> : null}
+    </Box>
   );
 }
 
