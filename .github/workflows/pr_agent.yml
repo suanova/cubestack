@@ -160,6 +160,6 @@ jobs:
             conclusion: "neutral",
             output: {
               title: "PR-Agent fallback review",
-              summary: ("Reviewed " + $sha + " because CodeRabbit was rate-limited.")
+              summary: ("Fallback review ran for " + $sha + ".")
             }
           }' | gh api "repos/$GITHUB_REPOSITORY/check-runs" --input -
