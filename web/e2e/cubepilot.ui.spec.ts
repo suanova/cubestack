@@ -377,6 +377,8 @@ interface Stubs {
   /** What POST /approval answers with. 404 and 409 both mean "settled
    *  elsewhere"; anything else is a failure the card reports. */
   approvalPostStatus?: number;
+  /** What an allow-turn decision reports for turn coverage (defaults true). */
+  approvalTurnAllowed?: boolean;
   turnEvents?: object[];
   /** What POST /question answers with. 404/409 are the refusals that send the
    *  pane to the pending list instead of letting it guess at the outcome. */
@@ -562,7 +564,7 @@ async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
           approved: body.decision !== "reject",
           decision: body.decision,
           approvalId: body.approvalId,
-          ...(body.decision === "allow-turn" ? { turnAllowed: true } : {}),
+          ...(body.decision === "allow-turn" ? { turnAllowed: stubs.approvalTurnAllowed ?? true } : {}),
         });
       }
       if (path.endsWith("/questions/answer") && method === "POST") {
@@ -711,6 +713,52 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     expect(captured.approvalPosts[0].path).toContain(`/api/v1/sessions/${ENC_KEY}/approvals/decision`);
     await expect(page.locator('[data-od-id="send-btn"]')).toBeVisible();
     await expect(page.locator('[data-od-id="stop-btn"]')).toHaveCount(0);
+  });
+
+  test("allows the rest of the turn from the approval card", async ({ page }) => {
+    const captured = await stubAgent(page, { turnEvents: TURN_APPROVAL });
+    await page.goto("/cubestack/cubepilot");
+    await page.locator('[data-od-id="obj-cubepilot"]').click();
+
+    const thread = page.locator('[data-od-id="chat-thread"]');
+    await expect(thread).toContainText("技能 2 项");
+    await page.locator('[data-od-id="chat-input"]').fill("分析 Ceph OSD 使用率告警");
+    await page.locator('[data-od-id="send-btn"]').click();
+
+    const approval = page.locator('[data-od-id="approval-item"]');
+    await expect(approval).toContainText("写操作待审批");
+
+    await page.locator('[data-od-id="approval-allow-turn"]').click();
+    await expect(approval).toContainText("已批准");
+    await expect(page.locator('[data-od-id="approval-allow-turn"]')).toHaveCount(0);
+
+    // The action is its own decision value: the platform uses it to resolve the
+    // rest of the live turn, so it must not travel as a plain approve.
+    expect(captured.approvalPosts).toHaveLength(1);
+    expect(captured.approvalPosts[0].body).toEqual({ approvalId: "app-1", decision: "allow-turn" });
+    expect(captured.approvalPosts[0].path).toContain(`/api/v1/sessions/${ENC_KEY}/approvals/decision`);
+  });
+
+  test("warns when the turn-scoped approval cannot cover the turn", async ({ page }) => {
+    const captured = await stubAgent(page, { turnEvents: TURN_APPROVAL, approvalTurnAllowed: false });
+    await page.goto("/cubestack/cubepilot");
+    await page.locator('[data-od-id="obj-cubepilot"]').click();
+
+    const thread = page.locator('[data-od-id="chat-thread"]');
+    await expect(thread).toContainText("技能 2 项");
+    await page.locator('[data-od-id="chat-input"]').fill("分析 Ceph OSD 使用率告警");
+    await page.locator('[data-od-id="send-btn"]').click();
+
+    const approval = page.locator('[data-od-id="approval-item"]');
+    await expect(approval).toContainText("写操作待审批");
+    await page.locator('[data-od-id="approval-allow-turn"]').click();
+
+    // The command was approved once, but the platform could not bind the
+    // approval to a live turn: the toast says so and the card is approved,
+    // not rejected.
+    await expect(page.getByText("本次命令已批准,但本轮无法自动放行")).toBeVisible();
+    await expect(approval).toContainText("已批准");
+    expect(captured.approvalPosts[0].body).toEqual({ approvalId: "app-1", decision: "allow-turn" });
   });
 
   test("answers an ask_user question from the stream", async ({ page }) => {
