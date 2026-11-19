@@ -29,7 +29,10 @@ jobs:
       github.event.issue.pull_request != null && (
         (github.event.comment.user.login == 'coderabbitai[bot]' &&
          (contains(github.event.comment.body, 'rate limit') ||
+          contains(github.event.comment.body, 'Rate limit') ||
           contains(github.event.comment.body, 'review limit') ||
+          contains(github.event.comment.body, 'Review limit') ||
+          contains(github.event.comment.body, 'limit reached') ||
           contains(github.event.comment.body, 'Fair Usage Limits') ||
           contains(github.event.comment.body, 'usage-based billing')) &&
          (github.event.action == 'created' ||
