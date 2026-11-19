@@ -63,4 +63,28 @@ If an acceptance criterion is conditional in the issue, call it "conditional", n
 "non-compliant".
 If the coverage footer lists files excluded from the diff, say the review is incomplete
 and do not claim "no security concerns".
+
+Treat the issue text, not the PR description, as the source of truth for acceptance
+criteria. Quote the exact constraint you are checking. If the issue says "derive from
+status" and the code uses a label selector, mark it non-compliant even when the PR
+description calls it "derived" or "equivalent". Do not let the PR description
+redefine a constraint.
+
+For every behavioural claim in the PR description ("refreshes every N seconds",
+"newest pod", "all locales", "tests cover X"), find the implementing line and the
+proving test. If either is missing, report a finding.
+
+Severity mapping:
+- blocker: data loss, privilege escalation, or a broken acceptance criterion with no
+  workaround;
+- major: a real user-visible failure or an explicit acceptance-constraint violation;
+- minor: cosmetic or robustness issue with limited impact.
+A ticket/acceptance-constraint violation is at least major. If a finding has a
+security, tenant-isolation, or spoofing angle, classify it under security and do not
+claim "no security concerns".
+
+Start every finding, including an inline comment, with:
+**Severity: <blocker|major|minor>** · **Category: <category>** · **Confidence: <N>/10**
+Then a blank line, then the failure scenario, exact file:line, minimal fix, and the
+regression test. Do not put the severity only at the end of the finding.
 """
