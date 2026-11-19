@@ -25,7 +25,7 @@ jobs:
         with:
           llm_url: ${{ vars.LLM_OPENAI_BASE_URL || 'https://cuberouter.cn/v1' }}
           llm_auth_token: ${{ secrets.CUBEROUTER_TOKEN }}
-          llm_model: ${{ vars.LLM_MODEL || 'openai/gpt-6-luna' }}
+          llm_model: 'gpt-6-luna'
           llm_use_anthropic: 'false'
           llm_reasoning_effort: 'medium'
           effort: 'medium'
