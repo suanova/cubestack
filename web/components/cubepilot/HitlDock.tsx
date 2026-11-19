@@ -11,7 +11,7 @@
 // the bubble that raised it; that is why the two cards are exported from here
 // rather than being private to the dock.
 
-import { Box, Tooltip } from "@mui/material";
+import { Box } from "@mui/material";
 import { useState } from "react";
 
 import {
@@ -184,16 +184,14 @@ export function ApprovalCard({
           {/* Approve the rest of this turn without asking. Turn-scoped, not
               durable: the platform drops it when the turn ends, so it is
               offered under every gated policy, unlike the allowlist rule. */}
-          <Tooltip title={t("cubepilot.chat.approvalAllowTurnHint")} arrow>
-            <Btn
-              small
-              disabled={locked}
-              onClick={() => onDecide?.(approval.callId, "allow-turn")}
-              data-od-id="approval-allow-turn"
-            >
-              {t("cubepilot.chat.approvalAllowTurn")}
-            </Btn>
-          </Tooltip>
+          <Btn
+            small
+            disabled={locked}
+            onClick={() => onDecide?.(approval.callId, "allow-turn")}
+            data-od-id="approval-allow-turn"
+          >
+            {t("cubepilot.chat.approvalAllowTurn")}
+          </Btn>
           <Btn small disabled={locked} onClick={() => onDecide?.(approval.callId, "reject")} data-od-id="approval-reject">
             {t("cubepilot.chat.approvalReject")}
           </Btn>
@@ -206,6 +204,11 @@ export function ApprovalCard({
               {t("cubepilot.chat.approvalAllowAlways")}
             </Btn>
           ) : null}
+          {/* Visible, not a tooltip: it has to be reachable by keyboard, touch
+              and screen readers, which a hover-only hint is not. */}
+          <Box sx={{ flexBasis: "100%", fontSize: 11.5, color: "text.secondary", mt: "2px" }}>
+            {t("cubepilot.chat.approvalAllowTurnHint")}
+          </Box>
         </Box>
       ) : null}
       {/* Under the buttons, where the reader is looking when the click fails. */}

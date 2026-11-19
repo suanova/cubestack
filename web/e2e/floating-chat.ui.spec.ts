@@ -443,6 +443,9 @@ test.describe("global floating AI chat", () => {
     await panel.locator('[data-od-id="fchat-send"]').click();
     await expect(panel).toContainText("写操作待审批");
 
+    // The scope hint is visible text, not a hover-only tooltip.
+    await expect(panel.getByText("只对点击之后本轮新出现的命令生效")).toBeVisible();
+
     await panel.locator('[data-od-id="approval-allow-turn"]').click();
     await expect(panel).toContainText("已批准");
     await expect(panel.locator('[data-od-id="approval-allow-turn"]')).toHaveCount(0);
@@ -466,6 +469,9 @@ test.describe("global floating AI chat", () => {
     await panel.locator('[data-od-id="fchat-input"]').fill("分析 Ceph OSD 使用率告警");
     await panel.locator('[data-od-id="fchat-send"]').click();
     await expect(panel).toContainText("写操作待审批");
+
+    // The scope hint is visible text, not a hover-only tooltip.
+    await expect(panel.getByText("只对点击之后本轮新出现的命令生效")).toBeVisible();
 
     await panel.locator('[data-od-id="approval-allow-turn"]').click();
     // Approved once, but the turn could not be covered: the toast says so and

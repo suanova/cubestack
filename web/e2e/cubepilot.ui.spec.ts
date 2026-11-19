@@ -728,6 +728,9 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     const approval = page.locator('[data-od-id="approval-item"]');
     await expect(approval).toContainText("写操作待审批");
 
+    // The scope hint is visible text, not a hover-only tooltip.
+    await expect(page.getByText("只对点击之后本轮新出现的命令生效")).toBeVisible();
+
     await page.locator('[data-od-id="approval-allow-turn"]').click();
     await expect(approval).toContainText("已批准");
     await expect(page.locator('[data-od-id="approval-allow-turn"]')).toHaveCount(0);
