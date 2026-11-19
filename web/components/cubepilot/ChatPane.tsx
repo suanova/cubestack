@@ -1617,7 +1617,7 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
         }
         throw new Error(body?.error ?? `HTTP ${res.status}`);
       }
-      const body = (await res.json().catch(() => null)) as { allowlisted?: boolean; approvalId?: string } | null;
+      const body = (await res.json().catch(() => null)) as { allowlisted?: boolean; approvalId?: string; turnAllowed?: boolean } | null;
       // The approval this settled is the one that was named. A server that
       // answered for a different one would have let a write through that the
       // user never chose, which is the failure the id exists to prevent — so it
@@ -1633,6 +1633,11 @@ export function ChatPane({ roomExpanded = false, onToggleRoom }: ChatPaneProps =
         // The approval took; the durable rule did not. Calling that a success
         // would tell the user it will not ask again, and it will.
         showToast(t("cubepilot.chat.approvalNotAllowlisted"), "error");
+      }
+      if (decision === "allow-turn" && body?.turnAllowed !== true) {
+        // The command ran, but the platform could not bind the approval to a
+        // live turn, so the rest of this turn still asks.
+        showToast(t("cubepilot.chat.approvalTurnUnavailable"), "error");
       }
     } catch (e) {
       // The card stays answerable, with the reason on it: a toast would leave it

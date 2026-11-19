@@ -988,7 +988,7 @@ export function FloatingChat() {
         }
         throw new Error(body?.error ?? `HTTP ${res.status}`);
       }
-      const body = (await res.json().catch(() => null)) as { allowlisted?: boolean; approvalId?: string } | null;
+      const body = (await res.json().catch(() => null)) as { allowlisted?: boolean; approvalId?: string; turnAllowed?: boolean } | null;
       // The approval this settled is the one that was named.
       if (body?.approvalId && body.approvalId !== callId) {
         patchApproval(callId, (a) => ({ ...a, state: "stopped", error: t("cubepilot.chat.approvalWrongRecord", { id: body.approvalId ?? "" }) }));
@@ -999,6 +999,10 @@ export function FloatingChat() {
       patchApproval(callId, (a) => (a.state === "deciding" ? { ...a, state: decision === "reject" ? "rejected" : "approved" } : a));
       if (decision === "allow-always" && body?.allowlisted !== true) {
         showToast(t("cubepilot.chat.approvalNotAllowlisted"), "error");
+      }
+      if (decision === "allow-turn" && body?.turnAllowed !== true) {
+        // Approved once, but the rest of the turn still asks.
+        showToast(t("cubepilot.chat.approvalTurnUnavailable"), "error");
       }
     } catch (e) {
       // The card stays answerable, with the reason on it.

@@ -92,6 +92,7 @@ function sseBody(events: object[]): string {
 
 interface Captured {
   messagePosts: Array<{ path: string; body: { content?: string; sessionId?: string } }>;
+  approvalPosts: Array<{ path: string; body: Record<string, unknown> }>;
 }
 
 /** Stub the endpoints the surface touches (plus /api/overview so a test that
@@ -109,9 +110,9 @@ interface Captured {
 async function stubFloatingChat(
   page: Page,
   turnEvents: object[],
-  stubs: { historyOnce?: object[]; staleHistory?: object[] } = {},
+  stubs: { historyOnce?: object[]; staleHistory?: object[]; approvalTurnAllowed?: boolean } = {},
 ): Promise<Captured & { serveStale: () => void }> {
-  const captured: Captured = { messagePosts: [] };
+  const captured: Captured = { messagePosts: [], approvalPosts: [] };
   let historyReads = 0;
   let stale = false;
   await page.route("**/api/overview", (route) => route.fulfill({ json: overviewSummary() }));
@@ -156,7 +157,13 @@ async function stubFloatingChat(
       if (path.endsWith("/turn")) return json({ active: false });
       if (path.endsWith("/approvals/decision") && method === "POST") {
         const body = post();
-        return json({ approved: body.decision !== "reject", decision: body.decision, approvalId: body.approvalId });
+        captured.approvalPosts.push({ path, body });
+        return json({
+          approved: body.decision !== "reject",
+          decision: body.decision,
+          approvalId: body.approvalId,
+          ...(body.decision === "allow-turn" ? { turnAllowed: stubs.approvalTurnAllowed ?? true } : {}),
+        });
       }
       if (path.endsWith("/questions/answer")) return json({ questionId: "q-1", cancelled: false });
       if (path.endsWith("/questions/cancel")) return json({ questionId: "q-1", cancelled: true });
@@ -417,10 +424,61 @@ test.describe("global floating AI chat", () => {
     await expect(panel).toContainText("写操作待审批");
     await expect(panel).toContainText("ceph osd set-noscrub");
     await expect(panel.locator('[data-od-id="approval-allow"]')).toBeVisible();
+    await expect(panel.locator('[data-od-id="approval-allow-turn"]')).toBeVisible();
 
     await panel.locator('[data-od-id="approval-approve"]').click();
     await expect(panel).toContainText("已批准");
     await expect(panel.locator('[data-od-id="approval-approve"]')).toHaveCount(0);
+  });
+
+  test("allows the rest of the turn from the approval card", async ({ page }) => {
+    const captured = await stubFloatingChat(page, TURN_APPROVAL);
+    await page.goto("/cubestack");
+
+    await page.click('[data-od-id="fchat-fab"]');
+    const panel = page.locator('[data-od-id="fchat-panel"]');
+    await expect(panel).toBeVisible();
+
+    await panel.locator('[data-od-id="fchat-input"]').fill("分析 Ceph OSD 使用率告警");
+    await panel.locator('[data-od-id="fchat-send"]').click();
+    await expect(panel).toContainText("写操作待审批");
+
+    // The scope hint is visible text, not a hover-only tooltip.
+    await expect(panel.getByText("只对点击之后本轮新出现的命令生效")).toBeVisible();
+
+    await panel.locator('[data-od-id="approval-allow-turn"]').click();
+    await expect(panel).toContainText("已批准");
+    await expect(panel.locator('[data-od-id="approval-allow-turn"]')).toHaveCount(0);
+
+    // The action is its own decision value: the platform uses it to resolve the
+    // rest of the live turn.
+    expect(captured.approvalPosts).toHaveLength(1);
+    expect(captured.approvalPosts[0].body).toEqual({ approvalId: "app-1", decision: "allow-turn" });
+    expect(captured.approvalPosts[0].path).toContain("/api/v1/sessions/");
+    expect(captured.approvalPosts[0].path).toContain("/approvals/decision");
+  });
+
+  test("warns when the turn-scoped approval cannot cover the turn", async ({ page }) => {
+    const captured = await stubFloatingChat(page, TURN_APPROVAL, { approvalTurnAllowed: false });
+    await page.goto("/cubestack");
+
+    await page.click('[data-od-id="fchat-fab"]');
+    const panel = page.locator('[data-od-id="fchat-panel"]');
+    await expect(panel).toBeVisible();
+
+    await panel.locator('[data-od-id="fchat-input"]').fill("分析 Ceph OSD 使用率告警");
+    await panel.locator('[data-od-id="fchat-send"]').click();
+    await expect(panel).toContainText("写操作待审批");
+
+    // The scope hint is visible text, not a hover-only tooltip.
+    await expect(panel.getByText("只对点击之后本轮新出现的命令生效")).toBeVisible();
+
+    await panel.locator('[data-od-id="approval-allow-turn"]').click();
+    // Approved once, but the turn could not be covered: the toast says so and
+    // the card is approved, not rejected.
+    await expect(page.getByText("本次命令已批准,但本轮无法自动放行")).toBeVisible();
+    await expect(panel).toContainText("已批准");
+    expect(captured.approvalPosts[0].body).toEqual({ approvalId: "app-1", decision: "allow-turn" });
   });
 
   test("closes from its own close button", async ({ page }) => {
