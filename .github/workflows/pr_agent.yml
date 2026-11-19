@@ -1,9 +1,10 @@
 name: PR Agent (CodeRabbit fallback)
 
 # CodeRabbit is the primary reviewer for this public repo. Its free OSS quota can run
-# out, in which case it posts a "Review limit reached" notice — as a new comment, or as
-# an edit of its existing comment — instead of a review. PR-Agent then takes over, so a
-# pull request is reviewed by exactly one of the two bots.
+# out, in which case it posts a "Review rate limited" notice — as a new comment, or as
+# an edit of its existing comment — instead of a review. PR-Agent then provides a
+# fallback review. This is a second opinion, not a replacement: it reviews the current
+# head with the repository contract in .pr_agent.toml and is deduplicated per commit.
 on:
   issue_comment:
     types: [created, edited]
@@ -16,25 +17,66 @@ jobs:
   pr_agent_job:
     # Either CodeRabbit's own rate-limit notice, or a maintainer explicitly asking
     # PR-Agent for a review by commenting `/review`. An edited notice only triggers
-    # when the edit introduces the marker, and an edited `/review` comment never
-    # repeats the review.
+    # when the edit introduces a rate-limit marker, and an edited `/review` comment
+    # never repeats the review.
+    #
+    # Do not match a single literal sentence: CodeRabbit has used "Review rate
+    # limited.", "Your included review limit is currently reached..." and the Fair
+    # Usage Limits link across notices. The old literal ('rate limited by
+    # coderabbit.ai') did not match the visible text and fallback runs were skipped
+    # on some notices (see PR #468).
     if: >-
       github.event.issue.pull_request != null && (
         (github.event.comment.user.login == 'coderabbitai[bot]' &&
-         contains(github.event.comment.body, 'rate limited by coderabbit.ai') &&
+         (contains(github.event.comment.body, 'rate limit') ||
+          contains(github.event.comment.body, 'review limit') ||
+          contains(github.event.comment.body, 'Fair Usage Limits') ||
+          contains(github.event.comment.body, 'usage-based billing')) &&
          (github.event.action == 'created' ||
-          !contains(github.event.changes.body.from, 'rate limited by coderabbit.ai'))) ||
+          !contains(github.event.changes.body.from, 'rate limit'))) ||
         (github.event.action == 'created' &&
          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
          startsWith(github.event.comment.body, '/review'))
       )
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       issues: write
       pull-requests: write
+      # The fallback-review marker is a check run on the reviewed commit.
+      checks: write
     name: Review the pull request when CodeRabbit is rate-limited
     steps:
+      - name: Resolve the pull request head
+        id: head
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          sha=$(gh pr view "${{ github.event.issue.number }}" \
+            --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      # A rate-limit notice can be created or edited more than once for the same
+      # commit. Keep one fallback review per head SHA. The marker is a check run, so
+      # it is visible in the PR and does not depend on parsing PR-Agent's own comment.
+      - name: Skip a commit that already has a fallback review
+        id: gate
+        if: ${{ !startsWith(github.event.comment.body, '/review') }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ steps.head.outputs.sha }}
+        run: |
+          count=$(gh api \
+            "repos/$GITHUB_REPOSITORY/commits/$SHA/check-runs?check_name=pr-agent-fallback" \
+            --jq '.total_count' 2>/dev/null || echo 0)
+          if [ "${count:-0}" -gt 0 ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Commit $SHA already has a PR-Agent fallback review; skipping."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       # The official action only accepts commands from human slash commands, so it
       # cannot consume CodeRabbit's bot-authored notice. Run the same review through
       # the CLI image instead: `--pr_url` carries everything the action would have
@@ -44,24 +86,35 @@ jobs:
       # the container must start in its own /app. A `uses: docker://...` step cannot
       # override that (the runner forces the repository checkout as the workdir),
       # which fails with "can't open file '/github/workspace/pr_agent/cli.py'".
+      #
+      # The image is pinned to the digest exercised on PR #468. Bump it deliberately
+      # after checking that the keys in .pr_agent.toml are accepted by the new image.
       - name: Run PR-Agent review
+        if: ${{ steps.gate.outputs.skip != 'true' }}
         run: |
           docker run --rm --workdir /app \
             -e GITHUB__USER_TOKEN \
+            -e GITHUB__AGENT_LOGIN \
             -e OPENAI__API_BASE \
             -e OPENAI__KEY \
             -e CONFIG__MODEL \
             -e CONFIG__FALLBACK_MODELS \
             -e CONFIG__CUSTOM_MODEL_MAX_TOKENS \
+            -e CONFIG__MAX_MODEL_TOKENS \
             -e CONFIG__ADDITIONAL_REASONING_EFFORT_MODELS \
             -e CONFIG__MAX_OUTPUT_TOKENS \
             -e CONFIG__REASONING_EFFORT \
             -e CONFIG__NO_TEMPERATURE_MODELS \
             -e CONFIG__OUTPUT_RUN_DETAILS \
-            pragent/pr-agent:latest \
+            pragent/pr-agent@sha256:8978ae8f025883159ccc6f5bec51e6553347c77d14dbc5ca4bf3bb4a8726eb43 \
             --pr_url="${{ github.event.issue.pull_request.html_url }}" review
         env:
           GITHUB__USER_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # A GitHub App installation token cannot call GET /user. Telling PR-Agent
+          # the login it posts as lets it verify its own comments and load the
+          # persisted finding state instead of skipping it with "identity cannot be
+          # verified".
+          GITHUB__AGENT_LOGIN: 'github-actions[bot]'
 
           # ---- LLM 路由（模型名来自仓库变量）----
           # 使用 OpenAI 兼容端点：cuberouter 的 Anthropic 端点(/v1/messages)会忽略
@@ -74,11 +127,36 @@ jobs:
           CONFIG__MODEL: ${{ vars.LLM_MODEL || 'openai/deepseek-flash' }}
           CONFIG__FALLBACK_MODELS: '[]'
           CONFIG__CUSTOM_MODEL_MAX_TOKENS: ${{ vars.LLM_MAX_TOKENS || '128000' }}
+          # The effective context budget. CUSTOM_MODEL_MAX_TOKENS only declares the
+          # model's window; without this, PR-Agent's default 32k total budget minus
+          # the output reserve left ~16k for input and pruned the 17k diff on PR #468
+          # (dropping rbac.yaml). Keep max_model_tokens > max_output_tokens + diff.
+          CONFIG__MAX_MODEL_TOKENS: ${{ vars.LLM_MODEL_TOKENS || '64000' }}
           # OpenAI 兼容网关不认识该模型 ID，显式声明其支持 reasoning_effort，
           # 否则 pr-agent 不会把 reasoning_effort 传给网关。
           CONFIG__ADDITIONAL_REASONING_EFFORT_MODELS: ${{ vars.LLM_REASONING_MODELS || '["deepseek-flash"]' }}
-          # 关闭思考后 8k 已够用，但仍留足余量避免长回答被截断。
-          CONFIG__MAX_OUTPUT_TOKENS: ${{ vars.LLM_MAX_OUTPUT_TOKENS || '16384' }}
+          # A review answer is normally under 2k tokens; 8k leaves room for a long
+          # finding list without taking input budget away from the diff.
+          CONFIG__MAX_OUTPUT_TOKENS: ${{ vars.LLM_MAX_OUTPUT_TOKENS || '8192' }}
           CONFIG__REASONING_EFFORT: ${{ vars.LLM_REASONING_EFFORT || 'none' }}
           CONFIG__NO_TEMPERATURE_MODELS: ${{ vars.LLM_NO_TEMPERATURE_MODELS || '["deepseek-flash"]' }}
           CONFIG__OUTPUT_RUN_DETAILS: 'true'
+
+      - name: Record the fallback review on the commit
+        if: ${{ steps.gate.outputs.skip != 'true' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ steps.head.outputs.sha }}
+        run: |
+          jq -n --arg sha "$SHA" '{
+            name: "pr-agent-fallback",
+            head_sha: $sha,
+            status: "completed",
+            # This is a "review ran" marker, not a verdict on the code.
+            conclusion: "neutral",
+            output: {
+              title: "PR-Agent fallback review",
+              summary: ("Reviewed " + $sha + " because CodeRabbit was rate-limited.")
+            }
+          }' | gh api "repos/$GITHUB_REPOSITORY/check-runs" --input -
