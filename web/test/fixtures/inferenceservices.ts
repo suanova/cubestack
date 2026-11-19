@@ -17,6 +17,7 @@ export function inferenceServiceSummary(
     routeModelName: "dsv4-flash",
     timeoutSeconds: 0,
     idleTimeoutSeconds: 300,
+    env: [],
     createdAt: "2026-09-01T06:12:00Z",
     engine: "sglang",
     engineVersion: "vendor-0.5.12-rc1",

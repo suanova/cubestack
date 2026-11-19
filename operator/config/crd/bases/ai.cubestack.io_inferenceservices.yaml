@@ -52,6 +52,49 @@ spec:
           spec:
             description: spec defines the desired state of InferenceService
             properties:
+              env:
+                description: |-
+                  Env lists environment variables set on every role's pod container, on
+                  top of the profile's podTemplate.env. They are service-level: each one
+                  is applied to the main container of every role's workload (LeaderWorkerSet
+                  or Deployment) in addition to — and, by name, overriding — the same-named
+                  variable the Profile's podTemplate already declares. Each entry is a
+                  static value or a fieldRef; secret references belong on the Profile, not
+                  here, so a reproducer keeps its secrets where its Profile puts them.
+                  A variable is identified by its name, which must therefore be unique.
+                items:
+                  description: EnvVar is an environment variable with either a static
+                    value or a fieldRef.
+                  properties:
+                    fieldRef:
+                      description: FieldRef selects a downward API field, e.g. status.hostIP.
+                      properties:
+                        fieldPath:
+                          description: FieldPath is the path of the field to select,
+                            e.g. status.hostIP.
+                          minLength: 1
+                          type: string
+                      required:
+                      - fieldPath
+                      type: object
+                    name:
+                      description: Name is the environment variable name.
+                      minLength: 1
+                      type: string
+                    value:
+                      description: Value is the static value; may contain templates.
+                      type: string
+                  required:
+                  - name
+                  type: object
+                  x-kubernetes-validations:
+                  - message: exactly one of value or fieldRef must be set
+                    rule: '(has(self.value) ? 1 : 0) + (has(self.fieldRef) ? 1 : 0)
+                      == 1'
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               modelRef:
                 description: |-
                   ModelRef references the ModelVersion to serve. The ModelVersion spec is

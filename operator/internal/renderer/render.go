@@ -157,6 +157,15 @@ func Render(isvc *aiv1alpha1.InferenceService, profile *aiv1alpha1.InferenceRunt
 	for i := range profile.Spec.Roles {
 		role := profile.Spec.Roles[i]
 		rr := RenderedRole{Name: role.Name, PodTemplate: role.PodTemplate}
+		// The service-level env vars are applied to every role's container, on
+		// top of the profile's podTemplate.env. Merging them in before the
+		// template render means their values are templated like the profile's
+		// own env (design §3.2: the full variable set), and — by name — they
+		// override a same-named profile variable so a service can point one knob
+		// at its own value. The Profile's fieldRef (e.g. status.hostIP) stays
+		// untouched: the override is by name, so the service env replaces the
+		// whole entry.
+		rr.PodTemplate.Env = mergeEnv(rr.PodTemplate.Env, isvc.Spec.Env)
 		rr.Replicas, res.Errors = resolveReplicas(ctx, role.Name, role.Workload.Replicas, res.Errors)
 
 		roleV := &roleVars{name: role.Name}
@@ -901,6 +910,45 @@ func renderPodTemplate(ctx *renderContext, pt aiv1alpha1.PodTemplate, errs []Err
 		}
 	}
 	return pt, errs
+}
+
+// mergeEnv merges the service-level env vars over the profile's. A service
+// entry with a name the profile already declares replaces that profile entry
+// squarely in place — so a later profile variable whose value references the
+// replaced name by `$(NAME)` resolves against the new value — while a service
+// entry whose name the profile does not declare is appended. Order is
+// otherwise stable and deterministic: the profile's entries keep their declared
+// order (surviving ones and in-place replacements), then the service's new
+// entries. The caller passes a fresh slice, so neither input is mutated.
+func mergeEnv(profile, service []aiv1alpha1.EnvVar) []aiv1alpha1.EnvVar {
+	if len(service) == 0 {
+		return profile
+	}
+	// Index the service entries by name: a name that exists in the profile is
+	// an override (replaces that profile entry in its position); one that does
+	// not is a new variable appended after the profile's.
+	override := make(map[string]aiv1alpha1.EnvVar, len(service))
+	for _, e := range service {
+		override[e.Name] = e
+	}
+	used := make(map[string]bool, len(profile))
+	out := make([]aiv1alpha1.EnvVar, 0, len(profile)+len(service))
+	for _, e := range profile {
+		used[e.Name] = true
+		if sv, ok := override[e.Name]; ok {
+			out = append(out, sv)
+		} else {
+			out = append(out, e)
+		}
+	}
+	// The service's brand-new entries (names the profile never declared) go on
+	// the end, preserving the service's own declared order.
+	for _, e := range service {
+		if !used[e.Name] {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 func renderEach(items []string, render func(string) string) []string {

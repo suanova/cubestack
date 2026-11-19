@@ -1123,6 +1123,62 @@ describe("deploy wizard", () => {
     await act(async () => {});
   }
 
+  it("gives each env row a unique stable key across re-renders", async () => {
+    const { container, root } = renderWithBoth();
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await fillNameAndGoToStep2();
+
+    const setValue = (el: HTMLInputElement, v: string) => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
+      setter.call(el, v);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+
+    // Add the first row, fill it, then add a second row on a fresh render. If
+    // the row-id counter reset between renders, the two rows would collide and
+    // editing the second would stomp the first.
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="deploy-env-add"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    const firstNames = document.body.querySelectorAll('[data-od-id="deploy-env-name"] input');
+    expect(firstNames).toHaveLength(1);
+    await act(async () => {
+      setValue(firstNames[0] as HTMLInputElement, "KEEP_ANSWER");
+    });
+    await act(async () => {});
+
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="deploy-env-add"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    const allNames = document.body.querySelectorAll('[data-od-id="deploy-env-name"] input');
+    expect(allNames).toHaveLength(2);
+    const names = Array.from(allNames).map((i) => (i as HTMLInputElement).value);
+    // The first row's value survives the second add; the second is still blank.
+    expect(names).toContain("KEEP_ANSWER");
+    expect(names.filter((v) => v === "")).toHaveLength(1);
+
+    // Editing the second row must not alter the first: fill a fresh value into
+    // the currently-blank row and assert independence.
+    const secondRow = Array.from(allNames).find((i) => (i as HTMLInputElement).value === "") as HTMLInputElement;
+    await act(async () => {
+      setValue(secondRow, "OTHER");
+    });
+    await act(async () => {});
+    const after = Array.from(document.body.querySelectorAll('[data-od-id="deploy-env-name"] input')).map((i) =>
+      (i as HTMLInputElement).value,
+    );
+    expect(after).toContain("KEEP_ANSWER");
+    expect(after).toContain("OTHER");
+
+    act(() => root.unmount());
+  });
+
   it("always publishes and defaults the catalog model name to the service name", async () => {
     const { container, root } = renderWithBoth();
     await act(async () => {});

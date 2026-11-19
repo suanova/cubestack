@@ -581,6 +581,11 @@ spec:
     prefillReplicas: 1
     decodeReplicas: 2
     maxModelLen: 131072
+  env:                       # 服务级环境变量，写入每个 role 的 Pod（可选）
+    - name: MC_GID_INDEX
+      value: "1"
+    - name: CUSTOM_FLAG
+      value: "on"
   route:
     aigatewayRouter: cubestack-ai-gateway   # public；private 用 cubestack-ai-gateway-private
     modelName: dsv4-flash     # 目录模型名：客户端请求体的 model 字段填该值
@@ -598,6 +603,7 @@ spec:
 | `spec.modelRef` | string | L0：必填、对象名格式；L2：引用存在性与兼容性（`Resolved`） | 引用 ModelVersion。ModelVersion 的 spec 不可变，因此修改此字段就是切换模型版本，用于升级或回滚。 |
 | `spec.profileRef` | string | L0：必填、对象名格式；L2：引用存在性（`Resolved`） | 引用 InferenceRuntimeProfile。Profile 的 spec 不可变，因此修改此字段就是切换运行配置版本，用于升级或回滚。 |
 | `spec.overrides` | map | L2：key 和 value 对照 Profile 的 `overrides[]` 声明校验（`Rendered`），未知 key 或不合法的值在 reconcile 时被拒绝 | 用户填写的可调参数。 |
+| `spec.env` | []EnvVar | L0：可选；`name` 必填、`MinLength=1`、列表内唯一（`listMapKey=name`）；XValidation 强制每条 `value` 与 `fieldRef` 恰居其一；命名规则同 Profile 的 `env[].name`（名称由 kubernetes/env 语义约束，web 端额外用 `^[-._a-zA-Z][-._a-zA-Z0-9]*$` 预校验） | 服务级环境变量，写入**每个 role** 的主容器，叠加在 Profile 的 `podTemplate.env` 之上：同名条目在 Profile 原位置原位覆盖（保证后续 `$(NAME)` 引用解析到服务值），新增名追加在 Profile 条目之后（§4 渲染）。控制台提供 name/value 表格编辑器，仅写入静态 `value`；`fieldRef`（如 `status.hostIP`）类型上支持但控制台不暴露，避免把主机相关取值硬编码进可复制的服务。 |
 | `spec.route.aigatewayRouter` | string | L0：可选，枚举 `cubestack-ai-gateway` / `cubestack-ai-gateway-private` | 发布到平台模型目录（Agent Router）的哪条共享路由：`cubestack-ai-gateway`（public）或 `cubestack-ai-gateway-private`（private）。已发布服务成为所选目录里的一个模型：同一目录共享一个入口 hostname，客户端用请求体里的 `model` 字段选服务。空值（或省略 `spec.route`）= 未发布，只提供 ClusterIP 内部端点。 |
 | `spec.route.modelName` | string | L0：`^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$`（首字符字母数字，可含 `.` `_` `/` `-`，长度 ≤128）；L1：`aigatewayRouter` 非空时必填；L2：所选路由内的唯一性（`RouteReady`） | 目录模型名，即客户端请求体 `model` 字段要填的值，也是已发布服务在所选目录里的身份。与引擎的 served model name 解耦（目录条目把请求的 model 改写为引擎名）：同一模型的不同版本（fp16 / w8a8）能以各自的目录名共存，客户端只认目录名，`model` 不等于所选路由里任何已发布服务的目录名时返回 404。public 与 private 两条路由各自独立，同一目录名可同时存在于两条路由。未发布时可省略，省略后引擎使用 ModelVersion 的 `spec.model`；未发布服务使用各自的 ClusterIP，不会相互影响。 |
 | `spec.route.paths` | []string | L0：可选，`MaxItems=4`、数组按集合处理（`listType=set`），枚举 `/v1/chat/completions`、`/v1/responses`、`/v1/messages`、`/v1/images` | 本服务在模型目录上暴露的客户端路径，可多选。省略 = 暴露全部四条（兼容字段引入前的服务）；显式空列表 = 不暴露任何路径。`/v1/messages` 由 Agent Router 处理（请求体 `model` 选模型），其余三条走平台的普通 HTTPRoute，客户端需在请求里带 `x-ai-eg-model: <目录模型名>` header。控制台在发布时默认全选，且至少保留一条。 |
