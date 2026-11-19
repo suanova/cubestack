@@ -42,8 +42,8 @@ jobs:
          startsWith(github.event.comment.body, '/review'))
       )
     runs-on: ubuntu-latest
-    # Two review passes (general + focused) plus the image pull.
-    timeout-minutes: 20
+    # One review plus the image pull.
+    timeout-minutes: 15
     permissions:
       contents: read
       issues: write
@@ -75,9 +75,9 @@ jobs:
       # OpenAI 兼容网关不认识该模型 ID，显式声明其支持 reasoning_effort，
       # 否则 pr-agent 不会把 reasoning_effort 传给网关。
       CONFIG__ADDITIONAL_REASONING_EFFORT_MODELS: ${{ vars.LLM_REASONING_MODELS || '["deepseek-flash"]' }}
-      # A review answer is normally under 2k tokens; 8k leaves room for a long
-      # finding list without taking input budget away from the diff.
-      CONFIG__MAX_OUTPUT_TOKENS: ${{ vars.LLM_MAX_OUTPUT_TOKENS || '8192' }}
+      # The general review plus the edge-case checklist can exceed 8k tokens at
+      # medium reasoning; 12k leaves room for both without starving the diff.
+      CONFIG__MAX_OUTPUT_TOKENS: ${{ vars.LLM_MAX_OUTPUT_TOKENS || '12288' }}
       CONFIG__REASONING_EFFORT: ${{ vars.LLM_REASONING_EFFORT || 'none' }}
       CONFIG__NO_TEMPERATURE_MODELS: ${{ vars.LLM_NO_TEMPERATURE_MODELS || '["deepseek-flash"]' }}
       CONFIG__OUTPUT_RUN_DETAILS: 'true'
@@ -165,83 +165,6 @@ jobs:
         env:
           GITHUB__USER_TOKEN: ${{ steps.token.outputs.usable == 'true' && secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
           GITHUB__AGENT_LOGIN: ${{ steps.token.outputs.usable == 'true' && steps.token.outputs.login || 'github-actions[bot]' }}
-
-      # A second, narrower pass. The general review keeps missing bugs that need a
-      # specific question asked: React effect/remount/polling behaviour, optional
-      # Kubernetes fields, and claims in the PR description that no line implements.
-      # It posts its own "Edge-case review" comment and is best-effort: a failure
-      # here must not discard the general review above.
-      - name: Run focused edge-case review
-        if: ${{ steps.gate.outputs.skip != 'true' }}
-        continue-on-error: true
-        run: |
-          docker run --rm --workdir /app \
-            -e GITHUB__USER_TOKEN \
-            -e GITHUB__AGENT_LOGIN \
-            -e OPENAI__API_BASE \
-            -e OPENAI__KEY \
-            -e CONFIG__MODEL \
-            -e CONFIG__FALLBACK_MODELS \
-            -e CONFIG__CUSTOM_MODEL_MAX_TOKENS \
-            -e CONFIG__MAX_MODEL_TOKENS \
-            -e CONFIG__ADDITIONAL_REASONING_EFFORT_MODELS \
-            -e CONFIG__MAX_OUTPUT_TOKENS \
-            -e CONFIG__REASONING_EFFORT \
-            -e CONFIG__NO_TEMPERATURE_MODELS \
-            -e CONFIG__OUTPUT_RUN_DETAILS \
-            -e CONFIG__PR_REVIEWER__PERSISTENT_COMMENT \
-            -e CONFIG__PR_REVIEWER__REVIEW_HEADING \
-            -e CONFIG__PR_REVIEWER__EXTRA_INSTRUCTIONS \
-            -e CONFIG__PR_REVIEWER__NUM_MAX_FINDINGS \
-            -e CONFIG__PR_REVIEWER__MIN_FINDING_CONFIDENCE \
-            -e CONFIG__PR_REVIEWER__INLINE_KEY_ISSUES \
-            -e CONFIG__PR_REVIEWER__REQUIRE_TICKET_ANALYSIS_REVIEW \
-            -e CONFIG__PR_REVIEWER__REQUIRE_SECURITY_REVIEW \
-            -e CONFIG__PR_REVIEWER__REQUIRE_MERGE_RECOMMENDATION \
-            -e CONFIG__PR_REVIEWER__REQUIRE_RISK_ASSESSMENT \
-            -e CONFIG__PR_REVIEWER__REQUIRE_FAILURE_MODES \
-            -e CONFIG__PR_REVIEWER__REQUIRE_TESTS_REVIEW \
-            -e CONFIG__PR_REVIEWER__REQUIRE_ESTIMATE_EFFORT_TO_REVIEW \
-            "$PR_AGENT_IMAGE" \
-            --pr_url="${{ github.event.issue.pull_request.html_url }}" review
-        env:
-          GITHUB__USER_TOKEN: ${{ steps.token.outputs.usable == 'true' && secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
-          GITHUB__AGENT_LOGIN: ${{ steps.token.outputs.usable == 'true' && steps.token.outputs.login || 'github-actions[bot]' }}
-          CONFIG__PR_REVIEWER__PERSISTENT_COMMENT: 'false'
-          CONFIG__PR_REVIEWER__REVIEW_HEADING: 'Edge-case review'
-          CONFIG__PR_REVIEWER__NUM_MAX_FINDINGS: '3'
-          CONFIG__PR_REVIEWER__MIN_FINDING_CONFIDENCE: '7'
-          CONFIG__PR_REVIEWER__INLINE_KEY_ISSUES: 'true'
-          CONFIG__PR_REVIEWER__REQUIRE_TICKET_ANALYSIS_REVIEW: 'false'
-          CONFIG__PR_REVIEWER__REQUIRE_SECURITY_REVIEW: 'true'
-          CONFIG__PR_REVIEWER__REQUIRE_MERGE_RECOMMENDATION: 'false'
-          CONFIG__PR_REVIEWER__REQUIRE_RISK_ASSESSMENT: 'false'
-          CONFIG__PR_REVIEWER__REQUIRE_FAILURE_MODES: 'false'
-          CONFIG__PR_REVIEWER__REQUIRE_TESTS_REVIEW: 'false'
-          CONFIG__PR_REVIEWER__REQUIRE_ESTIMATE_EFFORT_TO_REVIEW: 'false'
-          CONFIG__PR_REVIEWER__EXTRA_INSTRUCTIONS: |
-            Focused second pass for the CubeStack monorepo. Read AGENTS.md. CI already runs
-            eslint, tsc, unit tests, e2e and helm lint; do not report style or generic tests.
-
-            The general review has already run. Only report concrete edge-case bugs in these
-            areas, and skip the ticket-compliance, locale and pod-selection findings it
-            already covered:
-            1. React effects: for every useEffect/useRef in the diff, list its dependencies,
-               whether the component can stay mounted while the data changes (polling, keys,
-               remount), and whether an update can be missed.
-            2. Kubernetes optional fields: for every guard on a status field, check whether
-               the field is optional in the API; a missing optional field must not hide the
-               failure.
-            3. PR-description claims: for every behavioural claim ("refreshes every N
-               seconds", "newest pod", "all locales", "tests cover X"), find the
-               implementing line and the proving test; if either is missing, report it.
-
-            Start every finding, including inline comments, with:
-            **Severity: <blocker|major|minor>** · **Category: <category>** · **Confidence: <N>/10**
-            Then a blank line, then What/Where/Trigger/Detected by. Only confidence >= 7.
-            A ticket/acceptance-constraint violation is at least major. If a finding has a
-            security, tenant-isolation, or spoofing angle, classify it under security.
-            Do not write "consider", "confirm", or "maybe".
 
       - name: Record the fallback review on the commit
         if: ${{ steps.gate.outputs.skip != 'true' }}
