@@ -558,7 +558,12 @@ async function stubAgent(page: Page, stubs: Stubs = {}): Promise<Captured> {
         if (stubs.approvalPostStatus) return json({ error: "approval already resolved" }, stubs.approvalPostStatus);
         // The response names the approval it settled — the request's own id,
         // which the pane checks against the card it came from.
-        return json({ approved: body.decision !== "reject", decision: body.decision, approvalId: body.approvalId });
+        return json({
+          approved: body.decision !== "reject",
+          decision: body.decision,
+          approvalId: body.approvalId,
+          ...(body.decision === "allow-turn" ? { turnAllowed: true } : {}),
+        });
       }
       if (path.endsWith("/questions/answer") && method === "POST") {
         captured.questionPosts.push({ path, body: post() as { id?: string; answers?: Record<string, string[]> } });
@@ -768,6 +773,7 @@ test.describe("cubepilot agent chat (CR-backed data)", () => {
     await expect(page.locator('[data-od-id="approval-approve"]')).toBeVisible();
     await expect(page.locator('[data-od-id="approval-reject"]')).toBeVisible();
     await expect(page.locator('[data-od-id="approval-allow"]')).toBeVisible();
+    await expect(page.locator('[data-od-id="approval-allow-turn"]')).toBeVisible();
     // Restore re-reads both pending collections through the encoded session key.
     const decoded = captured.pendingPaths.map((p) => decodeURIComponent(p));
     expect(decoded.some((p) => p.includes(`/api/v1/sessions/${SESSION_KEY}/approvals`))).toBe(true);

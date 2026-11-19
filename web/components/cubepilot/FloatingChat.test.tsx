@@ -56,8 +56,9 @@ const TURN_APPROVAL = [
 
 /** Stub every endpoint the surface hits. `turn` is the SSE body of the first
  *  POST /messages (repeated for later ones). */
-function stubApi(turn: object[], opts: { approvalsStatus?: number } = {}) {
+function stubApi(turn: object[], opts: { approvalsStatus?: number; turnAllowed?: boolean } = {}) {
   const messagePosts: Array<{ path: string; body: { content?: string } }> = [];
+  const decisions: Array<{ path: string; body: Record<string, unknown> }> = [];
   const sse = (events: object[]) => {
     const enc = new TextEncoder();
     const stream = new ReadableStream({
@@ -117,7 +118,13 @@ function stubApi(turn: object[], opts: { approvalsStatus?: number } = {}) {
         if (url.endsWith("/turn")) return json({ active: false });
         if (url.endsWith("/approvals/decision") && method === "POST") {
           const body = post();
-          return json({ approved: body.decision !== "reject", decision: body.decision, approvalId: body.approvalId });
+          decisions.push({ path: url, body });
+          return json({
+            approved: body.decision !== "reject",
+            decision: body.decision,
+            approvalId: body.approvalId,
+            ...(body.decision === "allow-turn" ? { turnAllowed: opts.turnAllowed ?? true } : {}),
+          });
         }
         if (url.endsWith("/questions/answer")) return json({ questionId: "q-1", cancelled: false });
         if (url.endsWith("/questions/cancel")) return json({ questionId: "q-1", cancelled: true });
@@ -126,7 +133,7 @@ function stubApi(turn: object[], opts: { approvalsStatus?: number } = {}) {
       return json({});
     }),
   );
-  return { messagePosts };
+  return { messagePosts, decisions };
 }
 
 /** Poll `predicate` at act boundaries (one short act per tick) so streamed
@@ -352,6 +359,65 @@ describe("floating chat (global AI assistant)", () => {
     const approved = await waitFor(root, () => (container.textContent ?? "").includes("已批准"));
     expect(approved).toBe(true);
     expect(container.querySelector('[data-od-id="approval-approve"]')).toBeNull();
+    act(() => root.unmount());
+  });
+
+  it("posts a turn-scoped approval from the dock", async () => {
+    const api = stubApi(TURN_APPROVAL);
+    const { container, root } = renderChat();
+    await act(async () => {});
+    act(() => {
+      (container.querySelector('[data-od-id="fchat-fab"]') as HTMLElement).click();
+    });
+    await waitFor(root, () => (container.textContent ?? "").includes("当前会话已接入集群真实数据"));
+
+    const input = container.querySelector('[data-od-id="fchat-input"]') as HTMLTextAreaElement;
+    setValue(input, "分析 Ceph OSD 使用率告警");
+    act(() => {
+      (container.querySelector('[data-od-id="fchat-send"]') as HTMLElement).click();
+    });
+    const parked = await waitFor(root, () => container.querySelector('[data-od-id="approval-allow-turn"]') !== null);
+    expect(parked).toBe(true);
+
+    act(() => {
+      (container.querySelector('[data-od-id="approval-allow-turn"]') as HTMLElement).click();
+    });
+    const approved = await waitFor(root, () => (container.textContent ?? "").includes("已批准"));
+    expect(approved).toBe(true);
+    expect(api.decisions).toHaveLength(1);
+    expect(api.decisions[0].path).toContain("/api/v1/sessions/");
+    expect(api.decisions[0].path).toContain("/approvals/decision");
+    expect(api.decisions[0].body).toEqual({ approvalId: "app-1", decision: "allow-turn" });
+    act(() => root.unmount());
+  });
+
+  it("warns when the turn cannot be auto-approved", async () => {
+    stubApi(TURN_APPROVAL, { turnAllowed: false });
+    const { container, root } = renderChat();
+    await act(async () => {});
+    act(() => {
+      (container.querySelector('[data-od-id="fchat-fab"]') as HTMLElement).click();
+    });
+    await waitFor(root, () => (container.textContent ?? "").includes("当前会话已接入集群真实数据"));
+
+    const input = container.querySelector('[data-od-id="fchat-input"]') as HTMLTextAreaElement;
+    setValue(input, "分析 Ceph OSD 使用率告警");
+    act(() => {
+      (container.querySelector('[data-od-id="fchat-send"]') as HTMLElement).click();
+    });
+    const parked = await waitFor(root, () => container.querySelector('[data-od-id="approval-allow-turn"]') !== null);
+    expect(parked).toBe(true);
+
+    act(() => {
+      (container.querySelector('[data-od-id="approval-allow-turn"]') as HTMLElement).click();
+    });
+    // The command was approved once, but the platform could not cover the turn:
+    // the toast says so and the card is not painted as a rejection.
+    const warned = await waitFor(root, () =>
+      (container.textContent ?? "").includes("本次命令已批准,但本轮无法自动放行"),
+    );
+    expect(warned).toBe(true);
+    expect(container.textContent).toContain("已批准");
     act(() => root.unmount());
   });
 

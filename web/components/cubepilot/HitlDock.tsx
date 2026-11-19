@@ -184,7 +184,13 @@ export function ApprovalCard({
           {/* Approve the rest of this turn without asking. Turn-scoped, not
               durable: the platform drops it when the turn ends, so it is
               offered under every gated policy, unlike the allowlist rule. */}
-          <Btn small disabled={locked} onClick={() => onDecide?.(approval.callId, "allow-turn")} data-od-id="approval-allow-turn">
+          <Btn
+            small
+            disabled={locked}
+            onClick={() => onDecide?.(approval.callId, "allow-turn")}
+            data-od-id="approval-allow-turn"
+            title={t("cubepilot.chat.approvalAllowTurnHint")}
+          >
             {t("cubepilot.chat.approvalAllowTurn")}
           </Btn>
           <Btn small disabled={locked} onClick={() => onDecide?.(approval.callId, "reject")} data-od-id="approval-reject">
