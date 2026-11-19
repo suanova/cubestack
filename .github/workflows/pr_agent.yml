@@ -21,10 +21,10 @@ jobs:
     # never repeats the review.
     #
     # Do not match a single literal sentence: CodeRabbit has used "Review rate
-    # limited.", "Your included review limit is currently reached..." and the Fair
-    # Usage Limits link across notices. The old literal ('rate limited by
-    # coderabbit.ai') did not match the visible text and fallback runs were skipped
-    # on some notices (see PR #468).
+    # limited.", "Review limit reached", "Your included review limit is currently
+    # reached..." and the Fair Usage Limits link across notices. The old literal
+    # ('rate limited by coderabbit.ai') did not match the visible text and fallback
+    # runs were skipped on some notices (see PR #468).
     if: >-
       github.event.issue.pull_request != null && (
         (github.event.comment.user.login == 'coderabbitai[bot]' &&
@@ -42,6 +42,7 @@ jobs:
          startsWith(github.event.comment.body, '/review'))
       )
     runs-on: ubuntu-latest
+    # One review plus the image pull.
     timeout-minutes: 15
     permissions:
       contents: read
@@ -50,6 +51,36 @@ jobs:
       # The fallback-review marker is a check run on the reviewed commit.
       checks: write
     name: Review the pull request when CodeRabbit is rate-limited
+    env:
+      # Keep the image pin in one place. Bump it deliberately after checking that the
+      # keys in .pr_agent.toml are accepted by the new image.
+      PR_AGENT_IMAGE: pragent/pr-agent@sha256:8978ae8f025883159ccc6f5bec51e6553347c77d14dbc5ca4bf3bb4a8726eb43
+
+      # ---- LLM 路由（模型名来自仓库变量）----
+      # 使用 OpenAI 兼容端点：cuberouter 的 Anthropic 端点(/v1/messages)会忽略
+      # reasoning_effort，模型默认先输出 thinking token；thinking 会耗尽输出
+      # 预算并导致 "Empty content in model response (finish_reason: length)"。
+      # OpenAI 兼容端点(/v1/chat/completions)支持 reasoning_effort=none，可关闭思考。
+      OPENAI__API_BASE: ${{ vars.LLM_OPENAI_BASE_URL || 'https://cuberouter.cn/v1' }}
+      OPENAI__KEY: ${{ secrets.CUBEROUTER_TOKEN }}
+
+      CONFIG__MODEL: ${{ vars.LLM_MODEL || 'openai/deepseek-flash' }}
+      CONFIG__FALLBACK_MODELS: '[]'
+      CONFIG__CUSTOM_MODEL_MAX_TOKENS: ${{ vars.LLM_MAX_TOKENS || '128000' }}
+      # The effective context budget. CUSTOM_MODEL_MAX_TOKENS only declares the
+      # model's window; without this, PR-Agent's default 32k total budget minus
+      # the output reserve left ~16k for input and pruned the 17k diff on PR #468
+      # (dropping rbac.yaml). Keep max_model_tokens > max_output_tokens + diff.
+      CONFIG__MAX_MODEL_TOKENS: ${{ vars.LLM_MODEL_TOKENS || '64000' }}
+      # OpenAI 兼容网关不认识该模型 ID，显式声明其支持 reasoning_effort，
+      # 否则 pr-agent 不会把 reasoning_effort 传给网关。
+      CONFIG__ADDITIONAL_REASONING_EFFORT_MODELS: ${{ vars.LLM_REASONING_MODELS || '["deepseek-flash"]' }}
+      # The general review plus the edge-case checklist can exceed 8k tokens at
+      # medium reasoning; 12k leaves room for both without starving the diff.
+      CONFIG__MAX_OUTPUT_TOKENS: ${{ vars.LLM_MAX_OUTPUT_TOKENS || '12288' }}
+      CONFIG__REASONING_EFFORT: ${{ vars.LLM_REASONING_EFFORT || 'none' }}
+      CONFIG__NO_TEMPERATURE_MODELS: ${{ vars.LLM_NO_TEMPERATURE_MODELS || '["deepseek-flash"]' }}
+      CONFIG__OUTPUT_RUN_DETAILS: 'true'
     steps:
       - name: Resolve the pull request head
         id: head
@@ -80,6 +111,29 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # GITHUB_TOKEN is an installation token and cannot call GET /user, which leaves
+      # PR-Agent logging "identity cannot be verified". Prefer the repository
+      # GH_TOKEN when it can resolve its own login; otherwise fall back to
+      # GITHUB_TOKEN and declare the bot login explicitly.
+      - name: Select the PR-Agent token
+        id: token
+        if: ${{ steps.gate.outputs.skip != 'true' }}
+        env:
+          CANDIDATE: ${{ secrets.GH_TOKEN }}
+        run: |
+          if [ -n "$CANDIDATE" ] \
+            && login=$(GH_TOKEN="$CANDIDATE" gh api user --jq .login 2>/dev/null) \
+            && can_write=$(GH_TOKEN="$CANDIDATE" gh api "repos/$GITHUB_REPOSITORY" --jq '.permissions.push // false' 2>/dev/null) \
+            && [ "$can_write" = "true" ]; then
+            echo "usable=true" >> "$GITHUB_OUTPUT"
+            echo "login=$login" >> "$GITHUB_OUTPUT"
+            echo "Using GH_TOKEN for PR-Agent identity ($login, write access)."
+          else
+            echo "usable=false" >> "$GITHUB_OUTPUT"
+            echo "login=github-actions[bot]" >> "$GITHUB_OUTPUT"
+            echo "GH_TOKEN cannot resolve /user with write access; using GITHUB_TOKEN as github-actions[bot]."
+          fi
+
       # The official action only accepts commands from human slash commands, so it
       # cannot consume CodeRabbit's bot-authored notice. Run the same review through
       # the CLI image instead: `--pr_url` carries everything the action would have
@@ -89,9 +143,6 @@ jobs:
       # the container must start in its own /app. A `uses: docker://...` step cannot
       # override that (the runner forces the repository checkout as the workdir),
       # which fails with "can't open file '/github/workspace/pr_agent/cli.py'".
-      #
-      # The image is pinned to the digest exercised on PR #468. Bump it deliberately
-      # after checking that the keys in .pr_agent.toml are accepted by the new image.
       - name: Run PR-Agent review
         if: ${{ steps.gate.outputs.skip != 'true' }}
         run: |
@@ -109,41 +160,11 @@ jobs:
             -e CONFIG__REASONING_EFFORT \
             -e CONFIG__NO_TEMPERATURE_MODELS \
             -e CONFIG__OUTPUT_RUN_DETAILS \
-            pragent/pr-agent@sha256:8978ae8f025883159ccc6f5bec51e6553347c77d14dbc5ca4bf3bb4a8726eb43 \
+            "$PR_AGENT_IMAGE" \
             --pr_url="${{ github.event.issue.pull_request.html_url }}" review
         env:
-          GITHUB__USER_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # A GitHub App installation token cannot call GET /user. Telling PR-Agent
-          # the login it posts as lets it verify its own comments and load the
-          # persisted finding state instead of skipping it with "identity cannot be
-          # verified".
-          GITHUB__AGENT_LOGIN: 'github-actions[bot]'
-
-          # ---- LLM 路由（模型名来自仓库变量）----
-          # 使用 OpenAI 兼容端点：cuberouter 的 Anthropic 端点(/v1/messages)会忽略
-          # reasoning_effort，模型默认先输出 thinking token；thinking 会耗尽输出
-          # 预算并导致 "Empty content in model response (finish_reason: length)"。
-          # OpenAI 兼容端点(/v1/chat/completions)支持 reasoning_effort=none，可关闭思考。
-          OPENAI__API_BASE: ${{ vars.LLM_OPENAI_BASE_URL || 'https://cuberouter.cn/v1' }}
-          OPENAI__KEY: ${{ secrets.CUBEROUTER_TOKEN }}
-
-          CONFIG__MODEL: ${{ vars.LLM_MODEL || 'openai/deepseek-flash' }}
-          CONFIG__FALLBACK_MODELS: '[]'
-          CONFIG__CUSTOM_MODEL_MAX_TOKENS: ${{ vars.LLM_MAX_TOKENS || '128000' }}
-          # The effective context budget. CUSTOM_MODEL_MAX_TOKENS only declares the
-          # model's window; without this, PR-Agent's default 32k total budget minus
-          # the output reserve left ~16k for input and pruned the 17k diff on PR #468
-          # (dropping rbac.yaml). Keep max_model_tokens > max_output_tokens + diff.
-          CONFIG__MAX_MODEL_TOKENS: ${{ vars.LLM_MODEL_TOKENS || '64000' }}
-          # OpenAI 兼容网关不认识该模型 ID，显式声明其支持 reasoning_effort，
-          # 否则 pr-agent 不会把 reasoning_effort 传给网关。
-          CONFIG__ADDITIONAL_REASONING_EFFORT_MODELS: ${{ vars.LLM_REASONING_MODELS || '["deepseek-flash"]' }}
-          # A review answer is normally under 2k tokens; 8k leaves room for a long
-          # finding list without taking input budget away from the diff.
-          CONFIG__MAX_OUTPUT_TOKENS: ${{ vars.LLM_MAX_OUTPUT_TOKENS || '8192' }}
-          CONFIG__REASONING_EFFORT: ${{ vars.LLM_REASONING_EFFORT || 'none' }}
-          CONFIG__NO_TEMPERATURE_MODELS: ${{ vars.LLM_NO_TEMPERATURE_MODELS || '["deepseek-flash"]' }}
-          CONFIG__OUTPUT_RUN_DETAILS: 'true'
+          GITHUB__USER_TOKEN: ${{ steps.token.outputs.usable == 'true' && secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+          GITHUB__AGENT_LOGIN: ${{ steps.token.outputs.usable == 'true' && steps.token.outputs.login || 'github-actions[bot]' }}
 
       - name: Record the fallback review on the commit
         if: ${{ steps.gate.outputs.skip != 'true' }}

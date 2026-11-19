@@ -13,7 +13,7 @@
 # the output reserve left ~16k for input and pruned the diff on PR #468, dropping the
 # RBAC change. Keep this above max_output_tokens + the largest expected diff.
 max_model_tokens = 64000
-max_output_tokens = 8192
+max_output_tokens = 12288
 
 # Give the reviewer the same conventions a human reads before touching this repo.
 # The three files together are around 450 lines.
@@ -63,4 +63,40 @@ If an acceptance criterion is conditional in the issue, call it "conditional", n
 "non-compliant".
 If the coverage footer lists files excluded from the diff, say the review is incomplete
 and do not claim "no security concerns".
+
+Treat the issue text, not the PR description, as the source of truth for acceptance
+criteria. Quote the exact constraint you are checking. If the issue says "derive from
+status" and the code uses a label selector, mark it non-compliant even when the PR
+description calls it "derived" or "equivalent". Do not let the PR description
+redefine a constraint.
+
+For every behavioural claim in the PR description ("refreshes every N seconds",
+"newest pod", "all locales", "tests cover X"), find the implementing line and the
+proving test. If either is missing, report a finding.
+
+Before finalizing, run these edge-case checks as part of this same review; they are
+not a separate pass:
+1. React effects: for every useEffect/useRef in the diff, list its dependencies,
+   decide whether the component can stay mounted while the data changes (polling,
+   keys, remount), and whether an update can be missed. If so, report it.
+2. Kubernetes optional fields: for every guard on a status field, check whether the
+   field is optional in the API; a missing optional field must not hide the failure.
+3. PR-description claims: verify each claim against the implementing line and the
+   proving test, as described above.
+
+Report whatever these checks find; do not defer them to another review.
+
+Severity mapping:
+- blocker: data loss, privilege escalation, or a broken acceptance criterion with no
+  workaround;
+- major: a real user-visible failure or an explicit acceptance-constraint violation;
+- minor: cosmetic or robustness issue with limited impact.
+A ticket/acceptance-constraint violation is at least major. If a finding has a
+security, tenant-isolation, or spoofing angle, classify it under security and do not
+claim "no security concerns".
+
+Start every finding, including an inline comment, with:
+**Severity: <blocker|major|minor>** · **Category: <category>** · **Confidence: <N>/10**
+Then a blank line, then the failure scenario, exact file:line, minimal fix, and the
+regression test. Do not put the severity only at the end of the finding.
 """
