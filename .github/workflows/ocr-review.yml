@@ -1,0 +1,36 @@
+name: OpenCodeReview PR Review (replay)
+
+# Temporary workflow used to compare OpenCodeReview with PR-Agent on the
+# pre-fix #468 diff. It lives on the replay base branch, not on main.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ocr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  code-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Run OpenCodeReview
+        uses: alibaba/open-code-review@main
+        with:
+          llm_url: ${{ vars.LLM_OPENAI_BASE_URL || 'https://cuberouter.cn/v1' }}
+          llm_auth_token: ${{ secrets.CUBEROUTER_TOKEN }}
+          llm_model: ${{ vars.LLM_MODEL || 'openai/gpt-6-luna' }}
+          llm_use_anthropic: 'false'
+          llm_reasoning_effort: 'medium'
+          effort: 'medium'
+          language: 'English'
+          sticky_summary: 'true'
+          incremental: 'false'
+          resolve_outdated: 'false'
+          upload_artifacts: 'true'
