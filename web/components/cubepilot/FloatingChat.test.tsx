@@ -342,6 +342,8 @@ describe("floating chat (global AI assistant)", () => {
     expect(container.querySelector('[data-od-id="approval-approve"]')).not.toBeNull();
     // Allowlist policy (the stub's) offers the durable rule.
     expect(container.querySelector('[data-od-id="approval-allow"]')).not.toBeNull();
+    // And the turn-scoped action, which is offered under every gated policy.
+    expect(container.querySelector('[data-od-id="approval-allow-turn"]')).not.toBeNull();
 
     // Approve the write op: the card flips to its resolved state.
     act(() => {

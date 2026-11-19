@@ -594,6 +594,7 @@ describe("cubepilot page", () => {
     }
     expect(turnDone).toBe(true);
     expect(container.querySelector('[data-od-id="approval-approve"]')).not.toBeNull();
+    expect(container.querySelector('[data-od-id="approval-allow-turn"]')).not.toBeNull();
     expect(container.querySelector('[data-od-id="stop-btn"]')).toBeNull();
 
     // The tool card rests collapsed once its call has returned, so what it

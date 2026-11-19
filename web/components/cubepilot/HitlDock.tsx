@@ -29,7 +29,7 @@ import { useI18n } from "@/lib/i18n";
 import { fmtSeconds } from "./format";
 import { Btn, CpInput, Pill, STATUS_WARN, monoSx } from "./ui";
 
-export type ApprovalDecision = "approve" | "reject" | "allow-always";
+export type ApprovalDecision = "approve" | "reject" | "allow-always" | "allow-turn";
 export type ApprovalHandler = (callId: string, decision: ApprovalDecision) => void;
 /** `cancel` is the dismiss path: let the agent continue without an answer. */
 export type AnswerHandler = (callId: string, answers: Record<string, string[]>, cancel: boolean) => void;
@@ -180,6 +180,12 @@ export function ApprovalCard({
             data-od-id="approval-approve"
           >
             {deciding ? t("cubepilot.chat.approvalDeciding") : t("cubepilot.chat.approvalApprove")}
+          </Btn>
+          {/* Approve the rest of this turn without asking. Turn-scoped, not
+              durable: the platform drops it when the turn ends, so it is
+              offered under every gated policy, unlike the allowlist rule. */}
+          <Btn small disabled={locked} onClick={() => onDecide?.(approval.callId, "allow-turn")} data-od-id="approval-allow-turn">
+            {t("cubepilot.chat.approvalAllowTurn")}
           </Btn>
           <Btn small disabled={locked} onClick={() => onDecide?.(approval.callId, "reject")} data-od-id="approval-reject">
             {t("cubepilot.chat.approvalReject")}
