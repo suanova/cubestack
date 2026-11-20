@@ -43,8 +43,10 @@ import (
 	aigwv1beta1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
 	egv1alpha1 "github.com/envoyproxy/gateway/api/v1alpha1"
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+	ipamv1alpha1 "github.com/suanova/cubestack/api/ipam/v1alpha1"
 	aiv1alpha1 "github.com/suanova/cubestack/api/v1alpha1"
 	"github.com/suanova/cubestack/internal/controller"
+	ipam "github.com/suanova/cubestack/internal/controller/ipam"
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 	// +kubebuilder:scaffold:imports
 )
@@ -59,6 +61,7 @@ func init() {
 
 	utilruntime.Must(apiextensionsv1.AddToScheme(scheme))
 	utilruntime.Must(aiv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(ipamv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(leaderworkersetv1.AddToScheme(scheme))
 	utilruntime.Must(gatewayv1.Install(scheme))
 	utilruntime.Must(monitoringv1.AddToScheme(scheme))
@@ -345,6 +348,36 @@ func main() {
 		},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DevEnvironment")
+		os.Exit(1)
+	}
+
+	if err = (&ipam.IPPoolReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "IPPool")
+		os.Exit(1)
+	}
+	if err = (&ipam.IPClaimReconciler{
+		Client: mgr.GetClient(),
+		// Allocation is a read-modify-write over the claim set, so it reads that
+		// set from the API server rather than the cache. The controller serialises
+		// its own reconciles (MaxConcurrentReconciles is pinned at 1) and leader
+		// election keeps a second replica out; this closes the remaining window
+		// between one reconcile's write and the next one's read.
+		APIReader: mgr.GetAPIReader(),
+		Scheme:    mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "IPClaim")
+		os.Exit(1)
+	}
+	// The audit sweep is a Runnable rather than a controller: it reads the whole
+	// cluster on a timer and reports what no single reconcile can see.
+	if err = mgr.Add(&ipam.Auditor{
+		Client:   mgr.GetClient(),
+		Recorder: mgr.GetEventRecorder("ipam-auditor"),
+	}); err != nil {
+		setupLog.Error(err, "unable to add the IPAM auditor")
 		os.Exit(1)
 	}
 
