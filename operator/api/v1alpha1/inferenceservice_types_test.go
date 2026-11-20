@@ -131,6 +131,21 @@ var _ = Describe("InferenceService", func() {
 			Expect(k8sClient.Delete(ctx, isvc)).To(Succeed())
 		})
 
+		It("round-trips spec.env", func() {
+			isvc := validInferenceService("isvc-env")
+			isvc.Spec.Env = []UserEnvVar{
+				{Name: "MC_GID_INDEX", Value: "3", Roles: []string{"prefill", "decode"}},
+			}
+
+			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
+
+			got := &InferenceService{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: isvc.Name, Namespace: testNamespace}, got)).To(Succeed())
+			Expect(got.Spec.Env).To(Equal(isvc.Spec.Env))
+
+			Expect(k8sClient.Delete(ctx, isvc)).To(Succeed())
+		})
+
 		//nolint:dupl // status subresource round-trip mirrors the other CRD tests
 		It("updates status through the status subresource", func() {
 			isvc := validInferenceService("isvc-status")
@@ -251,6 +266,16 @@ var _ = Describe("InferenceService", func() {
 				"isvc-invalid-aigateway-router",
 				func(s *InferenceServiceSpec) { s.Route.AIGatewayRouter = "cubestack-ai-gateway-other" },
 				"spec.route.aigatewayRouter"),
+			Entry("env with an invalid name",
+				"isvc-invalid-env-name",
+				func(s *InferenceServiceSpec) {
+					s.Env = []UserEnvVar{{Name: "MC-GID", Value: "3", Roles: []string{"prefill"}}}
+				},
+				"spec.env"),
+			Entry("env with empty roles",
+				"isvc-invalid-env-roles",
+				func(s *InferenceServiceSpec) { s.Env = []UserEnvVar{{Name: "A", Value: "3"}} },
+				"spec.env"),
 		)
 	})
 })
