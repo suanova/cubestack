@@ -23,7 +23,6 @@ rules:
   - ""
   resources:
   - endpoints
-  - events
   verbs:
   - get
   - list
@@ -31,6 +30,7 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - events
   - persistentvolumeclaims
   verbs:
   - create
