@@ -53,6 +53,36 @@ func envValue(name, value string) aiv1alpha1.EnvVar {
 
 func stringPtr(s string) *string { return &s }
 
+// envOf returns the value of the first env entry with the given name.
+func envOf(env []aiv1alpha1.EnvVar, name string) string {
+	for _, e := range env {
+		if e.Name == name && e.Value != nil {
+			return *e.Value
+		}
+	}
+	return ""
+}
+
+// countName counts the env entries with the given name.
+func countName(env []aiv1alpha1.EnvVar, name string) int {
+	n := 0
+	for _, e := range env {
+		if e.Name == name {
+			n++
+		}
+	}
+	return n
+}
+
+// names returns the env entry names in order.
+func names(env []aiv1alpha1.EnvVar) []string {
+	out := make([]string, len(env))
+	for i, e := range env {
+		out[i] = e.Name
+	}
+	return out
+}
+
 func renderProfile() *aiv1alpha1.InferenceRuntimeProfile {
 	return &aiv1alpha1.InferenceRuntimeProfile{
 		Spec: aiv1alpha1.InferenceRuntimeProfileSpec{
@@ -801,6 +831,51 @@ var _ = Describe("Render", func() {
 		res := Render(renderISVC(), p, renderModel(), nil)
 		Expect(res.Errors).To(HaveLen(1))
 		Expect(res.Errors[0].Reason).To(Equal(ReasonUnknownPlaceholder))
+	})
+
+	Context("user env", func() {
+		It("rejects an env entry naming an unknown role", func() {
+			isvc := renderISVC()
+			isvc.Spec.Env = []aiv1alpha1.UserEnvVar{{Name: "A", Value: "1", Roles: []string{"decode"}}}
+
+			res := Render(isvc, renderProfile(), renderModel(), nil)
+			Expect(res.Errors).To(HaveLen(1))
+			Expect(res.Errors[0].Reason).To(Equal(ReasonUnknownEnvRole))
+			Expect(res.Errors[0].Msg).To(ContainSubstring("decode"))
+		})
+
+		It("applies env only to the listed roles", func() {
+			isvc := renderISVC()
+			isvc.Spec.Env = []aiv1alpha1.UserEnvVar{
+				{Name: "A", Value: "prefill-value", Roles: []string{"prefill"}},
+				{Name: "A", Value: "router-value", Roles: []string{"router"}},
+			}
+
+			res := Render(isvc, renderProfile(), renderModel(), nil)
+			Expect(res.Errors).To(BeEmpty())
+			Expect(envOf(res.Roles[1].PodTemplate.Env, "A")).To(Equal("prefill-value"))
+			Expect(envOf(res.Roles[0].PodTemplate.Env, "A")).To(Equal("router-value"))
+		})
+
+		It("replaces a profile env value in place and appends new names sorted", func() {
+			p := renderProfile()
+			p.Spec.Roles[1].PodTemplate.Env = append(p.Spec.Roles[1].PodTemplate.Env, envValue("NCCL_IB_HCA", "mlx5_1"))
+			isvc := renderISVC()
+			isvc.Spec.Env = []aiv1alpha1.UserEnvVar{
+				{Name: "Z_LAST", Value: "z", Roles: []string{"prefill"}},
+				{Name: "NCCL_IB_HCA", Value: "mlx5_3", Roles: []string{"prefill"}},
+				{Name: "A_FIRST", Value: "a", Roles: []string{"prefill"}},
+			}
+
+			res := Render(isvc, p, renderModel(), nil)
+			Expect(res.Errors).To(BeEmpty())
+
+			env := res.Roles[1].PodTemplate.Env
+			Expect(names(env)).To(ContainElement("NCCL_IB_HCA"))
+			Expect(countName(env, "NCCL_IB_HCA")).To(Equal(1))
+			Expect(envOf(env, "NCCL_IB_HCA")).To(Equal("mlx5_3"))
+			Expect(names(env)[len(env)-2:]).To(Equal([]string{"A_FIRST", "Z_LAST"}))
+		})
 	})
 })
 
