@@ -39,6 +39,9 @@ const (
 	// the accelerator product label to a value contradicting the declared
 	// accelerator.models (design §3.2): the merge would be unsatisfiable.
 	ReasonModelSchedulingConflict ErrorReason = "ModelSchedulingConflict"
+	// ReasonUnknownEnvRole marks a spec.env entry naming a role the profile does
+	// not declare.
+	ReasonUnknownEnvRole ErrorReason = "UnknownEnvRole"
 )
 
 // Error is a single render failure.

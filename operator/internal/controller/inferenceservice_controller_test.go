@@ -591,6 +591,10 @@ var _ = Describe("InferenceService controller", func() {
 				deprecated := meta.FindStatusCondition(got.Status.Conditions, aiv1alpha1.ConditionProfileDeprecated)
 				g.Expect(deprecated).ToNot(BeNil())
 				g.Expect(deprecated.Status).To(Equal(metav1.ConditionFalse))
+				customized := meta.FindStatusCondition(got.Status.Conditions, aiv1alpha1.ConditionCustomized)
+				g.Expect(customized).ToNot(BeNil())
+				g.Expect(customized.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(customized.Reason).To(Equal("NoUserEnvironment"))
 			}, "15s", "200ms").Should(Succeed())
 		})
 
@@ -882,6 +886,131 @@ var _ = Describe("InferenceService controller", func() {
 				g.Expect(drifted).ToNot(BeNil())
 				g.Expect(drifted.Status).To(Equal(metav1.ConditionFalse))
 			}, "15s", "200ms").Should(Succeed())
+		})
+
+		It("sets Customized true when spec.env is set", func() {
+			irp, mv := createRenderBase("isvc-env-customized")
+			defer func() { _ = k8sClient.Delete(ctx, irp); _ = k8sClient.Delete(ctx, mv) }()
+
+			isvc := validInferenceService("isvc-env-customized", mv.Name)
+			isvc.Spec.ProfileRef = irp.Name
+			isvc.Spec.Env = []aiv1alpha1.UserEnvVar{{Name: "MC_GID_INDEX", Value: "3", Roles: []string{testApplyRouterRole}}}
+			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, isvc) }()
+
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.InferenceService{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: isvc.Name, Namespace: testNamespace}, got)).To(Succeed())
+				cond := meta.FindStatusCondition(got.Status.Conditions, aiv1alpha1.ConditionCustomized)
+				g.Expect(cond).ToNot(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+				g.Expect(cond.Reason).To(Equal("UserEnvironment"))
+				g.Expect(cond.Message).To(ContainSubstring("MC_GID_INDEX (router)"))
+			}, "15s", "200ms").Should(Succeed())
+		})
+
+		It("rejects an env entry naming a role the profile does not declare", func() {
+			irp, mv := createRenderBase("isvc-env-unknown-role")
+			defer func() { _ = k8sClient.Delete(ctx, irp); _ = k8sClient.Delete(ctx, mv) }()
+
+			isvc := validInferenceService("isvc-env-unknown-role", mv.Name)
+			isvc.Spec.ProfileRef = irp.Name
+			isvc.Spec.Env = []aiv1alpha1.UserEnvVar{{Name: "A", Value: "1", Roles: []string{testApplyDecodeRole}}}
+			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, isvc) }()
+
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.InferenceService{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: isvc.Name, Namespace: testNamespace}, got)).To(Succeed())
+				cond := meta.FindStatusCondition(got.Status.Conditions, aiv1alpha1.ConditionRendered)
+				g.Expect(cond).ToNot(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(cond.Reason).To(Equal("UnknownEnvRole"))
+				g.Expect(cond.Message).To(ContainSubstring(testApplyDecodeRole))
+			}, "15s", "200ms").Should(Succeed())
+		})
+
+		It("applies spec.env to the role workload and rolls on change", func() {
+			name := "isvc-env-apply"
+			irp, mv := createRenderBase(name)
+			defer func() { _ = k8sClient.Delete(ctx, irp); _ = k8sClient.Delete(ctx, mv) }()
+
+			isvc := validInferenceService(name, mv.Name)
+			isvc.Spec.ProfileRef = irp.Name
+			isvc.Spec.Env = []aiv1alpha1.UserEnvVar{{Name: "MC_GID_INDEX", Value: "3", Roles: []string{testApplyRouterRole}}}
+			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, isvc) }()
+
+			getDeployment := func(g Gomega) *appsv1.Deployment {
+				d := &appsv1.Deployment{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name + "-router", Namespace: testNamespace}, d)).To(Succeed())
+				return d
+			}
+			containerEnv := func(d *appsv1.Deployment, envName string) (string, bool) {
+				for _, e := range d.Spec.Template.Spec.Containers[0].Env {
+					if e.Name == envName {
+						return e.Value, true
+					}
+				}
+				return "", false
+			}
+
+			var hash1, rev1 string
+			Eventually(func(g Gomega) {
+				d := getDeployment(g)
+				value, ok := containerEnv(d, "MC_GID_INDEX")
+				g.Expect(ok).To(BeTrue())
+				g.Expect(value).To(Equal("3"))
+				hash1 = d.Spec.Template.Annotations[templateHashAnnotationKey]
+				g.Expect(hash1).ToNot(BeEmpty())
+
+				got := &aiv1alpha1.InferenceService{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: testNamespace}, got)).To(Succeed())
+				g.Expect(got.Status.Profile).ToNot(BeNil())
+				rev1 = got.Status.Profile.Revision
+				g.Expect(rev1).ToNot(BeEmpty())
+			}, "15s", "200ms").Should(Succeed())
+
+			Eventually(func() error {
+				current := &aiv1alpha1.InferenceService{}
+				if err := k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: testNamespace}, current); err != nil {
+					return err
+				}
+				current.Spec.Env[0].Value = "4"
+				return k8sClient.Update(ctx, current)
+			}, "15s", "200ms").Should(Succeed())
+
+			var hash2 string
+			Eventually(func(g Gomega) {
+				d := getDeployment(g)
+				value, ok := containerEnv(d, "MC_GID_INDEX")
+				g.Expect(ok).To(BeTrue())
+				g.Expect(value).To(Equal("4"))
+				hash2 = d.Spec.Template.Annotations[templateHashAnnotationKey]
+				g.Expect(hash2).ToNot(Equal(hash1))
+			}, "15s", "200ms").Should(Succeed())
+
+			Eventually(func() error {
+				current := &aiv1alpha1.InferenceService{}
+				if err := k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: testNamespace}, current); err != nil {
+					return err
+				}
+				current.Spec.Env = nil
+				return k8sClient.Update(ctx, current)
+			}, "15s", "200ms").Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				d := getDeployment(g)
+				_, ok := containerEnv(d, "MC_GID_INDEX")
+				g.Expect(ok).To(BeFalse())
+				hash3 := d.Spec.Template.Annotations[templateHashAnnotationKey]
+				g.Expect(hash3).ToNot(Equal(hash2))
+			}, "15s", "200ms").Should(Succeed())
+
+			got := &aiv1alpha1.InferenceService{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: testNamespace}, got)).To(Succeed())
+			Expect(got.Status.Profile).ToNot(BeNil())
+			Expect(got.Status.Profile.Revision).To(Equal(rev1))
 		})
 	})
 

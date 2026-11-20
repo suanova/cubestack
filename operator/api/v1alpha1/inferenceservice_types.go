@@ -151,9 +151,39 @@ type InferenceServiceSpec struct {
 	// +optional
 	Overrides map[string]apiextensionsv1.JSON `json:"overrides,omitempty"`
 
+	// Env supplies user environment variables applied to the listed roles after
+	// the profile's pod template renders. A same-name variable replaces the
+	// profile's value. It is an escape hatch for environment facts the profile
+	// could not declare and is not covered by bundle validation.
+	// +optional
+	// +kubebuilder:validation:MaxItems=64
+	Env []UserEnvVar `json:"env,omitempty"`
+
 	// Route defines the public gateway route of the service.
 	// +optional
 	Route *RouteSpec `json:"route,omitempty"`
+}
+
+// UserEnvVar is a user-supplied environment variable applied to the listed
+// profile roles.
+type UserEnvVar struct {
+	// Name is the environment variable name.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:Pattern=`^[A-Za-z_][A-Za-z0-9_]*$`
+	Name string `json:"name"`
+
+	// Value is the literal value; v1 supports no valueFrom references.
+	// +kubebuilder:validation:MaxLength=8192
+	Value string `json:"value"`
+
+	// Roles lists the profile roles the variable applies to; every entry must
+	// name a role in the resolved profile (checked at render time).
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:MinLength=1
+	// +listType=set
+	Roles []string `json:"roles"`
 }
 
 // ProfileStatus echoes the resolved InferenceRuntimeProfile.

@@ -82,6 +82,11 @@ const (
 	// recreation. (InferenceService)
 	ConditionProfileDrifted ConditionType = "ProfileDrifted"
 
+	// ConditionCustomized warns that the service carries user environment
+	// overrides outside the profile (spec.env). It never affects the phase.
+	// (InferenceService)
+	ConditionCustomized ConditionType = "Customized"
+
 	// ConditionPodScheduled indicates that the Pod has been scheduled.
 	// (DevEnvironment)
 	ConditionPodScheduled ConditionType = "PodScheduled"

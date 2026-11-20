@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"fmt"
 	"path/filepath"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -143,6 +144,50 @@ var _ = Describe("InferenceService L1 admission", func() {
 
 			isvc := validInferenceService("no-route")
 			isvc.Spec.Route = nil
+			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, isvc)).To(Succeed())
+		})
+	})
+
+	Context("user env", func() {
+		It("rejects a reserved prefix or a code-loading name", func() {
+			setupISVCVAP()
+			defer cleanupISVCVAP()
+
+			for i, name := range []string{"KUBERNETES_SERVICE_HOST", "CUBESTACK_ROLE", "LD_PRELOAD", "LD_LIBRARY_PATH", "PYTHONPATH", "PYTHONSTARTUP", "BASH_ENV"} {
+				isvc := validInferenceService(fmt.Sprintf("env-reserved-%d", i))
+				isvc.Spec.Env = []UserEnvVar{{Name: name, Value: "x", Roles: []string{testPrefillRole}}}
+				err := k8sClient.Create(ctx, isvc)
+				Expect(err).To(HaveOccurred())
+				Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid error, got: %v", err)
+				Expect(err.Error()).To(ContainSubstring("spec.env"))
+			}
+		})
+
+		It("rejects the same name for the same role", func() {
+			setupISVCVAP()
+			defer cleanupISVCVAP()
+
+			isvc := validInferenceService("env-duplicate-role")
+			isvc.Spec.Env = []UserEnvVar{
+				{Name: "A", Value: "1", Roles: []string{testPrefillRole}},
+				{Name: "A", Value: "2", Roles: []string{testPrefillRole, testDecodeRole}},
+			}
+			err := k8sClient.Create(ctx, isvc)
+			Expect(err).To(HaveOccurred())
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid error, got: %v", err)
+			Expect(err.Error()).To(ContainSubstring("spec.env"))
+		})
+
+		It("accepts the same name for disjoint role sets", func() {
+			setupISVCVAP()
+			defer cleanupISVCVAP()
+
+			isvc := validInferenceService("env-disjoint-roles")
+			isvc.Spec.Env = []UserEnvVar{
+				{Name: "A", Value: "1", Roles: []string{testPrefillRole}},
+				{Name: "A", Value: "2", Roles: []string{testDecodeRole}},
+			}
 			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, isvc)).To(Succeed())
 		})

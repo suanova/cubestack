@@ -598,11 +598,14 @@ spec:
 | `spec.modelRef` | string | L0：必填、对象名格式；L2：引用存在性与兼容性（`Resolved`） | 引用 ModelVersion。ModelVersion 的 spec 不可变，因此修改此字段就是切换模型版本，用于升级或回滚。 |
 | `spec.profileRef` | string | L0：必填、对象名格式；L2：引用存在性（`Resolved`） | 引用 InferenceRuntimeProfile。Profile 的 spec 不可变，因此修改此字段就是切换运行配置版本，用于升级或回滚。 |
 | `spec.overrides` | map | L2：key 和 value 对照 Profile 的 `overrides[]` 声明校验（`Rendered`），未知 key 或不合法的值在 reconcile 时被拒绝 | 用户填写的可调参数。 |
+| `spec.env` | []object | L0：`name` 匹配 `^[A-Za-z_][A-Za-z0-9_]*$`；`value` 为字面量；`roles` 非空且去重；L1：拒绝 `KUBERNETES_`/`CUBESTACK_` 前缀与 `LD_PRELOAD`、`LD_LIBRARY_PATH`、`PYTHONPATH`、`PYTHONSTARTUP`、`BASH_ENV`，以及同一 role 内的重名；L2：每个 role 必须存在于解析后的 Profile（`Rendered`） | 用户环境变量逃生通道。按 role 合并进渲染后的 `podTemplate.env`，同名覆盖 Profile 值；不参与 `status.profile.revision`，变更触发受影响 role 的滚动。 |
 | `spec.route.aigatewayRouter` | string | L0：可选，枚举 `cubestack-ai-gateway` / `cubestack-ai-gateway-private` | 发布到平台模型目录（Agent Router）的哪条共享路由：`cubestack-ai-gateway`（public）或 `cubestack-ai-gateway-private`（private）。已发布服务成为所选目录里的一个模型：同一目录共享一个入口 hostname，客户端用请求体里的 `model` 字段选服务。空值（或省略 `spec.route`）= 未发布，只提供 ClusterIP 内部端点。 |
 | `spec.route.modelName` | string | L0：`^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$`（首字符字母数字，可含 `.` `_` `/` `-`，长度 ≤128）；L1：`aigatewayRouter` 非空时必填；L2：所选路由内的唯一性（`RouteReady`） | 目录模型名，即客户端请求体 `model` 字段要填的值，也是已发布服务在所选目录里的身份。与引擎的 served model name 解耦（目录条目把请求的 model 改写为引擎名）：同一模型的不同版本（fp16 / w8a8）能以各自的目录名共存，客户端只认目录名，`model` 不等于所选路由里任何已发布服务的目录名时返回 404。public 与 private 两条路由各自独立，同一目录名可同时存在于两条路由。未发布时可省略，省略后引擎使用 ModelVersion 的 `spec.model`；未发布服务使用各自的 ClusterIP，不会相互影响。 |
 | `spec.route.paths` | []string | L0：可选，`MaxItems=4`、数组按集合处理（`listType=set`），枚举 `/v1/chat/completions`、`/v1/responses`、`/v1/messages`、`/v1/images` | 本服务在模型目录上暴露的客户端路径，可多选。省略 = 暴露全部四条（兼容字段引入前的服务）；显式空列表 = 不暴露任何路径。`/v1/messages` 由 Agent Router 处理（请求体 `model` 选模型），其余三条走平台的普通 HTTPRoute，客户端需在请求里带 `x-ai-eg-model: <目录模型名>` header。控制台在发布时默认全选，且至少保留一条。 |
 | `spec.route.timeoutSeconds` | int | L0：可选，范围 0–86400，默认 0（0 = 不设总时长上限） | 单个请求的**总时长**上限，单位秒，包含全部流式分片。字段仍由 CRD/operator 支持，控制台不再提供输入，创建时使用默认值。 |
 | `spec.route.idleTimeoutSeconds` | int | L0：可选，范围 1–86400，默认 300 | 单个请求的**无进展**上限，单位秒：上游连续这么久没有发出任何字节即切断。非流式生成在响应完成前不发送任何字节，因此一直被它计时——非流式长生成的实际上限由它决定（要更久就调大）；流式只要有字节流动就不受它约束，其时长的上限由 `timeoutSeconds` 决定。字段仍由 CRD/operator 支持，控制台不再提供输入，创建时使用默认值。 |
+
+`spec.env` 是服务级的逃生通道：只支持字面量 `value`，不提供 `*` 通配，`roles` 必须显式列出（单 role profile 由控制台自动填充），且不受 bundle 验证覆盖。Profile 若希望 Pod env 能覆盖脚本内的默认值，entrypoint 应写成 `${VAR:-默认值}`；脚本显式 `export` 同名变量时，脚本在运行期胜出。
 
 #### Status
 
@@ -643,6 +646,9 @@ status:
     status: "True"
     reason: Reconciling
     message: "Deploying for the first time：decode (1/2)"
+  - type: Customized
+    status: "False"
+    reason: NoUserEnvironment
   roles:              # 解析后的拓扑，供计费和配额读取
   - name: router
     kind: Deployment
@@ -683,7 +689,7 @@ status:
 | Condition | 检查 | 失败 reason 示例 |
 |---|---|---|
 | `Resolved` | 引用解析：`profileRef` 指向的 Profile 存在；`modelRef` 指向的 ModelVersion 存在，且模型的 `architecture` 和 `quantization` 都满足 Profile 的要求；模型的存储策略与 Profile 的模型消费方式兼容（`S3` 策略不能搭配声明 `mounts[]` 的 Profile）；所有 asset 源都存在于 `cubestack-system`。`Static` 与 `S3` 存储策略额外要求 ModelVersion 的 `StorageResolved=True`（Static 下即 `status.rootPath` 已解析并回显），否则 `Resolved=False, reason=ModelStorageUnresolved`，不创建模型 PVC、凭据 Secret 副本与工作负载。各项校验全部执行，任一失败即为 `False`：reason 按上述顺序取第一个失败项，`message` 汇总全部失败。Profile 对象上的 `AssetsResolved` 预检（§3.2）不依赖服务存在，用于提前发现问题；服务解析时仍会再次校验，避免源对象在两次操作之间被删除。 | `ProfileNotFound`、`ModelNotFound`、`ModelIncompatible`、`ModelStorageIncompatible`、`AssetNotFound`、`ModelStorageUnresolved` |
-| `Rendered` | override 值合法；Phase 1 只使用允许的变量；所有占位符都在允许的变量范围内；引用 `{{ model.path }}` 的 role 已挂载对应模型；引用 `{{ model.credentialsPath }}` 的 role 要求对应 ModelVersion 已设置 `storage.s3.credentialsRef`。 | `UnknownOverride`、`InvalidOverride`、`PhaseViolation`、`UnknownPlaceholder`、`ModelNotMounted`、`ModelCredentialsUnresolved` |
+| `Rendered` | override 值合法；`spec.env` 的每个 role 都存在于 Profile；Phase 1 只使用允许的变量；所有占位符都在允许的变量范围内；引用 `{{ model.path }}` 的 role 已挂载对应模型；引用 `{{ model.credentialsPath }}` 的 role 要求对应 ModelVersion 已设置 `storage.s3.credentialsRef`。 | `UnknownOverride`、`InvalidOverride`、`PhaseViolation`、`UnknownPlaceholder`、`ModelNotMounted`、`ModelCredentialsUnresolved`、`UnknownEnvRole` |
 | `Provisioned` | 渲染后的 asset ConfigMap、模型 PVC 与 S3 凭据 Secret 副本（§3.1 S3 策略）已在服务 namespace 中创建成功；源 Secret 轮换后副本的重新同步同样由该 condition 反映。仅指对象创建/同步成功；PVC 的绑定与存储供给由存储系统完成，其异常通过 Pod 事件体现。 | `AssetConfigMapFailed`、`PVCCreateFailed`、`SecretCopyFailed` |
 | `WorkloadsApplied` | 期望配置已完整写入 Service 与工作负载（LWS/Deployment），即渲染结果已下发到期望版本。只表示配置已应用，不表示就绪：滚动更新期间保持 `True`，Pod 未就绪由 `Ready` 与 `roles[]` 反映。 | `ServiceApplyFailed`、`WorkloadApplyFailed` |
 | `EndpointReady` | 无论是否发布，内部端点都必须实际可访问：`endpoint.role` 渲染后指向存在的 role，该 role 的 Service 中存在名为 `endpoint.portName`（默认 `http`）的端口，且该 Service 至少有一个就绪的后端端点（对应 Pod 已通过就绪探针）。该 condition 决定 `status.endpoint.internal` 是否有效；`RouteReady` 仅在它为 True 后才在网关上创建路由。 | `EndpointRoleNotFound`、`EndpointPortNotFound`、`EndpointNotReady` |
@@ -692,6 +698,7 @@ status:
 | `Progressing` | spec 变更后，Controller 是否仍在应用期望配置。该条件与 `Ready` 独立。 | `True`：`Reconciling`、`Rollout` 或 `Scaling`；`False`：`Converged` |
 | `ProfileDeprecated`（警示） | 引用的 Profile 带有 deprecated label（`ai.cubestack.io/deprecated`）。 | 不阻断；提示迁移 |
 | `ProfileDrifted`（警示） | `profileRef` 未变，但当前内容 hash 与 `status.profile.revision` 不同，通常由删除后以相同名称重新创建 Profile 引起。 | 不阻断；审计告警 |
+| `Customized`（警示） | `spec.env` 非空时为 `True, reason=UserEnvironment`，message 列出变量名与 role（上限 8192 字符，超出时截断并给出省略数量）；否则 `False, reason=NoUserEnvironment`。 | 不阻断；不参与 phase 判定 |
 
 **Progressing 与 Ready**：
 
@@ -802,6 +809,8 @@ env:
 - {name: PD_HCA_LIST, value: "$(PREFILL_HCA_LIST)"}      # 运行期：引用 envFrom asset 注入的 key
 ```
 
+**`spec.env` 的合并**：Profile 渲染完成后，按 role 合并用户变量——以该 role 渲染后的 `podTemplate.env` 为基础，同名变量原位覆盖 Profile 的值，新变量按 name 排序追加；role 不在条目的 `roles` 中则完全不变。合并结果进入 Pod 模板 hash，因此只有受影响的 role 滚动；`spec.env` 的书写顺序不影响渲染结果。
+
 ### 4.3 生成资源规约
 
 | 生成资源 | 命名 | 标签 |
@@ -897,6 +906,7 @@ ModelVersion 与 InferenceRuntimeProfile 的 spec 均不可变（§3.1、§3.2�
 | 模型升级 / 回滚 | 管理员创建新的 ModelVersion（存储策略属于 spec，变更存储也必须新建对象）；用户修改 `spec.modelRef` 指向新版本。 |
 | 运行配置升级 / 回滚 | 管理员创建新的 InferenceRuntimeProfile（名称带版本标识，见 §3.2 命名规则）；用户修改 `spec.profileRef` 指向新版本。 |
 | 参数调整 | 用户在 Profile 授权的 `overrides[]` 范围内修改 `spec.overrides`；是否触发工作负载更新由 template-hash 判断，见下文。 |
+| 服务级 env 调整 | 用户修改 `spec.env`；env 属于渲染后的 Pod 模板，按 template-hash 判断并滚动受影响的 role。 |
 
 **template-hash**：Controller 每次 reconcile 完整渲染后，为每个 role 的工作负载计算 template-hash，写入 Pod 模板 annotation（`ai.cubestack.io/template-hash` 及分项 hash），据此决定创建、滚动、扩缩容或跳过（§4.1 步骤 4）。hash 的输入包括：
 
@@ -904,7 +914,7 @@ ModelVersion 与 InferenceRuntimeProfile 的 spec 均不可变（§3.1、§3.2�
 - 创建的 asset 内容 hash——必须参与计算，否则 ConfigMap 更新后不会有任何滚动，故障重建的 Pod 可能使用新脚本但保留旧模板配置；
 - 模型存储配置 hash——存储配置变化会使渲染后的工作负载配置随之变化，因此按模板变更处理并触发滚动更新（§3.1）。该项仅对消费模型的 role 参与计算：卷类策略下为声明 `mounts[]` 的 role，`S3` 策略下为引用 `{{ model.path }}` 的 role；不消费模型的 role（如 router）不因模型存储变化而重启。`S3` 的凭据 Secret 副本内容不参与 hash（轮换不触发滚动）。
 
-已解析 override 不单独参与综合 hash：渲染后的 Pod 模板已内嵌被引用的 override 值（模板变化由 Pod 模板 hash 覆盖），只影响 asset 数据的 override 由 asset 内容 hash 覆盖。因此"仅副本数变化"（如 `workload.replicas` 绑定 `{{ overrides.* }}` 时只改该 override）不会改变综合 hash，按扩缩容处理而非滚动。
+已解析 override 不单独参与综合 hash：渲染后的 Pod 模板已内嵌被引用的 override 值（模板变化由 Pod 模板 hash 覆盖），只影响 asset 数据的 override 由 asset 内容 hash 覆盖。因此"仅副本数变化"（如 `workload.replicas` 绑定 `{{ overrides.* }}` 时只改该 override）不会改变综合 hash，按扩缩容处理而非滚动。`spec.env` 同理：它已合并进渲染后的 Pod 模板，由第一条输入覆盖，不单独参与综合 hash；`status.profile.revision` 只覆盖 Profile 与 asset 内容，env 不改变它。
 
 比较的是**最终渲染结果**，而非 Profile 字段本身：例如用户值覆盖了被修改的默认值时，渲染结果未变，就不触发滚动，只更新 `status.profile.revision`。存储配置中的容量字段（`storage.dynamic.capacity` / `storage.static.capacity`）是 `resource.Quantity` 类型，参与 hash 前必须先解析并取规范序列化值（如 `1024Mi` 归一化为 `1Gi`），避免语义等量的不同书写被误判为存储配置变更。
 

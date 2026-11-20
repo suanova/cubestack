@@ -52,6 +52,46 @@ spec:
           spec:
             description: spec defines the desired state of InferenceService
             properties:
+              env:
+                description: |-
+                  Env supplies user environment variables applied to the listed roles after
+                  the profile's pod template renders. A same-name variable replaces the
+                  profile's value. It is an escape hatch for environment facts the profile
+                  could not declare and is not covered by bundle validation.
+                items:
+                  description: |-
+                    UserEnvVar is a user-supplied environment variable applied to the listed
+                    profile roles.
+                  properties:
+                    name:
+                      description: Name is the environment variable name.
+                      maxLength: 256
+                      minLength: 1
+                      pattern: ^[A-Za-z_][A-Za-z0-9_]*$
+                      type: string
+                    roles:
+                      description: |-
+                        Roles lists the profile roles the variable applies to; every entry must
+                        name a role in the resolved profile (checked at render time).
+                      items:
+                        minLength: 1
+                        type: string
+                      maxItems: 16
+                      minItems: 1
+                      type: array
+                      x-kubernetes-list-type: set
+                    value:
+                      description: Value is the literal value; v1 supports no valueFrom
+                        references.
+                      maxLength: 8192
+                      type: string
+                  required:
+                  - name
+                  - roles
+                  - value
+                  type: object
+                maxItems: 64
+                type: array
               modelRef:
                 description: |-
                   ModelRef references the ModelVersion to serve. The ModelVersion spec is

@@ -104,7 +104,7 @@ func validInferenceRuntimeProfile(name string) *InferenceRuntimeProfile {
 			Roles: []Role{
 				{
 					Name:      "router",
-					DependsOn: []string{"prefill", "decode"},
+					DependsOn: []string{testPrefillRole, testDecodeRole},
 					Workload: Workload{
 						Kind:     WorkloadKindDeployment,
 						Replicas: intstrPtr(intstr.FromInt(1)),
