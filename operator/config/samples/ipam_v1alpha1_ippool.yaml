@@ -1,0 +1,90 @@
+apiVersion: ipam.cubestack.io/v1alpha1
+kind: IPPool
+metadata:
+  labels:
+    app.kubernetes.io/name: cubestack
+    app.kubernetes.io/managed-by: kustomize
+  name: underlay-v4
+spec:
+  # Cluster-scoped: an admin creates this, users claim from it.
+  #
+  # range is the ONLY required field. It is what the allocator needs; everything
+  # the minted network config needs lives in nadTemplate below, and is required
+  # only when that template is present. A pool with no nadTemplate allocates
+  # addresses and mints nothing, so it needs no subnet and no gateway -- see
+  # ipam_v1alpha1_ippool_minimal.yaml.
+  #
+  # The band must be disjoint from any other NAD serving the same subnet. That is
+  # an admin responsibility rather than a controller check: regular users cannot
+  # create NADs, so an overlap can only be introduced deliberately, by an admin.
+  # The audit sweep reports the one case it can see -- two pools whose bands
+  # intersect on one subnet -- as PoolOverlap.
+  range:
+    start: 10.66.3.221
+    end: 10.66.3.240
+
+  # Optional: bands the allocator never hands out, even though they lie inside
+  # range -- a block reserved for another system, a gateway on a wider band, or an
+  # address found to be in use outside the platform.
+  #
+  # This is the remedy for a live collision (design §10.5): add the colliding
+  # address here and delete the claim holding it. The rest of the band keeps
+  # working; exclusions are prospective, so an address already assigned is not
+  # taken back. The rule below takes .230 out of use for illustration.
+  exclude:
+    - start: 10.66.3.230
+      end: 10.66.3.230
+
+  # Optional, default true. false makes this a pool that hands addresses out
+  # rather than one where callers choose them: an Exact request then fails with
+  # Ready=False / ExactNotAllowed instead of being honoured.
+  allowExact: true
+
+  # Who may claim from this pool. The list is the whole allow-list: an empty or
+  # absent list admits nobody, so a pool is unusable until it names at least one
+  # namespace.
+  #
+  # Checked when an address is allocated, not continuously: narrowing the list
+  # does not revoke an address that is already assigned, and widening it unblocks
+  # the claims that were waiting.
+  namespaces:
+    - default
+
+  # Optional: everything the per-claim NADs should contain. Present means this
+  # pool mints networks; a claim that asks for a NAD against a pool without one
+  # fails with Ready=False / TemplateMissing rather than binding without a
+  # network.
+  #
+  # All three of subnet, gateway and bridge are required here whenever nadTemplate
+  # is set. A template is therefore all-or-nothing, which is also why there is no
+  # rule anywhere saying so -- the field list is the rule.
+  nadTemplate:
+    # The CIDR the minted NADs' addresses belong to. It supplies their prefix
+    # length and the containment check. NOT the allocatable band: that is range
+    # above, which must lie inside this subnet. Several pools may share one subnet
+    # as long as their bands are disjoint.
+    subnet: 10.66.3.0/24
+
+    # The default gateway. Must be inside subnet (a bridge binding needs it on the
+    # same L2) and outside range above.
+    gateway: 10.66.3.254
+
+    # The address is written into the NAD as a literal static assignment, and
+    # nothing at the CNI arbitrates it. That is what lets the target and source pod
+    # of a live migration hold it at the same time -- a leased address (Whereabouts)
+    # has one slot per address and blocks migration outright, which is why it is
+    # not an option here.
+    #
+    # The cost is that a duplicate is silent: both VMs start and the symptom is
+    # intermittent connectivity. Exclusivity rests on the allocator being the sole
+    # writer over range, and the audit sweep -- which writes DuplicateAddress on
+    # every claim implicated -- is then the only detector. See design §10.5.
+    type: cnv-bridge
+    bridge: br0
+    macspoofchk: false
+    dns:
+      nameservers:
+        - 223.5.5.5
+        - 8.8.8.8
+    routes:
+      - dst: 0.0.0.0/0
