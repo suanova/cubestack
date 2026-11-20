@@ -190,6 +190,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	setResolvedCondition(&desired.Status.Conditions, resolved)
 	setProfileEcho(desired, &isvc, resolved.profile)
 	setModelEcho(desired, resolved.model)
+	setCustomizedCondition(&desired.Status.Conditions, desired.Spec.Env)
 
 	// Every status write goes through here. The phase is a summary of the
 	// conditions, and this pass has just finished writing them wherever it is
@@ -739,6 +740,33 @@ func setProfileDeprecatedCondition(conditions *[]metav1.Condition, profile *aiv1
 		Status:  metav1.ConditionFalse,
 		Reason:  "NotDeprecated",
 		Message: "The referenced profile is not deprecated",
+	})
+}
+
+// setCustomizedCondition reports whether spec.env carries user overrides
+// outside the profile. It is a warning, never a phase input.
+func setCustomizedCondition(conditions *[]metav1.Condition, env []aiv1alpha1.UserEnvVar) {
+	if len(env) == 0 {
+		meta.SetStatusCondition(conditions, metav1.Condition{
+			Type:    aiv1alpha1.ConditionCustomized,
+			Status:  metav1.ConditionFalse,
+			Reason:  "NoUserEnvironment",
+			Message: "No user environment overrides",
+		})
+		return
+	}
+	entries := make([]string, 0, len(env))
+	for _, e := range env {
+		roles := append([]string(nil), e.Roles...)
+		slices.Sort(roles)
+		entries = append(entries, fmt.Sprintf("%s (%s)", e.Name, strings.Join(roles, ", ")))
+	}
+	slices.Sort(entries)
+	meta.SetStatusCondition(conditions, metav1.Condition{
+		Type:    aiv1alpha1.ConditionCustomized,
+		Status:  metav1.ConditionTrue,
+		Reason:  "UserEnvironment",
+		Message: "User environment overrides: " + strings.Join(entries, "; "),
 	})
 }
 
