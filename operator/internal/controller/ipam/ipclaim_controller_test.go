@@ -1,0 +1,454 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package ipam
+
+import (
+	"encoding/json"
+	"fmt"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	ipamv1alpha1 "github.com/suanova/cubestack/api/ipam/v1alpha1"
+)
+
+var _ = Describe("IPClaim Controller", func() {
+	// reconciled is the object under test with every collaborator set the way the
+	// binary sets it. APIReader is the same client here — envtest's client reads
+	// straight from the API server — so the specs pin the invariant that back-to-back
+	// allocations see each other's writes, not the mechanism that provides it.
+	reconciled := func() *IPClaimReconciler {
+		return &IPClaimReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme()}
+	}
+
+	reconcileClaim := func(namespace, name string) {
+		_, err := reconciled().Reconcile(ctx, requestFor(namespace, name))
+		ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	}
+
+	ready := func(claim *ipamv1alpha1.IPClaim) *metav1.Condition {
+		return apimeta.FindStatusCondition(claim.Status.Conditions, ipamv1alpha1.ConditionReady)
+	}
+
+	// renderedConfig decodes a minted NAD's spec.config.
+	renderedConfig := func(nad *unstructured.Unstructured) map[string]any {
+		raw, found, err := unstructured.NestedString(nad.Object, "spec", "config")
+		ExpectWithOffset(1, err).NotTo(HaveOccurred())
+		ExpectWithOffset(1, found).To(BeTrue())
+
+		var parsed map[string]any
+		ExpectWithOffset(1, json.Unmarshal([]byte(raw), &parsed)).To(Succeed())
+		return parsed
+	}
+
+	It("binds the lowest free address and mints the NAD", func() {
+		createPool("claims-basic", testPoolSpec())
+		createClaim(testNamespace, "claims-basic-ip", "claims-basic", "claims-basic-static")
+		deleteNAD("claims-basic-static")
+
+		reconcileClaim(testNamespace, "claims-basic-ip")
+
+		got := getClaim(testNamespace, "claims-basic-ip")
+		Expect(got.Status.AssignedIP).To(Equal(testFirstIP))
+		Expect(ready(got)).NotTo(BeNil())
+		Expect(ready(got).Status).To(Equal(metav1.ConditionTrue))
+		Expect(ready(got).Reason).To(Equal(ipamv1alpha1.ReasonBound))
+		Expect(got.UID).NotTo(BeEmpty())
+
+		nad := getNAD("claims-basic-static")
+		Expect(metav1.IsControlledBy(nad, got)).To(BeTrue())
+		Expect(nad.GetLabels()).To(HaveKeyWithValue(ipamv1alpha1.LabelClaim, "claims-basic-ip"))
+
+		config := renderedConfig(nad)
+		Expect(config).To(HaveKeyWithValue("name", "claims-basic-static"))
+		Expect(config).To(HaveKeyWithValue("bridge", "br0"))
+
+		ipam, ok := config["ipam"].(map[string]any)
+		Expect(ok).To(BeTrue())
+		// The claim's address is baked in as a single static assignment. The pool's
+		// own fields remain the sole source of addressing — the mask comes from
+		// testSubnet, the gateway from the template — but nothing arbitrates the
+		// address at the CNI any more.
+		Expect(ipam).To(HaveKeyWithValue("type", "static"))
+		Expect(ipam).To(HaveKeyWithValue("addresses", []any{
+			map[string]any{"address": testFirstIP + "/24", "gateway": testGateway},
+		}))
+	})
+
+	It("gives the second claim the next address", func() {
+		createPool("claims-two", testPoolSpec())
+		createClaim(testNamespace, "claims-two-a", "claims-two", "")
+		createClaim(testNamespace, "claims-two-b", "claims-two", "")
+
+		reconcileClaim(testNamespace, "claims-two-a")
+		reconcileClaim(testNamespace, "claims-two-b")
+
+		Expect(getClaim(testNamespace, "claims-two-a").Status.AssignedIP).To(Equal(testFirstIP))
+		Expect(getClaim(testNamespace, "claims-two-b").Status.AssignedIP).To(Equal(testSecondIP))
+	})
+
+	It("gives every claim in a pool its own address", func() {
+		// The regression the single-writer discipline exists for: each allocation is a
+		// read of the claim set followed by a write, so an allocation that read a
+		// snapshot from before the previous write would hand out an address twice.
+		// Nothing on the network would refuse the second one.
+		spec := testPoolSpec()
+		spec.Range = ipamv1alpha1.IPRange{Start: testFirstIP, End: "10.66.3.159"}
+		createPool("claims-many", spec)
+
+		names := make([]string, 0, 10)
+		for i := range 10 {
+			name := fmt.Sprintf("claims-many-%d", i)
+			createClaim(testNamespace, name, "claims-many", "")
+			names = append(names, name)
+		}
+
+		held := map[string]string{}
+		for _, name := range names {
+			reconcileClaim(testNamespace, name)
+
+			ip := getClaim(testNamespace, name).Status.AssignedIP
+			Expect(ip).NotTo(BeEmpty(), "claim %s was not bound", name)
+			Expect(held).NotTo(HaveKey(ip), "address %s handed to both %s and %s", ip, held[ip], name)
+			held[ip] = name
+		}
+		Expect(held).To(HaveLen(len(names)))
+	})
+
+	It("binds a claim with no spec.nad without creating anything", func() {
+		createPool("claims-ledger-only", testPoolSpec())
+		createClaim(testNamespace, "claims-ledger-only-ip", "claims-ledger-only", "")
+
+		reconcileClaim(testNamespace, "claims-ledger-only-ip")
+
+		got := getClaim(testNamespace, "claims-ledger-only-ip")
+		Expect(got.Status.AssignedIP).To(Equal(testFirstIP))
+		Expect(ready(got).Status).To(Equal(metav1.ConditionTrue))
+	})
+
+	It("keeps an address a claim already holds", func() {
+		// The property that makes this layer worth having: a claim never moves. A
+		// re-derivation here would let a lower free address displace a running VM.
+		createPool("claims-sticky", testPoolSpec())
+		claim := createClaim(testNamespace, "claims-sticky-ip", "claims-sticky", "")
+
+		claim.Status.AssignedIP = testThirdIP
+		Expect(k8sClient.Status().Update(ctx, claim)).To(Succeed())
+
+		reconcileClaim(testNamespace, "claims-sticky-ip")
+
+		got := getClaim(testNamespace, "claims-sticky-ip")
+		Expect(got.Status.AssignedIP).To(Equal(testThirdIP))
+		Expect(ready(got).Status).To(Equal(metav1.ConditionTrue))
+	})
+
+	It("reports exhaustion rather than over-allocating", func() {
+		spec := testPoolSpec()
+		// A band of exactly one address, so the second claim must fail.
+		spec.Range = ipamv1alpha1.IPRange{Start: testFirstIP, End: testFirstIP}
+		createPool("claims-exhausted", spec)
+		createClaim(testNamespace, "claims-exhausted-a", "claims-exhausted", "")
+		createClaim(testNamespace, "claims-exhausted-b", "claims-exhausted", "")
+
+		reconcileClaim(testNamespace, "claims-exhausted-a")
+		reconcileClaim(testNamespace, "claims-exhausted-b")
+
+		Expect(getClaim(testNamespace, "claims-exhausted-a").Status.AssignedIP).To(Equal(testFirstIP))
+
+		second := getClaim(testNamespace, "claims-exhausted-b")
+		Expect(second.Status.AssignedIP).To(BeEmpty())
+		Expect(ready(second)).NotTo(BeNil())
+		Expect(ready(second).Status).To(Equal(metav1.ConditionFalse))
+		Expect(ready(second).Reason).To(Equal(ipamv1alpha1.ReasonRangeExhausted))
+	})
+
+	It("reports a pool whose exclusions leave nothing as exhausted", func() {
+		// Well formed and empty, so it reads as a full pool rather than a broken one:
+		// the operator's next step in both cases is to widen what can be allocated.
+		spec := testPoolSpec()
+		spec.Exclude = []ipamv1alpha1.IPRange{{Start: testFirstIP, End: testThirdIP}}
+		createPool("claims-all-excluded", spec)
+		createClaim(testNamespace, "claims-all-excluded-ip", "claims-all-excluded", "")
+
+		reconcileClaim(testNamespace, "claims-all-excluded-ip")
+
+		got := getClaim(testNamespace, "claims-all-excluded-ip")
+		Expect(got.Status.AssignedIP).To(BeEmpty())
+		Expect(ready(got).Reason).To(Equal(ipamv1alpha1.ReasonRangeExhausted))
+	})
+
+	It("skips an excluded address and keeps the rest of the band usable", func() {
+		// The remediation the design relies on (§10.5): taking an address out of the
+		// pool must not take the pool out with it.
+		spec := testPoolSpec()
+		spec.Exclude = []ipamv1alpha1.IPRange{{Start: testFirstIP, End: testFirstIP}}
+		createPool("claims-exclude", spec)
+		createClaim(testNamespace, "claims-exclude-a", "claims-exclude", "")
+		createClaim(testNamespace, "claims-exclude-b", "claims-exclude", "")
+
+		reconcileClaim(testNamespace, "claims-exclude-a")
+		reconcileClaim(testNamespace, "claims-exclude-b")
+
+		Expect(getClaim(testNamespace, "claims-exclude-a").Status.AssignedIP).To(Equal(testSecondIP))
+		Expect(getClaim(testNamespace, "claims-exclude-b").Status.AssignedIP).To(Equal(testThirdIP))
+	})
+
+	It("fails a claim whose pool does not exist", func() {
+		createClaim(testNamespace, "claims-nopool-ip", "claims-nopool", "")
+
+		reconcileClaim(testNamespace, "claims-nopool-ip")
+
+		got := getClaim(testNamespace, "claims-nopool-ip")
+		Expect(ready(got)).NotTo(BeNil())
+		Expect(ready(got).Status).To(Equal(metav1.ConditionFalse))
+		Expect(ready(got).Reason).To(Equal(ipamv1alpha1.ReasonPoolNotFound))
+	})
+
+	It("refuses a claim from a namespace the pool does not admit", func() {
+		createNamespace("claims-elsewhere")
+		// testPoolSpec admits only "default".
+		createPool("claims-gate", testPoolSpec())
+		createClaim("claims-elsewhere", "claims-gate-ip", "claims-gate", "")
+
+		reconcileClaim("claims-elsewhere", "claims-gate-ip")
+
+		got := getClaim("claims-elsewhere", "claims-gate-ip")
+		Expect(got.Status.AssignedIP).To(BeEmpty())
+		Expect(ready(got).Status).To(Equal(metav1.ConditionFalse))
+		Expect(ready(got).Reason).To(Equal(ipamv1alpha1.ReasonNamespaceNotAllowed))
+	})
+
+	It("keeps the address of a claim whose namespace leaves the allow-list", func() {
+		// Prospective, not retroactive: the NAD on the running VM still carries the
+		// address, so revoking it here would hand it to somebody else while that VM is
+		// still using it.
+		createPool("claims-gate-narrow", testPoolSpec())
+		createClaim(testNamespace, "claims-gate-narrow-ip", "claims-gate-narrow", "")
+		reconcileClaim(testNamespace, "claims-gate-narrow-ip")
+		Expect(getClaim(testNamespace, "claims-gate-narrow-ip").Status.AssignedIP).To(Equal(testFirstIP))
+
+		pool := &ipamv1alpha1.IPPool{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "claims-gate-narrow"}, pool)).To(Succeed())
+		pool.Spec.Namespaces = []string{"somebody-else"}
+		Expect(k8sClient.Update(ctx, pool)).To(Succeed())
+
+		reconcileClaim(testNamespace, "claims-gate-narrow-ip")
+
+		got := getClaim(testNamespace, "claims-gate-narrow-ip")
+		Expect(got.Status.AssignedIP).To(Equal(testFirstIP))
+		Expect(ready(got).Status).To(Equal(metav1.ConditionTrue))
+	})
+
+	It("honours an Exact request", func() {
+		spec := testPoolSpec()
+		spec.Range = ipamv1alpha1.IPRange{Start: testFirstIP, End: "10.66.3.159"}
+		createPool("claims-exact", spec)
+
+		// The higher address, so that a fallback to Auto would be visible.
+		createClaimWith(testNamespace, "claims-exact-ip", ipamv1alpha1.IPClaimSpec{
+			PoolRef:    "claims-exact",
+			Allocation: &ipamv1alpha1.AddressAllocation{Strategy: ipamv1alpha1.AllocationExact, Address: testThirdIP},
+		})
+
+		reconcileClaim(testNamespace, "claims-exact-ip")
+
+		Expect(getClaim(testNamespace, "claims-exact-ip").Status.AssignedIP).To(Equal(testThirdIP))
+	})
+
+	It("never substitutes a nearby address for an Exact request it cannot honour", func() {
+		createPool("claims-exact-taken", testPoolSpec())
+		createClaim(testNamespace, "claims-exact-taken-a", "claims-exact-taken", "")
+		reconcileClaim(testNamespace, "claims-exact-taken-a")
+		Expect(getClaim(testNamespace, "claims-exact-taken-a").Status.AssignedIP).To(Equal(testFirstIP))
+
+		createClaimWith(testNamespace, "claims-exact-taken-b", ipamv1alpha1.IPClaimSpec{
+			PoolRef:    "claims-exact-taken",
+			Allocation: &ipamv1alpha1.AddressAllocation{Strategy: ipamv1alpha1.AllocationExact, Address: testFirstIP},
+		})
+		reconcileClaim(testNamespace, "claims-exact-taken-b")
+
+		got := getClaim(testNamespace, "claims-exact-taken-b")
+		Expect(got.Status.AssignedIP).To(BeEmpty())
+		Expect(ready(got).Reason).To(Equal(ipamv1alpha1.ReasonAddressUnavailable))
+		// The blocker is structured so the reader can go and look at the holder.
+		Expect(got.Status.Blockers).To(HaveLen(1))
+		Expect(got.Status.Blockers[0].Kind).To(Equal("IPClaim"))
+		Expect(got.Status.Blockers[0].Name).To(Equal("claims-exact-taken-a"))
+		Expect(got.Status.Blockers[0].Address).To(Equal(testFirstIP))
+	})
+
+	It("fails an Exact request outside the band, and one on an excluded address", func() {
+		spec := testPoolSpec()
+		spec.Exclude = []ipamv1alpha1.IPRange{{Start: testSecondIP, End: testSecondIP}}
+		createPool("claims-exact-bounds", spec)
+
+		createClaimWith(testNamespace, "claims-exact-outside", ipamv1alpha1.IPClaimSpec{
+			PoolRef:    "claims-exact-bounds",
+			Allocation: &ipamv1alpha1.AddressAllocation{Strategy: ipamv1alpha1.AllocationExact, Address: testGateway},
+		})
+		reconcileClaim(testNamespace, "claims-exact-outside")
+		Expect(ready(getClaim(testNamespace, "claims-exact-outside")).Reason).To(Equal(ipamv1alpha1.ReasonAddressOutOfRange))
+
+		createClaimWith(testNamespace, "claims-exact-excluded", ipamv1alpha1.IPClaimSpec{
+			PoolRef:    "claims-exact-bounds",
+			Allocation: &ipamv1alpha1.AddressAllocation{Strategy: ipamv1alpha1.AllocationExact, Address: testSecondIP},
+		})
+		reconcileClaim(testNamespace, "claims-exact-excluded")
+		Expect(ready(getClaim(testNamespace, "claims-exact-excluded")).Reason).To(Equal(ipamv1alpha1.ReasonAddressExcluded))
+	})
+
+	It("refuses an Exact request against a pool that does not accept them", func() {
+		spec := testPoolSpec()
+		allow := false
+		spec.AllowExact = &allow
+		createPool("claims-exact-closed", spec)
+
+		createClaimWith(testNamespace, "claims-exact-closed-ip", ipamv1alpha1.IPClaimSpec{
+			PoolRef:    "claims-exact-closed",
+			Allocation: &ipamv1alpha1.AddressAllocation{Strategy: ipamv1alpha1.AllocationExact, Address: testFirstIP},
+		})
+		reconcileClaim(testNamespace, "claims-exact-closed-ip")
+
+		got := getClaim(testNamespace, "claims-exact-closed-ip")
+		Expect(got.Status.AssignedIP).To(BeEmpty())
+		Expect(ready(got).Reason).To(Equal(ipamv1alpha1.ReasonExactNotAllowed))
+	})
+
+	It("fails a claim that asks for a NAD against a template-less pool", func() {
+		spec := testPoolSpec()
+		spec.NADTemplate = nil
+		createPool("claims-notemplate", spec)
+		createClaim(testNamespace, "claims-notemplate-ip", "claims-notemplate", "claims-notemplate-static")
+
+		reconcileClaim(testNamespace, "claims-notemplate-ip")
+
+		got := getClaim(testNamespace, "claims-notemplate-ip")
+		Expect(ready(got).Status).To(Equal(metav1.ConditionFalse))
+		// A misconfiguration, not a broken controller: it is the Ready condition's
+		// reason, which is where every "no address yet, and here is why" lives.
+		Expect(ready(got).Reason).To(Equal(ipamv1alpha1.ReasonTemplateMissing))
+
+		// No address is consumed: a claim that cannot be satisfied must not sit on
+		// one of the pool's addresses.
+		Expect(got.Status.AssignedIP).To(BeEmpty())
+		absent := newNAD(testNamespace, "claims-notemplate-static")
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(absent), absent))).To(BeTrue())
+	})
+
+	It("refuses a nad name that belongs to someone else, then takes it once it is free", func() {
+		createPool("claims-taken", testPoolSpec())
+		createClaim(testNamespace, "claims-taken-ip", "claims-taken", "claims-taken-static")
+
+		// A NAD this project did not create: no ownerReference, and not ours to
+		// adopt or overwrite.
+		foreign := newNAD(testNamespace, "claims-taken-static")
+		Expect(unstructured.SetNestedField(foreign.Object, `{"name":"someone-elses"}`, "spec", "config")).To(Succeed())
+		Expect(k8sClient.Create(ctx, foreign)).To(Succeed())
+		deleteNAD("claims-taken-static")
+
+		reconcileClaim(testNamespace, "claims-taken-ip")
+
+		got := getClaim(testNamespace, "claims-taken-ip")
+		Expect(ready(got).Status).To(Equal(metav1.ConditionFalse))
+		Expect(ready(got).Reason).To(Equal(ipamv1alpha1.ReasonNADNotOwned))
+		Expect(got.Status.Blockers).To(HaveLen(1))
+		Expect(got.Status.Blockers[0].Kind).To(Equal(networkAttachmentDefinitionGVK.Kind))
+		Expect(got.Status.Blockers[0].Name).To(Equal("claims-taken-static"))
+
+		// And the foreign object is untouched.
+		still := getNAD("claims-taken-static")
+		config, _, err := unstructured.NestedString(still.Object, "spec", "config")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(config).To(Equal(`{"name":"someone-elses"}`))
+
+		// Once the squatter goes the claim is satisfiable again. In the binary the NAD
+		// watch re-enqueues it; here the second reconcile stands in for that event.
+		Expect(k8sClient.Delete(ctx, still)).To(Succeed())
+		reconcileClaim(testNamespace, "claims-taken-ip")
+
+		again := getClaim(testNamespace, "claims-taken-ip")
+		Expect(ready(again).Status).To(Equal(metav1.ConditionTrue))
+		Expect(again.Status.AssignedIP).To(Equal(testFirstIP))
+		Expect(getNAD("claims-taken-static").GetLabels()).To(
+			HaveKeyWithValue(ipamv1alpha1.LabelClaim, "claims-taken-ip"))
+	})
+
+	It("is idempotent when the NAD already exists and is ours", func() {
+		createPool("claims-idempotent", testPoolSpec())
+		createClaim(testNamespace, "claims-idempotent-ip", "claims-idempotent", "claims-idempotent-static")
+		deleteNAD("claims-idempotent-static")
+
+		reconcileClaim(testNamespace, "claims-idempotent-ip")
+		first := getNAD("claims-idempotent-static")
+
+		reconcileClaim(testNamespace, "claims-idempotent-ip")
+		second := getNAD("claims-idempotent-static")
+
+		Expect(second.GetResourceVersion()).To(Equal(first.GetResourceVersion()))
+	})
+
+	It("corrects a NAD whose config has drifted", func() {
+		createPool("claims-drift", testPoolSpec())
+		createClaim(testNamespace, "claims-drift-ip", "claims-drift", "claims-drift-static")
+		deleteNAD("claims-drift-static")
+
+		reconcileClaim(testNamespace, "claims-drift-ip")
+
+		nad := getNAD("claims-drift-static")
+		Expect(unstructured.SetNestedField(nad.Object, `{"name":"hand-edited"}`, "spec", "config")).To(Succeed())
+		Expect(k8sClient.Update(ctx, nad)).To(Succeed())
+
+		reconcileClaim(testNamespace, "claims-drift-ip")
+
+		repair := getNAD("claims-drift-static")
+		ipam, ok := renderedConfig(repair)["ipam"].(map[string]any)
+		Expect(ok).To(BeTrue())
+		Expect(ipam).To(HaveKeyWithValue("addresses", []any{
+			map[string]any{"address": testFirstIP + "/24", "gateway": testGateway},
+		}))
+	})
+
+	It("recovers once the pool gains a template", func() {
+		spec := testPoolSpec()
+		spec.NADTemplate = nil
+		createPool("claims-recover", spec)
+		createClaim(testNamespace, "claims-recover-ip", "claims-recover", "claims-recover-static")
+		deleteNAD("claims-recover-static")
+
+		reconcileClaim(testNamespace, "claims-recover-ip")
+		Expect(ready(getClaim(testNamespace, "claims-recover-ip")).Reason).To(Equal(ipamv1alpha1.ReasonTemplateMissing))
+
+		pool := &ipamv1alpha1.IPPool{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "claims-recover"}, pool)).To(Succeed())
+		// A complete template: the CRD requires subnet and gateway alongside the
+		// bridge, so a pool cannot be half-fixed into minting.
+		pool.Spec.NADTemplate = testPoolSpec().NADTemplate
+		Expect(k8sClient.Update(ctx, pool)).To(Succeed())
+
+		reconcileClaim(testNamespace, "claims-recover-ip")
+
+		got := getClaim(testNamespace, "claims-recover-ip")
+		Expect(ready(got).Status).To(Equal(metav1.ConditionTrue))
+		Expect(ready(got).Reason).To(Equal(ipamv1alpha1.ReasonBound))
+		Expect(got.Status.AssignedIP).To(Equal(testFirstIP))
+	})
+})
