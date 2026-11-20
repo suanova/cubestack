@@ -698,7 +698,7 @@ status:
 | `Progressing` | spec 变更后，Controller 是否仍在应用期望配置。该条件与 `Ready` 独立。 | `True`：`Reconciling`、`Rollout` 或 `Scaling`；`False`：`Converged` |
 | `ProfileDeprecated`（警示） | 引用的 Profile 带有 deprecated label（`ai.cubestack.io/deprecated`）。 | 不阻断；提示迁移 |
 | `ProfileDrifted`（警示） | `profileRef` 未变，但当前内容 hash 与 `status.profile.revision` 不同，通常由删除后以相同名称重新创建 Profile 引起。 | 不阻断；审计告警 |
-| `Customized`（警示） | `spec.env` 非空时为 `True, reason=UserEnvironment`，message 列出变量名与 role；否则 `False, reason=NoUserEnvironment`。 | 不阻断；不参与 phase 判定 |
+| `Customized`（警示） | `spec.env` 非空时为 `True, reason=UserEnvironment`，message 列出变量名与 role（上限 8192 字符，超出时截断并给出省略数量）；否则 `False, reason=NoUserEnvironment`。 | 不阻断；不参与 phase 判定 |
 
 **Progressing 与 Ready**：
 
