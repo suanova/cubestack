@@ -154,9 +154,9 @@ var _ = Describe("InferenceService L1 admission", func() {
 			setupISVCVAP()
 			defer cleanupISVCVAP()
 
-			for i, name := range []string{"KUBERNETES_SERVICE_HOST", "CUBESTACK_ROLE", "LD_PRELOAD", "PYTHONPATH"} {
+			for i, name := range []string{"KUBERNETES_SERVICE_HOST", "CUBESTACK_ROLE", "LD_PRELOAD", "LD_LIBRARY_PATH", "PYTHONPATH", "PYTHONSTARTUP", "BASH_ENV"} {
 				isvc := validInferenceService(fmt.Sprintf("env-reserved-%d", i))
-				isvc.Spec.Env = []UserEnvVar{{Name: name, Value: "x", Roles: []string{"prefill"}}}
+				isvc.Spec.Env = []UserEnvVar{{Name: name, Value: "x", Roles: []string{testPrefillRole}}}
 				err := k8sClient.Create(ctx, isvc)
 				Expect(err).To(HaveOccurred())
 				Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid error, got: %v", err)
@@ -170,8 +170,8 @@ var _ = Describe("InferenceService L1 admission", func() {
 
 			isvc := validInferenceService("env-duplicate-role")
 			isvc.Spec.Env = []UserEnvVar{
-				{Name: "A", Value: "1", Roles: []string{"prefill"}},
-				{Name: "A", Value: "2", Roles: []string{"prefill", "decode"}},
+				{Name: "A", Value: "1", Roles: []string{testPrefillRole}},
+				{Name: "A", Value: "2", Roles: []string{testPrefillRole, testDecodeRole}},
 			}
 			err := k8sClient.Create(ctx, isvc)
 			Expect(err).To(HaveOccurred())
@@ -185,8 +185,8 @@ var _ = Describe("InferenceService L1 admission", func() {
 
 			isvc := validInferenceService("env-disjoint-roles")
 			isvc.Spec.Env = []UserEnvVar{
-				{Name: "A", Value: "1", Roles: []string{"prefill"}},
-				{Name: "A", Value: "2", Roles: []string{"decode"}},
+				{Name: "A", Value: "1", Roles: []string{testPrefillRole}},
+				{Name: "A", Value: "2", Roles: []string{testDecodeRole}},
 			}
 			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, isvc)).To(Succeed())

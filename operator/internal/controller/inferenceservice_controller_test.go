@@ -894,7 +894,7 @@ var _ = Describe("InferenceService controller", func() {
 
 			isvc := validInferenceService("isvc-env-customized", mv.Name)
 			isvc.Spec.ProfileRef = irp.Name
-			isvc.Spec.Env = []aiv1alpha1.UserEnvVar{{Name: "MC_GID_INDEX", Value: "3", Roles: []string{"router"}}}
+			isvc.Spec.Env = []aiv1alpha1.UserEnvVar{{Name: "MC_GID_INDEX", Value: "3", Roles: []string{testApplyRouterRole}}}
 			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, isvc) }()
 
@@ -909,6 +909,27 @@ var _ = Describe("InferenceService controller", func() {
 			}, "15s", "200ms").Should(Succeed())
 		})
 
+		It("rejects an env entry naming a role the profile does not declare", func() {
+			irp, mv := createRenderBase("isvc-env-unknown-role")
+			defer func() { _ = k8sClient.Delete(ctx, irp); _ = k8sClient.Delete(ctx, mv) }()
+
+			isvc := validInferenceService("isvc-env-unknown-role", mv.Name)
+			isvc.Spec.ProfileRef = irp.Name
+			isvc.Spec.Env = []aiv1alpha1.UserEnvVar{{Name: "A", Value: "1", Roles: []string{testApplyDecodeRole}}}
+			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, isvc) }()
+
+			Eventually(func(g Gomega) {
+				got := &aiv1alpha1.InferenceService{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: isvc.Name, Namespace: testNamespace}, got)).To(Succeed())
+				cond := meta.FindStatusCondition(got.Status.Conditions, aiv1alpha1.ConditionRendered)
+				g.Expect(cond).ToNot(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(cond.Reason).To(Equal("UnknownEnvRole"))
+				g.Expect(cond.Message).To(ContainSubstring(testApplyDecodeRole))
+			}, "15s", "200ms").Should(Succeed())
+		})
+
 		It("applies spec.env to the role workload and rolls on change", func() {
 			name := "isvc-env-apply"
 			irp, mv := createRenderBase(name)
@@ -916,7 +937,7 @@ var _ = Describe("InferenceService controller", func() {
 
 			isvc := validInferenceService(name, mv.Name)
 			isvc.Spec.ProfileRef = irp.Name
-			isvc.Spec.Env = []aiv1alpha1.UserEnvVar{{Name: "MC_GID_INDEX", Value: "3", Roles: []string{"router"}}}
+			isvc.Spec.Env = []aiv1alpha1.UserEnvVar{{Name: "MC_GID_INDEX", Value: "3", Roles: []string{testApplyRouterRole}}}
 			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, isvc) }()
 

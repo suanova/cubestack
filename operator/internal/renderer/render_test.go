@@ -27,6 +27,10 @@ const (
 	extendedResourcesTemplate = "{{ overrides.extendedResources }}"
 	// decodeRole is the second GPU role of a PD separation.
 	decodeRole = "decode"
+	// routerRole is the CPU-only endpoint role of a PD separation.
+	routerRole = "router"
+	// prefillRole is the first GPU role of a PD separation.
+	prefillRole = "prefill"
 	// nodePoolLabel and nodePoolValue are the node-pool label pair the
 	// nodeSelector table entries pin a service to.
 	nodePoolLabel = "node-pool"
@@ -836,7 +840,7 @@ var _ = Describe("Render", func() {
 	Context("user env", func() {
 		It("rejects an env entry naming an unknown role", func() {
 			isvc := renderISVC()
-			isvc.Spec.Env = []aiv1alpha1.UserEnvVar{{Name: "A", Value: "1", Roles: []string{"decode"}}}
+			isvc.Spec.Env = []aiv1alpha1.UserEnvVar{{Name: "A", Value: "1", Roles: []string{decodeRole}}}
 
 			res := Render(isvc, renderProfile(), renderModel(), nil)
 			Expect(res.Errors).To(HaveLen(1))
@@ -847,8 +851,8 @@ var _ = Describe("Render", func() {
 		It("applies env only to the listed roles", func() {
 			isvc := renderISVC()
 			isvc.Spec.Env = []aiv1alpha1.UserEnvVar{
-				{Name: "A", Value: "prefill-value", Roles: []string{"prefill"}},
-				{Name: "A", Value: "router-value", Roles: []string{"router"}},
+				{Name: "A", Value: "prefill-value", Roles: []string{prefillRole}},
+				{Name: "A", Value: "router-value", Roles: []string{routerRole}},
 			}
 
 			res := Render(isvc, renderProfile(), renderModel(), nil)
@@ -862,9 +866,9 @@ var _ = Describe("Render", func() {
 			p.Spec.Roles[1].PodTemplate.Env = append(p.Spec.Roles[1].PodTemplate.Env, envValue("NCCL_IB_HCA", "mlx5_1"))
 			isvc := renderISVC()
 			isvc.Spec.Env = []aiv1alpha1.UserEnvVar{
-				{Name: "Z_LAST", Value: "z", Roles: []string{"prefill"}},
-				{Name: "NCCL_IB_HCA", Value: "mlx5_3", Roles: []string{"prefill"}},
-				{Name: "A_FIRST", Value: "a", Roles: []string{"prefill"}},
+				{Name: "Z_LAST", Value: "z", Roles: []string{prefillRole}},
+				{Name: "NCCL_IB_HCA", Value: "mlx5_3", Roles: []string{prefillRole}},
+				{Name: "A_FIRST", Value: "a", Roles: []string{prefillRole}},
 			}
 
 			res := Render(isvc, p, renderModel(), nil)

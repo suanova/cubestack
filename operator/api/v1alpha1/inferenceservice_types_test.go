@@ -30,6 +30,7 @@ const (
 	testModelVersion = "w8a8-v1"
 	testRouterRole   = "router"
 	testPrefillRole  = "prefill"
+	testDecodeRole   = "decode"
 	testNamespace    = "default"
 	testModelRef     = "deepseek-v4-flash-w8a8-v1"
 	testProfileRef   = "metax-sglang-dsv4-pd"
@@ -134,7 +135,7 @@ var _ = Describe("InferenceService", func() {
 		It("round-trips spec.env", func() {
 			isvc := validInferenceService("isvc-env")
 			isvc.Spec.Env = []UserEnvVar{
-				{Name: "MC_GID_INDEX", Value: "3", Roles: []string{"prefill", "decode"}},
+				{Name: "MC_GID_INDEX", Value: "3", Roles: []string{testPrefillRole, testDecodeRole}},
 			}
 
 			Expect(k8sClient.Create(ctx, isvc)).To(Succeed())
@@ -269,7 +270,7 @@ var _ = Describe("InferenceService", func() {
 			Entry("env with an invalid name",
 				"isvc-invalid-env-name",
 				func(s *InferenceServiceSpec) {
-					s.Env = []UserEnvVar{{Name: "MC-GID", Value: "3", Roles: []string{"prefill"}}}
+					s.Env = []UserEnvVar{{Name: "MC-GID", Value: "3", Roles: []string{testPrefillRole}}}
 				},
 				"spec.env"),
 			Entry("env with empty roles",
