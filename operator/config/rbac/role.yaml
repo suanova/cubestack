@@ -172,6 +172,34 @@ rules:
   - update
   - watch
 - apiGroups:
+  - ipam.cubestack.io
+  resources:
+  - ipclaims
+  - ippools
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ipam.cubestack.io
+  resources:
+  - ipclaims/status
+  - ippools/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - k8s.cni.cncf.io
+  resources:
+  - network-attachment-definitions
+  verbs:
+  - create
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
   - leaderworkerset.x-k8s.io
   resources:
   - leaderworkersets
