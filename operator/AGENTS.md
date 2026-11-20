@@ -29,6 +29,13 @@ internal/webhook/<group>/<version>/*   Webhooks by group and version (if present
 
 Multi-group layout organizes APIs by group name (e.g., `batch`, `apps`). Check the `PROJECT` file for `multigroup: true`.
 
+**Where this repo sits today:** the `ai.cubestack.io` group stays in the single-group
+layout above, and `ipam.cubestack.io` is laid out by group beside it —
+`api/ipam/v1alpha1/`, `internal/ipam/` (the invariants CEL cannot express, plus NAD
+rendering) and `internal/controller/ipam/` (the reconcilers and the audit sweep, with
+an envtest suite of its own that installs only the IPAM and Multus CRDs). Do not move
+the `ai` group to match; that conversion is the CLI's job and has not been asked for.
+
 **To convert to multi-group layout:**
 1. Run: `kubebuilder edit --multigroup=true`
 2. Move APIs: `mkdir -p api/<group> && mv api/<version> api/<group>/`
