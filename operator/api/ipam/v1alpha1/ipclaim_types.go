@@ -95,8 +95,13 @@ type IPClaimSpec struct {
 	// poolRef names the IPPool to claim from. IPPool is cluster-scoped, so this is
 	// a bare name with no namespace.
 	//
-	// Immutable in practice: re-pointing a bound claim would silently release an
-	// address its NAD still carries. Changing pools means a new claim.
+	// Immutable once an address is bound, as are nad and allocation: the CRD
+	// refuses a change to any of the three while status.assignedIP is set. The
+	// bounded fields are the binding, and the NAD already carries the address, so
+	// a change can only make the claim and its network disagree. Before binding
+	// they are ordinary fields, because a typo is worth fixing rather than
+	// deleting. To move a bound address to another pool, delete the claim and
+	// create a new one.
 	// +kubebuilder:validation:MinLength=1
 	// +required
 	PoolRef string `json:"poolRef"`
@@ -109,14 +114,21 @@ type IPClaimSpec struct {
 	// Omit it for an address-only claim: an address is bound and nothing is created.
 	// The referenced pool must carry a nadTemplate, otherwise the claim fails with
 	// reason TemplateMissing.
+	//
+	// Immutable once an address is bound, like poolRef: renaming it then would mint
+	// a second NAD carrying the same address and leave the first one behind until
+	// the claim is deleted.
 	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	// +optional
 	NAD string `json:"nad,omitempty"`
 
 	// allocation optionally asks for a named address instead of the lowest free
-	// one. Absent means Auto. Immutable in practice, like poolRef: a different
-	// address is a different claim.
+	// one. Absent means Auto.
+	//
+	// Immutable once an address is bound, like poolRef. That is not merely
+	// conservative: the assigned address is kept, never re-derived, so a change
+	// after binding could not take effect even if it were allowed.
 	// +optional
 	Allocation *AddressAllocation `json:"allocation,omitempty"`
 }
@@ -156,6 +168,7 @@ type IPClaimStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=ipc
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.assignedIP) || (self.spec.poolRef == oldSelf.spec.poolRef && has(self.spec.nad) == has(oldSelf.spec.nad) && (!has(self.spec.nad) || self.spec.nad == oldSelf.spec.nad) && has(self.spec.allocation) == has(oldSelf.spec.allocation) && (!has(self.spec.allocation) || (self.spec.allocation.strategy == oldSelf.spec.allocation.strategy && has(self.spec.allocation.address) == has(oldSelf.spec.allocation.address) && (!has(self.spec.allocation.address) || self.spec.allocation.address == oldSelf.spec.allocation.address))))",message="poolRef, nad and allocation are immutable once status.assignedIP is set"
 // +kubebuilder:printcolumn:name="Pool",type=string,JSONPath=`.spec.poolRef`
 // +kubebuilder:printcolumn:name="Assigned",type=string,JSONPath=`.status.assignedIP`
 // +kubebuilder:printcolumn:name="NAD",type=string,JSONPath=`.spec.nad`
