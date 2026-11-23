@@ -39,6 +39,8 @@ export function inferenceServiceSummary(
     phaseReason: null,
     conditions: [],
     roles: [],
+    roleNames: ["prefill", "decode"],
+    env: [],
     internalEndpoint: null,
     publicEndpoint: null,
     privateGatewayEndpoint: null,

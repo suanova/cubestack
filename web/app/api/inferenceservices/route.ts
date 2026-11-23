@@ -2,6 +2,7 @@ import { getCoreClient, getCustomObjectsClient } from "@/lib/kubernetes";
 import { withAuth } from "@/lib/auth/guard";
 import { privateGatewayClusterEndpoint } from "@/lib/cubepilot/gateway";
 import { CATALOG_PATHS, isAIGatewayRouter, isCatalogPath, type CatalogPath } from "@/lib/inference-routes";
+import type { EnvVar } from "@/lib/inferenceservices/env";
 
 // @kubernetes/client-node needs Node APIs (TLS, fs), not the Edge runtime.
 export const runtime = "nodejs";
@@ -93,6 +94,12 @@ export interface InferenceServiceSummary {
     ready: number;
     groupSize: number | null;
   }>;
+  // Profile-derived role names, available before the controller writes status;
+  // they populate the role picker of the scale card's env editor.
+  roleNames: string[];
+  // User environment overrides (spec.env); values are returned for the edit
+  // form, while the list/detail view shows only names and roles.
+  env: EnvVar[];
   internalEndpoint: string | null;
   publicEndpoint: string | null;
   /**
@@ -127,6 +134,7 @@ interface IsvcSpec {
   modelRef?: string;
   profileRef?: string;
   overrides?: Record<string, unknown>;
+  env?: EnvVar[];
   route?: {
     aigatewayRouter?: string;
     modelName?: string;
@@ -458,6 +466,8 @@ function project(
       transitionTime: c.lastTransitionTime ?? null,
     })),
     roles,
+    roleNames: (profile?.spec?.roles ?? []).map((r) => r.name).filter((n): n is string => Boolean(n)),
+    env: spec.env ?? [],
     internalEndpoint: status.endpoint?.internal ?? null,
     publicEndpoint: status.endpoint?.public ?? null,
     privateGatewayEndpoint,

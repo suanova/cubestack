@@ -73,7 +73,7 @@ function stubCluster() {
                 },
               ],
               roles: [
-                { name: "prefill", podTemplate: { resources: { gpuPerPod: 8 } } },
+                { name: "prefill", podTemplate: { resources: { gpuPerPod: 8 }, env: [{ name: "NCCL_IB_HCA" }] } },
                 { name: "decode", accelerator: { vendor: "nvidia", models: ["H200"] }, podTemplate: { resources: { gpuPerPod: 8 } } },
               ],
             },
@@ -153,8 +153,8 @@ describe("inference services create options route", () => {
       gpuPerPod: 8,
     });
     expect(profile.roles).toEqual([
-      { name: "prefill", vendor: "metax", models: ["MXC500"], gpuPerPod: 8 },
-      { name: "decode", vendor: "nvidia", models: ["H200"], gpuPerPod: 8 },
+      { name: "prefill", vendor: "metax", models: ["MXC500"], gpuPerPod: 8, envNames: ["NCCL_IB_HCA"] },
+      { name: "decode", vendor: "nvidia", models: ["H200"], gpuPerPod: 8, envNames: [] },
     ]);
     expect(profile.overrides).toEqual([
       { name: "prefillReplicas", type: "integer", min: 1, max: 8, enum: null, default: 1, description: "prefill LWS array" },

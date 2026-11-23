@@ -105,7 +105,15 @@ export interface CreateOptionsResponse {
     /** Profile label inference.ai.cubestack.io/serving-mode: "pd-separation" | "standard" (or null when unlabeled). */
     servingMode: string | null;
     gpuPerPod: number | null;
-    roles: Array<{ name: string; vendor: string | null; models: string[]; gpuPerPod: number | null }>;
+    roles: Array<{
+      name: string;
+      vendor: string | null;
+      models: string[];
+      gpuPerPod: number | null;
+      // Profile pod-template env names, for the wizard's "will override a
+      // profile variable" warning.
+      envNames: string[];
+    }>;
     overrides: Array<{
       name: string;
       type: "integer" | "string" | "stringList" | "boolean";
@@ -137,7 +145,7 @@ interface ProfileOverride {
 interface ProfileRole {
   name?: string;
   accelerator?: { vendor?: string; models?: string[] };
-  podTemplate?: { resources?: { gpuPerPod?: number } };
+  podTemplate?: { resources?: { gpuPerPod?: number }; env?: Array<{ name?: string }> };
 }
 interface ProfileSpec {
   engine?: { name?: string; version?: string };
@@ -272,6 +280,7 @@ export const GET = withAuth(async () => {
             vendor: r.accelerator?.vendor ?? spec.accelerator?.vendor ?? null,
             models: r.accelerator?.models ?? spec.accelerator?.models ?? [],
             gpuPerPod: r.podTemplate?.resources?.gpuPerPod ?? null,
+            envNames: (r.podTemplate?.env ?? []).map((e) => e.name).filter((n): n is string => Boolean(n)),
           })),
           overrides: (spec.overrides ?? []).map((o) => ({
             name: o.name ?? "",

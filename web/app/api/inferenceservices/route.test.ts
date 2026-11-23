@@ -58,6 +58,7 @@ function stubCluster() {
               modelRef: "deepseek-v4-flash-w8a8-v1",
               profileRef: "metax-sglang-dsv4-pd",
               overrides: { decodeReplicas: 2, prefillReplicas: 1, maxModelLen: 131072 },
+              env: [{ name: "MC_GID_INDEX", value: "3", roles: ["prefill", "decode"] }],
               route: { aigatewayRouter: "cubestack-ai-gateway", modelName: "dsv4-flash", timeoutSeconds: 0, idleTimeoutSeconds: 300 },
             },
             // No status: the controller has not reconciled yet.
@@ -235,6 +236,8 @@ describe("inference services route", () => {
       phaseReason: null,
       conditions: [],
       roles: [],
+      roleNames: ["router", "prefill", "decode"],
+      env: [{ name: "MC_GID_INDEX", value: "3", roles: ["prefill", "decode"] }],
       internalEndpoint: null,
       publicEndpoint: null,
     });
