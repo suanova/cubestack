@@ -1699,7 +1699,7 @@ function EnvEditor({
                         clickable
                         color={entry.roles.includes(role.name) ? "primary" : "default"}
                         variant={entry.roles.includes(role.name) ? "filled" : "outlined"}
-                        label={`${roleLabel(role.name)}${role.gpuPerPod !== null && role.gpuPerPod > 0 ? " · GPU" : " · CPU"}`}
+                        label={`${roleLabel(role.name)}${(role.gpuPerPod ?? 0) > 0 ? " · GPU" : " · CPU"}`}
                         onClick={() => toggleRole(i, role.name)}
                       />
                     ))
@@ -1710,7 +1710,7 @@ function EnvEditor({
                       sx={{ textTransform: "none", fontSize: 11.5 }}
                       onClick={() =>
                         update(i, {
-                          roles: roles.filter((r) => r.gpuPerPod !== null && r.gpuPerPod > 0).map((r) => r.name),
+                          roles: roles.filter((r) => (r.gpuPerPod ?? 0) > 0).map((r) => r.name),
                         })
                       }
                     >
