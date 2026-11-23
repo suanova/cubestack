@@ -8,10 +8,11 @@
 // (decodeReplicas / prefillReplicas / groupSize) via a PATCH. Metrics are
 // best-effort Prometheus data and show an empty state when absent.
 
-import { Box, Button, Checkbox, Dialog, DialogActions, DialogContent, DialogTitle, Menu, MenuItem, Select, Switch, TextField, Typography, Stepper, Step, StepLabel } from "@mui/material";
+import { Accordion, AccordionDetails, AccordionSummary, Box, Button, Checkbox, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Menu, MenuItem, Select, Switch, TextField, Typography, Stepper, Step, StepLabel } from "@mui/material";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { CreateOptionsResponse } from "@/app/api/inferenceservices/options/route";
+import { envError, type EnvVar } from "@/lib/inferenceservices/env";
 import type { InferenceServiceSummary } from "@/app/api/inferenceservices/route";
 import { validationMessage, type ValidationErrorBody } from "@/lib/api-error";
 import { apiFetch } from "@/lib/base-path";
@@ -1578,6 +1579,7 @@ interface DeployDraft {
   profileRef: string;
   modelRef: string;
   overrides: Record<string, OverrideValue>;
+  env: EnvVar[];
   // Publishing to the model catalog is mandatory, so the route is always set.
   aigatewayRouter: AIGatewayRouter;
   modelName: string;
@@ -1587,6 +1589,131 @@ interface DeployDraft {
 }
 
 type OverrideDecl = CreateOptionsResponse["profiles"][number]["overrides"][number];
+
+// EnvEditor is the shared spec.env row editor: the deploy wizard and the scale
+// card both use it. Single-role profiles hide the role picker and fill the only
+// role automatically; multi-role profiles require an explicit choice.
+function EnvEditor({
+  idPrefix,
+  env,
+  roles,
+  onChange,
+}: {
+  idPrefix: string;
+  env: EnvVar[];
+  roles: CreateOptionsResponse["profiles"][number]["roles"];
+  onChange: (env: EnvVar[]) => void;
+}) {
+  const { t } = useI18n();
+  const singleRole = roles.length === 1 ? roles[0].name : null;
+
+  const update = (index: number, patch: Partial<EnvVar>) =>
+    onChange(env.map((entry, i) => (i === index ? { ...entry, ...patch } : entry)));
+
+  const toggleRole = (index: number, role: string) => {
+    const current = env[index].roles;
+    update(index, {
+      roles: current.includes(role) ? current.filter((r) => r !== role) : [...current, role],
+    });
+  };
+
+  return (
+    <Box data-od-id={`${idPrefix}-env-editor`}>
+      {env.length === 0 ? (
+        <Typography sx={{ fontSize: 12, color: "text.secondary" }}>{t("inf.env.none")}</Typography>
+      ) : (
+        <Box sx={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+          {env.map((entry, i) => {
+            const conflicts = roles.filter(
+              (role) => entry.roles.includes(role.name) && role.envNames.includes(entry.name),
+            );
+            return (
+              <Box key={i} sx={{ border: 1, borderColor: "divider", borderRadius: "var(--radius)", p: "10px" }}>
+                <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
+                  <TextField
+                    data-od-id={`${idPrefix}-env-name-${i}`}
+                    size="small"
+                    label={t("inf.env.name")}
+                    value={entry.name}
+                    onChange={(e) => update(i, { name: e.target.value })}
+                  />
+                  <TextField
+                    data-od-id={`${idPrefix}-env-value-${i}`}
+                    size="small"
+                    label={t("inf.env.value")}
+                    value={entry.value}
+                    onChange={(e) => update(i, { value: e.target.value })}
+                  />
+                </Box>
+                <Box sx={{ mt: "8px", display: "flex", flexWrap: "wrap", gap: "6px", alignItems: "center" }}>
+                  {singleRole ? (
+                    <Typography sx={{ fontSize: 11.5, color: "text.secondary" }}>
+                      {t("inf.env.appliesTo", { role: roleLabel(singleRole) })}
+                    </Typography>
+                  ) : (
+                    roles.map((role) => (
+                      <Chip
+                        key={role.name}
+                        data-od-id={`${idPrefix}-env-role-${i}-${role.name}`}
+                        size="small"
+                        clickable
+                        color={entry.roles.includes(role.name) ? "primary" : "default"}
+                        variant={entry.roles.includes(role.name) ? "filled" : "outlined"}
+                        label={`${roleLabel(role.name)}${role.gpuPerPod !== null && role.gpuPerPod > 0 ? " · GPU" : " · CPU"}`}
+                        onClick={() => toggleRole(i, role.name)}
+                      />
+                    ))
+                  )}
+                  {singleRole ? null : (
+                    <Button
+                      size="small"
+                      sx={{ textTransform: "none", fontSize: 11.5 }}
+                      onClick={() =>
+                        update(i, {
+                          roles: roles.filter((r) => r.gpuPerPod !== null && r.gpuPerPod > 0).map((r) => r.name),
+                        })
+                      }
+                    >
+                      {t("inf.env.gpuRoles")}
+                    </Button>
+                  )}
+                  <Button
+                    data-od-id={`${idPrefix}-env-delete-${i}`}
+                    size="small"
+                    color="error"
+                    sx={{ textTransform: "none", fontSize: 11.5 }}
+                    onClick={() => onChange(env.filter((_, j) => j !== i))}
+                  >
+                    {t("inf.env.remove")}
+                  </Button>
+                </Box>
+                {conflicts.length > 0 ? (
+                  <Typography
+                    data-od-id={`${idPrefix}-env-warning-${i}`}
+                    sx={{ mt: "6px", fontSize: 11.5, color: soft(STATUS_ERR, 70) }}
+                  >
+                    {t("inf.env.warning", {
+                      name: entry.name,
+                      roles: conflicts.map((role) => roleLabel(role.name)).join(", "),
+                    })}
+                  </Typography>
+                ) : null}
+              </Box>
+            );
+          })}
+        </Box>
+      )}
+      <Button
+        data-od-id={`${idPrefix}-env-add`}
+        size="small"
+        sx={{ mt: "8px", textTransform: "none", fontSize: 12 }}
+        onClick={() => onChange([...env, { name: "", value: "", roles: singleRole ? [singleRole] : [] }])}
+      >
+        {t("inf.env.add")}
+      </Button>
+    </Box>
+  );
+}
 
 function DeployWizard({
   open,
@@ -1610,6 +1737,7 @@ function DeployWizard({
     profileRef: "",
     modelRef: "",
     overrides: {},
+    env: [],
     aigatewayRouter: AIGATEWAY_ROUTER_PRIVATE,
     modelName: "",
     paths: [...CATALOG_PATHS],
@@ -1729,7 +1857,8 @@ function DeployWizard({
     !!effectiveNamespace &&
     newNamespaceValid &&
     !!draft.profileRef;
-  const step2Valid = !!draft.modelRef;
+  const envErr = profile ? envError(draft.env, profile.roles.map((r) => r.name)) : null;
+  const step2Valid = !!draft.modelRef && !envErr;
 
   // The value an override holds from the user or the profile, before the
   // wizard's own auto-injection. GPU-model selection reads this one: an
@@ -2006,6 +2135,7 @@ function DeployWizard({
       profileRef: draft.profileRef,
       modelRef: draft.modelRef,
       overrides,
+      env: draft.env,
       route: { aigatewayRouter: draft.aigatewayRouter, modelName: draft.modelName.trim(), paths: draft.paths },
     };
     // The namespace first, then the service in it: the wizard no longer offers
@@ -2253,6 +2383,31 @@ function DeployWizard({
                   </Box>
                 )}
 
+                {profile && (
+                  <Accordion
+                    disableGutters
+                    sx={{ mt: 3, border: 1, borderColor: "divider", borderRadius: "var(--radius)", "&:before": { display: "none" } }}
+                  >
+                    <AccordionSummary data-od-id="deploy-env-section">
+                      <Typography sx={{ fontSize: 12.5, fontWeight: 600 }}>{t("inf.env.section")}</Typography>
+                    </AccordionSummary>
+                    <AccordionDetails>
+                      <Typography sx={{ fontSize: 11.5, color: "text.secondary", mb: "8px" }}>{t("inf.env.hint")}</Typography>
+                      <EnvEditor
+                        idPrefix="deploy"
+                        env={draft.env}
+                        roles={profile.roles}
+                        onChange={(env) => setField("env", env)}
+                      />
+                      {envErr ? (
+                        <Typography data-od-id="deploy-env-error" sx={{ mt: "8px", fontSize: 11.5, color: soft(STATUS_ERR, 70) }}>
+                          {validationMessage(t, { error: envErr.code, params: envErr.params }, 400, "inf")}
+                        </Typography>
+                      ) : null}
+                    </AccordionDetails>
+                  </Accordion>
+                )}
+
                 <Box sx={{ mt: 3, border: 1, borderColor: "divider", borderRadius: "var(--radius)", p: "14px" }}>
                   <Typography sx={{ fontSize: 12.5, fontWeight: 600 }}>{t("inf.deploy.route")}</Typography>
                   <Box sx={{ mt: "12px", display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
@@ -2317,6 +2472,13 @@ function DeployWizard({
                           return [`${t("inf.deploy.override")} ${overrideDisplayName(o.name, t("inf.deploy.rdmaType"))}`, Array.isArray(v) ? v.join(", ") : String(v)] as [string, string];
                         })
                       : []),
+                    ...draft.env.map(
+                      (e) =>
+                        [
+                          `${t("inf.env.summary")} ${e.name}`,
+                          `${e.value} · ${e.roles.map(roleLabel).join(", ")}`,
+                        ] as [string, string],
+                    ),
                     [t("inf.deploy.route"), `${t("inf.params.published")} · ${draft.aigatewayRouter === AIGATEWAY_ROUTER_PRIVATE ? t("inf.deploy.aigatewayRouterPrivate") : t("inf.deploy.aigatewayRouterPublic")} · ${draft.modelName} · ${draft.paths.join(" ")}`],
                   ]}
                 />

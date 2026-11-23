@@ -1007,8 +1007,8 @@ const OPTIONS = {
       servingMode: "pd-separation",
       gpuPerPod: 8,
       roles: [
-        { name: "prefill", vendor: "metax", models: ["MXC500"], gpuPerPod: 8 },
-        { name: "decode", vendor: "nvidia", models: ["H200"], gpuPerPod: 8 },
+        { name: "prefill", vendor: "metax", models: ["MXC500"], gpuPerPod: 8, envNames: ["NCCL_IB_HCA"] },
+        { name: "decode", vendor: "nvidia", models: ["H200"], gpuPerPod: 8, envNames: [] },
       ],
       overrides: [
         { name: "decodeReplicas", type: "integer", min: 1, max: 16, enum: null, default: 1, description: null },
@@ -1123,6 +1123,31 @@ describe("deploy wizard", () => {
     await act(async () => {});
   }
 
+  async function typeInto(input: HTMLInputElement, value: string) {
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
+      setter.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {});
+  }
+
+  async function pickModel(step2: HTMLElement) {
+    const modelSelect = Array.from(step2.querySelectorAll('[role="combobox"]')).find((c) =>
+      (c.textContent ?? "").includes("选择模型版本"),
+    ) as HTMLElement;
+    await act(async () => {
+      modelSelect.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    });
+    const model = Array.from(document.body.querySelectorAll('[role="option"]')).find(
+      (o) => o.textContent === "deepseek-v4-flash-w8a8-v1",
+    ) as HTMLElement;
+    await act(async () => {
+      model.click();
+    });
+    await act(async () => {});
+  }
+
   it("always publishes and defaults the catalog model name to the service name", async () => {
     const { container, root } = renderWithBoth();
     await act(async () => {});
@@ -1220,6 +1245,127 @@ describe("deploy wizard", () => {
         modelName: "my-serve",
         paths: ["/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/images"],
       },
+    });
+
+    act(() => root.unmount());
+  });
+
+  it("creates a service with role-scoped env entries", async () => {
+    const { container, root, calls } = renderWithBoth();
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await fillNameAndGoToStep2();
+    const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
+    await pickModel(step2);
+
+    const envSection = step2.querySelector('[data-od-id="deploy-env-section"]') as HTMLElement;
+    expect(envSection).not.toBeNull();
+    await act(async () => {
+      envSection.click();
+    });
+    await act(async () => {});
+    await act(async () => {
+      (step2.querySelector('[data-od-id="deploy-env-add"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    await typeInto(step2.querySelector('[data-od-id="deploy-env-name-0"] input') as HTMLInputElement, "MC_GID_INDEX");
+    await typeInto(step2.querySelector('[data-od-id="deploy-env-value-0"] input') as HTMLInputElement, "3");
+    await act(async () => {
+      (step2.querySelector('[data-od-id="deploy-env-role-0-prefill"]') as HTMLElement).click();
+    });
+    await act(async () => {
+      (step2.querySelector('[data-od-id="deploy-env-role-0-decode"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    await act(async () => {
+      (Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent === "下一步") as HTMLElement).click();
+    });
+    await act(async () => {});
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="wizard-create"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    expect(calls.find((c) => c.method === "POST")?.body).toMatchObject({
+      env: [{ name: "MC_GID_INDEX", value: "3", roles: ["prefill", "decode"] }],
+    });
+
+    act(() => root.unmount());
+  });
+
+  it("warns when an env entry overrides a profile variable", async () => {
+    const { container, root } = renderWithBoth();
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await fillNameAndGoToStep2();
+    const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
+
+    await act(async () => {
+      (step2.querySelector('[data-od-id="deploy-env-section"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await act(async () => {
+      (step2.querySelector('[data-od-id="deploy-env-add"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await typeInto(step2.querySelector('[data-od-id="deploy-env-name-0"] input') as HTMLInputElement, "NCCL_IB_HCA");
+    await act(async () => {
+      (step2.querySelector('[data-od-id="deploy-env-role-0-prefill"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    const warning = step2.querySelector('[data-od-id="deploy-env-warning-0"]');
+    expect(warning?.textContent).toContain("覆盖");
+
+    act(() => root.unmount());
+  });
+
+  it("auto-selects the only role in a single-role profile", async () => {
+    const single = {
+      ...OPTIONS,
+      profiles: [{ ...OPTIONS.profiles[0], roles: [OPTIONS.profiles[0].roles[0]] }],
+    };
+    const { container, root, calls } = renderWithBoth(single);
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await fillNameAndGoToStep2();
+    const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
+    await pickModel(step2);
+
+    await act(async () => {
+      (step2.querySelector('[data-od-id="deploy-env-section"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await act(async () => {
+      (step2.querySelector('[data-od-id="deploy-env-add"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    expect(step2.querySelector('[data-od-id="deploy-env-role-0-prefill"]')).toBeNull();
+    await typeInto(step2.querySelector('[data-od-id="deploy-env-name-0"] input') as HTMLInputElement, "A");
+    await typeInto(step2.querySelector('[data-od-id="deploy-env-value-0"] input') as HTMLInputElement, "1");
+
+    await act(async () => {
+      (Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent === "下一步") as HTMLElement).click();
+    });
+    await act(async () => {});
+    await act(async () => {
+      (document.body.querySelector('[data-od-id="wizard-create"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    expect(calls.find((c) => c.method === "POST")?.body).toMatchObject({
+      env: [{ name: "A", value: "1", roles: ["prefill"] }],
     });
 
     act(() => root.unmount());
