@@ -79,10 +79,16 @@ not a separate pass:
 1. React effects: for every useEffect/useRef in the diff, list its dependencies,
    decide whether the component can stay mounted while the data changes (polling,
    keys, remount), and whether an update can be missed. If so, report it.
-2. Kubernetes optional fields: for every guard on a status field, check whether the
-   field is optional in the API; a missing optional field must not hide the failure.
+2. Kubernetes optional fields: for every guard on a status field, including `reason`
+   and `message` on container states and on pod conditions, check whether the field is
+   optional in the API. A `PodScheduled=False` condition with no message must still be
+   reported, and a terminated state with no reason must still expose its exit code.
 3. PR-description claims: verify each claim against the implementing line and the
    proving test, as described above.
+4. Localized state: for every state that stores a translated string (errors, labels,
+   notices), check whether a locale change can leave stale text. Translate the data at
+   render time or key the state by locale. Report it if a mounted component can show
+   text from the previous locale.
 
 Report whatever these checks find; do not defer them to another review.
 
@@ -95,8 +101,10 @@ A ticket/acceptance-constraint violation is at least major. If a finding has a
 security, tenant-isolation, or spoofing angle, classify it under security and do not
 claim "no security concerns".
 
-Start every finding, including an inline comment, with:
+Start every finding, including an inline comment, with exactly this header shape:
 **Severity: <blocker|major|minor>** · **Category: <category>** · **Confidence: <N>/10**
+Use one `**` pair around each label and no extra `**` around the whole line: the line
+must start with `**Severity:` (two asterisks), never `****Severity:` (four).
 Then a blank line, then the failure scenario, exact file:line, minimal fix, and the
 regression test. Do not put the severity only at the end of the finding.
 """
