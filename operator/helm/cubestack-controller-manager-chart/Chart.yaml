@@ -1,6 +1,6 @@
 apiVersion: v2
 name: cubestack-controller-manager-chart
-description: CubeStack operator — installs the ai.cubestack.io CRDs, VAPs and controller manager
+description: CubeStack operator — installs the CubeStack CRDs, VAPs and controller manager
 type: application
 # `version` is a prefix, not a tag: main publishes `<version>-sha<7>` and
 # `<version>-latest`, and a `vX.Y.Z` release publishes `X.Y.Z`. CI overrides

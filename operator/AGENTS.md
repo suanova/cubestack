@@ -61,7 +61,7 @@ The e2e tests are designed to validate the solution in an isolated environment (
 Ensure you run them against a dedicated [Kind](https://kind.sigs.k8s.io/) cluster (not your “real” dev/prod cluster).
 
 ### Helm Chart Is Generated from `config/` — Never Hand-Edit
-The chart's `templates/` and `vap.yaml` are generated from the `config/` sources by `hack/update-helm-resources.sh`; only `Chart.yaml`, `values.yaml`, `.helmignore` and READMEs are hand-written. The ai.cubestack.io CRDs in `crds/` are NOT stored/committed — they are copied from `config/crd/bases` at use time by `make helm-crds-sync` (a prereq of `helm-package` / `helm-e2e-install`), so their content is by construction in sync with `config/`.
+The chart's `templates/` and `vap.yaml` are generated from the `config/` sources by `hack/update-helm-resources.sh`; only `Chart.yaml`, `values.yaml`, `.helmignore` and READMEs are hand-written. The CRDs in `crds/` are NOT stored/committed — they are copied from `config/crd/bases` at use time by `make helm-crds-sync` (a prereq of `helm-package` / `helm-e2e-install`), so their content is by construction in sync with `config/`.
 - `config/` is the single source of truth: after any `config/` change (types/markers → `make manifests`, or editing rbac/vap/manager yaml), run `make helm-resources-update` and commit the regenerated chart together with the `config/` change.
 - Never hand-edit generated files — a future regeneration overwrites them and the CI `helm-drift` job (`make helm-resources-check`) fails on the diff. The drift gate covers `templates/` + `vap.yaml`; CRD sync needs no gate because it happens from `config/` at use time.
 - `helm-e2e-*` make targets install and verify the operator on a dedicated kind cluster; see the repo README for the quickstart.
@@ -325,14 +325,14 @@ kubectl apply -f https://raw.githubusercontent.com/<org>/<repo>/<tag>/dist/insta
 
 The operator ships as a Helm chart at `helm/cubestack-controller-manager-chart/`. The chart's
 `templates/` and `vap.yaml` are generated from `config/` by
-`hack/update-helm-resources.sh` (see Critical Rules above); the ai CRDs in
+`hack/update-helm-resources.sh` (see Critical Rules above); the CRDs in
 `crds/` are synced from `config/crd/bases` at use time by `make helm-crds-sync`
 — do not use the kubebuilder helm plugin and do not hand-edit generated chart
 files.
 
 ```bash
 make helm-resources-update  # Regenerate chart templates/vap.yaml from config/ after config changes
-make helm-crds-sync          # Copy the ai CRDs from config/crd/bases into the chart (crds/ is not committed)
+make helm-crds-sync          # Copy the CRDs from config/crd/bases into the chart (crds/ is not committed)
 helm install cubestack ./helm/cubestack-controller-manager-chart --namespace cubestack-system --create-namespace
 helm uninstall cubestack --namespace cubestack-system   # removes the operator, keeps the CRDs
 ```

@@ -3,10 +3,10 @@
 # sources in config/. Idempotent: run after any change under config/ and commit
 # the chart. CI runs this script and fails on git diff (make helm-resources-check).
 #
-# The script manages only templates/ (kustomize split) + vap.yaml. The
-# ai.cubestack.io CRDs in crds/ are NOT stored in the repo — they are copied
-# from config/crd/bases at use time by `make helm-crds-sync` (a prereq of
-# helm-package / helm-e2e-install). The leaderworkerset/disaggregatedset CRDs
+# The script manages only templates/ (kustomize split) + vap.yaml. The CRDs in
+# crds/ are NOT stored in the repo — they are copied from config/crd/bases at
+# use time by `make helm-crds-sync` (a prereq of helm-package /
+# helm-e2e-install). The leaderworkerset/disaggregatedset CRDs
 # are NOT shipped by the chart — they come with the upstream LeaderWorkerSet
 # controller prerequisite (hack/install-lws-controller.sh applies the pinned
 # lws module's config/default, which includes its own CRDs).
