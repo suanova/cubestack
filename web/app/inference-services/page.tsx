@@ -1407,7 +1407,7 @@ function ScaleCard({
         </Box>
       )}
       <Box sx={{ px: "18px", pb: "12px" }}>
-        <Typography sx={{ fontSize: 12.5, fontWeight: 550, mb: "7px" }}>{t("inf.env.summary")}</Typography>
+        <Typography sx={{ fontSize: 12.5, fontWeight: 550, mb: "7px" }}>{t("inf.env.title")}</Typography>
         <EnvEditor idPrefix="scale" env={envValues} roles={envRoles} onChange={setEnvValues} />
         {envErr ? (
           <Typography data-od-id="scale-env-error" sx={{ mt: "6px", fontSize: 11.5, color: soft(STATUS_ERR, 70) }}>
@@ -2424,7 +2424,7 @@ function DeployWizard({
                     sx={{ mt: 3, border: 1, borderColor: "divider", borderRadius: "var(--radius)", "&:before": { display: "none" } }}
                   >
                     <AccordionSummary data-od-id="deploy-env-section">
-                      <Typography sx={{ fontSize: 12.5, fontWeight: 600 }}>{t("inf.env.section")}</Typography>
+                      <Typography sx={{ fontSize: 12.5, fontWeight: 600 }}>{t("inf.env.title")}</Typography>
                     </AccordionSummary>
                     <AccordionDetails>
                       <Typography sx={{ fontSize: 11.5, color: "text.secondary", mb: "8px" }}>{t("inf.env.hint")}</Typography>
@@ -2510,7 +2510,7 @@ function DeployWizard({
                     ...draft.env.map(
                       (e) =>
                         [
-                          `${t("inf.env.summary")} ${e.name}`,
+                          `${t("inf.env.title")} ${e.name}`,
                           `${e.value} · ${e.roles.map(roleLabel).join(", ")}`,
                         ] as [string, string],
                     ),

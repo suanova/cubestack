@@ -1355,7 +1355,7 @@ describe("deploy wizard", () => {
     const envSection = step2.querySelector('[data-od-id="deploy-env-section"]') as HTMLElement;
     expect(envSection).not.toBeNull();
     await act(async () => {
-      envSection.click();
+      (step2.querySelector('[data-od-id="deploy-env-section"]') as HTMLElement).click();
     });
     await act(async () => {});
     await act(async () => {
