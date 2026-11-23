@@ -466,6 +466,40 @@ var _ = Describe("IPClaim Controller", func() {
 			client.ObjectKey{Namespace: testNamespace, Name: "claims-teardown-ip"}, gone))).To(BeTrue())
 	})
 
+	It("holds a deleting claim until a NAD with its own finalizer is gone", func() {
+		// A delete only records the deletion. A NAD carrying a finalizer of its own
+		// stays readable — and still publishes the address — until something removes
+		// that finalizer, so the claim must not go before the object does.
+		createPool("claims-stuck", testPoolSpec())
+		createClaim(testNamespace, "claims-stuck-ip", "claims-stuck", "claims-stuck-static")
+		deleteNAD("claims-stuck-static")
+
+		reconcileClaim(testNamespace, "claims-stuck-ip")
+		stuck := getNAD("claims-stuck-static")
+		stuck.SetFinalizers([]string{"example.com/hold"})
+		Expect(k8sClient.Update(ctx, stuck)).To(Succeed())
+
+		Expect(k8sClient.Delete(ctx, getClaim(testNamespace, "claims-stuck-ip"))).To(Succeed())
+		reconcileClaim(testNamespace, "claims-stuck-ip")
+
+		// The deletion was recorded and the claim is still held: the NAD is
+		// terminating, not gone.
+		Expect(getNAD("claims-stuck-static").GetDeletionTimestamp()).NotTo(BeNil())
+		held := getClaim(testNamespace, "claims-stuck-ip")
+		Expect(held.DeletionTimestamp).NotTo(BeNil())
+		Expect(held.Finalizers).To(ContainElement(NADTeardownFinalizer))
+
+		// Whatever was holding the NAD lets go.
+		released := getNAD("claims-stuck-static")
+		released.SetFinalizers(nil)
+		Expect(k8sClient.Update(ctx, released)).To(Succeed())
+
+		reconcileClaim(testNamespace, "claims-stuck-ip")
+		gone := &ipamv1alpha1.IPClaim{}
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx,
+			client.ObjectKey{Namespace: testNamespace, Name: "claims-stuck-ip"}, gone))).To(BeTrue())
+	})
+
 	It("does not hold a claim that mints no NAD", func() {
 		// An address-only claim publishes its address nowhere but status, so there is no
 		// teardown to wait for and deleting it releases the address at once.

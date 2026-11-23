@@ -60,6 +60,12 @@ const nadNameField = "spec.nad"
 // another claim could be handed the same address. Holding the claim until its NAD
 // is gone keeps the two in step.
 //
+// The finalizer ties the claim to the NAD and to nothing else. A pod that attached
+// while the NAD existed keeps the address in its network namespace until the pod is
+// deleted, and this controller lists no pods: keeping a claim alive until an
+// attachment goes is the job of whatever deletes that pod, and a duplicate that
+// slips through anyway is what the audit sweep reports.
+//
 // It is only set on claims that ask for a NAD (spec.nad). An address-only claim
 // mints nothing, so nothing can outlive it and it is released as soon as it is
 // deleted.
@@ -525,7 +531,9 @@ func (r *IPClaimReconciler) ensureFinalizer(ctx context.Context, claim *ipamv1al
 // The NAD is deleted here rather than left to the garbage collector because
 // background cascade deletion never removes a dependent while its owner still
 // exists — and with the finalizer the owner exists until this removal completes, so
-// waiting for the collector would deadlock the claim.
+// waiting for the collector would deadlock the claim. The claim is released only
+// once the NAD has actually left the API server: a delete request alone proves
+// nothing about an object that carries finalizers of its own.
 //
 // Only an object this claim controls is deleted: a foreign NAD that happens to hold
 // the name is not ours to remove, and the claim never took an address on its
@@ -551,6 +559,17 @@ func (r *IPClaimReconciler) finalize(ctx context.Context, claim *ipamv1alpha1.IP
 			if err := r.Delete(ctx, nad, pre); client.IgnoreNotFound(err) != nil {
 				return ctrl.Result{}, fmt.Errorf("deleting NAD %s/%s: %w", claim.Namespace, claim.Spec.NAD, err)
 			}
+			// A delete request only records the deletion. A NAD with a finalizer of its
+			// own stays — readable, and still publishing the address — until something
+			// removes that finalizer, so the claim waits for the object itself to go.
+			// The NAD watch brings this claim back when it does.
+			gone, err := r.nadGone(ctx, claim.Namespace, claim.Spec.NAD)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if !gone {
+				return ctrl.Result{}, nil
+			}
 		}
 	}
 
@@ -560,6 +579,22 @@ func (r *IPClaimReconciler) finalize(ctx context.Context, claim *ipamv1alpha1.IP
 		return ctrl.Result{}, fmt.Errorf("removing finalizer from claim %s/%s: %w", claim.Namespace, claim.Name, err)
 	}
 	return ctrl.Result{}, nil
+}
+
+// nadGone reports whether the named NAD has actually left the API server. A delete
+// that returned without error only proves the deletion was recorded: an object
+// carrying finalizers of its own stays readable, deletionTimestamp and all, and
+// until it goes the static address in its config is still what a pod on that
+// network would be given.
+func (r *IPClaimReconciler) nadGone(ctx context.Context, namespace, name string) (bool, error) {
+	nad := newNAD(namespace, name)
+	switch err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(nad), nad); {
+	case apierrors.IsNotFound(err):
+		return true, nil
+	case err != nil:
+		return false, fmt.Errorf("reading NAD %s/%s after deleting it: %w", namespace, name, err)
+	}
+	return false, nil
 }
 
 // fail records a claim that could not be satisfied.
