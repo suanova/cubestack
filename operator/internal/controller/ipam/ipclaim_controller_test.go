@@ -514,9 +514,12 @@ var _ = Describe("IPClaim Controller", func() {
 		// Deleting the holder is the event the binary's watch passes to this map
 		// function; the second claim has to be in the result or it would stay failed
 		// with the address free.
-		Expect(k8sClient.Delete(ctx, getClaim(testNamespace, "claims-release-a"))).To(Succeed())
+		holder := getClaim(testNamespace, "claims-release-a")
+		Expect(k8sClient.Delete(ctx, holder)).To(Succeed())
 
-		reqs := reconciled().pendingClaimsForPool(ctx, getClaim(testNamespace, "claims-release-b"))
+		// The event carries the holder, not the claim it waits for: passing B here
+		// would let a mapper that merely echoes its input pass the test.
+		reqs := reconciled().pendingClaimsForPool(ctx, holder)
 		Expect(reqs).To(ConsistOf(requestFor(testNamespace, "claims-release-b")))
 	})
 

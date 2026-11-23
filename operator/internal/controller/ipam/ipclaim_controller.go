@@ -543,7 +543,12 @@ func (r *IPClaimReconciler) finalize(ctx context.Context, claim *ipamv1alpha1.IP
 		case err != nil:
 			return ctrl.Result{}, fmt.Errorf("reading NAD %s/%s: %w", claim.Namespace, claim.Spec.NAD, err)
 		case metav1.IsControlledBy(nad, claim):
-			if err := r.Delete(ctx, nad); client.IgnoreNotFound(err) != nil {
+			// The delete names the object this read proved is ours, by identity rather
+			// than by name: a NAD someone else created in the meantime has a different
+			// UID and fails the precondition instead of being deleted.
+			uid, rv := nad.GetUID(), nad.GetResourceVersion()
+			pre := client.Preconditions{UID: &uid, ResourceVersion: &rv}
+			if err := r.Delete(ctx, nad, pre); client.IgnoreNotFound(err) != nil {
 				return ctrl.Result{}, fmt.Errorf("deleting NAD %s/%s: %w", claim.Namespace, claim.Spec.NAD, err)
 			}
 		}
