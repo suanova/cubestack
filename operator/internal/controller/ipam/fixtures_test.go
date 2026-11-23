@@ -99,6 +99,16 @@ func createClaimWith(namespace, name string, spec ipamv1alpha1.IPClaimSpec) *ipa
 	}
 	ExpectWithOffset(1, k8sClient.Create(ctx, claim)).To(Succeed())
 	DeferCleanup(func() {
+		// A claim that asks for a NAD carries the teardown finalizer, and nothing in
+		// this suite runs the controller's finalize path. Removing it here stands in
+		// for that path: without it the object would stay behind terminating, and the
+		// auditor — which lists every claim in the cluster — would go on counting its
+		// address as held in later specs.
+		fresh := &ipamv1alpha1.IPClaim{}
+		if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(claim), fresh); err == nil && len(fresh.Finalizers) > 0 {
+			fresh.Finalizers = nil
+			ExpectWithOffset(1, k8sClient.Update(ctx, fresh)).To(Succeed())
+		}
 		ExpectWithOffset(1, client.IgnoreNotFound(k8sClient.Delete(ctx, claim))).To(Succeed())
 	})
 	return claim

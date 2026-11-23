@@ -17,11 +17,14 @@ limitations under the License.
 package ipam
 
 import (
+	"context"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	ipamv1alpha1 "github.com/suanova/cubestack/api/ipam/v1alpha1"
@@ -112,14 +115,39 @@ var _ = Describe("IPPool Controller", func() {
 
 	It("does not rewrite status when nothing changed", func() {
 		// The reconcilers do not requeue on success, so an unconditional status
-		// write would be the only thing generating further reconciles.
+		// write would be the only thing generating further reconciles. Counted
+		// directly rather than inferred from LastTransitionTime: the API preserves
+		// that timestamp when the condition's status is unchanged, so an assertion on
+		// it passes even if a patch was sent.
 		createPool("pool-idempotent", testPoolSpec())
 		reconcilePool("pool-idempotent")
 
-		before := conditionOf("pool-idempotent")
-		reconcilePool("pool-idempotent")
-		after := conditionOf("pool-idempotent")
+		counted := &statusPatchCounter{Client: k8sClient}
+		r := &IPPoolReconciler{Client: counted, Scheme: k8sClient.Scheme()}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: "pool-idempotent"}})
+		Expect(err).NotTo(HaveOccurred())
 
-		Expect(after.LastTransitionTime).To(Equal(before.LastTransitionTime))
+		Expect(counted.patches).To(BeZero())
 	})
 })
+
+// statusPatchCounter wraps a client to count status patch calls, which is the only
+// direct observation of "the reconciler wrote nothing".
+type statusPatchCounter struct {
+	client.Client
+	patches int
+}
+
+func (c *statusPatchCounter) Status() client.StatusWriter {
+	return &countingStatusWriter{StatusWriter: c.Client.Status(), counter: c}
+}
+
+type countingStatusWriter struct {
+	client.StatusWriter
+	counter *statusPatchCounter
+}
+
+func (w *countingStatusWriter) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+	w.counter.patches++
+	return w.StatusWriter.Patch(ctx, obj, patch, opts...)
+}

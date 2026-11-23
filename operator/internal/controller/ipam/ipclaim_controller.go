@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -49,6 +50,20 @@ import (
 // does *not* own — a name collision — and an owner-based lookup would find nothing
 // to retry when that object finally goes away.
 const nadNameField = "spec.nad"
+
+// NADTeardownFinalizer keeps a deleting IPClaim visible until the NAD it minted
+// has been removed.
+//
+// The ledger of held addresses is status.assignedIP on the claims themselves, and
+// a NAD's config is a literal static assignment. If the claim vanished first, the
+// address would still be published by a NAD while nothing counted it as held, and
+// another claim could be handed the same address. Holding the claim until its NAD
+// is gone keeps the two in step.
+//
+// It is only set on claims that ask for a NAD (spec.nad). An address-only claim
+// mints nothing, so nothing can outlive it and it is released as soon as it is
+// deleted.
+const NADTeardownFinalizer = "ipam.cubestack.io/nad-teardown"
 
 // IPClaimReconciler reconciles an IPClaim: it assigns an address from the
 // referenced pool, and mints the claim's NetworkAttachmentDefinition from the
@@ -76,15 +91,15 @@ type IPClaimReconciler struct {
 }
 
 // Note the absent verbs. The claim controller never creates or deletes an
-// IPClaim — that is a user's action, or the environment controller's — and it
-// never deletes a NAD, because the NAD it mints is collected by the garbage
-// collector through its ownerReference. It also needs no delete permission on the
-// objects it references: see controllerRef for why blockOwnerDeletion is off.
+// IPClaim — that is a user's action, or the environment controller's. It patches
+// the claim only to carry the teardown finalizer, and it deletes a NAD only as
+// part of that teardown: see NADTeardownFinalizer for why the garbage collector
+// cannot do that half.
 //
-// +kubebuilder:rbac:groups=ipam.cubestack.io,resources=ipclaims,verbs=get;list;watch
+// +kubebuilder:rbac:groups=ipam.cubestack.io,resources=ipclaims,verbs=get;list;watch;patch
 // +kubebuilder:rbac:groups=ipam.cubestack.io,resources=ipclaims/status,verbs=get;patch;update
 // +kubebuilder:rbac:groups=ipam.cubestack.io,resources=ippools,verbs=get;list;watch
-// +kubebuilder:rbac:groups=k8s.cni.cncf.io,resources=network-attachment-definitions,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups=k8s.cni.cncf.io,resources=network-attachment-definitions,verbs=get;list;watch;create;update;delete
 
 // Reconcile assigns an address and mints a NAD.
 //
@@ -109,15 +124,23 @@ func (r *IPClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// A deleting claim needs no work. The NAD carries an ownerReference to this
-	// claim, so the garbage collector takes it; re-binding here would write an
-	// address onto an object on its way out, and mint a NAD that is about to be
-	// collected. There is no finalizer in this chain on purpose.
+	// A deleting claim is not allocated for: re-binding here would write an address
+	// onto an object on its way out, and mint a NAD that is about to be collected.
+	// Its teardown is the one thing left to do — see NADTeardownFinalizer.
 	if !claim.DeletionTimestamp.IsZero() {
-		return ctrl.Result{}, nil
+		return r.finalize(ctx, claim)
 	}
 
 	original := claim.DeepCopy()
+
+	// Taken before anything is minted, so a claim deleted at any point after its NAD
+	// exists still keeps its address in the ledger until that NAD is gone.
+	if claim.Spec.NAD != "" {
+		if err := r.ensureFinalizer(ctx, claim); err != nil {
+			return ctrl.Result{}, err
+		}
+		original = claim.DeepCopy()
+	}
 
 	pool := &ipamv1alpha1.IPPool{}
 	switch err := r.Get(ctx, client.ObjectKey{Name: claim.Spec.PoolRef}, pool); {
@@ -131,7 +154,7 @@ func (r *IPClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// A pool that failed its own validation cannot be allocated from. Checking it
 	// again here rather than trusting status.conditions keeps this reconciler
 	// correct when the two run concurrently, and the check is a pure function.
-	if err := ipamutil.ValidatePoolRange(pool.Spec); err != nil {
+	if err := ipamutil.ValidatePoolRange(pool.Spec); err != nil && poolUnusable(claim, err) {
 		// A fully excluded pool is well formed and merely empty; it is reported as an
 		// exhausted one so the caller reads the same thing here as it would from the
 		// allocator that ran out of addresses.
@@ -177,6 +200,21 @@ func (r *IPClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 					pool.Name, claim.Spec.NAD), nil)
 		}
 
+		// Checked before the address is reserved, not only when the NAD is created. A
+		// name that stays taken would otherwise cost a reservation write and a write
+		// clearing it on every reconcile, and each of those re-enqueues this claim: a
+		// loop of the controller's own making that no outside change ends. ensureNAD
+		// repeats the check, which is what catches a name taken after this read.
+		conflict, err := nadNameHeld(ctx, r.Client, claim)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if conflict != "" {
+			// No reservation was written, so none has to be given back. The NAD watch
+			// re-enqueues this claim when the name falls free.
+			return r.failNADNotOwned(ctx, original, claim, conflict)
+		}
+
 		if err := r.reserve(ctx, original, claim, addr, pool.Name); err != nil {
 			return ctrl.Result{}, fmt.Errorf("reserving address %s for claim %s/%s: %w", addr, claim.Namespace, claim.Name, err)
 		}
@@ -193,14 +231,7 @@ func (r *IPClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 					// NAD may exist and a running VM may still be on it.
 					claim.Status.AssignedIP = ""
 				}
-				// Never adopted, never overwritten. The NAD watch re-enqueues this claim
-				// when the name falls free, so the failure needs no retry loop of its own.
-				return r.fail(ctx, original, claim, ipamv1alpha1.ReasonNADNotOwned, err.Error(),
-					[]ipamv1alpha1.Blocker{{
-						Kind:      networkAttachmentDefinitionGVK.Kind,
-						Namespace: claim.Namespace,
-						Name:      claim.Spec.NAD,
-					}})
+				return r.failNADNotOwned(ctx, original, claim, err.Error())
 			}
 			return ctrl.Result{}, fmt.Errorf("ensuring NAD %s/%s: %w", claim.Namespace, claim.Spec.NAD, err)
 		}
@@ -444,6 +475,86 @@ func excludedAddrs(bands []ipamv1alpha1.IPRange) (map[netip.Addr]struct{}, error
 // namespace by omission would quietly become the cluster-wide one.
 func admitsNamespace(pool *ipamv1alpha1.IPPool, namespace string) bool {
 	return slices.Contains(pool.Spec.Namespaces, namespace)
+}
+
+// poolUnusable reports whether a validation error stops this claim.
+//
+// A malformed pool refuses everyone. A fully excluded one is well formed and
+// merely empty, and emptiness only refuses NEW allocations: a claim that already
+// holds an address keeps it, because assign keeps any address inside the band and
+// the NAD on the running VM still carries it. That is the same prospective reading
+// the namespace gate and the exclusion list get.
+func poolUnusable(claim *ipamv1alpha1.IPClaim, err error) bool {
+	if !errors.Is(err, ipamutil.ErrRangeFullyExcluded) {
+		return true
+	}
+	return strings.TrimSpace(claim.Status.AssignedIP) == ""
+}
+
+// failNADNotOwned reports a NAD name held by an object this claim does not control.
+//
+// The object is never adopted and never overwritten: a name collision means two
+// claims believe they own one network, and taking it over would give the loser a VM
+// with no network and no explanation. The NAD watch re-enqueues the claim when the
+// name falls free, so the failure needs no retry loop of its own.
+func (r *IPClaimReconciler) failNADNotOwned(ctx context.Context, original, claim *ipamv1alpha1.IPClaim, message string) (ctrl.Result, error) {
+	return r.fail(ctx, original, claim, ipamv1alpha1.ReasonNADNotOwned, message,
+		[]ipamv1alpha1.Blocker{{
+			Kind:      networkAttachmentDefinitionGVK.Kind,
+			Namespace: claim.Namespace,
+			Name:      claim.Spec.NAD,
+		}})
+}
+
+// ensureFinalizer puts NADTeardownFinalizer on a claim that asks for a NAD.
+func (r *IPClaimReconciler) ensureFinalizer(ctx context.Context, claim *ipamv1alpha1.IPClaim) error {
+	if controllerutil.ContainsFinalizer(claim, NADTeardownFinalizer) {
+		return nil
+	}
+
+	original := claim.DeepCopy()
+	controllerutil.AddFinalizer(claim, NADTeardownFinalizer)
+	if err := r.Patch(ctx, claim, client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{})); err != nil {
+		return fmt.Errorf("adding finalizer to claim %s/%s: %w", claim.Namespace, claim.Name, err)
+	}
+	return nil
+}
+
+// finalize removes a claim's NAD and then lets the claim go.
+//
+// The NAD is deleted here rather than left to the garbage collector because
+// background cascade deletion never removes a dependent while its owner still
+// exists — and with the finalizer the owner exists until this removal completes, so
+// waiting for the collector would deadlock the claim.
+//
+// Only an object this claim controls is deleted: a foreign NAD that happens to hold
+// the name is not ours to remove, and the claim never took an address on its
+// account.
+func (r *IPClaimReconciler) finalize(ctx context.Context, claim *ipamv1alpha1.IPClaim) (ctrl.Result, error) {
+	if !controllerutil.ContainsFinalizer(claim, NADTeardownFinalizer) {
+		return ctrl.Result{}, nil
+	}
+
+	if claim.Spec.NAD != "" {
+		// Read directly: the NAD this claim minted may be younger than the cache.
+		nad := newNAD(claim.Namespace, claim.Spec.NAD)
+		switch err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(nad), nad); {
+		case apierrors.IsNotFound(err):
+		case err != nil:
+			return ctrl.Result{}, fmt.Errorf("reading NAD %s/%s: %w", claim.Namespace, claim.Spec.NAD, err)
+		case metav1.IsControlledBy(nad, claim):
+			if err := r.Delete(ctx, nad); client.IgnoreNotFound(err) != nil {
+				return ctrl.Result{}, fmt.Errorf("deleting NAD %s/%s: %w", claim.Namespace, claim.Spec.NAD, err)
+			}
+		}
+	}
+
+	original := claim.DeepCopy()
+	controllerutil.RemoveFinalizer(claim, NADTeardownFinalizer)
+	if err := r.Patch(ctx, claim, client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{})); err != nil {
+		return ctrl.Result{}, fmt.Errorf("removing finalizer from claim %s/%s: %w", claim.Namespace, claim.Name, err)
+	}
+	return ctrl.Result{}, nil
 }
 
 // fail records a claim that could not be satisfied.

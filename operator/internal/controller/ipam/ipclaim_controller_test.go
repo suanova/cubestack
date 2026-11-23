@@ -396,6 +396,86 @@ var _ = Describe("IPClaim Controller", func() {
 			HaveKeyWithValue(ipamv1alpha1.LabelClaim, "claims-taken-ip"))
 	})
 
+	It("keeps a bound claim's address when exclusions later cover the whole band", func() {
+		// Exclusions are prospective: they refuse new allocations, they do not take an
+		// address back from a VM whose NAD still carries it.
+		createPool("claims-excluded", testPoolSpec())
+		createClaim(testNamespace, "claims-excluded-ip", "claims-excluded", "")
+		reconcileClaim(testNamespace, "claims-excluded-ip")
+		Expect(getClaim(testNamespace, "claims-excluded-ip").Status.AssignedIP).To(Equal(testFirstIP))
+
+		pool := &ipamv1alpha1.IPPool{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "claims-excluded"}, pool)).To(Succeed())
+		spec := testPoolSpec()
+		pool.Spec.Exclude = []ipamv1alpha1.IPRange{{Start: spec.Range.Start, End: spec.Range.End}}
+		Expect(k8sClient.Update(ctx, pool)).To(Succeed())
+
+		reconcileClaim(testNamespace, "claims-excluded-ip")
+
+		got := getClaim(testNamespace, "claims-excluded-ip")
+		Expect(ready(got).Status).To(Equal(metav1.ConditionTrue))
+		Expect(got.Status.AssignedIP).To(Equal(testFirstIP))
+	})
+
+	It("reserves nothing and writes nothing while its NAD name stays taken", func() {
+		// Learning of the collision at create time would leave this claim writing a
+		// reservation, then clearing it, on every reconcile — and each of those writes
+		// enqueues the claim again, so the loop would feed itself.
+		createPool("claims-churn", testPoolSpec())
+		createClaim(testNamespace, "claims-churn-ip", "claims-churn", "claims-churn-static")
+
+		foreign := newNAD(testNamespace, "claims-churn-static")
+		Expect(unstructured.SetNestedField(foreign.Object, `{"name":"someone-elses"}`, "spec", "config")).To(Succeed())
+		Expect(k8sClient.Create(ctx, foreign)).To(Succeed())
+		deleteNAD("claims-churn-static")
+
+		reconcileClaim(testNamespace, "claims-churn-ip")
+		failed := getClaim(testNamespace, "claims-churn-ip")
+		Expect(ready(failed).Reason).To(Equal(ipamv1alpha1.ReasonNADNotOwned))
+		Expect(failed.Status.AssignedIP).To(BeEmpty())
+
+		// The second pass must not write at all, and an unchanged resourceVersion is
+		// the direct observation of that.
+		reconcileClaim(testNamespace, "claims-churn-ip")
+		Expect(getClaim(testNamespace, "claims-churn-ip").ResourceVersion).To(Equal(failed.ResourceVersion))
+	})
+
+	It("holds a deleting claim until its NAD is gone", func() {
+		// The address lives in status, and holders reads it from the claim list. If the
+		// claim went first, its NAD would still publish the address while nothing
+		// counted it as held.
+		createPool("claims-teardown", testPoolSpec())
+		createClaim(testNamespace, "claims-teardown-ip", "claims-teardown", "claims-teardown-static")
+		deleteNAD("claims-teardown-static")
+
+		reconcileClaim(testNamespace, "claims-teardown-ip")
+		Expect(getNAD("claims-teardown-static")).NotTo(BeNil())
+		Expect(getClaim(testNamespace, "claims-teardown-ip").Finalizers).To(ContainElement(NADTeardownFinalizer))
+
+		Expect(k8sClient.Delete(ctx, getClaim(testNamespace, "claims-teardown-ip"))).To(Succeed())
+		// Still there: the address is still published.
+		Expect(getClaim(testNamespace, "claims-teardown-ip").DeletionTimestamp).NotTo(BeNil())
+
+		reconcileClaim(testNamespace, "claims-teardown-ip")
+
+		nad := newNAD(testNamespace, "claims-teardown-static")
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(nad), nad))).To(BeTrue())
+
+		gone := &ipamv1alpha1.IPClaim{}
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx,
+			client.ObjectKey{Namespace: testNamespace, Name: "claims-teardown-ip"}, gone))).To(BeTrue())
+	})
+
+	It("does not hold a claim that mints no NAD", func() {
+		// An address-only claim publishes its address nowhere but status, so there is no
+		// teardown to wait for and deleting it releases the address at once.
+		createPool("claims-ledger", testLedgerOnlySpec())
+		createClaim(testNamespace, "claims-ledger-ip", "claims-ledger", "")
+
+		reconcileClaim(testNamespace, "claims-ledger-ip")
+		Expect(getClaim(testNamespace, "claims-ledger-ip").Finalizers).To(BeEmpty())
+	})
+
 	It("keeps a bound claim's address when its NAD name is taken over", func() {
 		// The other half of the release rule: an address that was published is never
 		// handed back because the NAD stopped being ours. A running VM may still be on

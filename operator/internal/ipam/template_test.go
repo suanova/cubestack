@@ -95,8 +95,19 @@ func TestRenderNAD_VLANIsEmittedWhenSet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(got, `"vlan":100`) {
-		t.Errorf("expected vlan 100 in %s", got)
+
+	// Decoded rather than matched as a substring: `"vlan":100` is also a prefix of
+	// `"vlan":1000`, so a substring check would pass on the wrong value.
+	var config map[string]any
+	if err := json.Unmarshal([]byte(got), &config); err != nil {
+		t.Fatalf("rendered config is not JSON: %v", err)
+	}
+	vlan, ok := config["vlan"]
+	if !ok {
+		t.Fatalf("expected vlan in %s", got)
+	}
+	if vlan != float64(100) {
+		t.Errorf("expected vlan 100, got %v", vlan)
 	}
 }
 

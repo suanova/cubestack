@@ -115,6 +115,35 @@ func TestValidatePoolRange(t *testing.T) {
 			wantErr: "must lie entirely within",
 		},
 		{
+			// Inside the subnet, but the subnet's own name: no host can answer for it.
+			name: "range starts at the network address",
+			mutate: func(s *ipamv1alpha1.IPPoolSpec) {
+				s.NADTemplate.Subnet = "10.66.9.0/24"
+				s.NADTemplate.Gateway = "10.66.9.254"
+				s.Range.Start = "10.66.9.0"
+				s.Range.End = "10.66.9.20"
+			},
+			wantErr: "network address",
+		},
+		{
+			name: "range ends at the broadcast address",
+			mutate: func(s *ipamv1alpha1.IPPoolSpec) {
+				s.Range.End = "10.66.3.255"
+			},
+			wantErr: "broadcast address",
+		},
+		{
+			// RFC 3021: a /31 has no network or broadcast address — both of its
+			// addresses are usable hosts — so the rule above must not fire here.
+			name: "both /31 addresses are assignable",
+			mutate: func(s *ipamv1alpha1.IPPoolSpec) {
+				s.NADTemplate.Subnet = "10.66.11.0/31"
+				s.NADTemplate.Gateway = "10.66.11.1"
+				s.Range.Start = "10.66.11.0"
+				s.Range.End = "10.66.11.0"
+			},
+		},
+		{
 			name: "subnet is not a CIDR",
 			mutate: func(s *ipamv1alpha1.IPPoolSpec) {
 				s.NADTemplate.Subnet = "10.66.3.0"
@@ -263,6 +292,15 @@ func TestValidatePoolRange(t *testing.T) {
 				s.NADTemplate.Routes = []ipamv1alpha1.NADRoute{{Dst: testRouteCIDR, GW: "nowhere"}}
 			},
 			wantErr: "not a valid address",
+		},
+		{
+			// ParseAddr accepts fe80::1%eth0; the static plugin, which parses route
+			// gateways as bare addresses, does not.
+			name: "a route gateway with a zone",
+			mutate: func(s *ipamv1alpha1.IPPoolSpec) {
+				s.NADTemplate.Routes = []ipamv1alpha1.NADRoute{{Dst: testRouteCIDR, GW: "fe80::1%eth0"}}
+			},
+			wantErr: "must not carry a zone",
 		},
 	}
 

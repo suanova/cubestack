@@ -28,8 +28,9 @@ import (
 // This is metav1.NewControllerRef with blockOwnerDeletion left off, which is the
 // difference that matters. blockOwnerDeletion makes an owner's deletion wait for
 // its dependents to go, which is worth having when a dependent holds a finalizer.
-// Nothing in this project's chain does: the whole release mechanism is garbage
-// collection, environment -> IPClaim -> NAD, so the wait would buy nothing.
+// The one finalizer in this chain — the claim's, holding its address in the ledger
+// until its NAD is gone — does not depend on it: the claim deletes its NAD itself
+// before letting go, so the wait would buy nothing.
 //
 // It would not be free either. The API server enforces blockOwnerDeletion against
 // whoever writes the reference, so turning it on would force this controller to

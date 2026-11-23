@@ -59,6 +59,27 @@ func newNAD(namespace, name string) *unstructured.Unstructured {
 	return nad
 }
 
+// nadNameHeld reports the NAD name at spec.nad when it is already held by an
+// object this claim does not control, and "" when the name is free.
+//
+// This is ensureNAD's ownership check on its own, for the caller to run BEFORE the
+// address is reserved: learning of the collision only at create time would leave the
+// claim writing a reservation and clearing it again on every reconcile, and each of
+// those writes re-enqueues the claim.
+func nadNameHeld(ctx context.Context, c client.Client, claim *ipamv1alpha1.IPClaim) (string, error) {
+	existing := newNAD(claim.Namespace, claim.Spec.NAD)
+	switch err := c.Get(ctx, client.ObjectKeyFromObject(existing), existing); {
+	case apierrors.IsNotFound(err):
+		return "", nil
+	case err != nil:
+		return "", fmt.Errorf("reading NAD %s/%s: %w", claim.Namespace, claim.Spec.NAD, err)
+	case metav1.IsControlledBy(existing, claim):
+		return "", nil
+	}
+	return fmt.Sprintf("%s: NAD %s/%s exists and %s",
+		errNADNotOwned, claim.Namespace, claim.Spec.NAD, describeController(existing)), nil
+}
+
 // ensureNAD makes the per-claim NetworkAttachmentDefinition for a bound claim.
 //
 // The rendered config serves this claim's address and no other, as a literal static
@@ -103,9 +124,10 @@ func createNAD(ctx context.Context, c client.Client, claim *ipamv1alpha1.IPClaim
 
 	// The owner is the claim, not the environment. That gives the chain
 	// environment -> IPClaim -> NAD, so deleting the environment garbage-collects
-	// the claim, which in turn collects the NAD. Nothing in that chain needs a finalizer, which is why there are
-	// none: a finalizer would add a failure mode (a stuck object) to a job the
-	// garbage collector already does correctly.
+	// the claim, which in turn collects the NAD. The claim holds a finalizer so that
+	// the address it publishes stays in the ledger until this NAD is gone — see
+	// NADTeardownFinalizer — but the collection itself is still the garbage
+	// collector's job.
 	owner := controllerRef(claim, ipamv1alpha1.GroupVersion.WithKind("IPClaim"))
 	nad.SetOwnerReferences([]metav1.OwnerReference{owner})
 

@@ -175,10 +175,10 @@ rules:
   - ipam.cubestack.io
   resources:
   - ipclaims
-  - ippools
   verbs:
   - get
   - list
+  - patch
   - watch
 - apiGroups:
   - ipam.cubestack.io
@@ -190,11 +190,20 @@ rules:
   - patch
   - update
 - apiGroups:
+  - ipam.cubestack.io
+  resources:
+  - ippools
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - k8s.cni.cncf.io
   resources:
   - network-attachment-definitions
   verbs:
   - create
+  - delete
   - get
   - list
   - update
