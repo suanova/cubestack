@@ -182,6 +182,8 @@ spec:
 ---
 # L1 validation for InferenceService per docs/design/isvc/api.md §3.3:
 # - route.modelName is required when route.aigatewayRouter is set (CREATE and UPDATE)
+# - spec.env must not use platform-reserved prefixes or code-loading variables
+# - spec.env must not repeat a variable name for the same role
 #
 # Reference existence (modelRef/profileRef), override values and modelName
 # uniqueness are validated by the controller at L2 (Resolved/Rendered/RouteReady).
@@ -200,6 +202,15 @@ spec:
   validations:
   - expression: "!has(object.spec.route) || !has(object.spec.route.aigatewayRouter) || object.spec.route.aigatewayRouter == '' || has(object.spec.route.modelName)"
     message: "route.modelName is required when route.aigatewayRouter is set"
+    reason: Invalid
+  # spec.env: no platform-reserved prefixes and no loader/interpreter hooks
+  # (design: user env override D5).
+  - expression: "!has(object.spec.env) || object.spec.env.all(e, !e.name.startsWith('KUBERNETES_') && !e.name.startsWith('CUBESTACK_') && !(e.name in ['LD_PRELOAD', 'LD_LIBRARY_PATH', 'PYTHONPATH', 'PYTHONSTARTUP', 'BASH_ENV']))"
+    message: "spec.env must not use a reserved prefix or a code-loading variable"
+    reason: Invalid
+  # Every role may name a variable once; disjoint role sets may repeat a name.
+  - expression: "!has(object.spec.env) || object.spec.env.all(e, e.roles.all(r, object.spec.env.exists_one(f, f.name == e.name && f.roles.exists(rr, rr == r))))"
+    message: "spec.env must not repeat a variable name for the same role"
     reason: Invalid
 ---
 apiVersion: admissionregistration.k8s.io/v1

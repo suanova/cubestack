@@ -116,6 +116,7 @@ func Render(isvc *aiv1alpha1.InferenceService, profile *aiv1alpha1.InferenceRunt
 	overrides, errs := ResolveOverrides(profile.Spec.Overrides, isvc.Spec.Overrides)
 	res.Overrides = overrides
 	res.Errors = append(res.Errors, errs...)
+	res.Errors = append(res.Errors, validateUserEnvRoles(profile, isvc.Spec.Env)...)
 
 	routeVars := routeVars(isvc.Spec.Route)
 	serviceVars := serviceVars(isvc)
@@ -235,6 +236,7 @@ func Render(isvc *aiv1alpha1.InferenceService, profile *aiv1alpha1.InferenceRunt
 				}
 			}
 		}
+		mergeUserEnv(&rr.PodTemplate, isvc.Spec.Env, role.Name)
 		res.Roles = append(res.Roles, rr)
 	}
 	ctx.role = nil

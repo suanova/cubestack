@@ -190,6 +190,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	setResolvedCondition(&desired.Status.Conditions, resolved)
 	setProfileEcho(desired, &isvc, resolved.profile)
 	setModelEcho(desired, resolved.model)
+	setCustomizedCondition(&desired.Status.Conditions, desired.Spec.Env)
 
 	// Every status write goes through here. The phase is a summary of the
 	// conditions, and this pass has just finished writing them wherever it is
@@ -740,6 +741,75 @@ func setProfileDeprecatedCondition(conditions *[]metav1.Condition, profile *aiv1
 		Reason:  "NotDeprecated",
 		Message: "The referenced profile is not deprecated",
 	})
+}
+
+// customizedMessageLimit bounds the Customized condition message well below
+// the CRD's 32768-character limit for metav1.Condition.Message. spec.env allows
+// 64 entries with 256-character names, so an unbounded list would make every
+// status update fail validation.
+const customizedMessageLimit = 8192
+
+// setCustomizedCondition reports whether spec.env carries user overrides
+// outside the profile. It is a warning, never a phase input. The message is a
+// bounded summary; the full environment reaches the rendered workload.
+func setCustomizedCondition(conditions *[]metav1.Condition, env []aiv1alpha1.UserEnvVar) {
+	if len(env) == 0 {
+		meta.SetStatusCondition(conditions, metav1.Condition{
+			Type:    aiv1alpha1.ConditionCustomized,
+			Status:  metav1.ConditionFalse,
+			Reason:  "NoUserEnvironment",
+			Message: "No user environment overrides",
+		})
+		return
+	}
+	entries := make([]string, 0, len(env))
+	for _, e := range env {
+		roles := append([]string(nil), e.Roles...)
+		slices.Sort(roles)
+		entries = append(entries, fmt.Sprintf("%s (%s)", e.Name, strings.Join(roles, ", ")))
+	}
+	slices.Sort(entries)
+	meta.SetStatusCondition(conditions, metav1.Condition{
+		Type:    aiv1alpha1.ConditionCustomized,
+		Status:  metav1.ConditionTrue,
+		Reason:  "UserEnvironment",
+		Message: boundedCustomizedMessage(entries),
+	})
+}
+
+// boundedCustomizedMessage joins the sorted entries under the platform limit
+// and appends the number of omitted entries. A single entry longer than the
+// limit is summarized without its detail.
+func boundedCustomizedMessage(entries []string) string {
+	const prefix = "User environment overrides: "
+
+	var b strings.Builder
+	b.WriteString(prefix)
+	kept := 0
+	for _, entry := range entries {
+		separator := ""
+		if kept > 0 {
+			separator = "; "
+		}
+		omitted := len(entries) - kept - 1
+		suffix := ""
+		if omitted > 0 {
+			suffix = fmt.Sprintf("; and %d more", omitted)
+		}
+		if b.Len()+len(separator)+len(entry)+len(suffix) > customizedMessageLimit {
+			break
+		}
+		b.WriteString(separator)
+		b.WriteString(entry)
+		kept++
+	}
+	if kept == 0 {
+		return prefix + fmt.Sprintf("%d env entries (too long to list)", len(entries))
+	}
+	if omitted := len(entries) - kept; omitted > 0 {
+		fmt.Fprintf(&b, "; and %d more", omitted)
+	}
+	return b.String()
 }
 
 // setProfileDriftedCondition sets the ProfileDrifted warning condition: the
