@@ -2,7 +2,7 @@ import { getCoreClient, getCustomObjectsClient } from "@/lib/kubernetes";
 import { withAuth } from "@/lib/auth/guard";
 import { privateGatewayClusterEndpoint } from "@/lib/cubepilot/gateway";
 import { CATALOG_PATHS, isAIGatewayRouter, isCatalogPath, type CatalogPath } from "@/lib/inference-routes";
-import type { EnvVar } from "@/lib/inferenceservices/env";
+import { envError, type EnvVar } from "@/lib/inferenceservices/env";
 
 // @kubernetes/client-node needs Node APIs (TLS, fs), not the Edge runtime.
 export const runtime = "nodejs";
@@ -534,34 +534,51 @@ export const GET = withAuth(async () => {
   }
 });
 
+/** The profile's declared role names, for spec.env validation. */
+function profileRoleNames(profile: Profile | undefined): string[] {
+  return (profile?.spec?.roles ?? []).map((r) => r.name).filter((n): n is string => Boolean(n));
+}
+
 /**
  * PATCH /api/inferenceservices
  *
- * Updates the `spec.overrides` of one service via an RFC 6902 JSON Patch. Body:
- * `{ namespace, name, overrides: Record<string, number|string|boolean> }`. Only
- * the keys present are touched; the values are resolved against the service's
- * InferenceRuntimeProfile and validated (same contract as POST) before the
- * cluster write. Requires RBAC to get and patch the CR.
+ * Updates `spec.overrides` and/or `spec.env` of one service via an RFC 6902
+ * JSON Patch. Body:
+ * `{ namespace, name, overrides?: Record<string, ...>, env?: EnvVar[] }`.
+ * At least one of overrides/env is required. Overrides only touch the keys
+ * present; env is a whole-array replacement and an empty list removes the
+ * field. Both are validated against the service's InferenceRuntimeProfile
+ * before the cluster write. Requires RBAC to get and patch the CR.
  */
 export const PATCH = withAuth(async (req) => {
   try {
-    const body = (await req.json()) as { namespace?: string; name?: string; overrides?: Record<string, unknown> };
-    if (!body.namespace || !body.name || !body.overrides) {
-      return Response.json({ error: "namespace, name and overrides are required" }, { status: 400 });
+    const body = (await req.json()) as {
+      namespace?: string;
+      name?: string;
+      overrides?: Record<string, unknown>;
+      env?: EnvVar[];
+    };
+    if (!body.namespace || !body.name) {
+      return Response.json({ error: "refsRequired" }, { status: 400 });
+    }
+    if (!body.overrides && !body.env) {
+      return Response.json({ error: "patchEmpty" }, { status: 400 });
     }
     // Only numeric/boolean/string override values and string lists are
     // meaningful; reject the rest so a bad payload cannot be persisted.
-    for (const [k, v] of Object.entries(body.overrides)) {
-      const isStringList = Array.isArray(v) && v.every((e) => typeof e === "string");
-      if (typeof v !== "number" && typeof v !== "string" && typeof v !== "boolean" && !isStringList) {
-        return Response.json({ error: `override '${k}' must be a number, string, string list or boolean` }, { status: 400 });
+    if (body.overrides) {
+      for (const [k, v] of Object.entries(body.overrides)) {
+        const isStringList = Array.isArray(v) && v.every((e) => typeof e === "string");
+        if (typeof v !== "number" && typeof v !== "string" && typeof v !== "boolean" && !isStringList) {
+          return Response.json({ error: `override '${k}' must be a number, string, string list or boolean` }, { status: 400 });
+        }
       }
     }
 
     const co = getCustomObjectsClient();
-    // Resolve the target service and its profile so the override values can be
-    // validated against the profile's declared parameters (same contract as
-    // POST) before touching the cluster.
+    // Resolve the target service and its profile so the override values and
+    // env roles can be validated (same contract as POST) before touching the
+    // cluster.
     let profile: Profile | undefined;
     try {
       const [svc, profileRes] = await Promise.all([
@@ -585,8 +602,10 @@ export const PATCH = withAuth(async (req) => {
       }
       return Response.json({ error: "Failed to update inference service" }, { status: 500 });
     }
-    const oerr = overrideError(body.overrides, profile);
+    const oerr = body.overrides ? overrideError(body.overrides, profile) : null;
     if (oerr) return Response.json({ error: oerr.code, params: oerr.params }, { status: 400 });
+    const eerr = body.env ? envError(body.env, profileRoleNames(profile)) : null;
+    if (eerr) return Response.json({ error: eerr.code, params: eerr.params }, { status: 400 });
 
     // The generated CustomObjectsApi patches custom objects with an RFC 6902
     // JSON Patch (application/json-patch+json). `add` replaces the value of an
@@ -594,11 +613,23 @@ export const PATCH = withAuth(async (req) => {
     // spec already carries (decodeReplicas) and keys not yet present
     // (groupSize). RFC 6901-escape each key (~ -> ~0, / -> ~1) so a key that
     // contains those characters targets the intended member.
-    const patch = Object.entries(body.overrides).map(([k, v]) => ({
-      op: "add",
-      path: `/spec/overrides/${jsonPointerEscape(k)}`,
-      value: v,
-    }));
+    const patch: Array<Record<string, unknown>> = [];
+    if (body.overrides) {
+      patch.push(
+        ...Object.entries(body.overrides).map(([k, v]) => ({
+          op: "add",
+          path: `/spec/overrides/${jsonPointerEscape(k)}`,
+          value: v,
+        })),
+      );
+    }
+    if (body.env) {
+      patch.push(
+        body.env.length
+          ? { op: "add", path: "/spec/env", value: body.env }
+          : { op: "remove", path: "/spec/env" },
+      );
+    }
     await co.patchNamespacedCustomObject({
       group: GROUP,
       version: VERSION,
@@ -634,6 +665,7 @@ interface CreateBody {
   profileRef?: string;
   modelRef?: string;
   overrides?: Record<string, number | string | boolean>;
+  env?: EnvVar[];
   route?: {
     aigatewayRouter?: string;
     modelName?: string;
@@ -706,6 +738,9 @@ export const POST = withAuth(async (req) => {
     // Overrides must satisfy the profile's declared parameters (shared with PATCH).
     const oerr = overrideError(body.overrides ?? {}, profile);
     if (oerr) return ValidationError(oerr.code, oerr.params);
+    // spec.env shares the same role/name rules as PATCH (and the operator VAP).
+    const eerr = envError(body.env ?? [], profileRoleNames(profile));
+    if (eerr) return ValidationError(eerr.code, eerr.params);
 
     // Route: a non-empty aigatewayRouter publishes the service into the model
     // catalog attached to that pre-installed AIGatewayRoute, which requires a
@@ -744,6 +779,7 @@ export const POST = withAuth(async (req) => {
         modelRef: body.modelRef,
         profileRef: body.profileRef,
         overrides: body.overrides ?? {},
+        ...(body.env?.length ? { env: body.env } : {}),
         ...(route ? { route } : {}),
       },
     };

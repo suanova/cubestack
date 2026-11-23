@@ -858,6 +858,81 @@ describe("inference services route", () => {
     expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
+  it("patches env only and leaves overrides untouched", async () => {
+    patchNamespacedCustomObject.mockResolvedValue({});
+    const { PATCH } = await importRoute();
+    const req = await authedRequest(
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          namespace: "project-a",
+          name: "dsv4-flash-pd",
+          env: [{ name: "MC_GID_INDEX", value: "3", roles: ["prefill", "decode"] }],
+        }),
+      },
+      "http://localhost/api/inferenceservices",
+    );
+    const res = await PATCH(req, undefined);
+    expect(res.status).toBe(200);
+    expect(patchNamespacedCustomObject).toHaveBeenCalledWith({
+      group: "ai.cubestack.io",
+      version: "v1alpha1",
+      namespace: "project-a",
+      plural: "inferenceservices",
+      name: "dsv4-flash-pd",
+      fieldManager: "cubestack-web",
+      body: [
+        {
+          op: "add",
+          path: "/spec/env",
+          value: [{ name: "MC_GID_INDEX", value: "3", roles: ["prefill", "decode"] }],
+        },
+      ],
+    });
+  });
+
+  it("removes spec.env when PATCH sends an empty env list", async () => {
+    patchNamespacedCustomObject.mockResolvedValue({});
+    const { PATCH } = await importRoute();
+    const req = await authedRequest(
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          namespace: "project-a",
+          name: "dsv4-flash-pd",
+          overrides: { decodeReplicas: 4 },
+          env: [],
+        }),
+      },
+      "http://localhost/api/inferenceservices",
+    );
+    const res = await PATCH(req, undefined);
+    expect(res.status).toBe(200);
+    expect(patchNamespacedCustomObject.mock.calls[0][0].body).toEqual([
+      { op: "add", path: "/spec/overrides/decodeReplicas", value: 4 },
+      { op: "remove", path: "/spec/env" },
+    ]);
+  });
+
+  it("rejects an env entry naming an unknown role without patching", async () => {
+    const { PATCH } = await importRoute();
+    const req = await authedRequest(
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          namespace: "project-a",
+          name: "dsv4-flash-pd",
+          env: [{ name: "A", value: "1", roles: ["main"] }],
+        }),
+      },
+      "http://localhost/api/inferenceservices",
+    );
+    const res = await PATCH(req, undefined);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "envRoleUnknown", params: { name: "A", role: "main" } });
+    expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
   it("returns a client-safe 500 when the cluster read fails", async () => {
     listClusterCustomObject.mockRejectedValue(new Error("boom"));
     const { GET } = await importRoute();
@@ -1062,6 +1137,43 @@ describe("inference services create (POST)", () => {
       undefined,
     );
     expect(res.status).toBe(400);
+    expect(createNamespacedCustomObject).not.toHaveBeenCalled();
+  });
+
+  it("creates a service with spec.env", async () => {
+    const { POST } = await importRoute();
+    const res = await POST(
+      await buildPost({
+        namespace: "project-a",
+        name: "env-serve",
+        profileRef: "metax-sglang-dsv4-pd",
+        modelRef: "deepseek-v4-flash-w8a8-v1",
+        env: [{ name: "MC_GID_INDEX", value: "3", roles: ["prefill", "decode"] }],
+      }),
+      undefined,
+    );
+    expect(res.status).toBe(201);
+    expect(createNamespacedCustomObject.mock.calls[0][0].body).toMatchObject({
+      spec: {
+        env: [{ name: "MC_GID_INDEX", value: "3", roles: ["prefill", "decode"] }],
+      },
+    });
+  });
+
+  it("rejects a reserved env name without creating the service", async () => {
+    const { POST } = await importRoute();
+    const res = await POST(
+      await buildPost({
+        namespace: "project-a",
+        name: "env-reserved-serve",
+        profileRef: "metax-sglang-dsv4-pd",
+        modelRef: "deepseek-v4-flash-w8a8-v1",
+        env: [{ name: "KUBERNETES_SERVICE_HOST", value: "x", roles: ["prefill"] }],
+      }),
+      undefined,
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "envNameReserved" });
     expect(createNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
