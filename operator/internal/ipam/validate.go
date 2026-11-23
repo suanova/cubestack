@@ -193,6 +193,23 @@ func validateTemplate(tmpl *ipamv1alpha1.NADTemplate, start, end netip.Addr) err
 		return fmt.Errorf("gateway %s must lie within subnet %s", gateway, subnet)
 	}
 
+	// The routes reach the CNI verbatim, and the static plugin decodes each
+	// destination as a CIDR. A malformed one is rejected at network setup, which is
+	// after the claim has already reported Ready=True — the guest comes up with no
+	// network and the pool looks fine.
+	for i, route := range tmpl.Routes {
+		if _, err := netip.ParsePrefix(route.Dst); err != nil {
+			return fmt.Errorf("nadTemplate.routes[%d].dst %q is not a valid CIDR: %w", i, route.Dst, err)
+		}
+		if route.GW == "" {
+			// Omitted means "via the interface's own gateway", which needs no check.
+			continue
+		}
+		if _, err := netip.ParseAddr(route.GW); err != nil {
+			return fmt.Errorf("nadTemplate.routes[%d].gw %q is not a valid address: %w", i, route.GW, err)
+		}
+	}
+
 	return nil
 }
 

@@ -30,9 +30,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	ipamv1alpha1 "github.com/suanova/cubestack/api/ipam/v1alpha1"
@@ -85,18 +88,24 @@ type IPClaimReconciler struct {
 
 // Reconcile assigns an address and mints a NAD.
 //
-// The sequence is deliberate: the NAD is created before the claim is marked
-// Ready, so that Ready implies the network exists. The reverse order would
-// advertise a claim as satisfied during the window in which its VM is still stuck
-// in FailedCreatePodSandBox, which is the only failure this ordering can have and
-// the one hardest to attribute afterwards.
+// The sequence is deliberate: the address is published first, then the NAD is
+// created, and only then is the claim marked Ready. Publishing the address first
+// closes the window in which an address exists only in memory — holders reads
+// status.assignedIP, so an address that is chosen but not yet written is free for
+// the next claim to take. Creating the NAD before marking Ready means Ready implies
+// the network exists; the reverse order would advertise a claim as satisfied during
+// the window in which its VM is still stuck in FailedCreatePodSandBox.
 //
 // Every failure path writes a condition and returns without requeueing. Nothing
 // here is time-dependent — the fix for each of them is an admin or user editing an
 // object, and both objects are watched.
 func (r *IPClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	claim := &ipamv1alpha1.IPClaim{}
-	if err := r.Get(ctx, req.NamespacedName, claim); err != nil {
+	// Read through APIReader, like holders: the address this claim already holds is
+	// what decides whether it is allocated for again, and a cached copy that has not
+	// caught up with this claim's own last write would read as unbound and be given a
+	// second address.
+	if err := r.APIReader.Get(ctx, req.NamespacedName, claim); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
@@ -143,6 +152,11 @@ func (r *IPClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			fmt.Sprintf("IPPool %q does not admit namespace %q", pool.Name, claim.Namespace), nil)
 	}
 
+	// Captured before assign: it decides whether a failure below may give the address
+	// back. A claim that arrived holding an address published it in a NAD already, so
+	// only an address picked by this reconcile can be handed back by it.
+	wasBound := strings.TrimSpace(claim.Status.AssignedIP) != ""
+
 	addr, err := r.assign(ctx, claim, pool)
 	if err != nil {
 		if alloc, ok := errors.AsType[*allocError](err); ok {
@@ -163,8 +177,22 @@ func (r *IPClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 					pool.Name, claim.Spec.NAD), nil)
 		}
 
+		if err := r.reserve(ctx, original, claim, addr, pool.Name); err != nil {
+			return ctrl.Result{}, fmt.Errorf("reserving address %s for claim %s/%s: %w", addr, claim.Namespace, claim.Name, err)
+		}
+		// The patch above moved the object on; the patches below are diffed against
+		// this snapshot and carry its resourceVersion as their precondition.
+		original = claim.DeepCopy()
+
 		if err := ensureNAD(ctx, r.Client, claim, pool, addr); err != nil {
 			if errors.Is(err, errNADNotOwned) {
+				if !wasBound {
+					// Nothing carries this address: the claim never came to own a NAD, so
+					// the reservation goes back to the pool rather than being held by a name
+					// collision. A claim that was already bound keeps its address here — its
+					// NAD may exist and a running VM may still be on it.
+					claim.Status.AssignedIP = ""
+				}
 				// Never adopted, never overwritten. The NAD watch re-enqueues this claim
 				// when the name falls free, so the failure needs no retry loop of its own.
 				return r.fail(ctx, original, claim, ipamv1alpha1.ReasonNADNotOwned, err.Error(),
@@ -439,6 +467,35 @@ func (r *IPClaimReconciler) fail(
 	return ctrl.Result{}, patchStatusIfChanged(ctx, r.Client, original, claim, original.Status, claim.Status)
 }
 
+// reserve publishes an address before the NAD carrying it exists.
+//
+// holders reads status.assignedIP, so an address that is chosen but not written is
+// free as far as the next claim is concerned. If the NAD write then fails, that
+// claim takes the same address and mints a second NAD with it — and the first
+// claim's retry fails with RangeExhausted while its NAD keeps the address alive.
+// Writing the address here makes the hold real at the moment it is chosen.
+//
+// Ready goes False rather than staying whatever it was last time: the address is
+// held, the network it is for is not there yet. bind turns it True once the NAD
+// exists. The write is skipped when the address is already published, so a bound
+// claim reconciling again does not flicker.
+func (r *IPClaimReconciler) reserve(
+	ctx context.Context, original, claim *ipamv1alpha1.IPClaim, addr netip.Addr, poolName string,
+) error {
+	if claim.Status.AssignedIP == addr.String() {
+		return nil
+	}
+	claim.Status.AssignedIP = addr.String()
+	apimeta.SetStatusCondition(&claim.Status.Conditions, metav1.Condition{
+		Type:               ipamv1alpha1.ConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             ipamv1alpha1.ReasonReserved,
+		Message:            fmt.Sprintf("address %s reserved from pool %s; its NAD is not ready yet", addr, poolName),
+		ObservedGeneration: claim.Generation,
+	})
+	return patchStatusIfChanged(ctx, r.Client, original, claim, original.Status, claim.Status)
+}
+
 // bind records a satisfied claim.
 func (r *IPClaimReconciler) bind(ctx context.Context, original, claim *ipamv1alpha1.IPClaim, addr netip.Addr, message string) error {
 	claim.Status.AssignedIP = addr.String()
@@ -514,6 +571,66 @@ func (r *IPClaimReconciler) claimsForNAD(ctx context.Context, obj client.Object)
 	return reqs
 }
 
+// pendingClaimsForPool maps a claim that has just given its address back to the
+// claims in the same pool that hold none.
+//
+// The primary watch enqueues only the object that changed, and a release changes
+// only the releasing claim. A claim that failed with RangeExhausted would therefore
+// stay failed after the holder was deleted, with the address sitting free: no NAD
+// and no pool changed, so nothing would wake it. AddressUnavailable — an Exact
+// request blocked by a holder — is woken by the same event.
+//
+// Only unbound claims are enqueued. A bound claim is not waiting for anything, and
+// reconciling it would be work that changes nothing.
+func (r *IPClaimReconciler) pendingClaimsForPool(ctx context.Context, obj client.Object) []reconcile.Request {
+	releasing, ok := obj.(*ipamv1alpha1.IPClaim)
+	if !ok {
+		return nil
+	}
+
+	var claims ipamv1alpha1.IPClaimList
+	if err := r.List(ctx, &claims); err != nil {
+		ctrl.LoggerFrom(ctx).Error(err, "listing IPClaims for pool", "pool", releasing.Spec.PoolRef)
+		return nil
+	}
+
+	var reqs []reconcile.Request
+	for i := range claims.Items {
+		claim := &claims.Items[i]
+		if claim.Spec.PoolRef != releasing.Spec.PoolRef || strings.TrimSpace(claim.Status.AssignedIP) != "" {
+			continue
+		}
+		reqs = append(reqs, reconcile.Request{NamespacedName: types.NamespacedName{
+			Namespace: claim.Namespace,
+			Name:      claim.Name,
+		}})
+	}
+	return reqs
+}
+
+// addressReleased lets through the two events that make a pool address free: a
+// claim giving its address back, and a claim holding one being deleted. Anything
+// else a claim does — being created, binding, having its condition rewritten — can
+// only take an address away, which is no reason to wake the claims left waiting.
+func addressReleased() predicate.Funcs {
+	return predicate.Funcs{
+		CreateFunc:  func(event.CreateEvent) bool { return false },
+		GenericFunc: func(event.GenericEvent) bool { return false },
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			return claimedAddress(e.ObjectOld) != "" && claimedAddress(e.ObjectNew) == ""
+		},
+		DeleteFunc: func(e event.DeleteEvent) bool { return claimedAddress(e.Object) != "" },
+	}
+}
+
+func claimedAddress(obj client.Object) string {
+	claim, ok := obj.(*ipamv1alpha1.IPClaim)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(claim.Status.AssignedIP)
+}
+
 // SetupWithManager sets up the controller with the Manager.
 //
 // MaxConcurrentReconciles is pinned at 1. That is not a default left unset, it is
@@ -548,6 +665,12 @@ func (r *IPClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// pod goes — which is why the drift has to be corrected here rather than
 		// noticed later (design R4).
 		Watches(newNAD("", ""), handler.EnqueueRequestsFromMapFunc(r.claimsForNAD)).
+		// A claim that gives an address back wakes the claims waiting on that pool, so
+		// a RangeExhausted or AddressUnavailable claim does not need a retry loop to
+		// notice the address it wanted is free.
+		Watches(&ipamv1alpha1.IPClaim{},
+			handler.EnqueueRequestsFromMapFunc(r.pendingClaimsForPool),
+			builder.WithPredicates(addressReleased())).
 		Watches(&ipamv1alpha1.IPPool{}, handler.EnqueueRequestsFromMapFunc(r.claimsForPool)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Named("ipclaim").

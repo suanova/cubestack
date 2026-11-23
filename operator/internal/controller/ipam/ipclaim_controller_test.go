@@ -27,6 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	ipamv1alpha1 "github.com/suanova/cubestack/api/ipam/v1alpha1"
 )
@@ -373,6 +374,9 @@ var _ = Describe("IPClaim Controller", func() {
 		Expect(got.Status.Blockers).To(HaveLen(1))
 		Expect(got.Status.Blockers[0].Kind).To(Equal(networkAttachmentDefinitionGVK.Kind))
 		Expect(got.Status.Blockers[0].Name).To(Equal("claims-taken-static"))
+		// Nothing carries this address — the claim never came to own a NAD — so the
+		// reservation goes back to the pool instead of being held by a name collision.
+		Expect(got.Status.AssignedIP).To(BeEmpty())
 
 		// And the foreign object is untouched.
 		still := getNAD("claims-taken-static")
@@ -390,6 +394,86 @@ var _ = Describe("IPClaim Controller", func() {
 		Expect(again.Status.AssignedIP).To(Equal(testFirstIP))
 		Expect(getNAD("claims-taken-static").GetLabels()).To(
 			HaveKeyWithValue(ipamv1alpha1.LabelClaim, "claims-taken-ip"))
+	})
+
+	It("keeps a bound claim's address when its NAD name is taken over", func() {
+		// The other half of the release rule: an address that was published is never
+		// handed back because the NAD stopped being ours. A running VM may still be on
+		// it, and the NAD it was given may be gone — but the guest's configuration is
+		// not.
+		createPool("claims-taken-bound", testPoolSpec())
+		createClaim(testNamespace, "claims-taken-bound-ip", "claims-taken-bound", "claims-taken-bound-static")
+		reconcileClaim(testNamespace, "claims-taken-bound-ip")
+		Expect(getClaim(testNamespace, "claims-taken-bound-ip").Status.AssignedIP).To(Equal(testFirstIP))
+
+		Expect(k8sClient.Delete(ctx, getNAD("claims-taken-bound-static"))).To(Succeed())
+		foreign := newNAD(testNamespace, "claims-taken-bound-static")
+		Expect(unstructured.SetNestedField(foreign.Object, `{"name":"someone-elses"}`, "spec", "config")).To(Succeed())
+		Expect(k8sClient.Create(ctx, foreign)).To(Succeed())
+		deleteNAD("claims-taken-bound-static")
+
+		reconcileClaim(testNamespace, "claims-taken-bound-ip")
+
+		got := getClaim(testNamespace, "claims-taken-bound-ip")
+		Expect(ready(got).Reason).To(Equal(ipamv1alpha1.ReasonNADNotOwned))
+		Expect(got.Status.AssignedIP).To(Equal(testFirstIP))
+	})
+
+	It("wakes the claims waiting on a pool when an address is released", func() {
+		spec := testPoolSpec()
+		// One address, so the second claim has to wait for the first.
+		spec.Range = ipamv1alpha1.IPRange{Start: testFirstIP, End: testFirstIP}
+		createPool("claims-release", spec)
+		createClaim(testNamespace, "claims-release-a", "claims-release", "")
+		createClaim(testNamespace, "claims-release-b", "claims-release", "")
+
+		reconcileClaim(testNamespace, "claims-release-a")
+		reconcileClaim(testNamespace, "claims-release-b")
+		Expect(ready(getClaim(testNamespace, "claims-release-b")).Reason).To(Equal(ipamv1alpha1.ReasonRangeExhausted))
+
+		// Deleting the holder is the event the binary's watch passes to this map
+		// function; the second claim has to be in the result or it would stay failed
+		// with the address free.
+		Expect(k8sClient.Delete(ctx, getClaim(testNamespace, "claims-release-a"))).To(Succeed())
+
+		reqs := reconciled().pendingClaimsForPool(ctx, getClaim(testNamespace, "claims-release-b"))
+		Expect(reqs).To(ConsistOf(requestFor(testNamespace, "claims-release-b")))
+	})
+
+	It("wakes claims only on events that free an address", func() {
+		// Binding and condition rewrites take an address away; reconciling every waiting
+		// claim for those would be work that cannot change an outcome.
+		bound := &ipamv1alpha1.IPClaim{}
+		bound.Status.AssignedIP = testFirstIP
+		free := &ipamv1alpha1.IPClaim{}
+
+		p := addressReleased()
+		Expect(p.Create(event.CreateEvent{Object: free})).To(BeFalse())
+		Expect(p.Generic(event.GenericEvent{Object: bound})).To(BeFalse())
+		Expect(p.Update(event.UpdateEvent{ObjectOld: free, ObjectNew: bound})).To(BeFalse())
+		Expect(p.Update(event.UpdateEvent{ObjectOld: bound, ObjectNew: bound.DeepCopy()})).To(BeFalse())
+		Expect(p.Update(event.UpdateEvent{ObjectOld: bound, ObjectNew: free})).To(BeTrue())
+		Expect(p.Delete(event.DeleteEvent{Object: bound})).To(BeTrue())
+		Expect(p.Delete(event.DeleteEvent{Object: free})).To(BeFalse())
+	})
+
+	It("refuses a status write computed from a stale read", func() {
+		// A claim deleted and recreated under the same name while its NAD was being
+		// minted must not receive the old claim's address. The resourceVersion is what
+		// tells the two apart, so the patch has to carry it.
+		claim := createClaim(testNamespace, "claims-stale-ip", "claims-stale", "")
+		stale := claim.DeepCopy()
+
+		fresh := getClaim(testNamespace, "claims-stale-ip")
+		fresh.Status.AssignedIP = testThirdIP
+		Expect(k8sClient.Status().Update(ctx, fresh)).To(Succeed())
+
+		claim.Status.AssignedIP = testFirstIP
+		err := patchStatusIfChanged(ctx, k8sClient, stale, claim, stale.Status, claim.Status)
+		Expect(apierrors.IsConflict(err)).To(BeTrue(), "expected a conflict, got %v", err)
+
+		// And nothing of the stale write landed.
+		Expect(getClaim(testNamespace, "claims-stale-ip").Status.AssignedIP).To(Equal(testThirdIP))
 	})
 
 	It("is idempotent when the NAD already exists and is ours", func() {

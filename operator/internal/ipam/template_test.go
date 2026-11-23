@@ -226,7 +226,7 @@ func TestRenderNAD_Errors(t *testing.T) {
 			tmpl:    template(func(t *ipamv1alpha1.NADTemplate) { t.Subnet = "10.66.3.0" }),
 			nadName: testNADName,
 			addr:    valid,
-			wantErr: "not a valid CIDR",
+			wantErr: testInvalidCIDR,
 		},
 		{
 			name:    "gateway is not an address",

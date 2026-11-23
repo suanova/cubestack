@@ -26,11 +26,20 @@ import (
 // patchStatusIfChanged writes the status subresource only when it differs from
 // what the object already carries.
 //
-// Patch rather than Update: an Update carries the resourceVersion of the object
-// we read, and that read is served by the informer cache, which lags the API
-// server. Status is this controller's own observed state and needs no
-// compare-and-swap, so a merge patch drops the precondition instead of
-// 409-conflicting and forcing a retry reconcile.
+// Patch rather than Update, but with the resourceVersion of the read kept as a
+// precondition. Dropping it would let the write land on a different object than the
+// one it was computed from: a claim deleted and recreated under the same name while
+// its NAD was being minted carries a newer resourceVersion, and a merge patch
+// without the precondition would write the old claim's address and Ready condition
+// onto the replacement. The conflict an optimistic lock returns is the correct
+// outcome — the next reconcile reads the replacement, which holds nothing, and
+// allocates for it.
+//
+// The claim half of the lock costs nothing in practice: IPClaim is read through
+// APIReader (see IPClaimReconciler.APIReader), so its resourceVersion is current.
+// IPPool is read through the cache, and a pool status write can therefore lose a
+// race with a version it has not seen yet; the pool's status is written only when
+// its spec changes, and the resulting conflict is one requeued reconcile.
 //
 // Skipping the write when nothing changed matters more than it looks: the
 // controllers return without requeueing on success, so an unconditional write
@@ -44,5 +53,5 @@ func patchStatusIfChanged[S any](ctx context.Context, c client.Client, current, 
 	if equality.Semantic.DeepEqual(currentStatus, desiredStatus) {
 		return nil
 	}
-	return c.Status().Patch(ctx, desired, client.MergeFrom(current))
+	return c.Status().Patch(ctx, desired, client.MergeFromWithOptions(current, client.MergeFromWithOptimisticLock{}))
 }

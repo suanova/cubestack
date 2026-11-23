@@ -101,3 +101,41 @@ func TestDefaultNADName_TrailingSeparatorIsTrimmed(t *testing.T) {
 		t.Errorf("result %q contains a doubled separator", got)
 	}
 }
+
+// A claim name is a DNS-1123 subdomain of up to 253 characters, but a label value
+// stops at 63. Writing a long name verbatim makes the NAD uncreatable, so the value
+// has to be shortened while still telling two long names apart.
+func TestClaimLabelValue(t *testing.T) {
+	if got := ClaimLabelValue("claims-basic-ip"); got != "claims-basic-ip" {
+		t.Errorf("a short name must be written as it is, got %q", got)
+	}
+
+	if got := ClaimLabelValue(strings.Repeat("a", maxLabelValueLength)); got != strings.Repeat("a", maxLabelValueLength) {
+		t.Errorf("a name of exactly %d characters must be kept, got %q", maxLabelValueLength, got)
+	}
+
+	long := strings.Repeat("a", 250)
+	got := ClaimLabelValue(long)
+	if len(got) > maxLabelValueLength {
+		t.Errorf("result is %d chars, over the %d limit: %s", len(got), maxLabelValueLength, got)
+	}
+	if errs := validation.IsValidLabelValue(got); len(errs) > 0 {
+		t.Errorf("result %q is not a valid label value: %v", got, errs)
+	}
+
+	// The point of the digest: two long names that share a prefix must not collapse
+	// onto one label value, or the audit cannot tell their NADs apart.
+	if ClaimLabelValue(strings.Repeat("a", 240)+"-one") == ClaimLabelValue(strings.Repeat("a", 240)+"-two") {
+		t.Error("two long claim names sharing a prefix produced the same label value")
+	}
+
+	// A truncation can land on a separator, which a label value may contain only in
+	// the middle.
+	separator := strings.Repeat("a", 53) + "-" + strings.Repeat("b", 20)
+	if got := ClaimLabelValue(separator); strings.Contains(got, "--") || strings.HasSuffix(got, "-") {
+		t.Errorf("result %q contains a doubled or trailing separator", got)
+	}
+	if errs := validation.IsValidLabelValue(ClaimLabelValue(separator)); len(errs) > 0 {
+		t.Errorf("result is not a valid label value: %v", errs)
+	}
+}

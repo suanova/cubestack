@@ -119,7 +119,7 @@ func TestValidatePoolRange(t *testing.T) {
 			mutate: func(s *ipamv1alpha1.IPPoolSpec) {
 				s.NADTemplate.Subnet = "10.66.3.0"
 			},
-			wantErr: "not a valid CIDR",
+			wantErr: testInvalidCIDR,
 		},
 		{
 			name: "malformed start",
@@ -233,6 +233,36 @@ func TestValidatePoolRange(t *testing.T) {
 				s.Exclude = []ipamv1alpha1.IPRange{{Start: testBandStart, End: testBandEnd}}
 			},
 			wantErr: "exclusions cover its entire range",
+		},
+
+		// Routes reach the CNI verbatim and the static plugin rejects a destination it
+		// cannot parse — at network setup, which is after the claim said Ready. The
+		// template has to be refused before then.
+		{
+			name: "a valid route",
+			mutate: func(s *ipamv1alpha1.IPPoolSpec) {
+				s.NADTemplate.Routes = []ipamv1alpha1.NADRoute{{Dst: testRouteCIDR, GW: testGateway}}
+			},
+		},
+		{
+			name: "a route with no gateway",
+			mutate: func(s *ipamv1alpha1.IPPoolSpec) {
+				s.NADTemplate.Routes = []ipamv1alpha1.NADRoute{{Dst: testRouteCIDR}}
+			},
+		},
+		{
+			name: "a route destination that is not a CIDR",
+			mutate: func(s *ipamv1alpha1.IPPoolSpec) {
+				s.NADTemplate.Routes = []ipamv1alpha1.NADRoute{{Dst: "not-a-cidr"}}
+			},
+			wantErr: testInvalidCIDR,
+		},
+		{
+			name: "a route gateway that is not an address",
+			mutate: func(s *ipamv1alpha1.IPPoolSpec) {
+				s.NADTemplate.Routes = []ipamv1alpha1.NADRoute{{Dst: testRouteCIDR, GW: "nowhere"}}
+			},
+			wantErr: "not a valid address",
 		},
 	}
 

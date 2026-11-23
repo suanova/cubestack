@@ -35,6 +35,34 @@ const maxNADNameLength = 253
 // enough to leave most of a long name readable.
 const digestLength = 8
 
+// maxLabelValueLength is the length limit on a label value. It is not the limit on
+// a claim name — that is a DNS-1123 subdomain of up to 253 characters — so a long
+// claim name cannot be written into a label verbatim.
+const maxLabelValueLength = 63
+
+// ClaimLabelValue returns the value the claim label takes for a claim name.
+//
+// Names that fit are written as they are. Longer ones are truncated and given a
+// digest of the whole name, exactly as DefaultNADName shortens a long NAD name, so
+// two claims sharing a long prefix keep distinct values. Without the truncation the
+// API server would reject the NAD and it would never be created; the full name stays
+// on the NAD's ownerReference, which is where a reader who needs it should look.
+func ClaimLabelValue(name string) string {
+	if len(name) <= maxLabelValueLength {
+		return name
+	}
+
+	sum := sha256.Sum256([]byte(name))
+	digest := hex.EncodeToString(sum[:digestLength/2])
+
+	keep := maxLabelValueLength - len(digest) - 1
+	// A truncation can leave the prefix ending in '-' or '.', which would put a
+	// label boundary in an illegal place once the digest is appended.
+	prefix := strings.TrimRight(name[:keep], "-.")
+
+	return prefix + "-" + digest
+}
+
 // DefaultNADName derives the NAD name for a VM that did not set
 // ipam.cubestack.io/nad-name.
 //

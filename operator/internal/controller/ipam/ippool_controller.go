@@ -18,6 +18,7 @@ package ipam
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -85,6 +86,12 @@ func (r *IPPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		// condition — a pool that fails here is still accepted by the API server.
 		available.Status = metav1.ConditionFalse
 		available.Reason = ipamv1alpha1.ReasonRangeInvalid
+		// A pool whose whole band is excluded is well formed and merely empty, so it
+		// gets its own reason: the fix is to widen the range or narrow the exclusions,
+		// not to correct a field.
+		if errors.Is(err, ipamutil.ErrRangeFullyExcluded) {
+			available.Reason = ipamv1alpha1.ReasonRangeFullyExcluded
+		}
 		available.Message = err.Error()
 	}
 	apimeta.SetStatusCondition(&pool.Status.Conditions, available)

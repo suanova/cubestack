@@ -96,7 +96,7 @@ func ensureNAD(ctx context.Context, c client.Client, claim *ipamv1alpha1.IPClaim
 
 func createNAD(ctx context.Context, c client.Client, claim *ipamv1alpha1.IPClaim, rendered string) error {
 	nad := newNAD(claim.Namespace, claim.Spec.NAD)
-	nad.SetLabels(map[string]string{ipamv1alpha1.LabelClaim: claim.Name})
+	nad.SetLabels(map[string]string{ipamv1alpha1.LabelClaim: ipamutil.ClaimLabelValue(claim.Name)})
 	if err := unstructured.SetNestedField(nad.Object, rendered, "spec", "config"); err != nil {
 		return fmt.Errorf("building NAD spec: %w", err)
 	}
@@ -133,12 +133,13 @@ func createNAD(ctx context.Context, c client.Client, claim *ipamv1alpha1.IPClaim
 func reconcileNAD(ctx context.Context, c client.Client, nad *unstructured.Unstructured, claim *ipamv1alpha1.IPClaim, rendered string) error {
 	changed := false
 
+	label := ipamutil.ClaimLabelValue(claim.Name)
 	labels := nad.GetLabels()
 	if labels == nil {
 		labels = map[string]string{}
 	}
-	if labels[ipamv1alpha1.LabelClaim] != claim.Name {
-		labels[ipamv1alpha1.LabelClaim] = claim.Name
+	if labels[ipamv1alpha1.LabelClaim] != label {
+		labels[ipamv1alpha1.LabelClaim] = label
 		nad.SetLabels(labels)
 		changed = true
 	}

@@ -96,6 +96,20 @@ var _ = Describe("IPPool Controller", func() {
 		Expect(available.Message).To(ContainSubstring("must lie within subnet"))
 	})
 
+	It("publishes Available=False under its own reason when the exclusions cover the range", func() {
+		// Well formed and merely empty, so it must not read as a malformed pool: the fix
+		// is a wider range or narrower exclusions, not a corrected field.
+		spec := testPoolSpec()
+		spec.Exclude = []ipamv1alpha1.IPRange{{Start: testFirstIP, End: testThirdIP}}
+		createPool("pool-all-excluded", spec)
+		reconcilePool("pool-all-excluded")
+
+		available := conditionOf("pool-all-excluded")
+		Expect(available).NotTo(BeNil())
+		Expect(available.Status).To(Equal(metav1.ConditionFalse))
+		Expect(available.Reason).To(Equal(ipamv1alpha1.ReasonRangeFullyExcluded))
+	})
+
 	It("does not rewrite status when nothing changed", func() {
 		// The reconcilers do not requeue on success, so an unconditional status
 		// write would be the only thing generating further reconciles.
