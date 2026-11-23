@@ -176,9 +176,9 @@ spec:
                   - "Ready": True once an address is assigned and, if spec.nad was set, its NAD exists.
                     The cause of a False goes in the condition's reason -- "PoolNotFound",
                     "NamespaceNotAllowed", "RangeInvalid", "RangeExhausted", "TemplateMissing",
-                    "NADNotOwned", "AddressOutOfRange", "AddressExcluded", "AddressUnavailable",
-                    "ExactNotAllowed", "AllocationInvalid" -- rather than into a condition type of
-                    its own.
+                    "Reserved", "NADNotOwned", "AddressOutOfRange", "AddressExcluded",
+                    "AddressUnavailable", "ExactNotAllowed", "AllocationInvalid" -- rather than
+                    into a condition type of its own.
                   - "DuplicateAddress": written by the audit sweep when this claim shares its
                     address with another claim on the same subnet. A separate type because a
                     different writer owns it; removed by the next sweep that finds nothing.

@@ -96,6 +96,12 @@ const (
 	// nadTemplate, so none can be minted.
 	ReasonTemplateMissing = "TemplateMissing"
 
+	// ReasonReserved marks a claim whose address is held but whose NAD does not exist
+	// yet. Ready is False because the network the address is for is not there; the
+	// address is published first anyway, so that a claim whose NAD write fails cannot
+	// leave the address looking free to a second claim.
+	ReasonReserved = "Reserved"
+
 	// ReasonNADNotOwned marks a spec.nad whose name is already held by an object
 	// this claim does not control. Such an object is never adopted or overwritten;
 	// the claim retries once the name is free, because the NAD is watched.
