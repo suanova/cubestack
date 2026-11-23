@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { envError } from "./env";
+import { envError, type EnvVar } from "./env";
 
 describe("envError", () => {
   const roles = ["prefill", "decode", "router"];
@@ -49,5 +49,12 @@ describe("envError", () => {
   it("rejects an empty role list and an invalid name", () => {
     expect(envError([{ name: "A", value: "1", roles: [] }], roles)?.code).toBe("envRoleRequired");
     expect(envError([{ name: "MC-GID", value: "1", roles: ["prefill"] }], roles)?.code).toBe("envNameInvalid");
+  });
+
+  it("rejects a malformed entry shape instead of throwing", () => {
+    expect(envError([{ name: "A", roles: ["prefill"] } as unknown as EnvVar], roles)?.code).toBe("envNameInvalid");
+    expect(envError([{ name: true, value: "x", roles: ["prefill"] } as unknown as EnvVar], roles)?.code).toBe(
+      "envNameInvalid",
+    );
   });
 });

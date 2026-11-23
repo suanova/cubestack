@@ -42,6 +42,17 @@ export function envError(env: EnvVar[], roles: string[]): EnvError | null {
 
   const known = new Set(roles);
   for (const entry of env) {
+    // Untrusted JSON: the TypeScript shape does not survive the wire, so a
+    // malformed payload must be a 400 (not a 500 from reading .length/.startsWith).
+    const raw = entry as unknown as { name?: unknown; value?: unknown; roles?: unknown };
+    if (
+      typeof raw.name !== "string" ||
+      typeof raw.value !== "string" ||
+      !Array.isArray(raw.roles) ||
+      !raw.roles.every((role) => typeof role === "string")
+    ) {
+      return { code: "envNameInvalid", params: { name: "" } };
+    }
     if (!entry.name || entry.name.length > MAX_ENV_NAME || !ENV_NAME_RE.test(entry.name)) {
       return { code: "envNameInvalid", params: { name: entry.name } };
     }

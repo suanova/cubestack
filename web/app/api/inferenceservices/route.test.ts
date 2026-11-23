@@ -892,6 +892,12 @@ describe("inference services route", () => {
   });
 
   it("removes spec.env when PATCH sends an empty env list", async () => {
+    getNamespacedCustomObject.mockResolvedValueOnce({
+      spec: {
+        profileRef: "metax-sglang-dsv4-pd",
+        env: [{ name: "A", value: "1", roles: ["prefill"] }],
+      },
+    });
     patchNamespacedCustomObject.mockResolvedValue({});
     const { PATCH } = await importRoute();
     const req = await authedRequest(
@@ -912,6 +918,42 @@ describe("inference services route", () => {
       { op: "add", path: "/spec/overrides/decodeReplicas", value: 4 },
       { op: "remove", path: "/spec/env" },
     ]);
+  });
+
+  it("omits the env op when the service has no spec.env", async () => {
+    patchNamespacedCustomObject.mockResolvedValue({});
+    const { PATCH } = await importRoute();
+    const req = await authedRequest(
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          namespace: "project-a",
+          name: "dsv4-flash-pd",
+          overrides: { decodeReplicas: 4 },
+          env: [],
+        }),
+      },
+      "http://localhost/api/inferenceservices",
+    );
+    const res = await PATCH(req, undefined);
+    expect(res.status).toBe(200);
+    expect(patchNamespacedCustomObject.mock.calls[0][0].body).toEqual([
+      { op: "add", path: "/spec/overrides/decodeReplicas", value: 4 },
+    ]);
+  });
+
+  it("does not patch when an empty env targets a service without spec.env", async () => {
+    const { PATCH } = await importRoute();
+    const req = await authedRequest(
+      {
+        method: "PATCH",
+        body: JSON.stringify({ namespace: "project-a", name: "dsv4-flash-pd", env: [] }),
+      },
+      "http://localhost/api/inferenceservices",
+    );
+    const res = await PATCH(req, undefined);
+    expect(res.status).toBe(200);
+    expect(patchNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
   it("rejects an env entry naming an unknown role without patching", async () => {

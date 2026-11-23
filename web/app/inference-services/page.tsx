@@ -1784,6 +1784,7 @@ function DeployWizard({
   });
   const [nameError, setNameError] = useState(false);
   const [modelError, setModelError] = useState(false);
+  const [envExpanded, setEnvExpanded] = useState(false);
   // The select offers `default` plus "create a new one": the tenant namespaces
   // the platform does not manage are not listed, because a denylist of the ones
   // it does manage was always one install behind (issue #367). A namespace the
@@ -1898,7 +1899,6 @@ function DeployWizard({
     newNamespaceValid &&
     !!draft.profileRef;
   const envErr = profile ? envError(draft.env, profile.roles.map((r) => r.name)) : null;
-  const step2Valid = !!draft.modelRef && !envErr;
 
   // The value an override holds from the user or the profile, before the
   // wizard's own auto-injection. GPU-model selection reads this one: an
@@ -2147,9 +2147,18 @@ function DeployWizard({
       }
       setNameError(false);
       setNamespaceError(false);
-    } else if (step === 2 && !step2Valid) {
-      setModelError(true);
-      return; // model is required to proceed
+    } else if (step === 2) {
+      if (!draft.modelRef) {
+        setModelError(true);
+        return; // model is required to proceed
+      }
+      if (envErr) {
+        // The env error is rendered inside the advanced section: open it
+        // rather than blaming the (already valid) model field.
+        setEnvExpanded(true);
+        return;
+      }
+      setModelError(false);
     }
     setStep((s) => Math.min(3, s + 1));
   };
@@ -2317,7 +2326,7 @@ function DeployWizard({
                   )}
                 </WizField>
                 <WizField label={t("inf.deploy.profile")} hint={profile ? profileSummary(profile) : undefined}>
-                  <Select size="small" fullWidth value={draft.profileRef} onChange={(e) => setDraft((prev) => ({ ...prev, profileRef: e.target.value, modelRef: "", overrides: {} }))}>
+                  <Select size="small" fullWidth value={draft.profileRef} onChange={(e) => setDraft((prev) => ({ ...prev, profileRef: e.target.value, modelRef: "", overrides: {}, env: [] }))}>
                     {(options?.profiles ?? []).map((p) => (
                       <MenuItem key={p.name} value={p.name}>{p.name}</MenuItem>
                     ))}
@@ -2425,6 +2434,8 @@ function DeployWizard({
 
                 {profile && (
                   <Accordion
+                    expanded={envExpanded}
+                    onChange={(_, expanded) => setEnvExpanded(expanded)}
                     disableGutters
                     sx={{ mt: 3, border: 1, borderColor: "divider", borderRadius: "var(--radius)", "&:before": { display: "none" } }}
                   >

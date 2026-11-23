@@ -1462,6 +1462,38 @@ describe("deploy wizard", () => {
     act(() => root.unmount());
   });
 
+  it("reports an env error without blaming the model field", async () => {
+    const { container, root } = renderWithBoth();
+    await act(async () => {});
+    await act(async () => {
+      (container.querySelector('[data-od-id="deploy-btn"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await fillNameAndGoToStep2();
+    const step2 = document.body.querySelector('[data-step="2"]') as HTMLElement;
+    await pickModel(step2);
+
+    await act(async () => {
+      (step2.querySelector('[data-od-id="deploy-env-section"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+    await act(async () => {
+      (step2.querySelector('[data-od-id="deploy-env-add"]') as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    // Leave the name empty; the model is valid, so Next must not blame it.
+    await act(async () => {
+      (Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent === "下一步") as HTMLElement).click();
+    });
+    await act(async () => {});
+
+    expect(step2.querySelector('[data-od-id="deploy-env-error"]')?.textContent).toContain("环境变量");
+    expect(step2.textContent).not.toContain("请选择一个模型版本");
+
+    act(() => root.unmount());
+  });
+
   it("publishes only the catalog paths that stay selected", async () => {
     const { container, root, calls } = renderWithBoth();
     await act(async () => {});

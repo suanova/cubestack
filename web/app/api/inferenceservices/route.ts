@@ -578,8 +578,10 @@ export const PATCH = withAuth(async (req) => {
     const co = getCustomObjectsClient();
     // Resolve the target service and its profile so the override values and
     // env roles can be validated (same contract as POST) before touching the
-    // cluster.
+    // cluster. hadEnv records whether spec.env exists: a JSON-Patch `remove`
+    // on an absent path rejects the whole patch.
     let profile: Profile | undefined;
+    let hadEnv = false;
     try {
       const [svc, profileRes] = await Promise.all([
         co.getNamespacedCustomObject({
@@ -591,7 +593,9 @@ export const PATCH = withAuth(async (req) => {
         }),
         co.listClusterCustomObject({ group: GROUP, version: VERSION, plural: PLURAL_PROFILE }),
       ]);
-      const profileRef = (svc as { spec?: { profileRef?: string } })?.spec?.profileRef;
+      const spec = (svc as Isvc).spec;
+      const profileRef = spec?.profileRef;
+      hadEnv = Array.isArray(spec?.env);
       const profiles = (profileRes.items ?? []) as Profile[];
       profile = profileRef ? profiles.find((p) => p.metadata?.name === profileRef) : undefined;
     } catch (err) {
@@ -624,11 +628,17 @@ export const PATCH = withAuth(async (req) => {
       );
     }
     if (body.env) {
-      patch.push(
-        body.env.length
-          ? { op: "add", path: "/spec/env", value: body.env }
-          : { op: "remove", path: "/spec/env" },
-      );
+      if (body.env.length > 0) {
+        patch.push({ op: "add", path: "/spec/env", value: body.env });
+      } else if (hadEnv) {
+        // RFC 6902 `remove` rejects the whole patch when the path is absent,
+        // and the console sends `env: []` on every Apply (including services
+        // that never had spec.env), so only remove when it is actually there.
+        patch.push({ op: "remove", path: "/spec/env" });
+      }
+    }
+    if (patch.length === 0) {
+      return Response.json({ ok: true });
     }
     await co.patchNamespacedCustomObject({
       group: GROUP,
