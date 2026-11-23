@@ -8,10 +8,11 @@
 // (decodeReplicas / prefillReplicas / groupSize) via a PATCH. Metrics are
 // best-effort Prometheus data and show an empty state when absent.
 
-import { Box, Button, Checkbox, Dialog, DialogActions, DialogContent, DialogTitle, Menu, MenuItem, Select, Switch, TextField, Typography, Stepper, Step, StepLabel } from "@mui/material";
+import { Accordion, AccordionDetails, AccordionSummary, Box, Button, Checkbox, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Menu, MenuItem, Select, Switch, TextField, Typography, Stepper, Step, StepLabel } from "@mui/material";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { CreateOptionsResponse } from "@/app/api/inferenceservices/options/route";
+import { envError, type EnvVar } from "@/lib/inferenceservices/env";
 import type { InferenceServiceSummary } from "@/app/api/inferenceservices/route";
 import { validationMessage, type ValidationErrorBody } from "@/lib/api-error";
 import { apiFetch } from "@/lib/base-path";
@@ -96,10 +97,21 @@ function statusDetail(s: InferenceServiceSummary): string | null {
 }
 
 function StatusCell({ s }: { s: InferenceServiceSummary }) {
+  const { t } = useI18n();
   const detail = statusDetail(s);
+  const customized = s.env.length > 0 || s.conditions.some((c) => c.type === "Customized" && c.status === "True");
   return (
     <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: "4px", minWidth: 0 }}>
       <StatusChip phase={s.phase} />
+      {customized ? (
+        <Typography
+          component="span"
+          data-od-id={`svc-customized-${s.name}`}
+          sx={{ fontSize: 10.5, px: "6px", py: "1px", borderRadius: "4px", bgcolor: soft("#8a6d3b", 12), color: "#8a6d3b" }}
+        >
+          {t("inf.env.customized")}
+        </Typography>
+      ) : null}
       {detail ? (
         <Box
           data-od-id={`svc-status-detail-${s.name}`}
@@ -347,7 +359,7 @@ export default function InferenceServicesPage() {
   });
 
   const handleApply = useCallback(
-    (overrides: Record<string, OverrideValue>) => {
+    (overrides: Record<string, OverrideValue>, env: EnvVar[]) => {
       if (!selected) return;
       setScaleMsg(null);
       setScaleErr(null);
@@ -355,7 +367,7 @@ export default function InferenceServicesPage() {
       apiFetch("/api/inferenceservices", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ namespace: selected.namespace, name: selected.name, overrides }),
+        body: JSON.stringify({ namespace: selected.namespace, name: selected.name, overrides, env }),
       })
         .then(async (res) => {
           const body = (await res.json().catch(() => ({}))) as ValidationErrorBody;
@@ -719,7 +731,7 @@ function ServiceTable({
   busy: boolean;
   msg: string | null;
   err: string | null;
-  onApply: (overrides: Record<string, OverrideValue>) => void;
+  onApply: (overrides: Record<string, OverrideValue>, env: EnvVar[]) => void;
 }) {
   const { t } = useI18n();
   const thSx = {
@@ -943,7 +955,7 @@ function DetailPanel({
   busy: boolean;
   msg: string | null;
   err: string | null;
-  onApply: (overrides: Record<string, OverrideValue>) => void;
+  onApply: (overrides: Record<string, OverrideValue>, env: EnvVar[]) => void;
 }) {
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: "14px", minWidth: 0 }}>
@@ -1334,7 +1346,7 @@ function ScaleCard({
   busy: boolean;
   msg: string | null;
   err: string | null;
-  onApply: (overrides: Record<string, OverrideValue>) => void;
+  onApply: (overrides: Record<string, OverrideValue>, env: EnvVar[]) => void;
 }) {
   const { t } = useI18n();
   const [values, setValues] = useState<Record<string, OverrideValue>>(() =>
@@ -1358,14 +1370,28 @@ function ScaleCard({
   }, [s.namespace, s.name, currentValueKey]);
   /* eslint-enable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps */
 
+  const currentEnvKey = JSON.stringify(s.env);
+  const [envValues, setEnvValues] = useState<EnvVar[]>(s.env);
+  /* eslint-disable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps */
+  useEffect(() => {
+    setEnvValues(s.env);
+  }, [s.namespace, s.name, currentEnvKey]);
+  /* eslint-enable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps */
+
   // Effective value per declared knob: the local edit when present, else the
   // service's value or declared default (values can lag one render behind a
   // poll that changed the declared override set).
   const effective: Record<string, OverrideValue> = Object.fromEntries(
     s.overrides.map((o) => [o.name, values[o.name] ?? scaleInitial(o)]),
   );
-  const invalid = s.overrides.some((o) => !scaleValueValid(o, effective[o.name]));
-  const unchanged = JSON.stringify(s.overrides.map((o) => [o.name, effective[o.name]])) === currentValueKey;
+  const envRoles: EnvRole[] = s.roleNames.map((name) => ({ name }));
+  const envErr = envError(envValues, s.roleNames);
+  const overridesInvalid = s.overrides.some((o) => !scaleValueValid(o, effective[o.name]));
+  const invalid = overridesInvalid || envErr !== null;
+  const overridesUnchanged =
+    JSON.stringify(s.overrides.map((o) => [o.name, effective[o.name]])) === currentValueKey;
+  const envChanged = JSON.stringify(envValues) !== currentEnvKey;
+  const unchanged = overridesUnchanged && !envChanged;
 
   return (
     <Card title={t("inf.scale.title")} meta={t("inf.scale.hint")}>
@@ -1380,6 +1406,15 @@ function ScaleCard({
           ))}
         </Box>
       )}
+      <Box sx={{ px: "18px", pb: "12px" }}>
+        <Typography sx={{ fontSize: 12.5, fontWeight: 550, mb: "7px" }}>{t("inf.env.title")}</Typography>
+        <EnvEditor idPrefix="scale" env={envValues} roles={envRoles} onChange={setEnvValues} />
+        {envErr ? (
+          <Typography data-od-id="scale-env-error" sx={{ mt: "6px", fontSize: 11.5, color: soft(STATUS_ERR, 70) }}>
+            {validationMessage(t, { error: envErr.code, params: envErr.params }, 400, "inf")}
+          </Typography>
+        ) : null}
+      </Box>
       {err ? (
         <Box sx={{ px: "18px", pb: "8px", fontSize: 11.5, color: soft(STATUS_ERR, 70) }}>{err}</Box>
       ) : null}
@@ -1387,7 +1422,7 @@ function ScaleCard({
         <Box sx={{ px: "18px", pb: "8px", fontSize: 11.5, color: "text.secondary" }}>{msg}</Box>
       ) : null}
       <Box sx={{ px: "18px", pb: "14px" }}>
-        <Button variant="contained" disabled={busy || invalid || unchanged || s.overrides.length === 0} onClick={() => onApply(effective)} sx={{ textTransform: "none", fontSize: 12.5 }}>
+        <Button variant="contained" disabled={busy || invalid || unchanged} onClick={() => onApply(effective, envValues)} sx={{ textTransform: "none", fontSize: 12.5 }}>
           {busy ? t("inf.scale.applying") : t("inf.scale.apply")}
         </Button>
       </Box>
@@ -1578,6 +1613,7 @@ interface DeployDraft {
   profileRef: string;
   modelRef: string;
   overrides: Record<string, OverrideValue>;
+  env: EnvVar[];
   // Publishing to the model catalog is mandatory, so the route is always set.
   aigatewayRouter: AIGatewayRouter;
   modelName: string;
@@ -1587,6 +1623,121 @@ interface DeployDraft {
 }
 
 type OverrideDecl = CreateOptionsResponse["profiles"][number]["overrides"][number];
+
+// EnvRole is the subset of a profile role the env editor needs.
+type EnvRole = { name: string; envNames?: string[] };
+
+// EnvEditor is the shared spec.env row editor: the deploy wizard and the scale
+// card both use it. Single-role profiles hide the role picker and fill the only
+// role automatically; multi-role profiles require an explicit choice.
+function EnvEditor({
+  idPrefix,
+  env,
+  roles,
+  onChange,
+}: {
+  idPrefix: string;
+  env: EnvVar[];
+  roles: EnvRole[];
+  onChange: (env: EnvVar[]) => void;
+}) {
+  const { t } = useI18n();
+  const singleRole = roles.length === 1 ? roles[0].name : null;
+
+  const update = (index: number, patch: Partial<EnvVar>) =>
+    onChange(env.map((entry, i) => (i === index ? { ...entry, ...patch } : entry)));
+
+  const toggleRole = (index: number, role: string) => {
+    const current = env[index].roles;
+    update(index, {
+      roles: current.includes(role) ? current.filter((r) => r !== role) : [...current, role],
+    });
+  };
+
+  return (
+    <Box data-od-id={`${idPrefix}-env-editor`}>
+      {env.length === 0 ? (
+        <Typography sx={{ fontSize: 12, color: "text.secondary" }}>{t("inf.env.none")}</Typography>
+      ) : (
+        <Box sx={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+          {env.map((entry, i) => {
+            const conflicts = roles.filter(
+              (role) => entry.roles.includes(role.name) && (role.envNames ?? []).includes(entry.name),
+            );
+            return (
+              <Box key={i} sx={{ border: 1, borderColor: "divider", borderRadius: "var(--radius)", p: "10px" }}>
+                <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
+                  <TextField
+                    data-od-id={`${idPrefix}-env-name-${i}`}
+                    size="small"
+                    label={t("inf.env.name")}
+                    value={entry.name}
+                    onChange={(e) => update(i, { name: e.target.value })}
+                  />
+                  <TextField
+                    data-od-id={`${idPrefix}-env-value-${i}`}
+                    size="small"
+                    label={t("inf.env.value")}
+                    value={entry.value}
+                    onChange={(e) => update(i, { value: e.target.value })}
+                  />
+                </Box>
+                <Box sx={{ mt: "8px", display: "flex", flexWrap: "wrap", gap: "6px", alignItems: "center" }}>
+                  {singleRole ? (
+                    <Typography sx={{ fontSize: 11.5, color: "text.secondary" }}>
+                      {t("inf.env.appliesTo", { role: roleLabel(singleRole) })}
+                    </Typography>
+                  ) : (
+                    roles.map((role) => (
+                      <Chip
+                        key={role.name}
+                        data-od-id={`${idPrefix}-env-role-${i}-${role.name}`}
+                        size="small"
+                        clickable
+                        color={entry.roles.includes(role.name) ? "primary" : "default"}
+                        variant={entry.roles.includes(role.name) ? "filled" : "outlined"}
+                        label={roleLabel(role.name)}
+                        onClick={() => toggleRole(i, role.name)}
+                      />
+                    ))
+                  )}
+                  <Button
+                    data-od-id={`${idPrefix}-env-delete-${i}`}
+                    size="small"
+                    color="error"
+                    sx={{ textTransform: "none", fontSize: 11.5 }}
+                    onClick={() => onChange(env.filter((_, j) => j !== i))}
+                  >
+                    {t("inf.env.remove")}
+                  </Button>
+                </Box>
+                {conflicts.length > 0 ? (
+                  <Typography
+                    data-od-id={`${idPrefix}-env-warning-${i}`}
+                    sx={{ mt: "6px", fontSize: 11.5, color: soft(STATUS_ERR, 70) }}
+                  >
+                    {t("inf.env.warning", {
+                      name: entry.name,
+                      roles: conflicts.map((role) => roleLabel(role.name)).join(", "),
+                    })}
+                  </Typography>
+                ) : null}
+              </Box>
+            );
+          })}
+        </Box>
+      )}
+      <Button
+        data-od-id={`${idPrefix}-env-add`}
+        size="small"
+        sx={{ mt: "8px", textTransform: "none", fontSize: 12 }}
+        onClick={() => onChange([...env, { name: "", value: "", roles: singleRole ? [singleRole] : [] }])}
+      >
+        {t("inf.env.add")}
+      </Button>
+    </Box>
+  );
+}
 
 function DeployWizard({
   open,
@@ -1610,12 +1761,14 @@ function DeployWizard({
     profileRef: "",
     modelRef: "",
     overrides: {},
+    env: [],
     aigatewayRouter: AIGATEWAY_ROUTER_PRIVATE,
     modelName: "",
     paths: [...CATALOG_PATHS],
   });
   const [nameError, setNameError] = useState(false);
   const [modelError, setModelError] = useState(false);
+  const [envExpanded, setEnvExpanded] = useState(false);
   // The select offers `default` plus "create a new one": the tenant namespaces
   // the platform does not manage are not listed, because a denylist of the ones
   // it does manage was always one install behind (issue #367). A namespace the
@@ -1729,7 +1882,7 @@ function DeployWizard({
     !!effectiveNamespace &&
     newNamespaceValid &&
     !!draft.profileRef;
-  const step2Valid = !!draft.modelRef;
+  const envErr = profile ? envError(draft.env, profile.roles.map((r) => r.name)) : null;
 
   // The value an override holds from the user or the profile, before the
   // wizard's own auto-injection. GPU-model selection reads this one: an
@@ -1978,9 +2131,18 @@ function DeployWizard({
       }
       setNameError(false);
       setNamespaceError(false);
-    } else if (step === 2 && !step2Valid) {
-      setModelError(true);
-      return; // model is required to proceed
+    } else if (step === 2) {
+      if (!draft.modelRef) {
+        setModelError(true);
+        return; // model is required to proceed
+      }
+      if (envErr) {
+        // The env error is rendered inside the advanced section: open it
+        // rather than blaming the (already valid) model field.
+        setEnvExpanded(true);
+        return;
+      }
+      setModelError(false);
     }
     setStep((s) => Math.min(3, s + 1));
   };
@@ -2006,6 +2168,7 @@ function DeployWizard({
       profileRef: draft.profileRef,
       modelRef: draft.modelRef,
       overrides,
+      env: draft.env,
       route: { aigatewayRouter: draft.aigatewayRouter, modelName: draft.modelName.trim(), paths: draft.paths },
     };
     // The namespace first, then the service in it: the wizard no longer offers
@@ -2147,7 +2310,7 @@ function DeployWizard({
                   )}
                 </WizField>
                 <WizField label={t("inf.deploy.profile")} hint={profile ? profileSummary(profile) : undefined}>
-                  <Select size="small" fullWidth value={draft.profileRef} onChange={(e) => setDraft((prev) => ({ ...prev, profileRef: e.target.value, modelRef: "", overrides: {} }))}>
+                  <Select size="small" fullWidth value={draft.profileRef} onChange={(e) => setDraft((prev) => ({ ...prev, profileRef: e.target.value, modelRef: "", overrides: {}, env: [] }))}>
                     {(options?.profiles ?? []).map((p) => (
                       <MenuItem key={p.name} value={p.name}>{p.name}</MenuItem>
                     ))}
@@ -2253,6 +2416,33 @@ function DeployWizard({
                   </Box>
                 )}
 
+                {profile && (
+                  <Accordion
+                    expanded={envExpanded}
+                    onChange={(_, expanded) => setEnvExpanded(expanded)}
+                    disableGutters
+                    sx={{ mt: 3, border: 1, borderColor: "divider", borderRadius: "var(--radius)", "&:before": { display: "none" } }}
+                  >
+                    <AccordionSummary data-od-id="deploy-env-section">
+                      <Typography sx={{ fontSize: 12.5, fontWeight: 600 }}>{t("inf.env.title")}</Typography>
+                    </AccordionSummary>
+                    <AccordionDetails>
+                      <Typography sx={{ fontSize: 11.5, color: "text.secondary", mb: "8px" }}>{t("inf.env.hint")}</Typography>
+                      <EnvEditor
+                        idPrefix="deploy"
+                        env={draft.env}
+                        roles={profile.roles}
+                        onChange={(env) => setField("env", env)}
+                      />
+                      {envErr ? (
+                        <Typography data-od-id="deploy-env-error" sx={{ mt: "8px", fontSize: 11.5, color: soft(STATUS_ERR, 70) }}>
+                          {validationMessage(t, { error: envErr.code, params: envErr.params }, 400, "inf")}
+                        </Typography>
+                      ) : null}
+                    </AccordionDetails>
+                  </Accordion>
+                )}
+
                 <Box sx={{ mt: 3, border: 1, borderColor: "divider", borderRadius: "var(--radius)", p: "14px" }}>
                   <Typography sx={{ fontSize: 12.5, fontWeight: 600 }}>{t("inf.deploy.route")}</Typography>
                   <Box sx={{ mt: "12px", display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
@@ -2317,6 +2507,13 @@ function DeployWizard({
                           return [`${t("inf.deploy.override")} ${overrideDisplayName(o.name, t("inf.deploy.rdmaType"))}`, Array.isArray(v) ? v.join(", ") : String(v)] as [string, string];
                         })
                       : []),
+                    ...draft.env.map(
+                      (e) =>
+                        [
+                          `${t("inf.env.title")} ${e.name}`,
+                          `${e.value} · ${e.roles.map(roleLabel).join(", ")}`,
+                        ] as [string, string],
+                    ),
                     [t("inf.deploy.route"), `${t("inf.params.published")} · ${draft.aigatewayRouter === AIGATEWAY_ROUTER_PRIVATE ? t("inf.deploy.aigatewayRouterPrivate") : t("inf.deploy.aigatewayRouterPublic")} · ${draft.modelName} · ${draft.paths.join(" ")}`],
                   ]}
                 />
