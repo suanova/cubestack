@@ -97,10 +97,21 @@ function statusDetail(s: InferenceServiceSummary): string | null {
 }
 
 function StatusCell({ s }: { s: InferenceServiceSummary }) {
+  const { t } = useI18n();
   const detail = statusDetail(s);
+  const customized = s.env.length > 0 || s.conditions.some((c) => c.type === "Customized" && c.status === "True");
   return (
     <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: "4px", minWidth: 0 }}>
       <StatusChip phase={s.phase} />
+      {customized ? (
+        <Typography
+          component="span"
+          data-od-id={`svc-customized-${s.name}`}
+          sx={{ fontSize: 10.5, px: "6px", py: "1px", borderRadius: "4px", bgcolor: soft("#8a6d3b", 12), color: "#8a6d3b" }}
+        >
+          {t("inf.env.customized")}
+        </Typography>
+      ) : null}
       {detail ? (
         <Box
           data-od-id={`svc-status-detail-${s.name}`}
@@ -348,7 +359,7 @@ export default function InferenceServicesPage() {
   });
 
   const handleApply = useCallback(
-    (overrides: Record<string, OverrideValue>) => {
+    (overrides: Record<string, OverrideValue>, env: EnvVar[]) => {
       if (!selected) return;
       setScaleMsg(null);
       setScaleErr(null);
@@ -356,7 +367,7 @@ export default function InferenceServicesPage() {
       apiFetch("/api/inferenceservices", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ namespace: selected.namespace, name: selected.name, overrides }),
+        body: JSON.stringify({ namespace: selected.namespace, name: selected.name, overrides, env }),
       })
         .then(async (res) => {
           const body = (await res.json().catch(() => ({}))) as ValidationErrorBody;
@@ -720,7 +731,7 @@ function ServiceTable({
   busy: boolean;
   msg: string | null;
   err: string | null;
-  onApply: (overrides: Record<string, OverrideValue>) => void;
+  onApply: (overrides: Record<string, OverrideValue>, env: EnvVar[]) => void;
 }) {
   const { t } = useI18n();
   const thSx = {
@@ -944,7 +955,7 @@ function DetailPanel({
   busy: boolean;
   msg: string | null;
   err: string | null;
-  onApply: (overrides: Record<string, OverrideValue>) => void;
+  onApply: (overrides: Record<string, OverrideValue>, env: EnvVar[]) => void;
 }) {
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: "14px", minWidth: 0 }}>
@@ -1335,7 +1346,7 @@ function ScaleCard({
   busy: boolean;
   msg: string | null;
   err: string | null;
-  onApply: (overrides: Record<string, OverrideValue>) => void;
+  onApply: (overrides: Record<string, OverrideValue>, env: EnvVar[]) => void;
 }) {
   const { t } = useI18n();
   const [values, setValues] = useState<Record<string, OverrideValue>>(() =>
@@ -1359,14 +1370,31 @@ function ScaleCard({
   }, [s.namespace, s.name, currentValueKey]);
   /* eslint-enable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps */
 
+  const currentEnvKey = JSON.stringify(s.env);
+  const [envValues, setEnvValues] = useState<EnvVar[]>(s.env);
+  /* eslint-disable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps */
+  useEffect(() => {
+    setEnvValues(s.env);
+  }, [s.namespace, s.name, currentEnvKey]);
+  /* eslint-enable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps */
+
   // Effective value per declared knob: the local edit when present, else the
   // service's value or declared default (values can lag one render behind a
   // poll that changed the declared override set).
   const effective: Record<string, OverrideValue> = Object.fromEntries(
     s.overrides.map((o) => [o.name, values[o.name] ?? scaleInitial(o)]),
   );
-  const invalid = s.overrides.some((o) => !scaleValueValid(o, effective[o.name]));
-  const unchanged = JSON.stringify(s.overrides.map((o) => [o.name, effective[o.name]])) === currentValueKey;
+  const envRoles: EnvRole[] = s.roleNames.map((name) => ({
+    name,
+    gpuPerPod: s.gpuRoles.find((g) => g.name === name)?.gpuPerPod ?? null,
+  }));
+  const envErr = envError(envValues, s.roleNames);
+  const overridesInvalid = s.overrides.some((o) => !scaleValueValid(o, effective[o.name]));
+  const invalid = overridesInvalid || envErr !== null;
+  const overridesUnchanged =
+    JSON.stringify(s.overrides.map((o) => [o.name, effective[o.name]])) === currentValueKey;
+  const envChanged = JSON.stringify(envValues) !== currentEnvKey;
+  const unchanged = overridesUnchanged && !envChanged;
 
   return (
     <Card title={t("inf.scale.title")} meta={t("inf.scale.hint")}>
@@ -1381,6 +1409,15 @@ function ScaleCard({
           ))}
         </Box>
       )}
+      <Box sx={{ px: "18px", pb: "12px" }}>
+        <Typography sx={{ fontSize: 12.5, fontWeight: 550, mb: "7px" }}>{t("inf.env.summary")}</Typography>
+        <EnvEditor idPrefix="scale" env={envValues} roles={envRoles} onChange={setEnvValues} />
+        {envErr ? (
+          <Typography data-od-id="scale-env-error" sx={{ mt: "6px", fontSize: 11.5, color: soft(STATUS_ERR, 70) }}>
+            {validationMessage(t, { error: envErr.code, params: envErr.params }, 400, "inf")}
+          </Typography>
+        ) : null}
+      </Box>
       {err ? (
         <Box sx={{ px: "18px", pb: "8px", fontSize: 11.5, color: soft(STATUS_ERR, 70) }}>{err}</Box>
       ) : null}
@@ -1388,7 +1425,7 @@ function ScaleCard({
         <Box sx={{ px: "18px", pb: "8px", fontSize: 11.5, color: "text.secondary" }}>{msg}</Box>
       ) : null}
       <Box sx={{ px: "18px", pb: "14px" }}>
-        <Button variant="contained" disabled={busy || invalid || unchanged || s.overrides.length === 0} onClick={() => onApply(effective)} sx={{ textTransform: "none", fontSize: 12.5 }}>
+        <Button variant="contained" disabled={busy || invalid || unchanged} onClick={() => onApply(effective, envValues)} sx={{ textTransform: "none", fontSize: 12.5 }}>
           {busy ? t("inf.scale.applying") : t("inf.scale.apply")}
         </Button>
       </Box>
@@ -1590,6 +1627,9 @@ interface DeployDraft {
 
 type OverrideDecl = CreateOptionsResponse["profiles"][number]["overrides"][number];
 
+// EnvRole is the subset of a profile role the env editor needs.
+type EnvRole = { name: string; gpuPerPod?: number | null; envNames?: string[] };
+
 // EnvEditor is the shared spec.env row editor: the deploy wizard and the scale
 // card both use it. Single-role profiles hide the role picker and fill the only
 // role automatically; multi-role profiles require an explicit choice.
@@ -1601,7 +1641,7 @@ function EnvEditor({
 }: {
   idPrefix: string;
   env: EnvVar[];
-  roles: CreateOptionsResponse["profiles"][number]["roles"];
+  roles: EnvRole[];
   onChange: (env: EnvVar[]) => void;
 }) {
   const { t } = useI18n();
@@ -1625,7 +1665,7 @@ function EnvEditor({
         <Box sx={{ display: "flex", flexDirection: "column", gap: "10px" }}>
           {env.map((entry, i) => {
             const conflicts = roles.filter(
-              (role) => entry.roles.includes(role.name) && role.envNames.includes(entry.name),
+              (role) => entry.roles.includes(role.name) && (role.envNames ?? []).includes(entry.name),
             );
             return (
               <Box key={i} sx={{ border: 1, borderColor: "divider", borderRadius: "var(--radius)", p: "10px" }}>
