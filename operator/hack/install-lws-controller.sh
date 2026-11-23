@@ -130,9 +130,10 @@ KIND="${KIND_BIN}" DOCKER="${DOCKER}" \
 
 # --- render + apply the full upstream default, CRDs included ---
 # The leaderworkerset/disaggregatedset CRDs are part of this install: the
-# chart ships only the ai.cubestack.io CRDs. Server-side apply (below) is
-# required because client-side apply stamps a last-applied-configuration
-# annotation that exceeds the per-object annotation limit on these large CRDs.
+# chart ships only the CubeStack CRDs (ai.cubestack.io, ipam.cubestack.io).
+# Server-side apply (below) is required because client-side apply stamps a
+# last-applied-configuration annotation that exceeds the per-object annotation
+# limit on these large CRDs.
 OUT="$(mktemp)"
 trap 'rm -f "${OUT}"' EXIT
 "${KUSTOMIZE}" build "${LWS_MOD}/config/default" > "${OUT}"

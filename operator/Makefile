@@ -717,7 +717,7 @@ devenv-e2e-cleanup: ## Delete namespaces left behind by an interrupted run
 		delete namespaces -l e2e.cubestack.io/run=devenv-conformance --wait=false
 
 .PHONY: helm-crds-sync
-helm-crds-sync: ## Copy the ai.cubestack.io CRDs from config/crd/bases into the chart (crds/ is not committed)
+helm-crds-sync: ## Copy the CRDs from config/crd/bases into the chart (crds/ is not committed)
 	rm -rf $(HELM_CHART_DIR)/crds
 	mkdir -p $(HELM_CHART_DIR)/crds
 	cp config/crd/bases/*.yaml $(HELM_CHART_DIR)/crds/
