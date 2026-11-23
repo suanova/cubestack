@@ -1384,10 +1384,7 @@ function ScaleCard({
   const effective: Record<string, OverrideValue> = Object.fromEntries(
     s.overrides.map((o) => [o.name, values[o.name] ?? scaleInitial(o)]),
   );
-  const envRoles: EnvRole[] = s.roleNames.map((name) => ({
-    name,
-    gpuPerPod: s.gpuRoles.find((g) => g.name === name)?.gpuPerPod ?? null,
-  }));
+  const envRoles: EnvRole[] = s.roleNames.map((name) => ({ name }));
   const envErr = envError(envValues, s.roleNames);
   const overridesInvalid = s.overrides.some((o) => !scaleValueValid(o, effective[o.name]));
   const invalid = overridesInvalid || envErr !== null;
@@ -1628,7 +1625,7 @@ interface DeployDraft {
 type OverrideDecl = CreateOptionsResponse["profiles"][number]["overrides"][number];
 
 // EnvRole is the subset of a profile role the env editor needs.
-type EnvRole = { name: string; gpuPerPod?: number | null; envNames?: string[] };
+type EnvRole = { name: string; envNames?: string[] };
 
 // EnvEditor is the shared spec.env row editor: the deploy wizard and the scale
 // card both use it. Single-role profiles hide the role picker and fill the only
@@ -1699,23 +1696,10 @@ function EnvEditor({
                         clickable
                         color={entry.roles.includes(role.name) ? "primary" : "default"}
                         variant={entry.roles.includes(role.name) ? "filled" : "outlined"}
-                        label={`${roleLabel(role.name)}${(role.gpuPerPod ?? 0) > 0 ? " · GPU" : " · CPU"}`}
+                        label={roleLabel(role.name)}
                         onClick={() => toggleRole(i, role.name)}
                       />
                     ))
-                  )}
-                  {singleRole ? null : (
-                    <Button
-                      size="small"
-                      sx={{ textTransform: "none", fontSize: 11.5 }}
-                      onClick={() =>
-                        update(i, {
-                          roles: roles.filter((r) => (r.gpuPerPod ?? 0) > 0).map((r) => r.name),
-                        })
-                      }
-                    >
-                      {t("inf.env.gpuRoles")}
-                    </Button>
                   )}
                   <Button
                     data-od-id={`${idPrefix}-env-delete-${i}`}

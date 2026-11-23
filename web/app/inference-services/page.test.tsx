@@ -1373,6 +1373,11 @@ describe("deploy wizard", () => {
     });
     await act(async () => {});
 
+    // Role names carry the meaning; no GPU/CPU suffix or bulk GPU-roles action.
+    const prefillChip = step2.querySelector('[data-od-id="deploy-env-role-0-prefill"]') as HTMLElement;
+    expect(prefillChip.textContent).toBe("Prefill");
+    expect(step2.querySelector('[data-od-id="deploy-env-editor"]')?.textContent).not.toContain("选择 GPU roles");
+
     await act(async () => {
       (Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent === "下一步") as HTMLElement).click();
     });
