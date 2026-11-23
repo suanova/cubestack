@@ -17,6 +17,7 @@ limitations under the License.
 package ipam
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 
@@ -26,8 +27,11 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	ipamv1alpha1 "github.com/suanova/cubestack/api/ipam/v1alpha1"
 )
@@ -498,6 +502,86 @@ var _ = Describe("IPClaim Controller", func() {
 		gone := &ipamv1alpha1.IPClaim{}
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx,
 			client.ObjectKey{Namespace: testNamespace, Name: "claims-stuck-ip"}, gone))).To(BeTrue())
+	})
+
+	It("finishes a deleting claim when its NAD goes, with no manual reconcile", func() {
+		// Every other spec here calls Reconcile itself, which cannot tell a working
+		// watch from a missing one. This one runs the controller in a manager scoped to
+		// a namespace of its own — so it sees no other spec's fixtures — and lets the
+		// NAD's deletion be the only thing that finishes the claim.
+		const watchNS = "ipam-watch"
+
+		createNamespace(watchNS)
+
+		mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+			Scheme:                 k8sClient.Scheme(),
+			Metrics:                metricsserver.Options{BindAddress: "0"},
+			HealthProbeBindAddress: "0",
+			Cache:                  cache.Options{DefaultNamespaces: map[string]cache.Config{watchNS: {}}},
+		})
+		Expect(err).NotTo(HaveOccurred())
+
+		running := &IPClaimReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Scheme: mgr.GetScheme()}
+		Expect(running.SetupWithManager(mgr)).To(Succeed())
+
+		mgrCtx, stop := context.WithCancel(ctx)
+		started := make(chan error, 1)
+		go func() { started <- mgr.Start(mgrCtx) }()
+		DeferCleanup(func() {
+			stop()
+			ExpectWithOffset(1, <-started).NotTo(HaveOccurred())
+		})
+
+		spec := testPoolSpec()
+		spec.Range = ipamv1alpha1.IPRange{Start: "10.66.3.170", End: "10.66.3.171"}
+		spec.Namespaces = []string{watchNS}
+		createPool("watch-pool", spec)
+		createClaim(watchNS, "watch-ip", "watch-pool", "watch-static")
+		DeferCleanup(func() {
+			nad := newNAD(watchNS, "watch-static")
+			ExpectWithOffset(1, client.IgnoreNotFound(k8sClient.Delete(ctx, nad))).To(Succeed())
+		})
+
+		claimIP := func() string {
+			claim := &ipamv1alpha1.IPClaim{}
+			if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: watchNS, Name: "watch-ip"}, claim); err != nil {
+				return ""
+			}
+			return claim.Status.AssignedIP
+		}
+		Eventually(claimIP, "30s").Should(Equal("10.66.3.170"))
+
+		// Hold the NAD so its deletion is recorded but not completed, which is the
+		// state the claim has to wait out.
+		stuck := newNAD(watchNS, "watch-static")
+		// The address is published before the NAD is minted, so the wait above says
+		// nothing about the NAD; this one is the object the rest of the spec needs.
+		Eventually(func() error {
+			return k8sClient.Get(ctx, client.ObjectKeyFromObject(stuck), stuck)
+		}, "30s").Should(Succeed())
+		stuck.SetFinalizers([]string{"example.com/hold"})
+		Expect(k8sClient.Update(ctx, stuck)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, getClaim(watchNS, "watch-ip"))).To(Succeed())
+
+		Eventually(func() bool {
+			nad := newNAD(watchNS, "watch-static")
+			return k8sClient.Get(ctx, client.ObjectKeyFromObject(nad), nad) == nil &&
+				nad.GetDeletionTimestamp() != nil
+		}, "30s").Should(BeTrue())
+		Consistently(claimIP, "1s").Should(Equal("10.66.3.170"))
+
+		// Whatever held the NAD lets go. Nothing calls Reconcile from here: the claim
+		// finishes only if the NAD watch carried the deletion to it.
+		released := newNAD(watchNS, "watch-static")
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(released), released)).To(Succeed())
+		released.SetFinalizers(nil)
+		Expect(k8sClient.Update(ctx, released)).To(Succeed())
+
+		Eventually(func() bool {
+			claim := &ipamv1alpha1.IPClaim{}
+			err := k8sClient.Get(ctx, client.ObjectKey{Namespace: watchNS, Name: "watch-ip"}, claim)
+			return apierrors.IsNotFound(err)
+		}, "30s").Should(BeTrue())
 	})
 
 	It("does not hold a claim that mints no NAD", func() {
