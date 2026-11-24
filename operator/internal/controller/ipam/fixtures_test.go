@@ -134,6 +134,30 @@ func deleteNAD(name string) {
 	})
 }
 
+// testNADFinalizer is the finalizer the specs hang on a NAD to hold it open past
+// its delete. It belongs to no controller, so nothing removes it by itself.
+const testNADFinalizer = "example.com/hold"
+
+// holdNAD puts the test finalizer on a NAD, and takes it off again when the spec
+// ends — including when an assertion fails in between. A NAD left terminating is
+// not merely untidy: envtest runs no garbage collector, and every later spec that
+// lists claim-labelled NADs — the auditor above all — would see an object that can
+// never be collected.
+func holdNAD(nad *unstructured.Unstructured) {
+	nad.SetFinalizers([]string{testNADFinalizer})
+	ExpectWithOffset(1, k8sClient.Update(ctx, nad)).To(Succeed())
+	DeferCleanup(func() {
+		fresh := newNAD(nad.GetNamespace(), nad.GetName())
+		if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(fresh), fresh); err != nil {
+			// Already gone: the spec's own path removed the finalizer and the delete
+			// completed.
+			return
+		}
+		fresh.SetFinalizers(nil)
+		ExpectWithOffset(1, k8sClient.Update(ctx, fresh)).To(Succeed())
+	})
+}
+
 // getNAD reads a NAD and fails the spec if it is absent.
 func getNAD(name string) *unstructured.Unstructured {
 	nad := newNAD(testNamespace, name)

@@ -28,6 +28,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -93,6 +94,13 @@ type IPClaimReconciler struct {
 	// cache would do exactly that, because the cache converges asynchronously.
 	APIReader client.Reader
 
+	// NADKindMissing is set by SetupWithManager when the cluster does not serve the
+	// NAD kind — Multus is not installed. Address-only claims work either way; a
+	// claim naming a NAD is then failed with MultusMissing instead of retrying a read
+	// and a create against a kind nothing can serve. False, the zero value, means the
+	// kind is there: the probe can only ever subtract from what the reconciler does.
+	NADKindMissing bool
+
 	Scheme *runtime.Scheme
 }
 
@@ -139,6 +147,17 @@ func (r *IPClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	original := claim.DeepCopy()
 
+	// A cluster without Multus cannot serve the kind a minted NAD would be, and no
+	// amount of retrying changes that. Reported as a condition — the fix is the
+	// administrator installing Multus — and checked before the finalizer, which would
+	// otherwise be held for a NAD that is never created. Address-only claims are
+	// unaffected: nothing but spec.nad needs the kind.
+	if claim.Spec.NAD != "" && r.NADKindMissing {
+		return r.fail(ctx, original, claim, ipamv1alpha1.ReasonMultusMissing,
+			fmt.Sprintf("spec.nad is set but the cluster does not serve %s, so NAD %s cannot be minted (Multus is not installed)",
+				networkAttachmentDefinitionGVK.GroupKind(), claim.Spec.NAD), nil)
+	}
+
 	// Taken before anything is minted, so a claim deleted at any point after its NAD
 	// exists still keeps its address in the ledger until that NAD is gone.
 	if claim.Spec.NAD != "" {
@@ -148,8 +167,12 @@ func (r *IPClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		original = claim.DeepCopy()
 	}
 
+	// Read directly too, and for the namespace gate below: a cached pool that has not
+	// caught up with a namespace being taken off the allow-list would still admit a
+	// claim that the administrator has just shut out, and the admission is not
+	// revisited once the address is bound.
 	pool := &ipamv1alpha1.IPPool{}
-	switch err := r.Get(ctx, client.ObjectKey{Name: claim.Spec.PoolRef}, pool); {
+	switch err := r.APIReader.Get(ctx, client.ObjectKey{Name: claim.Spec.PoolRef}, pool); {
 	case apierrors.IsNotFound(err):
 		return r.fail(ctx, original, claim, ipamv1alpha1.ReasonPoolNotFound,
 			fmt.Sprintf("IPPool %q does not exist", claim.Spec.PoolRef), nil)
@@ -238,6 +261,20 @@ func (r *IPClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 					claim.Status.AssignedIP = ""
 				}
 				return r.failNADNotOwned(ctx, original, claim, err.Error())
+			}
+			if errors.Is(err, errNADTerminating) {
+				// The address is kept: its NAD is still on the cluster and may still serve
+				// a running VM. Ready is False all the same — the network the claim is
+				// about to be handed is on its way out — and the NAD watch re-enqueues this
+				// claim once the object is gone and a replacement can be minted.
+				apimeta.SetStatusCondition(&claim.Status.Conditions, metav1.Condition{
+					Type:               ipamv1alpha1.ConditionReady,
+					Status:             metav1.ConditionFalse,
+					Reason:             ipamv1alpha1.ReasonReserved,
+					Message:            fmt.Sprintf("address %s is held; NAD %s is terminating and is minted again once it is gone", addr, claim.Spec.NAD),
+					ObservedGeneration: claim.Generation,
+				})
+				return ctrl.Result{}, patchStatusIfChanged(ctx, r.Client, original, claim, original.Status, claim.Status)
 			}
 			return ctrl.Result{}, fmt.Errorf("ensuring NAD %s/%s: %w", claim.Namespace, claim.Spec.NAD, err)
 		}
@@ -677,7 +714,7 @@ func (r *IPClaimReconciler) claimsForPool(ctx context.Context, obj client.Object
 	if err := r.List(ctx, &claims); err != nil {
 		// Nothing to do but wait for the next pool event: a map function has nowhere
 		// to report an error, and returning nil simply enqueues nothing.
-		ctrl.LoggerFrom(ctx).Error(err, "listing IPClaims for pool", "pool", pool.Name)
+		ctrl.LoggerFrom(ctx).Error(err, "Could not list IPClaims for IPPool", "pool", pool.Name)
 		return nil
 	}
 
@@ -708,7 +745,7 @@ func (r *IPClaimReconciler) claimsForNAD(ctx context.Context, obj client.Object)
 		client.InNamespace(obj.GetNamespace()),
 		client.MatchingFields{nadNameField: obj.GetName()},
 	); err != nil {
-		ctrl.LoggerFrom(ctx).Error(err, "listing IPClaims for NAD", "nad", client.ObjectKeyFromObject(obj))
+		ctrl.LoggerFrom(ctx).Error(err, "Could not list IPClaims for NAD", "nad", client.ObjectKeyFromObject(obj))
 		return nil
 	}
 
@@ -741,7 +778,7 @@ func (r *IPClaimReconciler) pendingClaimsForPool(ctx context.Context, obj client
 
 	var claims ipamv1alpha1.IPClaimList
 	if err := r.List(ctx, &claims); err != nil {
-		ctrl.LoggerFrom(ctx).Error(err, "listing IPClaims for pool", "pool", releasing.Spec.PoolRef)
+		ctrl.LoggerFrom(ctx).Error(err, "Could not list IPClaims for IPPool", "pool", releasing.Spec.PoolRef)
 		return nil
 	}
 
@@ -808,22 +845,55 @@ func (r *IPClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return fmt.Errorf("indexing IPClaims by %s: %w", nadNameField, err)
 	}
 
-	return ctrl.NewControllerManagedBy(mgr).
+	// The NAD kind is Multus's, not this project's, so it is probed before it is
+	// watched: a watch on a kind the server does not serve fails the manager at
+	// startup, which would take every controller in the binary down with it — the
+	// address-only half of IPAM works on a cluster with no Multus at all. Absent, the
+	// watch is skipped and a claim that asks for a NAD is failed with MultusMissing;
+	// any other probe failure fails setup rather than silently dropping the watch for
+	// the manager's lifetime.
+	served, err := crdServed(mgr, networkAttachmentDefinitionGVK)
+	if err != nil {
+		return fmt.Errorf("probing whether the %s kind is served: %w", networkAttachmentDefinitionGVK.Kind, err)
+	}
+	r.NADKindMissing = !served
+
+	watches := ctrl.NewControllerManagedBy(mgr).
 		For(&ipamv1alpha1.IPClaim{}).
-		// Owns the minted NAD, so a deleted or hand-edited NAD comes back, and a NAD
-		// whose name the claim was refused re-triggers it when it goes. Deleting a NAD
-		// does not disturb a running VM immediately — no CNI DEL is issued until the
-		// pod goes — which is why the drift has to be corrected here rather than
-		// noticed later (design R4).
-		Watches(newNAD("", ""), handler.EnqueueRequestsFromMapFunc(r.claimsForNAD)).
 		// A claim that gives an address back wakes the claims waiting on that pool, so
 		// a RangeExhausted or AddressUnavailable claim does not need a retry loop to
 		// notice the address it wanted is free.
 		Watches(&ipamv1alpha1.IPClaim{},
 			handler.EnqueueRequestsFromMapFunc(r.pendingClaimsForPool),
 			builder.WithPredicates(addressReleased())).
-		Watches(&ipamv1alpha1.IPPool{}, handler.EnqueueRequestsFromMapFunc(r.claimsForPool)).
+		Watches(&ipamv1alpha1.IPPool{}, handler.EnqueueRequestsFromMapFunc(r.claimsForPool))
+	if served {
+		// A deleted or hand-edited NAD comes back, and a NAD whose name the claim was
+		// refused re-triggers it when it goes. Deleting a NAD does not disturb a
+		// running VM immediately — no CNI DEL is issued until the pod goes — which is
+		// why the drift has to be corrected here rather than noticed later (design R4).
+		watches = watches.Watches(newNAD("", ""), handler.EnqueueRequestsFromMapFunc(r.claimsForNAD))
+	}
+
+	return watches.
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Named("ipclaim").
 		Complete(r)
+}
+
+// crdServed reports whether the cluster serves the given kind, so a watch is only
+// registered for kinds the server actually has.
+//
+// Only "no such kind" means absent. Every other discovery failure is returned: the
+// probe runs once, at startup, and a watch skipped here is skipped for the manager's
+// lifetime.
+func crdServed(mgr ctrl.Manager, gvk schema.GroupVersionKind) (bool, error) {
+	_, err := mgr.GetRESTMapper().RESTMapping(gvk.GroupKind(), gvk.Version)
+	if err == nil {
+		return true, nil
+	}
+	if apimeta.IsNoMatchError(err) {
+		return false, nil
+	}
+	return false, err
 }

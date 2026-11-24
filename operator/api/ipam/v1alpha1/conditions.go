@@ -107,6 +107,11 @@ const (
 	// the claim retries once the name is free, because the NAD is watched.
 	ReasonNADNotOwned = "NADNotOwned"
 
+	// ReasonMultusMissing marks a claim that asks for a NAD on a cluster that does
+	// not serve the kind: Multus is not installed, so nothing could mint one. The
+	// claim is not retried — the fix is the administrator installing Multus.
+	ReasonMultusMissing = "MultusMissing"
+
 	// ReasonDuplicateAddress is the audit's reason on a claim that shares its
 	// address with another claim. ReasonPoolOverlap is its counterpart on a pool
 	// whose band intersects another pool's on the same subnet.

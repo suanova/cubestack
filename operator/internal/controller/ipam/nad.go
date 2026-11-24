@@ -51,6 +51,11 @@ var networkAttachmentDefinitionGVK = schema.GroupVersionKind{
 // retried pointlessly forever.
 var errNADNotOwned = errors.New("NAD name is already in use by an object this claim does not control")
 
+// errNADTerminating reports an owned NAD that is on its way out: a finalizer held it
+// open past its delete. It is a sentinel so the reconciler can leave the claim
+// un-Ready without treating the wait as a failure of its own.
+var errNADTerminating = errors.New("NAD is terminating")
+
 func newNAD(namespace, name string) *unstructured.Unstructured {
 	nad := &unstructured.Unstructured{}
 	nad.SetGroupVersionKind(networkAttachmentDefinitionGVK)
@@ -110,6 +115,14 @@ func ensureNAD(ctx context.Context, c client.Client, claim *ipamv1alpha1.IPClaim
 
 	if !metav1.IsControlledBy(existing, claim) {
 		return fmt.Errorf("%w: NAD %s/%s exists and %s", errNADNotOwned, claim.Namespace, claim.Spec.NAD, describeController(existing))
+	}
+
+	// A finalizer someone else put on the NAD leaves it readable with a deletion
+	// timestamp after its delete. Its content matching is not the same as it being
+	// there when the VM starts, and reporting the claim Ready on it would advertise a
+	// network that is about to disappear.
+	if existing.GetDeletionTimestamp() != nil {
+		return fmt.Errorf("%w: NAD %s/%s is on its way out; its address stays held until it is gone", errNADTerminating, claim.Namespace, claim.Spec.NAD)
 	}
 
 	return reconcileNAD(ctx, c, existing, claim, rendered)

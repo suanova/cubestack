@@ -282,6 +282,11 @@ func (a *Auditor) listClaimNADs(ctx context.Context) ([]unstructured.Unstructure
 	var nads unstructured.UnstructuredList
 	nads.SetGroupVersionKind(networkAttachmentDefinitionGVK.GroupVersion().WithKind("NetworkAttachmentDefinitionList"))
 	if err := a.Client.List(ctx, &nads, client.HasLabels{ipamv1alpha1.LabelClaim}); err != nil {
+		if apimeta.IsNoMatchError(err) {
+			// Multus is not installed, so no NAD can exist to audit. The sweep still
+			// runs: every other check is about objects this project does own.
+			return nil, nil
+		}
 		return nil, fmt.Errorf("listing NetworkAttachmentDefinitions: %w", err)
 	}
 	return nads.Items, nil
@@ -296,13 +301,22 @@ func (a *Auditor) listClaimNADs(ctx context.Context) ([]unstructured.Unstructure
 // a new claim. If the orphaned NAD's VM is still running, the two now share an
 // address and nothing will refuse it.
 func (a *Auditor) orphanedNADs(claims []ipamv1alpha1.IPClaim, nads []unstructured.Unstructured) []Finding {
-	// Indexed by namespace and the name the label records — the claim's name, or the
-	// truncated, digested form a long one takes (see ClaimLabelValue). The value is
-	// the UID: a name is reusable, so a NAD left behind by a deleted claim and a new
-	// claim given that name share the label, and only the UID tells them apart.
-	known := make(map[types.NamespacedName]types.UID, len(claims))
+	// Two indexes over the live claims.
+	//
+	// byUID is how a NAD that still names its claim as its controller is decided:
+	// that reference is the one the garbage collector follows, and the UID is the only
+	// field that separates two claims the label cannot — a name is reusable, so a NAD
+	// left behind by a deleted claim and a new claim given that name share a label.
+	//
+	// byLabel is discovery, and the fallback for a NAD whose ownerReference was
+	// stripped by hand: it maps the name the label records — the claim's name, or the
+	// truncated, digested form a long one takes (see ClaimLabelValue) — to the UID.
+	byUID := make(map[types.UID]string, len(claims)) // claim UID -> the claim's namespace
+	byLabel := make(map[types.NamespacedName]types.UID, len(claims))
 	for i := range claims {
-		known[types.NamespacedName{Namespace: claims[i].Namespace, Name: ipamutil.ClaimLabelValue(claims[i].Name)}] = claims[i].UID
+		claim := &claims[i]
+		byUID[claim.UID] = claim.Namespace
+		byLabel[types.NamespacedName{Namespace: claim.Namespace, Name: ipamutil.ClaimLabelValue(claim.Name)}] = claim.UID
 	}
 
 	var findings []Finding
@@ -313,20 +327,27 @@ func (a *Auditor) orphanedNADs(claims []ipamv1alpha1.IPClaim, nads []unstructure
 			continue
 		}
 		key := types.NamespacedName{Namespace: nad.GetNamespace(), Name: label}
-		uid, live := known[key]
+		labelUID, labelLive := byLabel[key]
+		live := labelLive
 		control, owner := nadController(nad)
-		if live && (control != controlClaim || owner == uid) {
+		if control == controlClaim {
+			// Decided on the ownerReference alone. A shortened long name can equal a
+			// short claim's name without any hash collision, so the label can point at
+			// a live claim that is not this NAD's owner.
+			live = byUID[owner] == nad.GetNamespace()
+		}
+		if live {
 			continue
 		}
 		message := fmt.Sprintf("owned by IPClaim %s/%s, which no longer exists; "+
 			"its address is held by no claim and can be reassigned to another", key.Namespace, key.Name)
-		if live {
-			// The name exists, but it belongs to a different claim than the one that
-			// minted this NAD — the UID is what the garbage collector would have
-			// followed, and a label cannot express it.
+		if labelLive {
+			// The label names a live claim, but that claim is not this NAD's owner: the
+			// object still names an earlier claim of that name, or it carries no
+			// ownerReference and the label is all there is to go on.
 			message = fmt.Sprintf("kept by an earlier IPClaim %s/%s that no longer exists — "+
 				"the name now belongs to a different claim (uid %s) — so its address is held by no claim and can be reassigned to another",
-				key.Namespace, key.Name, uid)
+				key.Namespace, key.Name, labelUID)
 		}
 		findings = append(findings, Finding{
 			GVK:       networkAttachmentDefinitionGVK,

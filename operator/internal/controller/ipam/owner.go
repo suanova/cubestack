@@ -37,8 +37,13 @@ import (
 // hold delete permission on the very objects it serves. A tighter RBAC is worth
 // more here than a guarantee nothing needs.
 //
-// Controller: true is kept, and is load-bearing: it is what Owns() matches on to
-// map a NAD's events back to its claim.
+// Controller: true is kept, and is load-bearing for the ownership checks: it is
+// what metav1.IsControlledBy looks for when the reconciler decides whether an
+// existing NAD is this claim's to adopt, rewrite or delete (nadNameHeld, ensureNAD
+// and the teardown), and what the audit's nadController reads to tell a NAD this
+// operator minted from one another controller owns. The NAD watch does NOT depend
+// on it: it maps a NAD to its claims by spec.nad, precisely so a NAD the claim was
+// refused — and which therefore carries no reference to it — still wakes it.
 func controllerRef(owner metav1.Object, gvk schema.GroupVersionKind) metav1.OwnerReference {
 	return metav1.OwnerReference{
 		APIVersion: gvk.GroupVersion().String(),
