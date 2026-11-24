@@ -162,7 +162,7 @@ func TestValidatePoolRange(t *testing.T) {
 			mutate: func(s *ipamv1alpha1.IPPoolSpec) {
 				s.NADTemplate.Subnet = "fd00::/64"
 				s.NADTemplate.Gateway = "fd00::ffff"
-				s.Range.Start = "fd00::1"
+				s.Range.Start = testIPv6Addr
 				s.Range.End = "fd00::10"
 			},
 			wantErr: "IPv4-only",
@@ -302,6 +302,25 @@ func TestValidatePoolRange(t *testing.T) {
 			},
 			wantErr: "must not carry a zone",
 		},
+		{
+			// netlink refuses a route whose gateway is in another family than its
+			// destination, and the plugin fails the interface setup for it — after the
+			// claim had reported Ready.
+			name: "an IPv4 route with an IPv6 gateway",
+			mutate: func(s *ipamv1alpha1.IPPoolSpec) {
+				s.NADTemplate.Routes = []ipamv1alpha1.NADRoute{{Dst: testRouteCIDR, GW: testIPv6Addr}}
+			},
+			wantErr: "same address family",
+		},
+		{
+			// Checked in both directions: a v6 destination with a v4 gateway is just as
+			// unusable, and validating only the common shape would let it through.
+			name: "an IPv6 route with an IPv4 gateway",
+			mutate: func(s *ipamv1alpha1.IPPoolSpec) {
+				s.NADTemplate.Routes = []ipamv1alpha1.NADRoute{{Dst: "fd00::/64", GW: testGateway}}
+			},
+			wantErr: "same address family",
+		},
 	}
 
 	for _, tt := range tests {
@@ -390,7 +409,7 @@ func TestValidatePoolRange_LedgerOnly(t *testing.T) {
 
 	t.Run("an IPv6 band is still rejected", func(t *testing.T) {
 		spec := ledgerOnly()
-		spec.Range.Start = "fd00::1"
+		spec.Range.Start = testIPv6Addr
 		spec.Range.End = "fd00::10"
 		err := ValidatePoolRange(spec)
 		if err == nil || !strings.Contains(err.Error(), "IPv4-only") {

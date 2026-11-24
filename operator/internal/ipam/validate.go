@@ -214,7 +214,8 @@ func validateTemplate(tmpl *ipamv1alpha1.NADTemplate, start, end netip.Addr) err
 	// after the claim has already reported Ready=True — the guest comes up with no
 	// network and the pool looks fine.
 	for i, route := range tmpl.Routes {
-		if _, err := netip.ParsePrefix(route.Dst); err != nil {
+		dst, err := netip.ParsePrefix(route.Dst)
+		if err != nil {
 			return fmt.Errorf("nadTemplate.routes[%d].dst %q is not a valid CIDR: %w", i, route.Dst, err)
 		}
 		if route.GW == "" {
@@ -230,6 +231,12 @@ func validateTemplate(tmpl *ipamv1alpha1.NADTemplate, start, end netip.Addr) err
 			// route gateways as bare addresses: it would reject this at network setup,
 			// after the claim had already reported Ready=True.
 			return fmt.Errorf("nadTemplate.routes[%d].gw %q must not carry a zone", i, route.GW)
+		}
+		if gw.Is4() != dst.Addr().Is4() {
+			// netlink refuses a route whose gateway is in another family than its
+			// destination, and the plugin fails the interface setup for it — again
+			// after the claim reported Ready=True.
+			return fmt.Errorf("nadTemplate.routes[%d].gw %q is not in the same address family as dst %q", i, route.GW, route.Dst)
 		}
 	}
 
