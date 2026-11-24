@@ -85,6 +85,49 @@ func (f Finding) ref() *unstructured.Unstructured {
 	return obj
 }
 
+// maxEventNote is the longest note the Events API accepts. Every finding is recorded
+// as one, so a message that enumerates every object implicated can outgrow it — and a
+// rejected event is the finding nobody sees, precisely where the most objects share
+// the problem.
+const maxEventNote = 1024
+
+// boundedNote clamps a finding's message to that limit. It is a backstop: the
+// enumerations below are bounded already, and this catches a message that grew long
+// for some other reason — a bridge name, say, which is itself up to 253 characters.
+func boundedNote(message string) string {
+	if len(message) <= maxEventNote {
+		return message
+	}
+	const marker = " … (truncated)"
+	return message[:maxEventNote-len(marker)] + marker
+}
+
+// nameBudget is how much of a finding's message the names it lists may take. It
+// leaves room for the rest of the sentence inside maxEventNote.
+const nameBudget = 400
+
+// nameList renders object names for a finding, stopping before the list eats the
+// message and counting the rest. A duplicate can involve any number of claims, and
+// the message still has to be recordable as one event note.
+func nameList(names []string) string {
+	var b strings.Builder
+	listed := 0
+	for _, name := range names {
+		if listed > 0 && b.Len()+len(", ")+len(name) > nameBudget {
+			break
+		}
+		if listed > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(name)
+		listed++
+	}
+	if omitted := len(names) - listed; omitted > 0 {
+		fmt.Fprintf(&b, ", and %d more", omitted)
+	}
+	return b.String()
+}
+
 // Findings are reported as events on the objects they concern, which is the only
 // way an admin sees one without reading this process's log.
 //
@@ -200,6 +243,12 @@ func (a *Auditor) collect(claims []ipamv1alpha1.IPClaim, pools map[string]ipamv1
 	findings = append(findings, a.duplicateAddresses(claims, pools, nads)...)
 	findings = append(findings, a.overlappingPools(pools)...)
 	findings = append(findings, a.danglingPoolRefs(claims, pools)...)
+
+	// Every finding is recorded as an event, whose note the API caps well below the
+	// condition's own limit. Bounding here covers the checks now and any added later.
+	for i := range findings {
+		findings[i].Message = boundedNote(findings[i].Message)
+	}
 	return findings
 }
 
@@ -245,25 +294,37 @@ func (a *Auditor) listClaimNADs(ctx context.Context) ([]unstructured.Unstructure
 // a new claim. If the orphaned NAD's VM is still running, the two now share an
 // address and nothing will refuse it.
 func (a *Auditor) orphanedNADs(claims []ipamv1alpha1.IPClaim, nads []unstructured.Unstructured) []Finding {
-	// Indexed by namespace/label value: the NAD is always created in its claim's
-	// namespace, so the label value alone would not be enough to identify it. The
-	// value is the claim's name only up to a length — a longer one is truncated and
-	// digested — so the set has to hold what the label actually says.
-	known := make(map[types.NamespacedName]struct{}, len(claims))
+	// Indexed by namespace and the name the label records — the claim's name, or the
+	// truncated, digested form a long one takes (see ClaimLabelValue). The value is
+	// the UID: a name is reusable, so a NAD left behind by a deleted claim and a new
+	// claim given that name share the label, and only the UID tells them apart.
+	known := make(map[types.NamespacedName]types.UID, len(claims))
 	for i := range claims {
-		known[types.NamespacedName{Namespace: claims[i].Namespace, Name: ipamutil.ClaimLabelValue(claims[i].Name)}] = struct{}{}
+		known[types.NamespacedName{Namespace: claims[i].Namespace, Name: ipamutil.ClaimLabelValue(claims[i].Name)}] = claims[i].UID
 	}
 
 	var findings []Finding
 	for i := range nads {
 		nad := &nads[i]
-		owner := nad.GetLabels()[ipamv1alpha1.LabelClaim]
-		if owner == "" {
+		label := nad.GetLabels()[ipamv1alpha1.LabelClaim]
+		if label == "" {
 			continue
 		}
-		key := types.NamespacedName{Namespace: nad.GetNamespace(), Name: owner}
-		if _, ok := known[key]; ok {
+		key := types.NamespacedName{Namespace: nad.GetNamespace(), Name: label}
+		uid, live := known[key]
+		owner, named := nadClaimOwner(nad)
+		if live && (!named || owner == uid) {
 			continue
+		}
+		message := fmt.Sprintf("owned by IPClaim %s/%s, which no longer exists; "+
+			"its address is held by no claim and can be reassigned to another", key.Namespace, key.Name)
+		if live {
+			// The name exists, but it belongs to a different claim than the one that
+			// minted this NAD — the UID is what the garbage collector would have
+			// followed, and a label cannot express it.
+			message = fmt.Sprintf("kept by an earlier IPClaim %s/%s that no longer exists — "+
+				"the name now belongs to a different claim (uid %s) — so its address is held by no claim and can be reassigned to another",
+				key.Namespace, key.Name, uid)
 		}
 		findings = append(findings, Finding{
 			GVK:       networkAttachmentDefinitionGVK,
@@ -271,12 +332,30 @@ func (a *Auditor) orphanedNADs(claims []ipamv1alpha1.IPClaim, nads []unstructure
 			Name:      nad.GetName(),
 			UID:       nad.GetUID(),
 			Reason:    "OrphanedNAD",
-			Message: fmt.Sprintf("owned by IPClaim %s/%s, which no longer exists; "+
-				"its address is held by no claim and can be reassigned to another",
-				key.Namespace, key.Name),
+			Message:   message,
 		})
 	}
 	return findings
+}
+
+// nadClaimOwner returns the UID of the IPClaim whose controller ownerReference this
+// NAD carries, when it carries one.
+func nadClaimOwner(nad *unstructured.Unstructured) (types.UID, bool) {
+	for _, ref := range nad.GetOwnerReferences() {
+		if ref.Controller != nil && *ref.Controller &&
+			ref.APIVersion == ipamv1alpha1.GroupVersion.String() && ref.Kind == "IPClaim" {
+			return ref.UID, true
+		}
+	}
+	return "", false
+}
+
+// duplicateKey is one address on one L2: what two claims have to share to collide.
+// A struct rather than a joined string because the L2 key embeds NUL separators of
+// its own, leaving no separator in a string form that could be split back apart.
+type duplicateKey struct {
+	l2   string
+	addr netip.Addr
 }
 
 // duplicateAddresses finds two claims holding the same address on one L2.
@@ -297,7 +376,7 @@ func (a *Auditor) orphanedNADs(claims []ipamv1alpha1.IPClaim, nads []unstructure
 func (a *Auditor) duplicateAddresses(claims []ipamv1alpha1.IPClaim, pools map[string]ipamv1alpha1.IPPool, nads []unstructured.Unstructured) []Finding {
 	networks := nadNetworks(nads)
 
-	holders := map[string][]ipamv1alpha1.IPClaim{}
+	holders := map[duplicateKey][]ipamv1alpha1.IPClaim{}
 	where := map[string]string{}
 	for i := range claims {
 		claim := claims[i]
@@ -313,7 +392,7 @@ func (a *Auditor) duplicateAddresses(claims []ipamv1alpha1.IPClaim, pools map[st
 		// duplicate reported across two VLANs.
 		l2, phrase := claimL2(claim, networks, pools)
 		where[l2] = phrase
-		key := l2 + "\x00" + addr.String()
+		key := duplicateKey{l2: l2, addr: addr}
 		holders[key] = append(holders[key], claim)
 	}
 
@@ -322,8 +401,6 @@ func (a *Auditor) duplicateAddresses(claims []ipamv1alpha1.IPClaim, pools map[st
 		if len(group) < 2 {
 			continue
 		}
-		l2, addr, _ := strings.Cut(key, "\x00")
-
 		names := make([]string, 0, len(group))
 		for _, claim := range group {
 			names = append(names, claim.Namespace+"/"+claim.Name)
@@ -332,7 +409,7 @@ func (a *Auditor) duplicateAddresses(claims []ipamv1alpha1.IPClaim, pools map[st
 
 		message := fmt.Sprintf("address %s%s is held by %d claims: %s; "+
 			"nothing on the network refuses a duplicate, so these VMs share an address and the symptom is intermittent connectivity, not a failed start",
-			addr, where[l2], len(group), strings.Join(names, ", "))
+			key.addr, where[key.l2], len(group), nameList(names))
 
 		// Reported on each claim, not once: whichever one a reader is looking at
 		// should say what is wrong with it.
@@ -364,9 +441,10 @@ type l2Identity struct {
 	VLAN   int32
 }
 
-// untaggedVLAN stands in for an absent VLAN so that a template and a rendered NAD
-// which both omit it compare equal. It is -1 rather than 0 because 0 is a real and
-// different value: a priority-tagged interface.
+// untaggedVLAN stands in for a network with no VLAN. The bridge plugin decodes an
+// omitted vlan and vlan: 0 identically — both untagged — so a template that writes 0
+// and the NAD rendered from it without one describe one segment. -1 rather than 0
+// keeps an untagged network distinguishable from a VLAN number in the type.
 const untaggedVLAN int32 = -1
 
 func (l l2Identity) String() string {
@@ -392,45 +470,65 @@ func templateL2(tmpl *ipamv1alpha1.NADTemplate) (l2Identity, error) {
 	return l2Identity{Subnet: subnet, Bridge: tmpl.Bridge, VLAN: vlanFrom(tmpl.VLAN)}, nil
 }
 
+// vlanFrom normalises a VLAN field. Zero and absent are the same network — see
+// untaggedVLAN — so both collapse to untaggedVLAN; a pool that writes vlan: 0 and
+// the NAD rendered from it, which omits the field, must not compare unequal.
 func vlanFrom(v *int32) int32 {
-	if v == nil {
+	if v == nil || *v <= 0 {
 		return untaggedVLAN
 	}
 	return *v
 }
 
+// nadNetwork is one minted NAD's network together with the claim it says it belongs
+// to.
+type nadNetwork struct {
+	l2 l2Identity
+	// owner and named record the NAD's controller ownerReference. A NAD that names
+	// none — an older object, or one whose reference was stripped by hand — leaves
+	// only the name to go on.
+	owner types.UID
+	named bool
+}
+
+// controls reports whether this NAD belongs to the claim with the given UID. A NAD
+// that names no owner is taken on its name alone, which is the claim's own spec.nad.
+// A named owner must match: a NAD left behind by a deleted claim whose name has been
+// reused carries the same label, and must not be read as the new claim's.
+func (n nadNetwork) controls(uid types.UID) bool {
+	return !n.named || n.owner == uid
+}
+
 // claimL2 resolves the network a claim's address is served on — the NAD it minted,
-// else its pool's template, else nothing — and returns both the grouping key and the
+// else its pool's template if it mints none — and returns both the grouping key and the
 // phrase a finding names it by.
-func claimL2(claim ipamv1alpha1.IPClaim, networks map[types.NamespacedName]l2Identity, pools map[string]ipamv1alpha1.IPPool) (key, where string) {
-	nn := types.NamespacedName{Namespace: claim.Namespace, Name: ipamutil.ClaimLabelValue(claim.Name)}
-	l2, known := networks[nn]
-	if !known {
-		if pool, found := pools[claim.Spec.PoolRef]; found && pool.Spec.NADTemplate != nil {
-			if fromTemplate, err := templateL2(pool.Spec.NADTemplate); err == nil {
-				l2, known = fromTemplate, true
-			}
+func claimL2(claim ipamv1alpha1.IPClaim, networks map[types.NamespacedName]nadNetwork, pools map[string]ipamv1alpha1.IPPool) (key, where string) {
+	if claim.Spec.NAD != "" {
+		// A claim that mints a NAD is grouped by what the CNI will actually configure.
+		// Its pool's template is not a substitute when that NAD is missing, or is one
+		// another claim controls: the template says what the pool renders today, not
+		// what this claim's NAD was rendered with.
+		nn := types.NamespacedName{Namespace: claim.Namespace, Name: claim.Spec.NAD}
+		if net, found := networks[nn]; found && net.controls(claim.UID) {
+			return net.l2.key(), " on " + net.l2.String()
+		}
+	} else if pool, found := pools[claim.Spec.PoolRef]; found && pool.Spec.NADTemplate != nil {
+		// No NAD is minted, so the template is what the address lands on.
+		if fromTemplate, err := templateL2(pool.Spec.NADTemplate); err == nil {
+			return fromTemplate.key(), " on " + fromTemplate.String()
 		}
 	}
-	if known {
-		return l2.key(), " on " + l2.String()
-	}
-	// Unknown network: compared within the pool, which at least catches two claims
-	// holding one address from one band.
+	// Unknown network: compared within the pool, which at least catches two claims of
+	// one pool holding one address.
 	return "pool:" + claim.Spec.PoolRef, " in pool " + claim.Spec.PoolRef
 }
 
 // nadNetworks reads each labelled NAD's network from its rendered config, keyed by
-// its claim's namespace and label value, which is what the NAD records (see
-// ClaimLabelValue).
-func nadNetworks(nads []unstructured.Unstructured) map[types.NamespacedName]l2Identity {
-	out := make(map[types.NamespacedName]l2Identity, len(nads))
+// the NAD's own name — the value its claim put in spec.nad.
+func nadNetworks(nads []unstructured.Unstructured) map[types.NamespacedName]nadNetwork {
+	out := make(map[types.NamespacedName]nadNetwork, len(nads))
 	for i := range nads {
 		nad := &nads[i]
-		owner := nad.GetLabels()[ipamv1alpha1.LabelClaim]
-		if owner == "" {
-			continue
-		}
 		config, _, err := unstructured.NestedString(nad.Object, "spec", "config")
 		if err != nil || config == "" {
 			continue
@@ -454,10 +552,15 @@ func nadNetworks(nads []unstructured.Unstructured) map[types.NamespacedName]l2Id
 		if err != nil {
 			continue
 		}
-		out[types.NamespacedName{Namespace: nad.GetNamespace(), Name: owner}] = l2Identity{
-			Subnet: prefix.Masked().String(),
-			Bridge: parsed.Bridge,
-			VLAN:   vlanFrom(parsed.VLAN),
+		owner, named := nadClaimOwner(nad)
+		out[types.NamespacedName{Namespace: nad.GetNamespace(), Name: nad.GetName()}] = nadNetwork{
+			l2: l2Identity{
+				Subnet: prefix.Masked().String(),
+				Bridge: parsed.Bridge,
+				VLAN:   vlanFrom(parsed.VLAN),
+			},
+			owner: owner,
+			named: named,
 		}
 	}
 	return out
@@ -470,37 +573,48 @@ func nadNetworks(nads []unstructured.Unstructured) map[types.NamespacedName]l2Id
 // reached without anyone making a mistake — an address handed out by each pool looks
 // free to the other, so two VMs eventually get it.
 func (a *Auditor) overlappingPools(pools map[string]ipamv1alpha1.IPPool) []Finding {
-	names := make([]string, 0, len(pools))
-	for name := range pools {
-		names = append(names, name)
-	}
-	slices.Sort(names)
-
-	var findings []Finding
-	for i := 0; i < len(names); i++ {
+	names := sortedNames(pools)
+	peers := map[string][]string{}
+	network := map[string]l2Identity{}
+	for i := range len(names) {
 		for j := i + 1; j < len(names); j++ {
 			first, second := pools[names[i]], pools[names[j]]
-			overlaps, network := poolsOverlap(&first, &second)
+			overlaps, l2 := poolsOverlap(&first, &second)
 			if !overlaps {
 				continue
 			}
-			// Both pools are implicated, so both carry the finding: a reader looking at
-			// either one should see why its band cannot be used as written.
-			for _, pair := range [][2]*ipamv1alpha1.IPPool{{&first, &second}, {&second, &first}} {
-				findings = append(findings, Finding{
-					GVK:    ipamv1alpha1.GroupVersion.WithKind("IPPool"),
-					Name:   pair[0].Name,
-					UID:    pair[0].UID,
-					Reason: ipamv1alpha1.ReasonPoolOverlap,
-					Message: fmt.Sprintf("range %s-%s overlaps IPPool %q (%s-%s) on %s; "+
-						"the allocator works one pool at a time, so an address handed out by one looks free to the other",
-						pair[0].Spec.Range.Start, pair[0].Spec.Range.End,
-						pair[1].Name, pair[1].Spec.Range.Start, pair[1].Spec.Range.End, network),
-				})
-			}
+			peers[names[i]] = append(peers[names[i]], describePool(&second))
+			peers[names[j]] = append(peers[names[j]], describePool(&first))
+			network[names[i]] = l2
+			network[names[j]] = l2
 		}
 	}
+
+	// One finding per pool naming all of its peers, not one per pair: a pool that
+	// intersects three others would otherwise leave whichever pair came last in the
+	// condition, and the reader decides what to change from a message that names one.
+	findings := make([]Finding, 0, len(peers))
+	for _, name := range names {
+		if len(peers[name]) == 0 {
+			continue
+		}
+		pool := pools[name]
+		findings = append(findings, Finding{
+			GVK:    ipamv1alpha1.GroupVersion.WithKind("IPPool"),
+			Name:   name,
+			UID:    pool.UID,
+			Reason: ipamv1alpha1.ReasonPoolOverlap,
+			Message: fmt.Sprintf("range %s-%s overlaps %s on %s; "+
+				"the allocator works one pool at a time, so an address handed out by one pool looks free to the other",
+				pool.Spec.Range.Start, pool.Spec.Range.End, nameList(peers[name]), network[name]),
+		})
+	}
 	return findings
+}
+
+// describePool names a pool and its band for the message of a pool it overlaps.
+func describePool(pool *ipamv1alpha1.IPPool) string {
+	return fmt.Sprintf("IPPool %q (%s-%s)", pool.Name, pool.Spec.Range.Start, pool.Spec.Range.End)
 }
 
 // poolsOverlap reports whether two pools share a network — subnet, bridge and VLAN —
@@ -539,6 +653,13 @@ func poolsOverlap(first, second *ipamv1alpha1.IPPool) (bool, l2Identity) {
 	}
 	secondEnd, err := netip.ParseAddr(second.Spec.Range.End)
 	if err != nil {
+		return false, l2Identity{}
+	}
+
+	// A band written backwards is invalid, not overlapping. The pool's own rejection
+	// reports it through the Accepted condition; comparing it here would mark a
+	// neighbour for someone else's typo.
+	if firstStart.Compare(firstEnd) > 0 || secondStart.Compare(secondEnd) > 0 {
 		return false, l2Identity{}
 	}
 
