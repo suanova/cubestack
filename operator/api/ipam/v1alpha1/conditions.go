@@ -117,8 +117,8 @@ const (
 // Labels written by the controllers.
 const (
 	// LabelClaim is set on a minted NAD and carries the name of the IPClaim that
-	// owns it. The NAD is always created in its claim's namespace, so the name
-	// alone identifies the owner — the audit uses this to find NADs whose claim
-	// is gone.
+	// owns it, shortened when the name is longer than a label value may be. The NAD
+	// is always created in its claim's namespace, so the value alone identifies the
+	// owner — the audit uses this to find NADs whose claim is gone.
 	LabelClaim = "ipam.cubestack.io/claim"
 )

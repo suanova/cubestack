@@ -27,6 +27,7 @@ limitations under the License.
 package ipam
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -177,6 +178,21 @@ func validateTemplate(tmpl *ipamv1alpha1.NADTemplate, start, end netip.Addr) err
 		return fmt.Errorf("range %s-%s must lie entirely within subnet %s", start, end, subnet)
 	}
 
+	// An ordinary IPv4 subnet spends two of its addresses on the network and
+	// broadcast numbers, and neither may be handed to a VM: the CNI would configure
+	// a guest that no peer answers for. /31 is the exception — RFC 3021 makes both of
+	// its addresses usable hosts — and a /32 has no broadcast at all.
+	if subnet.Bits() < 31 {
+		if start.Compare(subnet.Masked().Addr()) == 0 {
+			return fmt.Errorf("range.start %s is the network address of subnet %s, which cannot be assigned to a VM",
+				start, subnet)
+		}
+		if end.Compare(broadcastAddr(subnet)) == 0 {
+			return fmt.Errorf("range.end %s is the broadcast address of subnet %s, which cannot be assigned to a VM",
+				end, subnet)
+		}
+	}
+
 	// The gateway must sit OUTSIDE the allocatable band: overlapping it means the
 	// pool can hand a VM the gateway's own address, which fails in a way that looks
 	// like a broken network rather than a bad pool.
@@ -193,7 +209,40 @@ func validateTemplate(tmpl *ipamv1alpha1.NADTemplate, start, end netip.Addr) err
 		return fmt.Errorf("gateway %s must lie within subnet %s", gateway, subnet)
 	}
 
+	// The routes reach the CNI verbatim, and the static plugin decodes each
+	// destination as a CIDR. A malformed one is rejected at network setup, which is
+	// after the claim has already reported Ready=True — the guest comes up with no
+	// network and the pool looks fine.
+	for i, route := range tmpl.Routes {
+		if _, err := netip.ParsePrefix(route.Dst); err != nil {
+			return fmt.Errorf("nadTemplate.routes[%d].dst %q is not a valid CIDR: %w", i, route.Dst, err)
+		}
+		if route.GW == "" {
+			// Omitted means "via the interface's own gateway", which needs no check.
+			continue
+		}
+		gw, err := netip.ParseAddr(route.GW)
+		if err != nil {
+			return fmt.Errorf("nadTemplate.routes[%d].gw %q is not a valid address: %w", i, route.GW, err)
+		}
+		if gw.Zone() != "" {
+			// A zone is only parseable on an IPv6 address, and the static plugin parses
+			// route gateways as bare addresses: it would reject this at network setup,
+			// after the claim had already reported Ready=True.
+			return fmt.Errorf("nadTemplate.routes[%d].gw %q must not carry a zone", i, route.GW)
+		}
+	}
+
 	return nil
+}
+
+// broadcastAddr returns the highest address of p, which is the broadcast address
+// for an ordinary IPv4 subnet.
+func broadcastAddr(p netip.Prefix) netip.Addr {
+	b := p.Masked().Addr().As4()
+	host := ^uint32(0) >> uint(p.Bits())
+	binary.BigEndian.PutUint32(b[:], binary.BigEndian.Uint32(b[:])|host)
+	return netip.AddrFrom4(b)
 }
 
 // fullyExcluded reports whether nothing in the band survives the exclusions.

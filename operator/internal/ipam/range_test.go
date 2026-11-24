@@ -39,6 +39,8 @@ const (
 	testNADName          = "x-static"
 	testInvalidIP        = "10.66.3.999"
 	testInvalidIPMessage = "not a valid address"
+	testRouteCIDR        = "10.66.9.0/24"
+	testInvalidCIDR      = "not a valid CIDR"
 )
 
 func TestParseRange(t *testing.T) {
