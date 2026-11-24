@@ -193,7 +193,9 @@ func (a *Auditor) Start(ctx context.Context) error {
 		}
 		for _, f := range findings {
 			a.log().Info("audit finding", "reason", f.Reason, "namespace", f.Namespace, "name", f.Name, "message", f.Message)
-			recordEvent(a.Recorder, f.ref(), corev1.EventTypeWarning, f.Reason, "Audit", f.Message)
+			// The message is data — it names objects this process did not author — so
+			// it is an argument, never the format.
+			recordEvent(a.Recorder, f.ref(), corev1.EventTypeWarning, f.Reason, "Audit", "%s", f.Message)
 		}
 
 		select {
@@ -312,8 +314,8 @@ func (a *Auditor) orphanedNADs(claims []ipamv1alpha1.IPClaim, nads []unstructure
 		}
 		key := types.NamespacedName{Namespace: nad.GetNamespace(), Name: label}
 		uid, live := known[key]
-		owner, named := nadClaimOwner(nad)
-		if live && (!named || owner == uid) {
+		control, owner := nadController(nad)
+		if live && (control != controlClaim || owner == uid) {
 			continue
 		}
 		message := fmt.Sprintf("owned by IPClaim %s/%s, which no longer exists; "+
@@ -338,16 +340,34 @@ func (a *Auditor) orphanedNADs(claims []ipamv1alpha1.IPClaim, nads []unstructure
 	return findings
 }
 
-// nadClaimOwner returns the UID of the IPClaim whose controller ownerReference this
-// NAD carries, when it carries one.
-func nadClaimOwner(nad *unstructured.Unstructured) (types.UID, bool) {
+// nadControl says what controls a NAD: nothing, an IPClaim, or a controller that is
+// not an IPClaim.
+type nadControl int
+
+const (
+	// controlNone is a NAD with no controller reference — an older object, or one
+	// whose reference was stripped by hand. Its name and label are all there is to
+	// go on.
+	controlNone nadControl = iota
+	// controlClaim is a NAD this operator minted.
+	controlClaim
+	// controlForeign is a NAD another controller owns. Whatever its name or label
+	// says, its network and lifetime are that controller's to decide.
+	controlForeign
+)
+
+// nadController reads a NAD's controller ownerReference.
+func nadController(nad *unstructured.Unstructured) (nadControl, types.UID) {
 	for _, ref := range nad.GetOwnerReferences() {
-		if ref.Controller != nil && *ref.Controller &&
-			ref.APIVersion == ipamv1alpha1.GroupVersion.String() && ref.Kind == "IPClaim" {
-			return ref.UID, true
+		if ref.Controller == nil || !*ref.Controller {
+			continue
 		}
+		if ref.APIVersion == ipamv1alpha1.GroupVersion.String() && ref.Kind == "IPClaim" {
+			return controlClaim, ref.UID
+		}
+		return controlForeign, ref.UID
 	}
-	return "", false
+	return controlNone, ""
 }
 
 // duplicateKey is one address on one L2: what two claims have to share to collide.
@@ -480,23 +500,29 @@ func vlanFrom(v *int32) int32 {
 	return *v
 }
 
-// nadNetwork is one minted NAD's network together with the claim it says it belongs
-// to.
+// nadNetwork is one minted NAD's network together with what controls it.
 type nadNetwork struct {
-	l2 l2Identity
-	// owner and named record the NAD's controller ownerReference. A NAD that names
-	// none — an older object, or one whose reference was stripped by hand — leaves
-	// only the name to go on.
-	owner types.UID
-	named bool
+	l2      l2Identity
+	control nadControl
+	owner   types.UID
 }
 
-// controls reports whether this NAD belongs to the claim with the given UID. A NAD
-// that names no owner is taken on its name alone, which is the claim's own spec.nad.
-// A named owner must match: a NAD left behind by a deleted claim whose name has been
-// reused carries the same label, and must not be read as the new claim's.
+// controls reports whether this NAD may supply the network of the claim with the
+// given UID. A claim's own spec.nad names it, so a NAD with no controller is taken
+// on the name alone. One this operator minted must carry the claim's UID: a NAD
+// left behind by a deleted claim whose name was reused carries the same label, and
+// must not be read as the new claim's. One another controller owns is refused
+// whatever its name — the reconciler will not adopt it either, so its config says
+// nothing about where the claim's address lands.
 func (n nadNetwork) controls(uid types.UID) bool {
-	return !n.named || n.owner == uid
+	switch n.control {
+	case controlClaim:
+		return n.owner == uid
+	case controlForeign:
+		return false
+	default:
+		return true
+	}
 }
 
 // claimL2 resolves the network a claim's address is served on — the NAD it minted,
@@ -552,15 +578,15 @@ func nadNetworks(nads []unstructured.Unstructured) map[types.NamespacedName]nadN
 		if err != nil {
 			continue
 		}
-		owner, named := nadClaimOwner(nad)
+		control, owner := nadController(nad)
 		out[types.NamespacedName{Namespace: nad.GetNamespace(), Name: nad.GetName()}] = nadNetwork{
 			l2: l2Identity{
 				Subnet: prefix.Masked().String(),
 				Bridge: parsed.Bridge,
 				VLAN:   vlanFrom(parsed.VLAN),
 			},
-			owner: owner,
-			named: named,
+			control: control,
+			owner:   owner,
 		}
 	}
 	return out
@@ -698,7 +724,7 @@ func (a *Auditor) danglingPoolRefs(claims []ipamv1alpha1.IPClaim, pools map[stri
 			Name:      first.Name,
 			UID:       first.UID,
 			Reason:    "PoolDeleted",
-			Message:   fmt.Sprintf("IPPool %q does not exist but %d claim(s) still reference it: %s", pool, len(group), strings.Join(names, ", ")),
+			Message:   fmt.Sprintf("IPPool %q does not exist but %d claim(s) still reference it: %s", pool, len(group), nameList(names)),
 		})
 	}
 	sortFindings(findings)

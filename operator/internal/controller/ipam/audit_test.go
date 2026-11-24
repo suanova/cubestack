@@ -357,6 +357,39 @@ var _ = Describe("Auditor", func() {
 		Expect(withName(duplicates, "audit-no-nad-b")).To(BeEmpty())
 	})
 
+	It("does not read the network of a NAD another controller owns", func() {
+		// A NAD sitting at the claim's spec.nad is not necessarily the claim's: if
+		// another controller owns it, the claim cannot adopt it, so its config says
+		// nothing about where this claim's address lands. Reading it anyway would put
+		// the claim on a network it is not on — here, alongside a claim whose
+		// address is genuinely on the pool's network.
+		createPool("audit-foreign", testPoolSpec())
+
+		nad := newNAD(testNamespace, "audit-foreign-static")
+		nad.SetLabels(map[string]string{ipamv1alpha1.LabelClaim: "audit-foreign-a"})
+		controlled := true
+		nad.SetOwnerReferences([]metav1.OwnerReference{{
+			APIVersion: "apps/v1",
+			Kind:       "StatefulSet",
+			Name:       "audit-foreign-db",
+			UID:        types.UID("00000000-0000-0000-0000-00000000beef"),
+			Controller: &controlled,
+		}})
+		config := `{"name":"audit-foreign-static","bridge":"br0","ipam":{"addresses":[{"address":"10.66.3.150/24"}]}}`
+		Expect(unstructured.SetNestedField(nad.Object, config, "spec", "config")).To(Succeed())
+		Expect(k8sClient.Create(ctx, nad)).To(Succeed())
+		deleteNAD("audit-foreign-static")
+
+		createClaim(testNamespace, "audit-foreign-a", "audit-foreign", "audit-foreign-static")
+		createClaim(testNamespace, "audit-foreign-b", "audit-foreign", "")
+		bindAs("audit-foreign-a", testFirstIP)
+		bindAs("audit-foreign-b", testFirstIP)
+
+		duplicates := withReason(sweep(), ipamv1alpha1.ReasonDuplicateAddress)
+		Expect(withName(duplicates, "audit-foreign-a")).To(BeEmpty())
+		Expect(withName(duplicates, "audit-foreign-b")).To(BeEmpty())
+	})
+
 	It("reports two pools whose bands intersect on one subnet", func() {
 		// Neither pool is wrong on its own and the allocator works one pool at a time,
 		// so only the sweep can see this. Both carry the finding, and both carry it as
@@ -459,6 +492,33 @@ var _ = Describe("Auditor", func() {
 		// could say about them — and PoolDeleted is about the pool, not them.
 		Expect(claimCondition("audit-dangling-a")).To(BeNil())
 		Expect(claimCondition("audit-dangling-b")).To(BeNil())
+	})
+
+	It("bounds the claim list of a deleted-pool finding when the names are long", func() {
+		// A claim name may run to 253 characters, so a handful of them is already more
+		// than an event note can hold — and the Events API rejects the whole event, not
+		// just the excess. The finding is the only place the stranded claims are named
+		// at all, so it has to survive the widest band an IPPool can serve.
+		longName := func(i int) string {
+			return fmt.Sprintf("audit-long-gone-%s-%d", strings.Repeat("n", 200), i)
+		}
+		names := make([]string, 5)
+		for i := range names {
+			names[i] = longName(i)
+			createClaim(testNamespace, names[i], "audit-long-gone-pool", "")
+		}
+
+		var matched []Finding
+		for _, f := range withReason(sweep(), "PoolDeleted") {
+			if strings.Contains(f.Message, "audit-long-gone-pool") {
+				matched = append(matched, f)
+			}
+		}
+		Expect(matched).To(HaveLen(1))
+		Expect(len(matched[0].Message)).To(BeNumerically("<=", maxEventNote))
+		Expect(matched[0].Message).To(ContainSubstring(testNamespace + "/" + names[0]))
+		Expect(matched[0].Message).To(ContainSubstring("and 4 more"))
+		Expect(matched[0].Message).NotTo(ContainSubstring(names[4]))
 	})
 
 	It("keeps the duplicate report when a claim also references a missing pool", func() {
