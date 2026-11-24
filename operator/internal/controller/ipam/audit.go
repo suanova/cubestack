@@ -796,12 +796,12 @@ func (a *Auditor) applyConditions(ctx context.Context, claims []ipamv1alpha1.IPC
 		key := types.NamespacedName{Namespace: claims[i].Namespace, Name: claims[i].Name}
 		// A claim with no finding is walked only to clear a condition a previous sweep
 		// set, so the nil desired is the removal.
-		if err := a.syncClaimCondition(ctx, key, claimConditions[key], claims[i].Generation); err != nil {
+		if err := a.syncClaimCondition(ctx, key, claimConditions[key], claims[i].Generation, claims[i].UID); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	for _, name := range sortedNames(pools) {
-		if err := a.syncPoolCondition(ctx, name, poolConditions[name], pools[name].Generation); err != nil {
+		if err := a.syncPoolCondition(ctx, name, poolConditions[name], pools[name].Generation, pools[name].UID); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -822,11 +822,20 @@ func (a *Auditor) applyConditions(ctx context.Context, claims []ipamv1alpha1.IPC
 // was computed from, not the one this re-read returned: the finding describes the
 // object as it was listed, and an edit that landed since would otherwise be
 // reported as already observed.
-func (a *Auditor) syncClaimCondition(ctx context.Context, key types.NamespacedName, desired *metav1.Condition, generation int64) error {
+//
+// The UID is the listed object's, and a re-read that returns a different one is left
+// alone: the name was deleted and recreated in between, so the finding describes an
+// object that no longer exists. The optimistic lock cannot catch this — it locks on
+// the replacement's own resourceVersion, which it has just read — and the next sweep
+// speaks for the replacement.
+func (a *Auditor) syncClaimCondition(ctx context.Context, key types.NamespacedName, desired *metav1.Condition, generation int64, uid types.UID) error {
 	for range conditionWriteAttempts {
 		claim := &ipamv1alpha1.IPClaim{}
 		if err := a.Client.Get(ctx, key, claim); err != nil {
 			return client.IgnoreNotFound(err)
+		}
+		if claim.UID != uid {
+			return nil
 		}
 		before := claim.DeepCopy()
 
@@ -853,12 +862,15 @@ func (a *Auditor) syncClaimCondition(ctx context.Context, key types.NamespacedNa
 // syncPoolCondition is syncClaimCondition for a pool. Kept as a separate function
 // rather than parameterised over the kind: the two status types share no interface,
 // and a type switch here would cost more than the twenty duplicated lines.
-func (a *Auditor) syncPoolCondition(ctx context.Context, name string, desired *metav1.Condition, generation int64) error {
+func (a *Auditor) syncPoolCondition(ctx context.Context, name string, desired *metav1.Condition, generation int64, uid types.UID) error {
 	key := types.NamespacedName{Name: name}
 	for range conditionWriteAttempts {
 		pool := &ipamv1alpha1.IPPool{}
 		if err := a.Client.Get(ctx, key, pool); err != nil {
 			return client.IgnoreNotFound(err)
+		}
+		if pool.UID != uid {
+			return nil
 		}
 		before := pool.DeepCopy()
 

@@ -232,6 +232,14 @@ func validateTemplate(tmpl *ipamv1alpha1.NADTemplate, start, end netip.Addr) err
 			// after the claim had already reported Ready=True.
 			return fmt.Errorf("nadTemplate.routes[%d].gw %q must not carry a zone", i, route.GW)
 		}
+		if gw.Is4In6() {
+			// A mapped address reads as IPv6 to Is4 but as IPv4 to the kernel, so the
+			// family check below cannot classify it: with an IPv6 destination it passes,
+			// and the route is then laid via an IPv4 gateway that nothing in the v6
+			// neighbour table can resolve. It is never what the NAD should carry, so it
+			// is refused rather than guessed at.
+			return fmt.Errorf("nadTemplate.routes[%d].gw %q is an IPv4-mapped IPv6 address; write the gateway as a plain IPv4 address", i, route.GW)
+		}
 		if gw.Is4() != dst.Addr().Is4() {
 			// netlink refuses a route whose gateway is in another family than its
 			// destination, and the plugin fails the interface setup for it — again

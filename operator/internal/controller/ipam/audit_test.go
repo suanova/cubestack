@@ -239,17 +239,61 @@ var _ = Describe("Auditor", func() {
 		}
 
 		// The objects' own generation is 1, so 7 can only come from the argument.
-		Expect(getClaim(testNamespace, claimName).Generation).NotTo(Equal(snapshotGeneration))
+		claim := getClaim(testNamespace, claimName)
+		Expect(claim.Generation).NotTo(Equal(snapshotGeneration))
 		Expect(auditor.syncClaimCondition(ctx,
-			client.ObjectKey{Namespace: testNamespace, Name: claimName}, desired, snapshotGeneration)).To(Succeed())
+			client.ObjectKey{Namespace: testNamespace, Name: claimName}, desired, snapshotGeneration, claim.UID)).To(Succeed())
 		claimCond := claimCondition(claimName)
 		Expect(claimCond).NotTo(BeNil())
 		Expect(claimCond.ObservedGeneration).To(Equal(snapshotGeneration))
 
-		Expect(auditor.syncPoolCondition(ctx, poolName, desired, snapshotGeneration)).To(Succeed())
+		pool := &ipamv1alpha1.IPPool{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: poolName}, pool)).To(Succeed())
+		Expect(auditor.syncPoolCondition(ctx, poolName, desired, snapshotGeneration, pool.UID)).To(Succeed())
 		poolCond := poolCondition(poolName)
 		Expect(poolCond).NotTo(BeNil())
 		Expect(poolCond.ObservedGeneration).To(Equal(snapshotGeneration))
+	})
+
+	It("does not write a finding onto an object that replaced the one it was listed from", func() {
+		// The sweep lists, then re-reads to patch. A delete and recreate under the same
+		// name in between hands the re-read a different object, and the optimistic lock
+		// cannot refuse the write — it locks against the replacement's own
+		// resourceVersion, which was just read. For a finding that is written (as
+		// opposed to one that is cleared) the UID is the only thing that can tell the
+		// two apart.
+		claimName := "audit-replaced-ip"
+		poolName := "audit-replaced"
+		createClaim(testNamespace, claimName, poolName, "")
+		createPool(poolName, testPoolSpec())
+
+		auditor := &Auditor{Client: k8sClient}
+		desired := &metav1.Condition{
+			Type:    ipamv1alpha1.ConditionDuplicateAddress,
+			Status:  metav1.ConditionTrue,
+			Reason:  ipamv1alpha1.ReasonDuplicateAddress,
+			Message: "about the object this sweep listed",
+		}
+		stale := types.UID("00000000-0000-0000-0000-00000000dead")
+
+		claim := getClaim(testNamespace, claimName)
+		Expect(claim.UID).NotTo(Equal(stale))
+		Expect(auditor.syncClaimCondition(ctx,
+			client.ObjectKey{Namespace: testNamespace, Name: claimName}, desired, claim.Generation, stale)).To(Succeed())
+		Expect(claimCondition(claimName)).To(BeNil())
+
+		pool := &ipamv1alpha1.IPPool{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: poolName}, pool)).To(Succeed())
+		Expect(auditor.syncPoolCondition(ctx, poolName, desired, pool.Generation, stale)).To(Succeed())
+		Expect(poolCondition(poolName)).To(BeNil())
+
+		// The same calls with the listed object's own UID do write, which is what makes
+		// the assertions above about the UID rather than about the write path being dead.
+		Expect(auditor.syncClaimCondition(ctx,
+			client.ObjectKey{Namespace: testNamespace, Name: claimName}, desired, claim.Generation, claim.UID)).To(Succeed())
+		Expect(claimCondition(claimName)).NotTo(BeNil())
+		Expect(auditor.syncPoolCondition(ctx, poolName, desired, pool.Generation, pool.UID)).To(Succeed())
+		Expect(poolCondition(poolName)).NotTo(BeNil())
 	})
 
 	It("does not report distinct addresses", func() {
