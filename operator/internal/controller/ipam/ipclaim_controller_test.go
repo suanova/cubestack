@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -479,9 +480,7 @@ var _ = Describe("IPClaim Controller", func() {
 		deleteNAD("claims-stuck-static")
 
 		reconcileClaim(testNamespace, "claims-stuck-ip")
-		stuck := getNAD("claims-stuck-static")
-		stuck.SetFinalizers([]string{"example.com/hold"})
-		Expect(k8sClient.Update(ctx, stuck)).To(Succeed())
+		holdNAD(getNAD("claims-stuck-static"))
 
 		Expect(k8sClient.Delete(ctx, getClaim(testNamespace, "claims-stuck-ip"))).To(Succeed())
 		reconcileClaim(testNamespace, "claims-stuck-ip")
@@ -527,10 +526,17 @@ var _ = Describe("IPClaim Controller", func() {
 		mgrCtx, stop := context.WithCancel(ctx)
 		started := make(chan error, 1)
 		go func() { started <- mgr.Start(mgrCtx) }()
-		DeferCleanup(func() {
-			stop()
-			ExpectWithOffset(1, <-started).NotTo(HaveOccurred())
-		})
+		// Idempotent, because the fixture cleanup below has to stop the manager too:
+		// a running controller would mint the NAD again the moment the cleanup's delete
+		// went through, and the fixture would be back.
+		var stopOnce sync.Once
+		stopManager := func() {
+			stopOnce.Do(func() {
+				stop()
+				ExpectWithOffset(1, <-started).NotTo(HaveOccurred())
+			})
+		}
+		DeferCleanup(stopManager)
 
 		spec := testPoolSpec()
 		spec.Range = ipamv1alpha1.IPRange{Start: "10.66.3.170", End: "10.66.3.171"}
@@ -538,6 +544,7 @@ var _ = Describe("IPClaim Controller", func() {
 		createPool("watch-pool", spec)
 		createClaim(watchNS, "watch-ip", "watch-pool", "watch-static")
 		DeferCleanup(func() {
+			stopManager()
 			nad := newNAD(watchNS, "watch-static")
 			ExpectWithOffset(1, client.IgnoreNotFound(k8sClient.Delete(ctx, nad))).To(Succeed())
 		})
@@ -559,8 +566,7 @@ var _ = Describe("IPClaim Controller", func() {
 		Eventually(func() error {
 			return k8sClient.Get(ctx, client.ObjectKeyFromObject(stuck), stuck)
 		}, "30s").Should(Succeed())
-		stuck.SetFinalizers([]string{"example.com/hold"})
-		Expect(k8sClient.Update(ctx, stuck)).To(Succeed())
+		holdNAD(stuck)
 		Expect(k8sClient.Delete(ctx, getClaim(watchNS, "watch-ip"))).To(Succeed())
 
 		Eventually(func() bool {
@@ -582,6 +588,61 @@ var _ = Describe("IPClaim Controller", func() {
 			err := k8sClient.Get(ctx, client.ObjectKey{Namespace: watchNS, Name: "watch-ip"}, claim)
 			return apierrors.IsNotFound(err)
 		}, "30s").Should(BeTrue())
+	})
+
+	It("keeps a live claim off Ready while its NAD is terminating", func() {
+		// A finalizer on the NAD leaves it readable after its delete. Its content may
+		// still match what the pool renders, but the object is on its way out: Ready
+		// would advertise a network the VM is about to be handed and lose.
+		createPool("claims-waning", testPoolSpec())
+		createClaim(testNamespace, "claims-waning-ip", "claims-waning", "claims-waning-static")
+		deleteNAD("claims-waning-static")
+
+		reconcileClaim(testNamespace, "claims-waning-ip")
+		Expect(ready(getClaim(testNamespace, "claims-waning-ip")).Status).To(Equal(metav1.ConditionTrue))
+
+		holdNAD(getNAD("claims-waning-static"))
+		Expect(k8sClient.Delete(ctx, getNAD("claims-waning-static"))).To(Succeed())
+
+		reconcileClaim(testNamespace, "claims-waning-ip")
+		waning := getClaim(testNamespace, "claims-waning-ip")
+		Expect(ready(waning).Status).To(Equal(metav1.ConditionFalse))
+		Expect(ready(waning).Reason).To(Equal(ipamv1alpha1.ReasonReserved))
+		// The address is not given back: the NAD is still there, and a running VM may
+		// still be on it.
+		Expect(waning.Status.AssignedIP).To(Equal(testFirstIP))
+
+		// Whatever held it lets go; a replacement is minted on the next pass.
+		released := getNAD("claims-waning-static")
+		released.SetFinalizers(nil)
+		Expect(k8sClient.Update(ctx, released)).To(Succeed())
+
+		reconcileClaim(testNamespace, "claims-waning-ip")
+		Expect(ready(getClaim(testNamespace, "claims-waning-ip")).Status).To(Equal(metav1.ConditionTrue))
+		Expect(getNAD("claims-waning-static").GetDeletionTimestamp()).To(BeNil())
+	})
+
+	It("refuses a NAD claim on a cluster that does not serve the kind", func() {
+		// No Multus. Nothing could mint the NAD, so the claim is failed with a reason
+		// naming what is missing instead of retrying a read and a create against a kind
+		// the server does not have; address-only claims are unaffected.
+		createPool("claims-nomultus", testPoolSpec())
+		createClaim(testNamespace, "claims-nomultus-ip", "claims-nomultus", "claims-nomultus-static")
+
+		r := reconciled()
+		r.NADKindMissing = true
+		_, err := r.Reconcile(ctx, requestFor(testNamespace, "claims-nomultus-ip"))
+		Expect(err).NotTo(HaveOccurred())
+
+		got := getClaim(testNamespace, "claims-nomultus-ip")
+		Expect(ready(got).Status).To(Equal(metav1.ConditionFalse))
+		Expect(ready(got).Reason).To(Equal(ipamv1alpha1.ReasonMultusMissing))
+		Expect(got.Status.AssignedIP).To(BeEmpty())
+		// No teardown finalizer either: there is no NAD whose life it would guard.
+		Expect(got.Finalizers).NotTo(ContainElement(NADTeardownFinalizer))
+
+		nad := newNAD(testNamespace, "claims-nomultus-static")
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(nad), nad))).To(BeTrue())
 	})
 
 	It("does not hold a claim that mints no NAD", func() {

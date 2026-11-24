@@ -18,9 +18,11 @@ package ipam
 
 import (
 	"context"
+	"errors"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	ipamv1alpha1 "github.com/suanova/cubestack/api/ipam/v1alpha1"
@@ -66,6 +68,24 @@ var _ = Describe("IPPool schema validation", func() {
 		}
 	}
 
+	// rejected asserts the object was refused by schema validation of the field named.
+	//
+	// NotTo(Succeed()) alone also passes on a timeout, a broken connection, or a rule
+	// that was silently dropped from the CRD — so a spec meant to pin a rule could go
+	// green while the rule was gone. The field in the status cause is what pins it.
+	rejected := func(err error, field string) {
+		ExpectWithOffset(1, err).To(HaveOccurred())
+		ExpectWithOffset(1, apierrors.IsInvalid(err)).To(BeTrue(), "expected an Invalid error, got %v", err)
+
+		var statusErr *apierrors.StatusError
+		ExpectWithOffset(1, errors.As(err, &statusErr)).To(BeTrue())
+		fields := make([]string, 0, len(statusErr.ErrStatus.Details.Causes))
+		for _, cause := range statusErr.ErrStatus.Details.Causes {
+			fields = append(fields, cause.Field)
+		}
+		ExpectWithOffset(1, fields).To(ContainElement(ContainSubstring(field)))
+	}
+
 	It("accepts the band the design proposes", func() {
 		pool := newPool(func(*ipamv1alpha1.IPPoolSpec) {})
 		Expect(k8sClient.Create(ctx, pool)).To(Succeed())
@@ -83,7 +103,7 @@ var _ = Describe("IPPool schema validation", func() {
 
 	It("rejects a gateway that is not an address", func() {
 		pool := newPool(func(s *ipamv1alpha1.IPPoolSpec) { s.NADTemplate.Gateway = "not-an-ip" })
-		Expect(k8sClient.Create(ctx, pool)).NotTo(Succeed())
+		rejected(k8sClient.Create(ctx, pool), "spec.nadTemplate.gateway")
 	})
 
 	It("rejects an IPClaim with no poolRef", func() {
@@ -91,7 +111,7 @@ var _ = Describe("IPPool schema validation", func() {
 			ObjectMeta: metav1.ObjectMeta{GenerateName: schemaCheckName, Namespace: testNamespace},
 			Spec:       ipamv1alpha1.IPClaimSpec{},
 		}
-		Expect(k8sClient.Create(ctx, claim)).NotTo(Succeed())
+		rejected(k8sClient.Create(ctx, claim), "spec.poolRef")
 	})
 
 	// The minimal form: a band and nothing else. Nothing mints from this pool, so
@@ -107,7 +127,7 @@ var _ = Describe("IPPool schema validation", func() {
 	// rather than the required-ness of the field itself.)
 	It("rejects a pool whose range bounds are empty", func() {
 		pool := newPool(func(s *ipamv1alpha1.IPPoolSpec) { s.Range = ipamv1alpha1.IPRange{} })
-		Expect(k8sClient.Create(ctx, pool)).NotTo(Succeed())
+		rejected(k8sClient.Create(ctx, pool), "spec.range")
 	})
 
 	// The nadTemplate is typed precisely so that this class of mistake is caught
@@ -116,33 +136,33 @@ var _ = Describe("IPPool schema validation", func() {
 	// is what removes the need for a cross-field rule saying so.
 	It("rejects a nadTemplate with no bridge", func() {
 		pool := newPool(func(s *ipamv1alpha1.IPPoolSpec) { s.NADTemplate.Bridge = "" })
-		Expect(k8sClient.Create(ctx, pool)).NotTo(Succeed())
+		rejected(k8sClient.Create(ctx, pool), "spec.nadTemplate.bridge")
 	})
 
 	It("rejects a nadTemplate with no subnet", func() {
 		pool := newPool(func(s *ipamv1alpha1.IPPoolSpec) { s.NADTemplate.Subnet = "" })
-		Expect(k8sClient.Create(ctx, pool)).NotTo(Succeed())
+		rejected(k8sClient.Create(ctx, pool), "spec.nadTemplate.subnet")
 	})
 
 	It("rejects a nadTemplate with no gateway", func() {
 		pool := newPool(func(s *ipamv1alpha1.IPPoolSpec) { s.NADTemplate.Gateway = "" })
-		Expect(k8sClient.Create(ctx, pool)).NotTo(Succeed())
+		rejected(k8sClient.Create(ctx, pool), "spec.nadTemplate.gateway")
 	})
 
 	It("rejects a subnet that is not a CIDR", func() {
 		pool := newPool(func(s *ipamv1alpha1.IPPoolSpec) { s.NADTemplate.Subnet = "10.66.3.0" })
-		Expect(k8sClient.Create(ctx, pool)).NotTo(Succeed())
+		rejected(k8sClient.Create(ctx, pool), "spec.nadTemplate.subnet")
 	})
 
 	It("rejects a VLAN outside the 802.1Q range", func() {
 		vlan := int32(9999)
 		pool := newPool(func(s *ipamv1alpha1.IPPoolSpec) { s.NADTemplate.VLAN = &vlan })
-		Expect(k8sClient.Create(ctx, pool)).NotTo(Succeed())
+		rejected(k8sClient.Create(ctx, pool), "spec.nadTemplate.vlan")
 	})
 
 	It("rejects an unknown CNI plugin type", func() {
 		pool := newPool(func(s *ipamv1alpha1.IPPoolSpec) { s.NADTemplate.Type = "sriov" })
-		Expect(k8sClient.Create(ctx, pool)).NotTo(Succeed())
+		rejected(k8sClient.Create(ctx, pool), "spec.nadTemplate.type")
 	})
 
 	It("rejects an IPClaim whose nad is not a DNS subdomain", func() {
@@ -150,7 +170,7 @@ var _ = Describe("IPPool schema validation", func() {
 			ObjectMeta: metav1.ObjectMeta{GenerateName: schemaCheckName, Namespace: testNamespace},
 			Spec:       ipamv1alpha1.IPClaimSpec{PoolRef: anyPool, NAD: "Not_A_Name"},
 		}
-		Expect(k8sClient.Create(ctx, claim)).NotTo(Succeed())
+		rejected(k8sClient.Create(ctx, claim), "spec.nad")
 	})
 
 	// The one allocation rule CEL can express: an address belongs to the Exact
@@ -190,7 +210,7 @@ var _ = Describe("IPPool schema validation", func() {
 				Allocation: &ipamv1alpha1.AddressAllocation{Strategy: "Maybe"},
 			},
 		}
-		Expect(k8sClient.Create(ctx, claim)).NotTo(Succeed())
+		rejected(k8sClient.Create(ctx, claim), "spec.allocation.strategy")
 	})
 
 	It("accepts an Exact allocation", func() {

@@ -44,7 +44,10 @@ import (
 // underlay NAD retired, there is no longer a live object to compare against, and
 // the remaining overlap risk (an admin hand-writing a conflicting NAD) is bounded
 // by RBAC instead: regular users cannot create NADs. What cannot be caught before
-// the fact is caught after it, by the audit sweep.
+// the fact is caught after it, by the audit sweep — but only within what it can
+// see: the sweep compares pools with each other and lists only NADs carrying the
+// claim label, so a hand-written NAD without one is invisible to it. Check those
+// by hand before pointing a pool at their subnet.
 type IPPoolReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme

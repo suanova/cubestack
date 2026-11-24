@@ -1,0 +1,31 @@
+apiVersion: ipam.cubestack.io/v1alpha1
+kind: IPClaim
+metadata:
+  labels:
+    app.kubernetes.io/name: cubestack
+    app.kubernetes.io/managed-by: kustomize
+  name: vm-web-01-ip
+  namespace: default
+spec:
+  # IPPool is cluster-scoped, so this is a bare name with no namespace.
+  poolRef: underlay-v4
+
+  # Optional. The NAD to mint for this claim, in this namespace. The generated NAD
+  # takes this name verbatim, which is what lets the VM manifest be written before
+  # the claim is satisfied: the VM's network list already names the NAD it will have.
+  #
+  # Omit it for an address-only claim -- an address is bound and nothing is created.
+  # The referenced pool must carry a nadTemplate, otherwise the claim reports
+  # Ready=False / TemplateMissing.
+  nad: vm-web-01-underlay
+
+  # Optional. Omitted means Auto: the lowest free address in the pool's band is
+  # taken, so allocation is deterministic. There is no "requestedIP" to contradict.
+  #
+  #   allocation:
+  #     strategy: Exact
+  #     address: 10.66.3.221
+  #
+  # Exact never falls back to a nearby address: an address that is out of band,
+  # excluded, or held by another claim fails with its own reason and names the
+  # holder in status.blockers.

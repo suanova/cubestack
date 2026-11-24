@@ -160,6 +160,27 @@ var _ = Describe("Auditor", func() {
 		Expect(matched[0].Message).To(ContainSubstring("audit-reused-ip"))
 	})
 
+	It("does not report a NAD whose label was edited while its claim lives", func() {
+		// The label is discovery, not identity: the ownerReference is what names the
+		// claim, and a shortened long name can equal a short claim's name without any
+		// hash collision, so a label pointing at nothing proves nothing. The finding is
+		// what a reader acts on — the callback on it is a deletion — so a live NAD must
+		// not acquire one from a label alone.
+		createPool("audit-relabel", testPoolSpec())
+		createClaim(testNamespace, "audit-relabel-ip", "audit-relabel", "audit-relabel-static")
+		deleteNAD("audit-relabel-static")
+
+		r := &IPClaimReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme()}
+		_, err := r.Reconcile(ctx, requestFor(testNamespace, "audit-relabel-ip"))
+		Expect(err).NotTo(HaveOccurred())
+
+		relabelled := getNAD("audit-relabel-static")
+		relabelled.SetLabels(map[string]string{ipamv1alpha1.LabelClaim: "audit-somebody-else-ip"})
+		Expect(k8sClient.Update(ctx, relabelled)).To(Succeed())
+
+		Expect(withName(withReason(sweep(), "OrphanedNAD"), "audit-relabel-static")).To(BeEmpty())
+	})
+
 	It("reports two claims holding one address", func() {
 		// The residue of the allocation race. Nothing on the network refuses the
 		// duplicate, so the message has to say what the consequence is — and it is not

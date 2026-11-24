@@ -1,0 +1,32 @@
+apiVersion: ipam.cubestack.io/v1alpha1
+kind: IPPool
+metadata:
+  labels:
+    app.kubernetes.io/name: cubestack
+    app.kubernetes.io/managed-by: kustomize
+  name: ledger-only
+spec:
+  # The minimal form: a band, and nothing else.
+  #
+  # This pool hands out addresses and mints no NetworkAttachmentDefinition, so
+  # there is no subnet to draw from and no gateway to hand out. Claims against it
+  # are ledger-only -- they reserve an address that nothing in the claim layer
+  # attaches to a VM.
+  #
+  # That is useful when something ELSE consumes the address record: a pre-flight
+  # reservation before a VM exists, an inventory of which cubestack nodes hold
+  # which address, or a claim whose NAD is written by hand by an admin. A claim
+  # asking for a NAD against this pool fails with TemplateMissing, deliberately --
+  # it is a misconfiguration, not something to guess around.
+  #
+  # If you want per-VM NADs minted, add a nadTemplate. subnet and gateway become
+  # required at that point, because the generated config has nowhere else to get
+  # them from.
+  #
+  # namespaces is not optional in practice even here: an empty list admits nobody,
+  # so a pool without one allocates nothing at all.
+  namespaces:
+    - default
+  range:
+    start: 10.66.3.150
+    end: 10.66.3.189

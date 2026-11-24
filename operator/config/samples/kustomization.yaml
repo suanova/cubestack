@@ -1,8 +1,18 @@
 ## Append samples of your project ##
+#
+# The IPClaim is what mints the NAD a VM names in its network list.
+#
+# ipam_v1alpha1_ippool_minimal.yaml is deliberately NOT listed here. It is the
+# alternative form of a pool -- a band with no nadTemplate -- and two pools over
+# one band is the misconfiguration the audit sweep reports as PoolOverlap: each
+# allocates against its own poolRef and would happily hand the same address to two
+# claims. Use it instead of the full pool, not alongside it.
 resources:
 - ai_v1alpha1_modelversion.yaml
 - ai_v1alpha1_inferenceruntimeprofile.yaml
 - ai_v1alpha1_inferenceservice.yaml
 - ai_v1alpha1_devenvironment.yaml
 - ai_v1alpha1_dataset.yaml
+- ipam_v1alpha1_ippool.yaml
+- ipam_v1alpha1_ipclaim.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples
