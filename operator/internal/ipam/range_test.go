@@ -40,7 +40,9 @@ const (
 	testInvalidIP        = "10.66.3.999"
 	testInvalidIPMessage = "not a valid address"
 	testRouteCIDR        = "10.66.9.0/24"
+	testRouteCIDR6       = "fd00::/64"
 	testInvalidCIDR      = "not a valid CIDR"
+	testIPv6Addr         = "fd00::1"
 )
 
 func TestParseRange(t *testing.T) {

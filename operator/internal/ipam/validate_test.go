@@ -160,9 +160,9 @@ func TestValidatePoolRange(t *testing.T) {
 		{
 			name: "IPv6 is rejected",
 			mutate: func(s *ipamv1alpha1.IPPoolSpec) {
-				s.NADTemplate.Subnet = "fd00::/64"
+				s.NADTemplate.Subnet = testRouteCIDR6
 				s.NADTemplate.Gateway = "fd00::ffff"
-				s.Range.Start = "fd00::1"
+				s.Range.Start = testIPv6Addr
 				s.Range.End = "fd00::10"
 			},
 			wantErr: "IPv4-only",
@@ -302,6 +302,35 @@ func TestValidatePoolRange(t *testing.T) {
 			},
 			wantErr: "must not carry a zone",
 		},
+		{
+			// netlink refuses a route whose gateway is in another family than its
+			// destination, and the plugin fails the interface setup for it — after the
+			// claim had reported Ready.
+			name: "an IPv4 route with an IPv6 gateway",
+			mutate: func(s *ipamv1alpha1.IPPoolSpec) {
+				s.NADTemplate.Routes = []ipamv1alpha1.NADRoute{{Dst: testRouteCIDR, GW: testIPv6Addr}}
+			},
+			wantErr: "same address family",
+		},
+		{
+			// Checked in both directions: a v6 destination with a v4 gateway is just as
+			// unusable, and validating only the common shape would let it through.
+			name: "an IPv6 route with an IPv4 gateway",
+			mutate: func(s *ipamv1alpha1.IPPoolSpec) {
+				s.NADTemplate.Routes = []ipamv1alpha1.NADRoute{{Dst: testRouteCIDR6, GW: testGateway}}
+			},
+			wantErr: "same address family",
+		},
+		{
+			// Is4 says false for a mapped address, so the family check would read it as
+			// IPv6 and accept it against an IPv6 destination — a route via an address no
+			// IPv6 neighbour can resolve.
+			name: "an IPv6 route with an IPv4-mapped gateway",
+			mutate: func(s *ipamv1alpha1.IPPoolSpec) {
+				s.NADTemplate.Routes = []ipamv1alpha1.NADRoute{{Dst: testRouteCIDR6, GW: "::ffff:10.66.3.254"}}
+			},
+			wantErr: "IPv4-mapped IPv6 address",
+		},
 	}
 
 	for _, tt := range tests {
@@ -390,7 +419,7 @@ func TestValidatePoolRange_LedgerOnly(t *testing.T) {
 
 	t.Run("an IPv6 band is still rejected", func(t *testing.T) {
 		spec := ledgerOnly()
-		spec.Range.Start = "fd00::1"
+		spec.Range.Start = testIPv6Addr
 		spec.Range.End = "fd00::10"
 		err := ValidatePoolRange(spec)
 		if err == nil || !strings.Contains(err.Error(), "IPv4-only") {
