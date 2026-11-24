@@ -17,6 +17,7 @@ limitations under the License.
 package ipam
 
 import (
+	"fmt"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -91,6 +92,11 @@ var _ = Describe("Auditor", func() {
 		matched := withName(withReason(sweep(), "OrphanedNAD"), "audit-orphan-static")
 		Expect(matched).To(HaveLen(1))
 		Expect(matched[0].Message).To(ContainSubstring("audit-orphan-ip"))
+		// The event is filed against a stub, and kubectl describe selects events by
+		// the live object's UID: without it, the one finding that has no persistent
+		// condition would be invisible on the object it is about.
+		Expect(orphan.GetUID()).NotTo(BeEmpty())
+		Expect(matched[0].ref().GetUID()).To(Equal(orphan.GetUID()))
 	})
 
 	It("does not report a live NAD", func() {
@@ -143,6 +149,7 @@ var _ = Describe("Auditor", func() {
 		a := withName(duplicates, "audit-dup-a")
 		Expect(a).To(HaveLen(1))
 		Expect(a[0].Message).To(ContainSubstring("audit-dup-b"))
+		Expect(a[0].UID).To(Equal(getClaim(testNamespace, "audit-dup-a").UID))
 
 		b := withName(duplicates, "audit-dup-b")
 		Expect(b).To(HaveLen(1))
@@ -181,6 +188,39 @@ var _ = Describe("Auditor", func() {
 		Expect(claimCondition("audit-dup-cond-b")).To(BeNil())
 	})
 
+	It("stamps a condition with the generation of the snapshot it was computed from", func() {
+		// The sync re-reads the object so its optimistic lock is against the live
+		// version, but the generation it stamps must stay the snapshot's: an edit
+		// landing between the list and the Get is what observedGeneration is for, and a
+		// condition claiming the newer generation reads as current when it is not.
+		const snapshotGeneration int64 = 7
+		claimName := "audit-generation-ip"
+		poolName := "audit-generation"
+		createClaim(testNamespace, claimName, poolName, "")
+		createPool(poolName, testPoolSpec())
+
+		auditor := &Auditor{Client: k8sClient}
+		desired := &metav1.Condition{
+			Type:    ipamv1alpha1.ConditionDuplicateAddress,
+			Status:  metav1.ConditionTrue,
+			Reason:  ipamv1alpha1.ReasonDuplicateAddress,
+			Message: "computed from an older snapshot",
+		}
+
+		// The objects' own generation is 1, so 7 can only come from the argument.
+		Expect(getClaim(testNamespace, claimName).Generation).NotTo(Equal(snapshotGeneration))
+		Expect(auditor.syncClaimCondition(ctx,
+			client.ObjectKey{Namespace: testNamespace, Name: claimName}, desired, snapshotGeneration)).To(Succeed())
+		claimCond := claimCondition(claimName)
+		Expect(claimCond).NotTo(BeNil())
+		Expect(claimCond.ObservedGeneration).To(Equal(snapshotGeneration))
+
+		Expect(auditor.syncPoolCondition(ctx, poolName, desired, snapshotGeneration)).To(Succeed())
+		poolCond := poolCondition(poolName)
+		Expect(poolCond).NotTo(BeNil())
+		Expect(poolCond.ObservedGeneration).To(Equal(snapshotGeneration))
+	})
+
 	It("does not report distinct addresses", func() {
 		createPool("audit-distinct", testPoolSpec())
 		for name, addr := range map[string]string{"audit-distinct-a": testFirstIP, "audit-distinct-b": testSecondIP} {
@@ -191,6 +231,56 @@ var _ = Describe("Auditor", func() {
 		duplicates := withReason(sweep(), ipamv1alpha1.ReasonDuplicateAddress)
 		Expect(withName(duplicates, "audit-distinct-a")).To(BeEmpty())
 		Expect(withName(duplicates, "audit-distinct-b")).To(BeEmpty())
+	})
+
+	It("does not report a collision across two VLANs", func() {
+		// The API places a pool's subnet on a VLAN-filtered bridge and states outright
+		// that address reuse across VLANs is legal. Two pools on one subnet whose bands
+		// intersect are two isolated segments when the VLANs differ, and reporting them
+		// would mark exactly the sanctioned arrangement as broken.
+		withVLAN := func(vlan int32) ipamv1alpha1.IPPoolSpec {
+			spec := testPoolSpec()
+			spec.NADTemplate.VLAN = &vlan
+			return spec
+		}
+		createPool("audit-vlan-a", withVLAN(100))
+		createPool("audit-vlan-b", withVLAN(200))
+		for claim, pool := range map[string]string{"audit-vlan-a-ip": "audit-vlan-a", "audit-vlan-b-ip": "audit-vlan-b"} {
+			createClaim(testNamespace, claim, pool, "")
+			bindAs(claim, testFirstIP)
+		}
+
+		findings := sweep()
+		duplicates := withReason(findings, ipamv1alpha1.ReasonDuplicateAddress)
+		Expect(withName(duplicates, "audit-vlan-a-ip")).To(BeEmpty())
+		Expect(withName(duplicates, "audit-vlan-b-ip")).To(BeEmpty())
+
+		overlaps := withReason(findings, ipamv1alpha1.ReasonPoolOverlap)
+		Expect(withName(overlaps, "audit-vlan-a")).To(BeEmpty())
+		Expect(withName(overlaps, "audit-vlan-b")).To(BeEmpty())
+	})
+
+	It("reads the VLAN from the NAD a claim minted", func() {
+		// A claim with a NAD is grouped by what the CNI will configure — and that
+		// config, not the pool, is where the bridge and VLAN come from.
+		staticNAD := func(nad, claim string, vlan int32) {
+			obj := newNAD(testNamespace, nad)
+			obj.SetLabels(map[string]string{ipamv1alpha1.LabelClaim: claim})
+			config := fmt.Sprintf(`{"name":%q,"bridge":"br0","vlan":%d,"ipam":{"addresses":[{"address":"10.66.3.150/24"}]}}`, nad, vlan)
+			ExpectWithOffset(1, unstructured.SetNestedField(obj.Object, config, "spec", "config")).To(Succeed())
+			ExpectWithOffset(1, k8sClient.Create(ctx, obj)).To(Succeed())
+			deleteNAD(nad)
+		}
+		staticNAD("audit-nad-vlan-a-static", "audit-nad-vlan-a", 100)
+		staticNAD("audit-nad-vlan-b-static", "audit-nad-vlan-b", 200)
+		for _, name := range []string{"audit-nad-vlan-a", "audit-nad-vlan-b"} {
+			createClaim(testNamespace, name, "audit-nad-vlan-pool", name+"-static")
+			bindAs(name, testFirstIP)
+		}
+
+		duplicates := withReason(sweep(), ipamv1alpha1.ReasonDuplicateAddress)
+		Expect(withName(duplicates, "audit-nad-vlan-a")).To(BeEmpty())
+		Expect(withName(duplicates, "audit-nad-vlan-b")).To(BeEmpty())
 	})
 
 	It("reports two pools whose bands intersect on one subnet", func() {
@@ -204,6 +294,10 @@ var _ = Describe("Auditor", func() {
 		overlaps := withReason(sweep(), ipamv1alpha1.ReasonPoolOverlap)
 		Expect(withName(overlaps, "audit-overlap-a")).To(HaveLen(1))
 		Expect(withName(overlaps, "audit-overlap-b")).To(HaveLen(1))
+
+		pool := &ipamv1alpha1.IPPool{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "audit-overlap-a"}, pool)).To(Succeed())
+		Expect(withName(overlaps, "audit-overlap-a")[0].UID).To(Equal(pool.UID))
 
 		for _, name := range []string{"audit-overlap-a", "audit-overlap-b"} {
 			cond := poolCondition(name)
@@ -231,6 +325,34 @@ var _ = Describe("Auditor", func() {
 		Expect(matched[0].Message).To(ContainSubstring("audit-dangling-a"))
 		Expect(matched[0].Message).To(ContainSubstring("audit-dangling-b"))
 		Expect(matched[0].Message).To(ContainSubstring("2 claim(s)"))
+		Expect(matched[0].UID).To(Equal(getClaim(testNamespace, matched[0].Name).UID))
+
+		// Neither claim holds an address, so there is nothing a duplicate condition
+		// could say about them — and PoolDeleted is about the pool, not them.
+		Expect(claimCondition("audit-dangling-a")).To(BeNil())
+		Expect(claimCondition("audit-dangling-b")).To(BeNil())
+	})
+
+	It("keeps the duplicate report when a claim also references a missing pool", func() {
+		// Both findings land on claims of a deleted pool that share an address. Filing
+		// PoolDeleted as a condition would replace the duplicate message — and drop the
+		// other holder from it — because both wash into the one condition type.
+		names := []string{"audit-mixed-a", "audit-mixed-b"}
+		for _, name := range names {
+			createClaim(testNamespace, name, "audit-mixed-pool", "")
+			bindAs(name, testFirstIP)
+		}
+
+		sweep()
+
+		for _, name := range names {
+			cond := claimCondition(name)
+			Expect(cond).NotTo(BeNil(), name)
+			Expect(cond.Reason).To(Equal(ipamv1alpha1.ReasonDuplicateAddress), name)
+			Expect(cond.Message).To(ContainSubstring("is held by 2 claims"), name)
+			Expect(cond.Message).To(ContainSubstring(names[0]), name)
+			Expect(cond.Message).To(ContainSubstring(names[1]), name)
+		}
 	})
 
 	It("is quiet about a healthy claim", func() {
