@@ -18,8 +18,6 @@ export interface DashboardViewerProps {
   // Left spacer for the variable toolbar, so a control the host page overlays
   // on top of it (the dashboard picker on /dashboards) is not hidden.
   variableRowSpacing?: string;
-  // Landing scope for the conditional-panel rules (see DashboardConditionalPanels).
-  scope?: string;
 }
 
 // A dashboard variable marked display.hidden is one the portal still resolves
@@ -74,7 +72,6 @@ export function DashboardViewer({
   dashboardName,
   dashboardResource,
   variableRowSpacing,
-  scope,
 }: DashboardViewerProps) {
   const hiddenVariables = dashboardResource.spec.variables.filter(
     (v) => v.spec.display?.hidden === true,
@@ -168,7 +165,7 @@ export function DashboardViewer({
           </Box>
         </Box>
         <Dashboard />
-        <DashboardConditionalPanels dashboardResource={dashboardResource} scope={scope} />
+        <DashboardConditionalPanels dashboardResource={dashboardResource} />
       </ErrorBoundary>
     </PersesProvider>
   );

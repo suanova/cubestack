@@ -11,7 +11,7 @@
 // resource (spec.display), which is the single source of truth — no frontend
 // catalog.
 //
-// The deep-link values arrive as plain props resolved from the request by the
+// The deep-link value arrives as a plain prop resolved from the request by the
 // route (app/dashboards/page.tsx) — see the note there for why the client page
 // cannot read `searchParams` itself.
 
@@ -34,12 +34,9 @@ import { fetchDashboard, fetchDashboards } from "@/lib/perses/perses-client";
 
 export function DashboardsLanding({
   requestedDashboard = null,
-  requestedScope = null,
 }: {
   /** Dashboard named by the request's ?dashboard= param, or null. */
   requestedDashboard?: string | null;
-  /** Landing scope carried by the request's ?scope= param, or null. */
-  requestedScope?: string | null;
 }) {
   const { t } = useI18n();
   const [dashboards, setDashboards] = useState<DashboardResource[]>([]);
@@ -51,10 +48,6 @@ export function DashboardsLanding({
   // unless the request named one of the listed dashboards (then that one is
   // preselected).
   const [selectedName, setSelectedName] = useState<string | null>(null);
-  // Optional landing scope carried by the Overview deep links (?scope=gpu): it
-  // tells the island to start the selected dashboard in that scope (see
-  // DashboardConditionalPanels). A manual pick from the dropdown clears it.
-  const [scope, setScope] = useState<string | null>(null);
   const [dashboard, setDashboard] = useState<DashboardResource | null>(null);
   const [viewError, setViewError] = useState<string | null>(null);
 
@@ -72,7 +65,6 @@ export function DashboardsLanding({
           requestedDashboard !== null && items.some((d) => d.metadata.name === requestedDashboard);
         const platformOverview = items.find((d) => d.metadata.name === DEFAULT_DASHBOARD_NAME)?.metadata.name;
         setSelectedName(match ? requestedDashboard : (platformOverview ?? items[0]?.metadata.name ?? null));
-        setScope(requestedScope);
       } catch (err: unknown) {
         if (!cancelled) {
           setListError(err instanceof Error ? err.message : String(err));
@@ -84,7 +76,7 @@ export function DashboardsLanding({
     return () => {
       cancelled = true;
     };
-  }, [requestedDashboard, requestedScope]);
+  }, [requestedDashboard]);
 
   useEffect(() => {
     if (selectedName === null) return;
@@ -156,17 +148,7 @@ export function DashboardsLanding({
                 labelId="dashboard-select-label"
                 label={t("dash.select")}
                 value={selectedName ?? ""}
-                onChange={(e) => {
-                  setSelectedName(e.target.value as string);
-                  // A manual pick is a return to that dashboard's default (full)
-                  // view — drop any landing scope the deep link carried.
-                  setScope(null);
-                }}
-                // MUI Select does not fire onChange when the already-selected item
-                // is picked again, so clearing on close (any close: a pick, Esc,
-                // or clicking away) is what lets a GPU-scoped deep link hand back
-                // to the full dashboard by reopening the picker.
-                onClose={() => setScope(null)}
+                onChange={(e) => setSelectedName(e.target.value as string)}
               >
                 {dashboards.map((d) => (
                   <MenuItem key={d.metadata.name} value={d.metadata.name}>
@@ -191,7 +173,6 @@ export function DashboardsLanding({
                 dashboardName={dashboard.metadata.name}
                 dashboardResource={dashboard}
                 variableRowSpacing="276px"
-                scope={scope ?? undefined}
               />
             )}
           </Box>

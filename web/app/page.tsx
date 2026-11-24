@@ -502,10 +502,10 @@ export default function OverviewPage() {
           footParams: data.trend
             ? { util: `${trendLast(data.trend.util)}%`, mem: `${trendLast(data.trend.mem)}%` }
             : null,
-          // The GPU card lands on the same Resource Overview but GPU-scoped
-          // (?scope=gpu): the node CPU/Memory/RDMA rows are dropped on arrival,
-          // leaving the per-GPU utilization/temperature/power panels.
-          href: `/dashboards?dashboard=${DEFAULT_DASHBOARD_NAME}&scope=gpu`,
+          // The GPU card lands on the same full Resource Overview. The node
+          // rows are only hidden once a specific GPU is picked, so arriving
+          // here with gpu=All still shows every panel.
+          href: `/dashboards?dashboard=${DEFAULT_DASHBOARD_NAME}`,
         },
         {
           dataOdId: "kpi-inference",
