@@ -235,7 +235,7 @@ LATEST_ARG_CUDA    = $(if $(filter 1,$(PUSH_LATEST)),-t $(LATEST_CUDA))
 
 .PHONY: help check-tag check-platform check-platforms check-push-latest check-ubuntu-base check-cpu-pytorch check-maca-pytorch check-cuda-pytorch check-deps check-select build build-cpu-pytorch build-maca-pytorch build-cuda-pytorch \
 	smoke smoke-cpu-pytorch smoke-maca-pytorch smoke-cuda-pytorch push push-cpu-pytorch push-maca-pytorch push-cuda-pytorch retag-latest \
-	retag-latest-cpu-pytorch retag-latest-maca-pytorch retag-latest-cuda-pytorch
+	retag-latest-cpu-pytorch retag-latest-maca-pytorch retag-latest-cuda-pytorch print-images
 
 .DEFAULT_GOAL := help
 
@@ -435,6 +435,17 @@ retag-latest-maca-pytorch: check-tag
 	$(CONTAINER_TOOL) buildx imagetools create -t $(LATEST_MACA) $(IMG_MACA)
 retag-latest-cuda-pytorch: check-tag
 	$(CONTAINER_TOOL) buildx imagetools create -t $(LATEST_CUDA) $(IMG_CUDA)
+
+# The references `push-<image>` publishes, one `name=<ref>` per line, for a caller that
+# has just pushed them and needs to resolve their digests: the release pin records the
+# digest a tag resolved to (cubestack-release components/dev-lab.yaml), and naming the
+# tag anywhere else would let the two drift the first time an axis moves. Prints, pushes
+# nothing.
+print-images: check-tag ## Print the references a publish is about, as name=ref lines (TAG)
+	@printf '%s\n' \
+		'cpu-pytorch=$(IMG_CPU_PYTORCH)' \
+		'maca-pytorch=$(IMG_MACA)' \
+		'cuda-pytorch=$(IMG_CUDA)'
 
 help: ## Show this help message
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
