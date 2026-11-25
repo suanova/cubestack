@@ -32,7 +32,7 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 
 import type { DevEnvironmentSummary } from "@/app/api/devenvironments/route";
 import type { DevEnvImageOption, DevEnvOptionsResponse } from "@/app/api/devenvironments/options/route";
@@ -1046,7 +1046,24 @@ const CONN_VALUE_SX = {
   minWidth: 0,
 } as const;
 
-function EndpointRow({ label, value }: { label: string; value: string }) {
+function EndpointRow({
+  label,
+  value,
+  onOpen,
+  busy = false,
+  error = null,
+}: {
+  label: string;
+  value: string;
+  /**
+   * Set when a plain click on the address has to do something before the
+   * browser may follow it. The href stays, so the address is still there to
+   * copy, hover, or open in another tab.
+   */
+  onOpen?: () => void;
+  busy?: boolean;
+  error?: string | null;
+}) {
   return (
     <Box>
       {/* Endpoint names are lowercase DNS labels in the CR ("jupyter"); the row
@@ -1062,10 +1079,29 @@ function EndpointRow({ label, value }: { label: string; value: string }) {
           <Box
             component="a"
             href={value}
-            target="_blank"
+            target={onOpen ? undefined : "_blank"}
             rel="noopener noreferrer"
             data-od-id="endpoint-link"
-            sx={{ ...CONN_VALUE_SX, color: "var(--accent-strong)", textDecoration: "none", "&:hover": { textDecoration: "underline" } }}
+            aria-busy={busy || undefined}
+            onClick={
+              onOpen
+                ? (ev: MouseEvent) => {
+                    // Modified and non-primary clicks are the browser's: they
+                    // open the address the row still holds, in a new tab or
+                    // window. Only a plain click is signed in for first.
+                    if (ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
+                    ev.preventDefault();
+                    onOpen();
+                  }
+                : undefined
+            }
+            sx={{
+              ...CONN_VALUE_SX,
+              color: "var(--accent-strong)",
+              textDecoration: "none",
+              opacity: busy ? 0.6 : 1,
+              "&:hover": { textDecoration: "underline" },
+            }}
           >
             {value}
           </Box>
@@ -1074,6 +1110,15 @@ function EndpointRow({ label, value }: { label: string; value: string }) {
         )}
         <CopyButton value={value} />
       </Box>
+      {error ? (
+        <Typography
+          role="alert"
+          data-od-id="endpoint-open-error"
+          sx={{ display: "block", fontSize: 11, lineHeight: 1.7, color: STATUS_ERR, mt: "8px" }}
+        >
+          {error}
+        </Typography>
+      ) : null}
     </Box>
   );
 }
@@ -1382,11 +1427,21 @@ function SshKeyRow({
   );
 }
 
-// One click from the console into JupyterLab, with no token to copy: the route
-// signs in to the environment's own endpoint server-side and hands back the
-// session cookie, so the browser lands on the clean page — the token never
-// appears in a URL, the history, or the Gateway's access log.
-function OpenJupyterRow({ name, namespace }: { name: string; namespace: string }) {
+// The Jupyter endpoint, opened in one click with no token to copy: a plain
+// click on the address asks the portal to sign in to the environment server-side
+// and hands back the session cookie, so the browser lands on the clean page —
+// the token never appears in a URL, the history, or the Gateway's access log.
+function JupyterEndpointRow({
+  label,
+  address,
+  name,
+  namespace,
+}: {
+  label: string;
+  address: string;
+  name: string;
+  namespace: string;
+}) {
   const { t } = useI18n();
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -1395,7 +1450,7 @@ function OpenJupyterRow({ name, namespace }: { name: string; namespace: string }
   // and an answer that arrives afterwards must not navigate the browser back to
   // the environment the user has just left. The flag is cleared on mount
   // because StrictMode runs the effect twice (mount, simulated unmount, mount)
-  // and a flag that stayed set would leave the button dead in development.
+  // and a flag that stayed set would leave the link dead in development.
   const abandoned = useRef(false);
   useEffect(() => {
     abandoned.current = false;
@@ -1405,6 +1460,7 @@ function OpenJupyterRow({ name, namespace }: { name: string; namespace: string }
   }, []);
 
   const open = async () => {
+    if (busy) return;
     setBusy(true);
     setError(null);
     try {
@@ -1453,25 +1509,7 @@ function OpenJupyterRow({ name, namespace }: { name: string; namespace: string }
     }
   };
 
-  return (
-    <Box sx={{ gridColumn: { lg: "1 / -1" } }}>
-      <Button
-        size="small"
-        variant="contained"
-        data-od-id="jupyter-open"
-        disabled={busy}
-        onClick={open}
-        sx={{ textTransform: "none", fontSize: 12.5, whiteSpace: "nowrap" }}
-      >
-        {busy ? t("dev.conn.jupyterOpening") : t("dev.conn.jupyterOpen")}
-      </Button>
-      {error ? (
-        <Typography role="alert" data-od-id="jupyter-open-error" sx={{ display: "block", fontSize: 11, lineHeight: 1.7, color: STATUS_ERR, mt: "8px" }}>
-          {error}
-        </Typography>
-      ) : null}
-    </Box>
-  );
+  return <EndpointRow label={label} value={address} onOpen={open} busy={busy} error={error} />;
 }
 
 function ConnectionCard({ e, onAct }: { e: DevEnvironmentSummary; onAct: (e: DevEnvironmentSummary, act: string) => void }) {
@@ -1499,9 +1537,22 @@ function ConnectionCard({ e, onAct }: { e: DevEnvironmentSummary; onAct: (e: Dev
               same address twice. */}
           {e.endpoints
             .filter((ep) => !(e.sshClientKeySecret && sshEndpoint && ep.name === sshEndpoint.name))
-            .map((ep) => (
-              <EndpointRow key={ep.name} label={ep.name} value={ep.address} />
-            ))}
+            .map((ep) =>
+              // The jupyter address is the way in, so a click on it is signed in
+              // first: a separate button would ask the user to find the address
+              // and then to look for somewhere to use it.
+              e.type === "jupyter" && ep.name === "jupyter" ? (
+                <JupyterEndpointRow
+                  key={`${e.namespace}/${e.name}-${ep.name}`}
+                  label={ep.name}
+                  address={ep.address}
+                  name={e.name}
+                  namespace={e.namespace}
+                />
+              ) : (
+                <EndpointRow key={ep.name} label={ep.name} value={ep.address} />
+              ),
+            )}
           {/* Reaching a jupyter environment needs its token, so the card carries
               the token itself — masked until asked for, read from the Secret the
               environment's own status names. */}
@@ -1523,11 +1574,6 @@ function ConnectionCard({ e, onAct }: { e: DevEnvironmentSummary; onAct: (e: Dev
               address={sshEndpoint.address}
               label={sshEndpoint.name}
             />
-          ) : null}
-          {/* A jupyter environment is opened with one click, the token handled
-              behind the scenes rather than copied by hand. */}
-          {e.type === "jupyter" ? (
-            <OpenJupyterRow key={`${e.namespace}/${e.name}-jupyter-open`} name={e.name} namespace={e.namespace} />
           ) : null}
         </Box>
         {/* Said only when it is true of this environment: the idle clause used to
