@@ -1,0 +1,121 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: vmimages.ai.cubestack.io
+spec:
+  group: ai.cubestack.io
+  names:
+    kind: VMImage
+    listKind: VMImageList
+    plural: vmimages
+    shortNames:
+    - vmimage
+    singular: vmimage
+  scope: Cluster
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: VMImage is the Schema for the vmimages API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of VMImage
+            properties:
+              architecture:
+                description: Architecture is the guest architecture, e.g. amd64.
+                type: string
+              deprecated:
+                description: Deprecated refuses new environments; existing ones are
+                  unaffected.
+                type: boolean
+              displayName:
+                description: DisplayName is the human-readable name.
+                type: string
+              guestAgent:
+                description: GuestAgent is whether the image already runs the guest
+                  agent.
+                type: boolean
+              minSystemDisk:
+                anyOf:
+                - type: integer
+                - type: string
+                description: MinSystemDisk is the smallest system disk this image
+                  can run on.
+                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                x-kubernetes-int-or-string: true
+              os:
+                description: OS is the guest operating system family, e.g. ubuntu.
+                type: string
+              osVersion:
+                description: OSVersion is the guest operating system version, e.g.
+                  24.04.
+                type: string
+              source:
+                description: |-
+                  Source is where the disk comes from: a registry artifact (a container
+                  image holding a disk file) or an already-imported PVC.
+                properties:
+                  pvc:
+                    description: PVC is a claim in the platform namespace.
+                    properties:
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  registry:
+                    description: Registry is a container image holding the disk.
+                    type: string
+                type: object
+            required:
+            - architecture
+            - displayName
+            - guestAgent
+            - minSystemDisk
+            - os
+            - osVersion
+            - source
+            type: object
+          status:
+            description: status defines the observed state of VMImage
+            properties:
+              dataVolume:
+                description: DataVolume is the platform's copy of the golden disk.
+                type: string
+              phase:
+                description: Phase is Importing, Ready or Failed.
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
