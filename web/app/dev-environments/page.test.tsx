@@ -263,14 +263,14 @@ describe("dev environments page", () => {
     const { container, root } = renderPage();
     await act(async () => {});
 
-    // The endpoint is a URL, so it opens the container's own UI in a new tab
-    // instead of asking the user to select and paste it — and the copy button
-    // stays, for the places a link cannot go (a terminal, a client config).
+    // The endpoint is a URL, so it opens the container's own UI instead of
+    // asking the user to select and paste it — and the copy button stays, for
+    // the places a link cannot go (a terminal, a client config).
     const link = container.querySelector('[data-od-id="endpoint-link"]') as HTMLAnchorElement;
     expect(link.getAttribute("href")).toBe("https://dev.cubestack.local/ws/jupyter-nlp-ln");
-    expect(link.getAttribute("target")).toBe("_blank");
-    // noopener: a new tab must not get a handle on this window through `window.opener`.
-    expect(link.getAttribute("rel")).toContain("noopener");
+    // No target: the address is signed in for and then followed in this tab, so
+    // a plain click and the session are one navigation, not two tabs.
+    expect(link.getAttribute("target")).toBeNull();
     expect(link.textContent).toBe("https://dev.cubestack.local/ws/jupyter-nlp-ln");
 
     // The copy button next to it still copies the address itself.
@@ -682,7 +682,7 @@ describe("dev environments page", () => {
     act(() => root.unmount());
   });
 
-  it("opens JupyterLab in one click, with no token to copy", async () => {
+  it("opens JupyterLab from its endpoint link, with no token to copy", async () => {
     stubData(devEnvironmentList());
     // jsdom's location cannot navigate; the click's destination is the assertion.
     const original = window.location;
@@ -697,10 +697,9 @@ describe("dev environments page", () => {
     // Nothing is fetched until the user asks to open it.
     expect(openRequests).toEqual([]);
 
-    const button = container.querySelector('[data-od-id="jupyter-open"]') as HTMLElement;
-    expect(button.textContent).toBe("打开 JupyterLab");
+    const link = container.querySelector('[data-od-id="endpoint-link"]') as HTMLElement;
     await act(async () => {
-      button.click();
+      link.click();
     });
 
     // The console asks the route for this environment's session...
@@ -729,10 +728,10 @@ describe("dev environments page", () => {
     const { container, root } = renderPage();
     await act(async () => {});
     await act(async () => {
-      (container.querySelector('[data-od-id="jupyter-open"]') as HTMLElement).click();
+      (container.querySelector('[data-od-id="endpoint-link"]') as HTMLElement).click();
     });
 
-    expect(container.querySelector('[data-od-id="jupyter-open-error"]')?.textContent).toContain("不在同一主机");
+    expect(container.querySelector('[data-od-id="endpoint-open-error"]')?.textContent).toContain("不在同一主机");
     expect(assign).not.toHaveBeenCalled();
 
     Object.defineProperty(window, "location", { configurable: true, value: original });
@@ -765,10 +764,10 @@ describe("dev environments page", () => {
     const { container, root } = renderPage();
     await act(async () => {});
     await act(async () => {
-      (container.querySelector('[data-od-id="jupyter-open"]') as HTMLElement).click();
+      (container.querySelector('[data-od-id="endpoint-link"]') as HTMLElement).click();
     });
 
-    expect(container.querySelector('[data-od-id="jupyter-open-error"]')?.textContent).toContain("浏览器会丢弃登录状态");
+    expect(container.querySelector('[data-od-id="endpoint-open-error"]')?.textContent).toContain("浏览器会丢弃登录状态");
     expect(assign).not.toHaveBeenCalled();
 
     Object.defineProperty(window, "location", { configurable: true, value: original });
@@ -805,7 +804,7 @@ describe("dev environments page", () => {
     const { container, root } = renderPage();
     await act(async () => {});
     await act(async () => {
-      (container.querySelector('[data-od-id="jupyter-open"]') as HTMLElement).click();
+      (container.querySelector('[data-od-id="endpoint-link"]') as HTMLElement).click();
     });
     act(() => root.unmount());
     await act(async () => {
@@ -817,14 +816,14 @@ describe("dev environments page", () => {
     Object.defineProperty(window, "location", { configurable: true, value: original });
   });
 
-  it("offers no JupyterLab button for an ssh environment", async () => {
+  it("offers no signed-in Jupyter link for an ssh environment", async () => {
     stubData(devEnvironmentList());
     const { container, root } = renderPage();
     await act(async () => {});
     await act(async () => {
       (container.querySelector('[data-od-id="dev-row-ssh-dataset-prep"]') as HTMLElement).click();
     });
-    expect(container.querySelector('[data-od-id="jupyter-open"]')).toBeNull();
+    expect(container.querySelector('[data-od-id="endpoint-link"]')).toBeNull();
     expect(openRequests).toEqual([]);
     act(() => root.unmount());
   });
@@ -851,11 +850,11 @@ describe("dev environments page", () => {
     const { container, root } = renderPage();
     await act(async () => {});
     await act(async () => {
-      (container.querySelector('[data-od-id="jupyter-open"]') as HTMLElement).click();
+      (container.querySelector('[data-od-id="endpoint-link"]') as HTMLElement).click();
     });
 
     // The route's code reaches the card as a sentence, and nothing navigates.
-    expect(container.querySelector('[data-od-id="jupyter-open-error"]')?.textContent).toContain("没有 Jupyter 访问端点");
+    expect(container.querySelector('[data-od-id="endpoint-open-error"]')?.textContent).toContain("没有 Jupyter 访问端点");
     expect(assign).not.toHaveBeenCalled();
 
     Object.defineProperty(window, "location", { configurable: true, value: original });
