@@ -4,8 +4,9 @@ name: CI Images
 # validates these images — build and smoke — runs in ci-operator.yml, on pull
 # requests too; this workflow is about what a merge publishes.
 #
-# dev-lab images are pinned by cubestack-release components/dev-lab.yaml; this
-# workflow no longer dispatches the public installer.
+# dev-lab images are pinned by cubestack-release components/dev-lab.yaml. This workflow
+# does not dispatch the public installer; in the other direction, notify-release hands the
+# pin the digests a merge published, so the two cannot part ways.
 # Two triggers, two kinds of tag: a merge to main publishes a commit-addressed
 # tag plus `latest`; a `vX.Y.Z` tag publishes the release version it names.
 on:
@@ -201,3 +202,116 @@ jobs:
           # this image and nothing else: the other three were not pushed here, so asking
           # for them would fail on a manifest that does not exist.
           make -C images retag-latest TAG="${TAG}" RETAG="${IMAGE}"
+
+  # The image a cluster runs is the one cubestack-release's components/dev-lab.yaml
+  # pins, not the one this workflow pushed: the installer ships from that pin. A merge
+  # that publishes an image and says nothing therefore leaves the release behind — the
+  # box kept running a pre-#462 cpu-pytorch whose launcher bound 8888 while the
+  # controller asked for 21000, though Harbor had the fix under a commit-addressed tag.
+  #
+  # So this job sends the pin the same `component-built` event the operator, portal and
+  # chart workflows send: the commit, and for each image this run rebuilt, the tag it
+  # pushed and the digest that tag resolved to. Read back from the registry rather than
+  # from the push job's own output: only the registry knows what a concurrent republish
+  # of the same tag left there, and a matrix leg's outputs are per-leg.
+  notify-release:
+    # A partial matrix is not a payload: the event moves `commit` for every image, so
+    # sending it with only the legs that succeeded would pin the others to a commit
+    # that did not build them.
+    needs: [changes, build-push-image]
+    # `!cancelled()` for the same reason as above. The success check is what narrows
+    # this to a run that published something: an empty selection skips the matrix
+    # rather than failing it. Not `always()`.
+    if: "!cancelled() && needs.build-push-image.result == 'success' && github.ref_type == 'branch'"
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Set up Buildx
+        # `buildx imagetools inspect` reads a published manifest without pulling or
+        # building anything, which is the only way to ask a 10.5 GiB vendor image what
+        # its digest is.
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Log in to Harbor
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: harbor.isuanova.com
+          username: ${{ vars.CI_BOT_NAME }}
+          password: ${{ secrets.CI_BOT_PASSWORD }}
+      - name: Resolve the published digests
+        id: publish
+        env:
+          # The images the matrix just published, in the rule's order.
+          SELECTED: ${{ needs.changes.outputs.build }}
+        run: |
+          set -euo pipefail
+
+          # Resolved by the Makefile target that handed the same references to the push,
+          # so the tag shape — which carries a torch, vendor or release axis — is not
+          # written a second time here to drift from it.
+          refs="$(make -s -C images print-images TAG="$(git rev-parse --short HEAD)")"
+
+          json=""
+          for image in ${SELECTED}; do
+            ref="$(printf '%s\n' "${refs}" | sed -n "s/^${image}=//p")"
+            [ -n "${ref}" ] || { echo "::error::no published reference for ${image}"; exit 1; }
+
+            # Which digest is the pin: a multi-arch image is an index, and the release
+            # records the linux/amd64 child, because the offline fetch copies
+            # `skopeo copy docker://repo@digest` without --all — an index digest would
+            # export every platform. A vendor image is one manifest and is pinned as
+            # itself.
+            digest="$(docker buildx imagetools inspect "${ref}" --format '{{json .}}' \
+              | jq -r '(.manifest.manifests // []) as $m
+                       | if ($m | length) > 0
+                         then ($m[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest)
+                         else .manifest.digest
+                         end')"
+            case "${digest}" in
+              sha256:*) ;;
+              *) echo "::error::cannot resolve a digest for ${ref}"; exit 1 ;;
+            esac
+
+            item="$(jq -nc --arg n "${image}" --arg r "${ref}" --arg d "${digest}" \
+              '{name:$n,ref:$r,digest:$d}')"
+            if [ -z "${json}" ]; then json="${item}"; else json="${json},${item}"; fi
+          done
+          echo "images_json=[${json}]" >> "${GITHUB_OUTPUT}"
+      - name: Create an installation token for cubestack-release
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.SUANOVA_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.SUANOVA_BOT_APP_PRIVATE_KEY }}
+          owner: suanova
+          repositories: cubestack-release
+          permission-contents: write
+      - name: Dispatch component-built
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          IMAGES_JSON: ${{ steps.publish.outputs.images_json }}
+        run: |
+          set -euo pipefail
+          # No `line`: this workflow publishes from main only, which is the line the
+          # receiver resolves by default. A `v*` tag is excluded by the job's `if` —
+          # it publishes the version tag, not the commit-addressed one named here.
+          payload="$(jq -nc \
+            --arg repo "suanova/cubestack" \
+            --arg commit "${GITHUB_SHA}" \
+            --arg component "dev-lab" \
+            --argjson images "${IMAGES_JSON}" \
+            '{event_type:"component-built",client_payload:{repo:$repo,commit:$commit,component:$component,images:$images}}')"
+          for i in 1 2 3; do
+            if printf '%s' "${payload}" | gh api --method POST \
+                repos/suanova/cubestack-release/dispatches --input -; then
+              exit 0
+            fi
+            sleep $((i * 5))
+          done
+          echo "::error::component-built dispatch failed after 3 attempts"
+          exit 1
