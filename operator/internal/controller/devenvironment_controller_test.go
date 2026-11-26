@@ -520,8 +520,8 @@ var _ = Describe("DevEnvironment resource helpers", func() {
 	})
 
 	Describe("allocatePort", func() {
-		cfg := DevEnvironmentControllerConfig{L4PortRangeStart: 20000, L4PortRangeEnd: 20002}
-		r := &DevEnvironmentReconciler{Config: cfg}
+		cfg := portPoolConfig{L4PortRangeStart: 20000, L4PortRangeEnd: 20002}
+		a := &portAllocator{}
 		used := func(ports ...int32) map[int32]bool {
 			m := map[int32]bool{}
 			for _, p := range ports {
@@ -534,32 +534,34 @@ var _ = Describe("DevEnvironment resource helpers", func() {
 		}
 
 		It("keeps the environment's own recorded port when it is still free", func() {
-			Expect(r.allocatePort(sshPortName, used(20002), held(sshPortName, 20001))).To(Equal(int32(20001)))
+			Expect(a.allocatePort(cfg, sshPortName, used(20002), held(sshPortName, 20001))).To(Equal(int32(20001)))
 		})
 
 		It("skips ports used by other environments and picks the lowest free", func() {
-			Expect(r.allocatePort(sshPortName, used(20000), nil)).To(Equal(int32(20001)))
-			Expect(r.allocatePort(sshPortName, used(20000, 20001), nil)).To(Equal(int32(20002)))
+			Expect(a.allocatePort(cfg, sshPortName, used(20000), nil)).To(Equal(int32(20001)))
+			Expect(a.allocatePort(cfg, sshPortName, used(20000, 20001), nil)).To(Equal(int32(20002)))
 		})
 
 		It("does not reuse its own recorded port when another environment now holds it", func() {
-			Expect(r.allocatePort(sshPortName, used(20001), held(sshPortName, 20001))).To(Equal(int32(20000)))
+			Expect(a.allocatePort(cfg, sshPortName, used(20001), held(sshPortName, 20001))).To(Equal(int32(20000)))
 		})
 
 		It("returns 0 when the whole configured range is used", func() {
-			Expect(r.allocatePort(sshPortName, used(20000, 20001, 20002), nil)).To(Equal(int32(0)))
+			Expect(a.allocatePort(cfg, sshPortName, used(20000, 20001, 20002), nil)).To(Equal(int32(0)))
 		})
 	})
 
 	Describe("heldPorts", func() {
 		const envName = "env-b"
-		cfg := DevEnvironmentControllerConfig{L4PortRangeStart: 20000, L4PortRangeEnd: 20002}
-		r := &DevEnvironmentReconciler{Config: cfg}
-		newReconciler := func(objs ...client.Object) *DevEnvironmentReconciler {
+		a := &portAllocator{}
+		r := &DevEnvironmentReconciler{}
+		newReader := func(objs ...client.Object) client.Reader {
 			scheme := runtime.NewScheme()
 			Expect(gatewayv1.Install(scheme)).To(Succeed())
-			live := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
-			return &DevEnvironmentReconciler{Config: cfg, APIReader: live}
+			return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
+		}
+		heldPorts := func(reader client.Reader, env *aiv1alpha1.DevEnvironment) (map[string]int32, error) {
+			return a.heldPorts(context.Background(), reader, env.Namespace, r.envLabels(env.Name), env.Status.Endpoints, l4PortNames(env))
 		}
 		// The environment's own ListenerSet, named and labeled the way the
 		// controller writes it — the labels are the ones the read selects on, so a
@@ -588,7 +590,7 @@ var _ = Describe("DevEnvironment resource helpers", func() {
 			env := sshEnv()
 			env.Status.Endpoints = []aiv1alpha1.Endpoint{{Name: sshPortName, Address: "1.2.3.4:31001", ListenerPort: 20001}}
 
-			held, err := r.heldPorts(context.Background(), env)
+			held, err := heldPorts(newReader(), env)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(held).To(Equal(map[string]int32{sshPortName: 20001}))
 		})
@@ -596,11 +598,11 @@ var _ = Describe("DevEnvironment resource helpers", func() {
 		It("recovers a port from the environment's own ListenerSet when the list records none", func() {
 			// The withheld-endpoint case: the ListenerSet still declares the port,
 			// and the name of the listener is what attributes it to an endpoint.
-			r := newReconciler(ownListenerSet(envName, gatewayv1.ListenerEntry{
+			reader := newReader(ownListenerSet(envName, gatewayv1.ListenerEntry{
 				Name: "ssh-tcp-20001", Protocol: gatewayv1.TCPProtocolType, Port: 20001,
 			}))
 
-			held, err := r.heldPorts(context.Background(), sshEnv())
+			held, err := heldPorts(reader, sshEnv())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(held).To(Equal(map[string]int32{sshPortName: 20001}))
 		})
@@ -609,13 +611,13 @@ var _ = Describe("DevEnvironment resource helpers", func() {
 			// They can only disagree after a reconcile that applied the ListenerSet
 			// and then failed before writing the endpoints; the published port is
 			// what the user was last shown.
-			r := newReconciler(ownListenerSet(envName, gatewayv1.ListenerEntry{
+			reader := newReader(ownListenerSet(envName, gatewayv1.ListenerEntry{
 				Name: "ssh-tcp-20000", Protocol: gatewayv1.TCPProtocolType, Port: 20000,
 			}))
 			env := sshEnv()
 			env.Status.Endpoints = []aiv1alpha1.Endpoint{{Name: sshPortName, Address: "1.2.3.4:20001", ListenerPort: 20001}}
 
-			held, err := r.heldPorts(context.Background(), env)
+			held, err := heldPorts(reader, env)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(held[sshPortName]).To(Equal(int32(20001)))
 		})
@@ -623,11 +625,11 @@ var _ = Describe("DevEnvironment resource helpers", func() {
 		It("reads no port off a listener this operator did not name", func() {
 			// A listener left from the naming scheme that did not carry the
 			// endpoint: it declares a port, but not whose it is.
-			r := newReconciler(ownListenerSet(envName, gatewayv1.ListenerEntry{
+			reader := newReader(ownListenerSet(envName, gatewayv1.ListenerEntry{
 				Name: "tcp-20001", Protocol: gatewayv1.TCPProtocolType, Port: 20001,
 			}))
 
-			held, err := r.heldPorts(context.Background(), sshEnv())
+			held, err := heldPorts(reader, sshEnv())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(held).To(BeEmpty())
 		})
@@ -636,9 +638,9 @@ var _ = Describe("DevEnvironment resource helpers", func() {
 			peer := ownListenerSet("peer-a", gatewayv1.ListenerEntry{
 				Name: "ssh-tcp-20001", Protocol: gatewayv1.TCPProtocolType, Port: 20001,
 			})
-			r := newReconciler(peer)
+			reader := newReader(peer)
 
-			held, err := r.heldPorts(context.Background(), sshEnv())
+			held, err := heldPorts(reader, sshEnv())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(held).To(BeEmpty())
 		})
@@ -776,14 +778,31 @@ var _ = Describe("DevEnvironment resource helpers", func() {
 	})
 
 	// Allocation is a read of the pool followed by a create, and the create lands
-	// in the API server while the TCPRoute informer catches up on its own
-	// schedule. A reconcile that runs inside that window would see the port the
-	// previous one just reserved as free and hand it out a second time, so the
-	// read has to bypass the cache. The two clients below are that window: the
-	// cache has not seen the route, the API server has. Asserting on the port
-	// that only the live client knows about fails if the List goes back through
-	// r.Client.
+	// in the API server while a TCPRoute informer catches up on its own schedule.
+	// A reconcile that runs inside that window would see the port the previous one
+	// just reserved as free and hand it out a second time, so the allocator is
+	// handed its reader rather than reaching for one — the controller supplies
+	// APIReader — and these specs hand it a client that is the API server itself.
 	Describe("usedPorts", func() {
+		const envName = "env-b"
+		const ownUID types.UID = "uid-env-b"
+		cfg := (&DevEnvironmentReconciler{}).defaultedConfig().portPool()
+		// Own allocations are identified by the controller reference this operator
+		// writes, so a fixture that only labels its objects is a peer of itself.
+		own := ownObjects{labels: client.MatchingLabels{devEnvironmentLabelKey: envName}, uid: ownUID}
+		controllerRef := func(uid types.UID) []metav1.OwnerReference {
+			return []metav1.OwnerReference{{
+				APIVersion: aiv1alpha1.GroupVersion.String(),
+				Kind:       testDevEnvKind,
+				Name:       envName,
+				UID:        uid,
+				Controller: ptrTo(true),
+			}}
+		}
+		a := &portAllocator{}
+		usedPorts := func(reader client.Reader) (map[int32]bool, error) {
+			return a.usedPorts(context.Background(), reader, cfg, "ns-b", own)
+		}
 		gatewayParent := func() []gatewayv1.ParentReference {
 			return []gatewayv1.ParentReference{{
 				Group:     ptrTo(gatewayv1.Group(gatewayAPIGroup)),
@@ -798,18 +817,16 @@ var _ = Describe("DevEnvironment resource helpers", func() {
 				Spec:       gatewayv1.TCPRouteSpec{CommonRouteSpec: gatewayv1.CommonRouteSpec{ParentRefs: gatewayParent()}},
 			}
 		}
-		newReconciler := func(objs ...client.Object) *DevEnvironmentReconciler {
+		newReader := func(objs ...client.Object) client.Reader {
 			scheme := runtime.NewScheme()
 			Expect(gatewayv1.Install(scheme)).To(Succeed())
-			live := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
-			lagging := fake.NewClientBuilder().WithScheme(scheme).Build()
-			return &DevEnvironmentReconciler{Client: lagging, APIReader: live}
+			return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
 		}
 
-		It("reads the pool through APIReader, not the lagging cache", func() {
-			r := newReconciler(newRoute("peer-tcp-20001", "ns-a"))
+		It("counts a peer's route on the configured Gateway", func() {
+			reader := newReader(newRoute("peer-tcp-20001", "ns-a"))
 
-			used, err := r.usedPorts(context.Background(), "ns-b", "env-b")
+			used, err := usedPorts(reader)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(used).To(HaveKey(int32(20001)))
 		})
@@ -817,20 +834,21 @@ var _ = Describe("DevEnvironment resource helpers", func() {
 		It("still ignores routes that are not on the configured Gateway", func() {
 			foreign := newRoute("peer-tcp-20001", "ns-a")
 			foreign.Spec.ParentRefs[0].Name = "some-other-gateway"
-			r := newReconciler(foreign, newRoute("peer-tcp-20002", "ns-a"))
+			reader := newReader(foreign, newRoute("peer-tcp-20002", "ns-a"))
 
-			used, err := r.usedPorts(context.Background(), "ns-b", "env-b")
+			used, err := usedPorts(reader)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(used).NotTo(HaveKey(int32(20001)))
 			Expect(used).To(HaveKey(int32(20002)))
 		})
 
 		It("leaves this environment's own ports free for it to reuse", func() {
-			own := newRoute("env-b-tcp-20003", "ns-b")
-			own.Labels = map[string]string{devEnvironmentLabelKey: "env-b"}
-			r := newReconciler(own, newRoute("peer-tcp-20004", "ns-a"))
+			ownRoute := newRoute("env-b-tcp-20003", "ns-b")
+			ownRoute.Labels = map[string]string{devEnvironmentLabelKey: "env-b"}
+			ownRoute.OwnerReferences = controllerRef(ownUID)
+			reader := newReader(ownRoute, newRoute("peer-tcp-20004", "ns-a"))
 
-			used, err := r.usedPorts(context.Background(), "ns-b", "env-b")
+			used, err := usedPorts(reader)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(used).NotTo(HaveKey(int32(20003)))
 			Expect(used).To(HaveKey(int32(20004)))
@@ -861,9 +879,9 @@ var _ = Describe("DevEnvironment resource helpers", func() {
 		}
 
 		It("counts a peer's ListenerSet listeners", func() {
-			r := newReconciler(newListenerSet("peer-a-l4", "ns-a", defaultGatewayName, 20005, 20006))
+			reader := newReader(newListenerSet("peer-a-l4", "ns-a", defaultGatewayName, 20005, 20006))
 
-			used, err := r.usedPorts(context.Background(), "ns-b", "env-b")
+			used, err := usedPorts(reader)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(used).To(HaveKey(int32(20005)))
 			Expect(used).To(HaveKey(int32(20006)))
@@ -872,9 +890,9 @@ var _ = Describe("DevEnvironment resource helpers", func() {
 		It("still counts a route attached straight to the Gateway", func() {
 			// The carry-over path: ports declared before ListenerSets existed, or
 			// declared by a route whose ListenerSet is not in this read.
-			r := newReconciler(newRoute("peer-tcp-20007", "ns-a"), newListenerSet("peer-a-l4", "ns-a", defaultGatewayName, 20008))
+			reader := newReader(newRoute("peer-tcp-20007", "ns-a"), newListenerSet("peer-a-l4", "ns-a", defaultGatewayName, 20008))
 
-			used, err := r.usedPorts(context.Background(), "ns-b", "env-b")
+			used, err := usedPorts(reader)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(used).To(HaveKey(int32(20007)))
 			Expect(used).To(HaveKey(int32(20008)))
@@ -888,31 +906,51 @@ var _ = Describe("DevEnvironment resource helpers", func() {
 			udp := newListenerSet("peer-a-l4", "ns-a", defaultGatewayName, 20011)
 			udp.Spec.Listeners[0].Name = "udp-20011"
 			udp.Spec.Listeners[0].Protocol = gatewayv1.UDPProtocolType
-			r := newReconciler(udp)
+			reader := newReader(udp)
 
-			used, err := r.usedPorts(context.Background(), "ns-b", "env-b")
+			used, err := usedPorts(reader)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(used).To(HaveKey(int32(20011)))
 		})
 
 		It("leaves its own ListenerSet's ports free and ignores one on another gateway", func() {
-			own := newListenerSet("env-b-l4", "ns-b", defaultGatewayName, 20009)
-			own.Labels = map[string]string{devEnvironmentLabelKey: "env-b"}
-			r := newReconciler(own, newListenerSet("peer-a-l4", "ns-a", "some-other-gateway", 20010))
+			ownSet := newListenerSet("env-b-l4", "ns-b", defaultGatewayName, 20009)
+			ownSet.Labels = map[string]string{devEnvironmentLabelKey: "env-b"}
+			ownSet.OwnerReferences = controllerRef(ownUID)
+			reader := newReader(ownSet, newListenerSet("peer-a-l4", "ns-a", "some-other-gateway", 20010))
 
-			used, err := r.usedPorts(context.Background(), "ns-b", "env-b")
+			used, err := usedPorts(reader)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(used).NotTo(HaveKey(int32(20009)))
 			Expect(used).NotTo(HaveKey(int32(20010)))
 		})
 
+		It("counts a same-labelled ledger entry this environment does not control", func() {
+			// The label is not identity: anything in the namespace can carry it. A
+			// set this environment does not control still holds its port — the
+			// unowned one from something else writing here, the stale one from an
+			// earlier incarnation of the environment — and reading either as its own
+			// is what hands the number out twice.
+			unowned := newListenerSet("env-b-stray", "ns-b", defaultGatewayName, 20013)
+			unowned.Labels = map[string]string{devEnvironmentLabelKey: envName}
+			stale := newListenerSet("env-b-last-year", "ns-b", defaultGatewayName, 20014)
+			stale.Labels = map[string]string{devEnvironmentLabelKey: envName}
+			stale.OwnerReferences = controllerRef("uid-earlier-incarnation")
+			reader := newReader(unowned, stale)
+
+			used, err := usedPorts(reader)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(used).To(HaveKey(int32(20013)))
+			Expect(used).To(HaveKey(int32(20014)))
+		})
+
 		// A cluster serving the Gateway API's standard channel has no TCPRoute kind
 		// at all, so the only way to exercise that cluster here is to make the read
 		// itself fail the way its discovery does.
-		newReconcilerFailingRouteRead := func(err error) *DevEnvironmentReconciler {
+		newFailingRouteReader := func(err error) client.Reader {
 			scheme := runtime.NewScheme()
 			Expect(gatewayv1.Install(scheme)).To(Succeed())
-			live := fake.NewClientBuilder().WithScheme(scheme).
+			return fake.NewClientBuilder().WithScheme(scheme).
 				WithObjects(newListenerSet("peer-a-l4", "ns-a", defaultGatewayName, 20012)).
 				WithInterceptorFuncs(interceptor.Funcs{
 					List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
@@ -922,7 +960,6 @@ var _ = Describe("DevEnvironment resource helpers", func() {
 						return c.List(ctx, list, opts...)
 					},
 				}).Build()
-			return &DevEnvironmentReconciler{APIReader: live}
 		}
 
 		It("tolerates a cluster that serves no TCPRoute kind", func() {
@@ -930,12 +967,12 @@ var _ = Describe("DevEnvironment resource helpers", func() {
 			// is what holds every port this operator allocates. Read as a failure,
 			// this would fail allocation for every L4 environment on such a cluster,
 			// including the udp-only and ssh-only ones that never had a route.
-			r := newReconcilerFailingRouteRead(&meta.NoKindMatchError{
+			reader := newFailingRouteReader(&meta.NoKindMatchError{
 				GroupKind:        schema.GroupKind{Group: gatewayAPIGroup, Kind: tcpRouteKind},
 				SearchedVersions: []string{gatewayv1.GroupVersion.Version},
 			})
 
-			used, err := r.usedPorts(context.Background(), "ns-b", "env-b")
+			used, err := usedPorts(reader)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(used).To(HaveKey(int32(20012)))
 		})
@@ -943,9 +980,9 @@ var _ = Describe("DevEnvironment resource helpers", func() {
 		It("fails on any other error from the route read", func() {
 			// Tolerated here, a transient failure would read as an empty pool and
 			// hand out the port a peer's route already holds.
-			r := newReconcilerFailingRouteRead(fmt.Errorf("the API server is having a bad day"))
+			reader := newFailingRouteReader(fmt.Errorf("the API server is having a bad day"))
 
-			_, err := r.usedPorts(context.Background(), "ns-b", "env-b")
+			_, err := usedPorts(reader)
 			Expect(err).To(HaveOccurred())
 		})
 	})
