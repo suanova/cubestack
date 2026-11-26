@@ -3,9 +3,8 @@
 // Perses 0.54 has no way to hide a panel based on a variable selection, so a
 // dashboard spec opts in by tagging a panel's `display.description` with
 // "@hide-when-specific:<variable>": the portal then drops that panel whenever
-// <variable> settles on one concrete value (a GPU is picked instead of All) —
-// or, on a scoped landing, immediately. The rule lives in the dashboard YAML;
-// these helpers only interpret it.
+// <variable> settles on one concrete value (a GPU is picked instead of All).
+// The rule lives in the dashboard YAML; these helpers only interpret it.
 
 import type { DashboardResource } from "@perses-dev/client";
 import type { GridItemDefinition } from "@perses-dev/spec";

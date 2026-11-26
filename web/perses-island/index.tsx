@@ -40,7 +40,6 @@ export interface PersesIslandOptions {
   dashboardName: string;
   dashboardResource: DashboardResource;
   variableRowSpacing?: string;
-  scope?: string;
 }
 
 export function mountPersesIsland(
@@ -56,7 +55,6 @@ export function mountPersesIsland(
         dashboardName={options.dashboardName}
         dashboardResource={options.dashboardResource}
         variableRowSpacing={options.variableRowSpacing}
-        scope={options.scope}
       />
     </CacheProvider>,
   );

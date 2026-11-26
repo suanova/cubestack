@@ -94,10 +94,10 @@ describe("overview landing page", () => {
     expect(cardText(container, "kpi-gpu")).toContain("128");
     expect(cardText(container, "kpi-gpu")).toContain("2 品牌");
     expect(cardText(container, "kpi-gpu")).toContain("当前利用率 62% · 显存 58%");
-    // The GPU card lands GPU-scoped on Resource Overview (?scope=gpu): the node
-    // CPU/Memory/RDMA rows are dropped on arrival, leaving per-GPU panels.
+    // The GPU card lands on the full Resource Overview: with the gpu filter on
+    // All, every node and GPU panel is shown.
     expect(container.querySelector('[data-od-id="kpi-gpu"]')?.getAttribute("href")).toBe(
-      "/dashboards?dashboard=resource-overview-dashboard&scope=gpu",
+      "/dashboards?dashboard=resource-overview-dashboard",
     );
 
     expect(cardText(container, "kpi-inference")).toContain("推理服务");

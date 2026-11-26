@@ -1,6 +1,6 @@
-// Route entry for the monitoring landing. The deep-link values (?dashboard=,
-// ?scope=) are resolved here, from the request, and handed to the landing as
-// plain props.
+// Route entry for the monitoring landing. The deep-link value (?dashboard=)
+// is resolved here, from the request, and handed to the landing as a plain
+// prop.
 //
 // This has to happen on the server: the route provisions nothing dynamic, so
 // Next prerenders it, and the `searchParams` promise a client page receives is
@@ -22,7 +22,6 @@ export default async function DashboardsPage({
   return (
     <DashboardsLanding
       requestedDashboard={typeof sp.dashboard === "string" ? sp.dashboard : null}
-      requestedScope={typeof sp.scope === "string" ? sp.scope : null}
     />
   );
 }

@@ -44,10 +44,10 @@ function viewerText(container: HTMLElement): string {
   return container.querySelector('[data-od-id="dash-viewer"]')?.textContent ?? "";
 }
 
-// The route component only picks the deep-link values out of the request and
-// hands them to the landing, so its own contract is checked on the returned
+// The route component only picks the deep-link value out of the request and
+// hands it to the landing, so its own contract is checked on the returned
 // element's props; the landing's rendering is covered below.
-type LandingProps = { requestedDashboard: string | null; requestedScope: string | null };
+type LandingProps = { requestedDashboard: string | null };
 
 async function routeProps(searchParams: Record<string, string | string[] | undefined>): Promise<LandingProps> {
   const element = (await DashboardsPage({ searchParams: Promise.resolve(searchParams) })) as ReactElement<LandingProps>;
@@ -55,21 +55,19 @@ async function routeProps(searchParams: Record<string, string | string[] | undef
 }
 
 describe("dashboards route", () => {
-  it("resolves ?dashboard= and ?scope= from the request into the landing props", async () => {
-    expect(await routeProps({ dashboard: "inference-service-dashboard", scope: "gpu" })).toEqual({
+  it("resolves ?dashboard= from the request into the landing prop", async () => {
+    expect(await routeProps({ dashboard: "inference-service-dashboard" })).toEqual({
       requestedDashboard: "inference-service-dashboard",
-      requestedScope: "gpu",
     });
   });
 
   it("passes no deep link through when the request carries none", async () => {
-    expect(await routeProps({})).toEqual({ requestedDashboard: null, requestedScope: null });
+    expect(await routeProps({})).toEqual({ requestedDashboard: null });
   });
 
   it("ignores a repeated param rather than guessing which one was meant", async () => {
     expect(await routeProps({ dashboard: ["a", "b"] })).toEqual({
       requestedDashboard: null,
-      requestedScope: null,
     });
   });
 });
@@ -91,7 +89,7 @@ describe("dashboards landing page", () => {
     document.body.innerHTML = "";
   });
 
-  function renderLanding(props: LandingProps = { requestedDashboard: null, requestedScope: null }) {
+  function renderLanding(props: LandingProps = { requestedDashboard: null }) {
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -158,7 +156,6 @@ describe("dashboards landing page", () => {
     // a matching name must win over the default first item.
     const { container, root } = renderLanding({
       requestedDashboard: "kubernetes-cluster-resources-overview",
-      requestedScope: null,
     });
     await act(async () => {});
 
@@ -175,7 +172,7 @@ describe("dashboards landing page", () => {
       Promise.resolve({ metadata: { name }, spec: {} }),
     );
 
-    const { container, root } = renderLanding({ requestedDashboard: "nope-dashboard", requestedScope: null });
+    const { container, root } = renderLanding({ requestedDashboard: "nope-dashboard" });
     await act(async () => {});
 
     expect(fetchDashboard).toHaveBeenLastCalledWith("monitoring", "resource-overview-dashboard");
