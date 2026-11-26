@@ -7,6 +7,8 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
@@ -44,8 +46,8 @@ func (c DevEnvironmentControllerConfig) portPool() portPoolConfig {
 // place at once.
 //
 // It knows nothing about the kind of environment that asks: each method takes
-// the caller's own inputs — its namespace, the labels that identify its
-// allocations, its recorded endpoints — and the reader to use. One allocator
+// the caller's own inputs — its namespace, what identifies its allocations, its
+// recorded endpoints — and the reader to use. One allocator
 // serves every kind in the manager process, because serialising each kind's
 // reconciles on its own (as MaxConcurrentReconciles does) says nothing about the
 // other kind's.
@@ -90,11 +92,32 @@ func matchesLabels(labels map[string]string, selector client.MatchingLabels) boo
 	return true
 }
 
+// ownObjects is what makes a ledger entry an environment's own: the labels its
+// objects carry, and the owner whose controller reference they bear. The
+// identity is the controller UID — the same check ensureDevEnvOwned applies
+// before this operator writes to an object — and the labels only narrow the
+// read. A same-labelled object controlled by something else is a peer: it still
+// holds its port, and treating it as this environment's own is what would hand
+// that number out a second time.
+type ownObjects struct {
+	labels client.MatchingLabels
+	uid    types.UID
+}
+
+// owns reports whether obj is one of this environment's own allocations.
+func (o ownObjects) owns(obj metav1.Object) bool {
+	if !matchesLabels(obj.GetLabels(), o.labels) {
+		return false
+	}
+	owner := metav1.GetControllerOf(obj)
+	return owner != nil && owner.UID == o.uid
+}
+
 // usedPorts collects every L4 port already allocated to another environment
-// (the port pool is gateway-wide, so it spans namespaces and kinds). own is the
-// label set that identifies this environment's own allocations — the caller's
-// choice of what "this environment's" means — and an object carrying all of it
-// is free for this environment to reuse. Allocations
+// (the port pool is gateway-wide, so it spans namespaces and kinds). own is what
+// identifies this environment's own allocations — the caller's choice of what
+// "this environment's" means — and an object it reports as its own is free for
+// this environment to reuse. Allocations
 // are read from the objects that declare them, not from status.endpoints: the
 // endpoint list is withheld while a route is unaccepted, and a reservation that
 // disappears from under an environment lets two of them claim the same listener
@@ -127,7 +150,7 @@ func matchesLabels(labels map[string]string, selector client.MatchingLabels) boo
 // lets the read see the claim another caller wrote a moment ago, and the lock
 // keeps the two apart so this one cannot be superseded between the read and
 // the write (::locked).
-func (a *portAllocator) usedPorts(ctx context.Context, reader client.Reader, cfg portPoolConfig, namespace string, own client.MatchingLabels) (map[int32]bool, error) {
+func (a *portAllocator) usedPorts(ctx context.Context, reader client.Reader, cfg portPoolConfig, namespace string, own ownObjects) (map[int32]bool, error) {
 	used := map[int32]bool{}
 	// A cluster serving the Gateway API's standard channel has no TCPRoute kind
 	// at all. That means there are no legacy routes to count — the ListenerSet
@@ -147,7 +170,7 @@ func (a *portAllocator) usedPorts(ctx context.Context, reader client.Reader, cfg
 	// ListenerSet and its port is already counted below.
 	for i := range trs.Items {
 		route := &trs.Items[i]
-		if route.Namespace == namespace && matchesLabels(route.Labels, own) {
+		if route.Namespace == namespace && own.owns(route) {
 			continue // this environment's own allocations are free for it to reuse
 		}
 		if !routeParentsTo(route.Spec.ParentRefs, route.Namespace, cfg.GatewayName, cfg.GatewayNamespace) {
@@ -163,7 +186,7 @@ func (a *portAllocator) usedPorts(ctx context.Context, reader client.Reader, cfg
 	}
 	for i := range lss.Items {
 		ls := &lss.Items[i]
-		if ls.Namespace == namespace && matchesLabels(ls.Labels, own) {
+		if ls.Namespace == namespace && own.owns(ls) {
 			continue
 		}
 		if !listenerSetParentsToGateway(ls, cfg.GatewayName, cfg.GatewayNamespace) {

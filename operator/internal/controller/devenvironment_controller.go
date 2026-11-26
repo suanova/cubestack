@@ -4345,11 +4345,14 @@ func (r *DevEnvironmentReconciler) declareL4Listeners(ctx context.Context, env *
 	// failing with the NoMatch that a missing kind would otherwise raise.
 	if l4Exposed(env) {
 		pool, names := cfg.portPool(), l4PortNames(env)
-		// Identity, not the full label set this operator writes, is what makes a
-		// ledger entry this environment's own: one that carries the environment
-		// label is that environment's allocation even if its managed-by label was
-		// lost, and counting it as a peer would move the environment to a new port.
-		own := client.MatchingLabels{devEnvironmentLabelKey: env.Name}
+		// The environment's own allocations are identified by the controller
+		// reference this operator writes on every object it creates, not by the
+		// labels alone: a same-labelled ListenerSet controlled by something else
+		// still holds its port, and reusing it would hand the number out twice.
+		own := ownObjects{
+			labels: client.MatchingLabels{devEnvironmentLabelKey: env.Name},
+			uid:    env.UID,
+		}
 		used, err := r.ports.usedPorts(ctx, r.APIReader, pool, env.Namespace, own)
 		if err != nil {
 			return nil, nil, err

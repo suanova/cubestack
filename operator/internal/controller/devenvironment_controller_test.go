@@ -785,8 +785,20 @@ var _ = Describe("DevEnvironment resource helpers", func() {
 	// APIReader — and these specs hand it a client that is the API server itself.
 	Describe("usedPorts", func() {
 		const envName = "env-b"
+		const ownUID types.UID = "uid-env-b"
 		cfg := (&DevEnvironmentReconciler{}).defaultedConfig().portPool()
-		own := client.MatchingLabels{devEnvironmentLabelKey: envName}
+		// Own allocations are identified by the controller reference this operator
+		// writes, so a fixture that only labels its objects is a peer of itself.
+		own := ownObjects{labels: client.MatchingLabels{devEnvironmentLabelKey: envName}, uid: ownUID}
+		controllerRef := func(uid types.UID) []metav1.OwnerReference {
+			return []metav1.OwnerReference{{
+				APIVersion: aiv1alpha1.GroupVersion.String(),
+				Kind:       testDevEnvKind,
+				Name:       envName,
+				UID:        uid,
+				Controller: ptrTo(true),
+			}}
+		}
 		a := &portAllocator{}
 		usedPorts := func(reader client.Reader) (map[int32]bool, error) {
 			return a.usedPorts(context.Background(), reader, cfg, "ns-b", own)
@@ -831,9 +843,10 @@ var _ = Describe("DevEnvironment resource helpers", func() {
 		})
 
 		It("leaves this environment's own ports free for it to reuse", func() {
-			own := newRoute("env-b-tcp-20003", "ns-b")
-			own.Labels = map[string]string{devEnvironmentLabelKey: "env-b"}
-			reader := newReader(own, newRoute("peer-tcp-20004", "ns-a"))
+			ownRoute := newRoute("env-b-tcp-20003", "ns-b")
+			ownRoute.Labels = map[string]string{devEnvironmentLabelKey: "env-b"}
+			ownRoute.OwnerReferences = controllerRef(ownUID)
+			reader := newReader(ownRoute, newRoute("peer-tcp-20004", "ns-a"))
 
 			used, err := usedPorts(reader)
 			Expect(err).NotTo(HaveOccurred())
@@ -901,14 +914,34 @@ var _ = Describe("DevEnvironment resource helpers", func() {
 		})
 
 		It("leaves its own ListenerSet's ports free and ignores one on another gateway", func() {
-			own := newListenerSet("env-b-l4", "ns-b", defaultGatewayName, 20009)
-			own.Labels = map[string]string{devEnvironmentLabelKey: "env-b"}
-			reader := newReader(own, newListenerSet("peer-a-l4", "ns-a", "some-other-gateway", 20010))
+			ownSet := newListenerSet("env-b-l4", "ns-b", defaultGatewayName, 20009)
+			ownSet.Labels = map[string]string{devEnvironmentLabelKey: "env-b"}
+			ownSet.OwnerReferences = controllerRef(ownUID)
+			reader := newReader(ownSet, newListenerSet("peer-a-l4", "ns-a", "some-other-gateway", 20010))
 
 			used, err := usedPorts(reader)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(used).NotTo(HaveKey(int32(20009)))
 			Expect(used).NotTo(HaveKey(int32(20010)))
+		})
+
+		It("counts a same-labelled ledger entry this environment does not control", func() {
+			// The label is not identity: anything in the namespace can carry it. A
+			// set this environment does not control still holds its port — the
+			// unowned one from something else writing here, the stale one from an
+			// earlier incarnation of the environment — and reading either as its own
+			// is what hands the number out twice.
+			unowned := newListenerSet("env-b-stray", "ns-b", defaultGatewayName, 20013)
+			unowned.Labels = map[string]string{devEnvironmentLabelKey: envName}
+			stale := newListenerSet("env-b-last-year", "ns-b", defaultGatewayName, 20014)
+			stale.Labels = map[string]string{devEnvironmentLabelKey: envName}
+			stale.OwnerReferences = controllerRef("uid-earlier-incarnation")
+			reader := newReader(unowned, stale)
+
+			used, err := usedPorts(reader)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(used).To(HaveKey(int32(20013)))
+			Expect(used).To(HaveKey(int32(20014)))
 		})
 
 		// A cluster serving the Gateway API's standard channel has no TCPRoute kind
