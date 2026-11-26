@@ -4345,12 +4345,16 @@ func (r *DevEnvironmentReconciler) declareL4Listeners(ctx context.Context, env *
 	// failing with the NoMatch that a missing kind would otherwise raise.
 	if l4Exposed(env) {
 		pool, names := cfg.portPool(), l4PortNames(env)
-		own := r.envLabels(env.Name)
+		// Identity, not the full label set this operator writes, is what makes a
+		// ledger entry this environment's own: one that carries the environment
+		// label is that environment's allocation even if its managed-by label was
+		// lost, and counting it as a peer would move the environment to a new port.
+		own := client.MatchingLabels{devEnvironmentLabelKey: env.Name}
 		used, err := r.ports.usedPorts(ctx, r.APIReader, pool, env.Namespace, own)
 		if err != nil {
 			return nil, nil, err
 		}
-		held, err := r.ports.heldPorts(ctx, r.APIReader, env.Namespace, own, env.Status.Endpoints, names)
+		held, err := r.ports.heldPorts(ctx, r.APIReader, env.Namespace, r.envLabels(env.Name), env.Status.Endpoints, names)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -4871,7 +4875,12 @@ func (r *DevEnvironmentReconciler) applyUDPRoute(ctx context.Context, env *aiv1a
 // its NoMatch is left to report as the incomplete install it is.
 func (r *DevEnvironmentReconciler) applyListenerSet(ctx context.Context, env *aiv1alpha1.DevEnvironment, gw *gatewayv1.Gateway, ports map[string]int32) (*gatewayv1.ListenerSet, error) {
 	existing := &gatewayv1.ListenerSet{}
-	err := r.Get(ctx, client.ObjectKey{Name: listenerSetName(env), Namespace: env.Namespace}, existing)
+	// Read through the API server, not the cache. This decides whether the
+	// ledger already holds the desired listeners, and skipping the write on a
+	// stale match would leave the ledger missing a listener the environment
+	// believes it declared — the number then free for another environment while
+	// this one's route points at it.
+	err := r.APIReader.Get(ctx, client.ObjectKey{Name: listenerSetName(env), Namespace: env.Namespace}, existing)
 
 	// No ports means no L4 exposure: remove the object rather than leave a
 	// listener behind, which would keep its port claimed (see usedPorts) and,

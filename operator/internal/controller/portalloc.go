@@ -44,17 +44,22 @@ func (c DevEnvironmentControllerConfig) portPool() portPoolConfig {
 // place at once.
 //
 // It knows nothing about the kind of environment that asks: each method takes
-// the caller's own inputs — its namespace and name, its recorded endpoints, the
-// labels its ListenerSet carries — and the reader to use. One allocator serves
-// every kind in the manager process, because serialising each kind's reconciles
-// on its own (as MaxConcurrentReconciles does) says nothing about the other
-// kind's.
+// the caller's own inputs — its namespace, the labels that identify its
+// allocations, its recorded endpoints — and the reader to use. One allocator
+// serves every kind in the manager process, because serialising each kind's
+// reconciles on its own (as MaxConcurrentReconciles does) says nothing about the
+// other kind's.
 //
 // Ports deliberately get no PortPool / PortClaim CRD (D-VM26): a route's name
 // and a ListenerSet's listeners already hold the numbers, and a second ledger
 // would be a second truth to reconcile against.
 type portAllocator struct {
 	mu sync.Mutex
+	// beforeLock, when set, runs as a caller arrives at the critical section,
+	// just before the mutex is taken. It exists for the concurrency spec, which
+	// has to know its second caller has reached the boundary before the window
+	// under test starts; production leaves it nil.
+	beforeLock func()
 }
 
 // locked runs fn with the pool held. A caller wraps its whole allocation in it
@@ -63,6 +68,9 @@ type portAllocator struct {
 // close: another caller reads the same pool before this one has written its
 // claim, and both take the same port.
 func (a *portAllocator) locked(fn func() error) error {
+	if a.beforeLock != nil {
+		a.beforeLock()
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return fn()
@@ -70,10 +78,12 @@ func (a *portAllocator) locked(fn func() error) error {
 
 // matchesLabels reports whether labels carries every pair in selector. An
 // environment names its own objects with its kind's label — the pool spans
-// kinds, so this rather than the label's name is what tells them apart.
+// kinds, so this rather than the label's name is what tells them apart. A key
+// that is absent never matches, even when the selector asks for its empty
+// value: an unlabelled object is not "carrying" the label.
 func matchesLabels(labels map[string]string, selector client.MatchingLabels) bool {
-	for k, v := range selector {
-		if labels[k] != v {
+	for k, want := range selector {
+		if got, ok := labels[k]; !ok || got != want {
 			return false
 		}
 	}
@@ -82,8 +92,9 @@ func matchesLabels(labels map[string]string, selector client.MatchingLabels) boo
 
 // usedPorts collects every L4 port already allocated to another environment
 // (the port pool is gateway-wide, so it spans namespaces and kinds). own is the
-// label set the caller writes on the objects it owns, so its own allocations
-// are free for it to reuse. Allocations
+// label set that identifies this environment's own allocations — the caller's
+// choice of what "this environment's" means — and an object carrying all of it
+// is free for this environment to reuse. Allocations
 // are read from the objects that declare them, not from status.endpoints: the
 // endpoint list is withheld while a route is unaccepted, and a reservation that
 // disappears from under an environment lets two of them claim the same listener
