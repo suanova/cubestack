@@ -52,10 +52,13 @@ function stubApi(
       pending?: Array<(models: string[]) => void>;
       warning?: string;
     };
+    /** What an allow-turn decision reports for turn coverage (defaults true). */
+    turnAllowed?: boolean;
   } = {},
 ) {
   let turnPolls = 0;
   let sent = false;
+  const decisions: Array<{ path: string; body: Record<string, unknown> }> = [];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -235,8 +238,16 @@ function stubApi(
         if (!sent || (opts.activePolls !== undefined && turnPolls <= opts.activePolls)) return json({ items: [] });
         return json({ items: opts.transcript });
       }
-      if (url.endsWith("/approvals/decision"))
-        return json({ approved: true, decision: "approve", approvalId: "app-1" });
+      if (url.endsWith("/approvals/decision")) {
+        const body = JSON.parse((init?.body as string) ?? "{}") as Record<string, unknown>;
+        decisions.push({ path: url, body });
+        return json({
+          approved: body.decision !== "reject",
+          decision: body.decision,
+          approvalId: body.approvalId ?? "app-1",
+          ...(body.decision === "allow-turn" ? { turnAllowed: opts.turnAllowed ?? true } : {}),
+        });
+      }
       if (url.endsWith("/questions/answer")) return json({ questionId: "ask-1", cancelled: false });
       if (url.endsWith("/questions/cancel")) return json({ questionId: "ask-1", cancelled: true });
       // The two restore collections, and the empty list IS the answer for a
@@ -285,6 +296,7 @@ function stubApi(
       return json({});
     }),
   );
+  return { decisions };
 }
 
 describe("cubepilot page", () => {
@@ -594,6 +606,7 @@ describe("cubepilot page", () => {
     }
     expect(turnDone).toBe(true);
     expect(container.querySelector('[data-od-id="approval-approve"]')).not.toBeNull();
+    expect(container.querySelector('[data-od-id="approval-allow-turn"]')).not.toBeNull();
     expect(container.querySelector('[data-od-id="stop-btn"]')).toBeNull();
 
     // The tool card rests collapsed once its call has returned, so what it
@@ -629,6 +642,46 @@ describe("cubepilot page", () => {
     expect(container.querySelector('[data-od-id="params-chip"]')).not.toBeNull();
     expect(container.querySelector('[data-od-id="tool-whitelist-card"]')).toBeNull();
     expect(container.textContent).toContain("已切换到 glm-5.2-chat");
+    act(() => root.unmount());
+  }, 15000);
+
+  it("posts the turn-scoped approval and warns when it cannot cover the turn", async () => {
+    const api = stubApi(undefined, { turnAllowed: false });
+    const { container, root } = renderPage();
+    await act(async () => {});
+    act(() => {
+      (container.querySelector('[data-od-id="obj-cubepilot"]') as HTMLElement).click();
+    });
+
+    await sendTurn(container, "分析 Ceph OSD 使用率告警");
+
+    let parked = false;
+    for (let i = 0; i < 100 && !parked; i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 50));
+      });
+      parked = container.querySelector('[data-od-id="approval-allow-turn"]') !== null;
+    }
+    expect(parked).toBe(true);
+
+    act(() => {
+      (container.querySelector('[data-od-id="approval-allow-turn"]') as HTMLElement).click();
+    });
+    // The command was approved once, but the platform could not cover the turn:
+    // the toast says so and the card is not painted as a rejection.
+    let warned = false;
+    for (let i = 0; i < 100 && !warned; i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 50));
+      });
+      warned = (container.textContent ?? "").includes("本次命令已批准,但本轮无法自动放行");
+    }
+    expect(warned).toBe(true);
+    expect(container.textContent).toContain("已批准");
+    expect(api.decisions).toHaveLength(1);
+    expect(api.decisions[0].path).toContain("/api/v1/sessions/");
+    expect(api.decisions[0].path).toContain("/approvals/decision");
+    expect(api.decisions[0].body).toEqual({ approvalId: "app-1", decision: "allow-turn" });
     act(() => root.unmount());
   }, 15000);
 
