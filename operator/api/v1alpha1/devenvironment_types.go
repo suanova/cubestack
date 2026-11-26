@@ -678,10 +678,10 @@ type Endpoint struct {
 	// application port.
 	Name string `json:"name"`
 
-	// Address is the access address: a URL for a web endpoint, or a host:port
-	// for SSH and tcp/udp ports (e.g. ssh://user@<gw-ip>:<port>). The port is
-	// the one the address is reachable on, which is not ListenerPort when the
-	// Gateway's dataplane Service is a NodePort Service.
+	// Address is the access address: a URL for an endpoint with a scheme (web,
+	// SSH), or a bare host:port for a tcp/udp port. The port is the one the
+	// address is reachable on, which is not ListenerPort when the Gateway's
+	// dataplane Service is a NodePort Service.
 	Address string `json:"address"`
 
 	// ListenerPort is the Gateway listener port the endpoint is published on: the

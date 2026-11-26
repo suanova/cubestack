@@ -35,6 +35,7 @@ const (
 	testVMData  = "scratch"
 
 	vmEnvironmentKind = "VMEnvironment"
+	vmImageKind       = "VMImage"
 
 	// Keys of the unstructured objects built by the raw-object tables. They are
 	// constants because the sibling CRD tests name the same keys, and the
@@ -54,6 +55,12 @@ var vmEnvironmentGVR = schema.GroupVersionResource{
 	Resource: "vmenvironments",
 }
 
+var vmImageGVR = schema.GroupVersionResource{
+	Group:    SchemeGroupVersion.Group,
+	Version:  SchemeGroupVersion.Version,
+	Resource: "vmimages",
+}
+
 // rawVMEnvironment builds a VMEnvironment object map with a single copy of the
 // apiVersion/kind/metadata/spec keys shared by the raw-object tables.
 func rawVMEnvironment(name string, spec map[string]any) map[string]any {
@@ -62,6 +69,25 @@ func rawVMEnvironment(name string, spec map[string]any) map[string]any {
 		objKind:       vmEnvironmentKind,
 		objMetadata:   map[string]any{objName: name, "namespace": testNamespace},
 		objSpec:       spec,
+	}
+}
+
+// rawVMImage builds a cluster-scoped VMImage object map around a raw source, so
+// values the typed client cannot express (an empty string) reach the schema.
+func rawVMImage(name string, source map[string]any) map[string]any {
+	return map[string]any{
+		objAPIVersion: testAPIVersion,
+		objKind:       vmImageKind,
+		objMetadata:   map[string]any{objName: name},
+		objSpec: map[string]any{
+			"displayName":   "Ubuntu 24.04 LTS",
+			"os":            "ubuntu",
+			"osVersion":     "24.04",
+			"architecture":  "amd64",
+			"minSystemDisk": "20Gi",
+			"guestAgent":    true,
+			"source":        source,
+		},
 	}
 }
 
@@ -115,6 +141,17 @@ var _ = Describe("VMEnvironment", func() {
 			}
 
 			Expect(k8sClient.Create(ctx, vme)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, vme)).To(Succeed())
+		})
+
+		It("accepts a name the API server generates", func() {
+			// The generated name is checked by the same root rule as an explicit
+			// one: the apiserver fills metadata.name before admission runs.
+			vme := validVMEnvironment("")
+			vme.GenerateName = "vme-"
+
+			Expect(k8sClient.Create(ctx, vme)).To(Succeed())
+			Expect(vme.Name).NotTo(BeEmpty())
 			Expect(k8sClient.Delete(ctx, vme)).To(Succeed())
 		})
 
@@ -422,5 +459,26 @@ var _ = Describe("VMImage", func() {
 			"vmimage-both-sources",
 			VMImageSource{Registry: "harbor.isuanova.com/suanova/ubuntu:24.04", PVC: &corev1.LocalObjectReference{Name: "golden"}},
 			"exactly one of source.registry and source.pvc"),
+	)
+
+	// The typed client omits an empty string, so an empty registry (or claim
+	// name) is only expressible as a raw object.
+	DescribeTable("rejects empty source values",
+		func(name string, source map[string]any, wantMessage string) {
+			dynClient := dynamic.NewForConfigOrDie(cfg)
+			_, err := dynClient.Resource(vmImageGVR).Create(
+				ctx, &unstructured.Unstructured{Object: rawVMImage(name, source)}, metav1.CreateOptions{})
+			Expect(err).To(HaveOccurred())
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid error, got: %v", err)
+			Expect(err.Error()).To(ContainSubstring(wantMessage))
+		},
+		Entry("empty registry",
+			"vmimage-empty-registry",
+			map[string]any{"registry": ""},
+			"exactly one of source.registry and source.pvc"),
+		Entry("empty PVC name",
+			"vmimage-empty-pvc",
+			map[string]any{"pvc": map[string]any{objName: ""}},
+			"the claim name must be set"),
 	)
 })
