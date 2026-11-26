@@ -73,6 +73,7 @@ var _ = BeforeSuite(func() {
 			filepath.Join("..", "..", "testdata", "servicemonitor-crd"),
 			filepath.Join("..", "..", "testdata", "aigateway-crds"),
 			filepath.Join("..", "..", "testdata", "envoy-gateway-crds"),
+			filepath.Join("..", "..", "testdata", "cdi-crds"),
 		},
 	}
 	// kube-apiserver 1.36 takes ~60s to exit on SIGTERM while informer
@@ -152,6 +153,9 @@ var _ = BeforeSuite(func() {
 			RDMARoCEResource: testRDMARoCEResource,
 		},
 	}).SetupWithManager(testMgr)
+	Expect(err).NotTo(HaveOccurred())
+
+	err = (&VMImageReconciler{Client: testMgr.GetClient(), Scheme: testMgr.GetScheme()}).SetupWithManager(testMgr)
 	Expect(err).NotTo(HaveOccurred())
 
 	mgrDone = make(chan struct{})

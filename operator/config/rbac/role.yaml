@@ -71,6 +71,7 @@ rules:
   - inferenceruntimeprofiles/status
   - inferenceservices/status
   - modelversions/status
+  - vmimages/status
   verbs:
   - get
   - patch
@@ -80,6 +81,8 @@ rules:
   resources:
   - inferenceruntimeprofiles
   - modelversions
+  - vmenvironments
+  - vmimages
   verbs:
   - get
   - list
@@ -127,6 +130,15 @@ rules:
   - list
   - patch
   - update
+  - watch
+- apiGroups:
+  - cdi.kubevirt.io
+  resources:
+  - datavolumes
+  verbs:
+  - create
+  - get
+  - list
   - watch
 - apiGroups:
   - events.k8s.io

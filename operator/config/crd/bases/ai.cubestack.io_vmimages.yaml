@@ -110,6 +110,8 @@ spec:
             - message: exactly one of source.registry and source.pvc is required
               rule: (has(self.source.registry) && size(self.source.registry) > 0 &&
                 !has(self.source.pvc)) || (!has(self.source.registry) && has(self.source.pvc))
+            - message: minSystemDisk must be a positive quantity
+              rule: quantity(self.minSystemDisk).isGreaterThan(quantity('0'))
           status:
             description: status defines the observed state of VMImage
             properties:

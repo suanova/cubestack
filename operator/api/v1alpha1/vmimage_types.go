@@ -27,6 +27,7 @@ import (
 // catalogue is cluster-scoped and maintained by administrators; an environment
 // references an entry by name and cannot name any other source.
 // +kubebuilder:validation:XValidation:rule="(has(self.source.registry) && size(self.source.registry) > 0 && !has(self.source.pvc)) || (!has(self.source.registry) && has(self.source.pvc))",message="exactly one of source.registry and source.pvc is required"
+// +kubebuilder:validation:XValidation:rule="quantity(self.minSystemDisk).isGreaterThan(quantity('0'))",message="minSystemDisk must be a positive quantity"
 type VMImageSpec struct {
 	// DisplayName is the human-readable name.
 	DisplayName string `json:"displayName"`

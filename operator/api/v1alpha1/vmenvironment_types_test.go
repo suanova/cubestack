@@ -34,6 +34,9 @@ const (
 	testVMImage = "ubuntu-24.04"
 	testVMData  = "scratch"
 
+	// testVMImageRegistry is the catalogue artifact the VMImage specs import.
+	testVMImageRegistry = "harbor.isuanova.com/suanova/ubuntu:24.04"
+
 	vmEnvironmentKind = "VMEnvironment"
 	vmImageKind       = "VMImage"
 
@@ -401,7 +404,7 @@ var _ = Describe("VMImage", func() {
 	}
 
 	It("is cluster-scoped and round-trips its spec and status", func() {
-		img := validVMImage("vmimage-ubuntu-24-04", VMImageSource{Registry: "harbor.isuanova.com/suanova/ubuntu:24.04"})
+		img := validVMImage("vmimage-ubuntu-24-04", VMImageSource{Registry: testVMImageRegistry})
 		want := img.Spec.DeepCopy()
 
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
@@ -457,7 +460,7 @@ var _ = Describe("VMImage", func() {
 			"exactly one of source.registry and source.pvc"),
 		Entry("both sources",
 			"vmimage-both-sources",
-			VMImageSource{Registry: "harbor.isuanova.com/suanova/ubuntu:24.04", PVC: &corev1.LocalObjectReference{Name: "golden"}},
+			VMImageSource{Registry: testVMImageRegistry, PVC: &corev1.LocalObjectReference{Name: "golden"}},
 			"exactly one of source.registry and source.pvc"),
 	)
 
@@ -480,5 +483,19 @@ var _ = Describe("VMImage", func() {
 			"vmimage-empty-pvc",
 			map[string]any{"pvc": map[string]any{objName: ""}},
 			"the claim name must be set"),
+	)
+
+	DescribeTable("requires a positive minSystemDisk",
+		func(name, size string) {
+			img := validVMImage(name, VMImageSource{Registry: testVMImageRegistry})
+			img.Spec.MinSystemDisk = resource.MustParse(size)
+
+			err := k8sClient.Create(ctx, img)
+			Expect(err).To(HaveOccurred())
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid error, got: %v", err)
+			Expect(err.Error()).To(ContainSubstring("minSystemDisk must be a positive quantity"))
+		},
+		Entry("zero", "vmimage-zero-min-disk", "0"),
+		Entry("negative", "vmimage-negative-min-disk", "-1Gi"),
 	)
 })
