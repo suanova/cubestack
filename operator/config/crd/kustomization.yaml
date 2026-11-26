@@ -7,6 +7,8 @@ resources:
 - bases/ai.cubestack.io_inferenceservices.yaml
 - bases/ai.cubestack.io_devenvironments.yaml
 - bases/ai.cubestack.io_datasets.yaml
+- bases/ai.cubestack.io_vmenvironments.yaml
+- bases/ai.cubestack.io_vmimages.yaml
 - bases/ipam.cubestack.io_ippools.yaml
 - bases/ipam.cubestack.io_ipclaims.yaml
 # +kubebuilder:scaffold:crdkustomizeresource

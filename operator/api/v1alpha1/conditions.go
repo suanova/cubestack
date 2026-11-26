@@ -65,8 +65,9 @@ const (
 	ConditionRouteReady ConditionType = "RouteReady"
 
 	// ConditionReady aggregates all roles per readinessPolicy, and for a
-	// DevEnvironment reflects the phase derived from the workload.
-	// (InferenceService, DevEnvironment)
+	// DevEnvironment reflects the phase derived from the workload, and for a
+	// VMImage says whether the golden disk is usable. (InferenceService,
+	// DevEnvironment, VMImage)
 	ConditionReady ConditionType = "Ready"
 
 	// ConditionProgressing indicates that the controller is still applying the
@@ -99,4 +100,29 @@ const (
 	// controller resolved one or more spec fields itself and runs the
 	// environment anyway, each one named in the message. (DevEnvironment)
 	ConditionAccepted ConditionType = "Accepted"
+
+	// ConditionPlatformReady indicates that the platform prerequisites and
+	// resources this environment requests are in place: the virtualization and
+	// storage layers are serviceable, and the requested accelerator, RDMA and
+	// IP-pool resources are available. The ones not requested count as
+	// satisfied. (VMEnvironment)
+	ConditionPlatformReady ConditionType = "PlatformReady"
+
+	// ConditionAssetsReady indicates that the external objects the spec
+	// references exist and are usable — the SSH key Secret and the password
+	// Secret. Not referencing one counts as satisfied. (VMEnvironment)
+	ConditionAssetsReady ConditionType = "AssetsReady"
+
+	// ConditionStorageReady indicates that the system disk and every data disk
+	// are usable. (VMEnvironment)
+	ConditionStorageReady ConditionType = "StorageReady"
+
+	// ConditionGuestReady indicates that the guest finished booting, its agent
+	// is connected, and the guest-side services of the enabled channels are up.
+	// (VMEnvironment)
+	ConditionGuestReady ConditionType = "GuestReady"
+
+	// ConditionLiveMigratable indicates whether the environment currently
+	// meets the conditions for live migration. (VMEnvironment)
+	ConditionLiveMigratable ConditionType = "LiveMigratable"
 )

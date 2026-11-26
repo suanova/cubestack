@@ -1,0 +1,780 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: vmenvironments.ai.cubestack.io
+spec:
+  group: ai.cubestack.io
+  names:
+    kind: VMEnvironment
+    listKind: VMEnvironmentList
+    plural: vmenvironments
+    shortNames:
+    - vme
+    singular: vmenvironment
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase.name
+      name: Phase
+      type: string
+    - jsonPath: .status.phase.reason
+      name: Reason
+      type: string
+    - jsonPath: .status.ip
+      name: IP
+      type: string
+    - jsonPath: .status.lastActivityTime
+      name: Last activity
+      type: date
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          VMEnvironment is the Schema for the vmenvironments API.
+
+          metadata.name must be a DNS-1035 label: lowercase letters, digits and
+          hyphens, starting with a letter, at most 63 characters. It is also the name
+          prefix of every object the platform derives for this environment, so a name
+          already taken by an object this environment does not own is a conflict
+          rather than a rename.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of VMEnvironment
+            properties:
+              dataDisks:
+                description: |-
+                  DataDisks are additional disks.
+
+                  Each disk is identified by its name, which must therefore be unique: a
+                  repeated one is refused by the API server.
+                items:
+                  description: VMDataDisk is an additional disk.
+                  properties:
+                    mountPath:
+                      description: |-
+                        MountPath is where the guest mounts the disk. Absent leaves it attached
+                        but unmounted.
+                      type: string
+                    name:
+                      description: Name identifies the disk.
+                      maxLength: 32
+                      minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                    pvcName:
+                      description: |-
+                        PVCName references an existing claim in the project namespace; mutually
+                        exclusive with Size.
+                      minLength: 1
+                      type: string
+                    readOnly:
+                      default: false
+                      description: ReadOnly mounts the disk read-only.
+                      type: boolean
+                    retain:
+                      default: false
+                      description: |-
+                        Retain keeps the disk when the environment is deleted. Default false. A
+                        shared disk is never deleted, whatever this says.
+                      type: boolean
+                    size:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      description: |-
+                        Size creates a new disk of this capacity; mutually exclusive with
+                        PVCName.
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    type:
+                      default: block
+                      description: Type is block (default) or shared.
+                      enum:
+                      - block
+                      - shared
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              image:
+                description: |-
+                  Image is the name of a VMImage in the platform catalogue. Only
+                  catalogued images are accepted: this is not a container image reference,
+                  and no other source exists. It is held to the name syntax of the object
+                  it refers to, so a reference the catalogue could never resolve — a
+                  registry path with a tag, say — is refused instead of stored.
+                maxLength: 253
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                type: string
+              network:
+                description: Network configures the second interface, RDMA access
+                  and egress.
+                properties:
+                  egress:
+                    description: Egress is what the guest may reach on its own behalf.
+                    properties:
+                      unrestricted:
+                        default: false
+                        description: |-
+                          Unrestricted lifts the restriction on what the environment may reach: it
+                          may open a connection to any destination, rather than being able to
+                          resolve names and reach nothing.
+
+                          An environment is restricted by default, and one that serves a notebook
+                          off its own image never notices. One that installs a package or downloads
+                          a dataset does — and the failure does not land where the request was made.
+                          An install that cannot reach its index does not raise, so the environment
+                          goes on to fail later on a missing import instead, and the network is the
+                          last thing suspected. This field is how an environment that expects to
+                          reach outside the cluster says so.
+
+                          It is a property of one environment and not of a namespace: setting it
+                          says nothing about the environments that did not, and an environment that
+                          carries it is no more reachable from outside than one that does not.
+                        type: boolean
+                    type: object
+                  rdmaEnabled:
+                    default: false
+                    description: RDMAEnabled attaches a device from the fabric the
+                      cluster advertises.
+                    type: boolean
+                  rdmaType:
+                    default: roce
+                    description: |-
+                      RDMAType names the fabric; effective when rdmaEnabled=true. Only roce is
+                      offered: InfiniBand is refused at admission rather than accepted and
+                      reported against the environment later.
+                    enum:
+                    - roce
+                    type: string
+                  underlay:
+                    description: |-
+                      Underlay attaches the guest to a layer-2 project network. Absent means
+                      pod network only.
+                    properties:
+                      pool:
+                        description: |-
+                          Pool names the cluster-scoped IPPool approved for this project, from
+                          which a fixed address is claimed. Required whenever underlay is present:
+                          the pool is what supplies the subnet, gateway and bridge, so there is no
+                          way to attach a layer-2 network without one.
+                        minLength: 1
+                        type: string
+                    required:
+                    - pool
+                    type: object
+                type: object
+              nodeSelector:
+                additionalProperties:
+                  type: string
+                description: NodeSelector constrains the guest to nodes carrying these
+                  labels.
+                type: object
+              ports:
+                description: |-
+                  Ports are application ports served from the guest and published through
+                  the platform gateway. containerPort is the port inside the guest.
+
+                  Each port is identified by its name, which must therefore be unique: a
+                  repeated one is refused by the API server.
+                items:
+                  description: PortSpec is an extra application port.
+                  properties:
+                    containerPort:
+                      description: ContainerPort is the in-container application port.
+                      format: int32
+                      maximum: 65535
+                      minimum: 1
+                      type: integer
+                    name:
+                      description: |-
+                        Name is the port identifier: it becomes the Service port's name, the route
+                        sub path and the status endpoint's name.
+
+                        A Service port name must be unique across the whole Service, whatever the
+                        protocol, so a name repeated across spec.ports is refused by the API server.
+                        A name the platform publishes for this environment is not covered by that
+                        rule: the controller refuses it instead (Accepted=False, phase Failed)
+                        rather than applying a Service the API server would reject.
+                      minLength: 1
+                      type: string
+                    type:
+                      default: http
+                      description: |-
+                        Type is the exposure form.
+
+                        http publishes the port as a sub path of the Gateway's HTTP listener —
+                        /dev/<namespace>/<name>/port/<this port's name>/ — and the request
+                        reaches the container in cleartext. It is not a way to expose a port that
+                        serves TLS: the container would receive a plain HTTP request where it
+                        expects a TLS handshake, and the Gateway does not re-encrypt to it.
+
+                        tcp publishes the port over L4 instead — a listener of the environment's
+                        own, on a port from the platform's L4 range, plus a TCPRoute — with
+                        nothing above it interpreting the stream.
+
+                        A port that serves TLS is exposed as tcp, and as tcp only: the handshake
+                        crosses the Gateway untouched and the client validates the certificate
+                        the container itself presents, so the address in status.endpoints is
+                        reached by prefixing the scheme — an app terminating TLS on 8443 is
+                        published with type tcp and containerPort 8443, and reached at
+                        https://<address>. The platform neither terminates nor re-originates TLS,
+                        and what it publishes is an address, not a hostname: matching an endpoint
+                        by SNI (a TLSRoute on a shared TLS listener) is not implemented, so the
+                        certificate has to cover the address the client dials.
+
+                        udp publishes the port over L4 the same way, as a listener and a UDPRoute
+                        of its own, and the address in status.endpoints is reached by prefixing
+                        udp://. tcp and udp draw on the same pool, and a number is held by one
+                        protocol only: the two cannot be published on the same port number.
+                      enum:
+                      - http
+                      - tcp
+                      - udp
+                      type: string
+                  required:
+                  - containerPort
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              resources:
+                description: |-
+                  Resources is the compute configuration: CPU count, guest memory and the
+                  accelerators passed through to the guest.
+                properties:
+                  cpu:
+                    description: CPU is the CPU limit in cores.
+                    type: string
+                  gpu:
+                    description: |-
+                      GPU requests accelerators. Absent asks for none: no vendor is named, no
+                      vendor GPU resource goes into the pod, and the image brand is not checked,
+                      which is what makes the CPU images usable. It is deliberately not defaulted
+                      into existence — defaulting it would put an accelerator on every
+                      environment and leave "no accelerator" with no way to be expressed.
+                    properties:
+                      count:
+                        default: 1
+                        description: |-
+                          Count is the number of GPU cards to request. Omit it for the default of 1.
+                          There is no zero: omitting the whole gpu block is how an environment asks
+                          for no accelerator.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      model:
+                        description: |-
+                          Model restricts the environment to a single GPU model the vendor offers,
+                          e.g. MXC550. It has to name a model of the declared vendor
+                          (spec.resources.gpu.vendor), and is matched against the model the cluster
+                          advertises for that vendor, so it is written as that vendor reports the
+                          model rather than in any platform's own spelling. Omit it to take any node
+                          offering the vendor's accelerator.
+
+                          The advertised model is a node label's value, and the field is held to that
+                          shape — a vendor that names a card "MXC 550" advertises it as "MXC-550".
+                          The shape is enforced rather than left to select nothing, because no
+                          cluster could ever satisfy the other one; a model that is valid but absent
+                          is a different matter, and is handled below.
+
+                          A model no node offers is a matter of what the cluster has rather than of
+                          what the spec asks for, so the environment stays Pending with the
+                          scheduling failure reported against it — the spec is applied as written.
+                        maxLength: 63
+                        minLength: 1
+                        pattern: ^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$
+                        type: string
+                      vendor:
+                        default: nvidia
+                        description: |-
+                          Vendor is the GPU vendor: nvidia / metax. It decides the GPU extended
+                          resource (nvidia.com/gpu / metax-tech.com/gpu) and image brand matching.
+                        enum:
+                        - metax
+                        - nvidia
+                        type: string
+                    type: object
+                  memory:
+                    description: Memory is the memory limit.
+                    type: string
+                type: object
+              running:
+                default: false
+                description: Running is the desired running state.
+                type: boolean
+              schedulerName:
+                description: SchedulerName names the scheduler that places the guest.
+                type: string
+              ssh:
+                description: |-
+                  SSH configures SSH access to the guest. It is on by default: the guest
+                  image runs sshd whether or not the platform exposes it.
+                properties:
+                  authorizedKeysSecret:
+                    description: |-
+                      AuthorizedKeysSecret holds the public keys to install in the guest. When
+                      omitted the platform mints a client keypair and records the Secret in
+                      status.sshClientKeySecret.
+
+                      The Secret holds public keys, and its selected data entry is the file the
+                      guest reads, so it must exist at the named key.
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                    x-kubernetes-validations:
+                    - message: the Secret name and its data key must both be named
+                      rule: size(self.name) > 0 && size(self.key) > 0
+                  enabled:
+                    default: true
+                    description: |-
+                      Enabled exposes SSH. On by default, unlike the container form: the guest
+                      image runs sshd either way. It is a pointer so that "unset" (take the
+                      default) and an explicit false are distinguishable.
+                    type: boolean
+                  passwordAuth:
+                    description: |-
+                      PasswordAuth enables password authentication in the guest sshd. Absent
+                      means off: a reachable sshd with password auth is a brute-force target.
+
+                      Public-key authentication is unaffected: with both configured, either
+                      method logs in.
+                    properties:
+                      passwordSecret:
+                        description: |-
+                          PasswordSecret holds the password. When omitted the platform mints one
+                          into <name>-ssh-password and records it in status.sshPasswordSecret.
+
+                          The password is never written to the resource: the spec carries a
+                          reference, the status carries a reference, and what reaches the guest is
+                          a hash.
+                        properties:
+                          key:
+                            description: The key of the secret to select from.  Must
+                              be a valid secret key.
+                            type: string
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                          optional:
+                            description: Specify whether the Secret or its key must
+                              be defined
+                            type: boolean
+                        required:
+                        - key
+                        type: object
+                        x-kubernetes-map-type: atomic
+                        x-kubernetes-validations:
+                        - message: the Secret name and its data key must both be named
+                          rule: size(self.name) > 0 && size(self.key) > 0
+                    type: object
+                type: object
+              systemDisk:
+                description: SystemDisk is the guest OS disk.
+                properties:
+                  retain:
+                    default: false
+                    description: |-
+                      Retain keeps the disk when the environment is deleted. Default false:
+                      the disk is deleted with the environment.
+                    type: boolean
+                  size:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: |-
+                      Size is the disk capacity. It must be at least the image's
+                      minSystemDisk, and can only grow, and only while the environment is
+                      stopped.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                required:
+                - size
+                type: object
+            required:
+            - image
+            - resources
+            - systemDisk
+            type: object
+            x-kubernetes-validations:
+            - message: exactly one of size and pvcName is required per data disk
+              rule: '!has(self.dataDisks) || self.dataDisks.all(d, (has(d.size) &&
+                !has(d.pvcName)) || (!has(d.size) && has(d.pvcName)))'
+            - message: pvcName is only allowed for type=shared
+              rule: '!has(self.dataDisks) || self.dataDisks.all(d, !has(d.pvcName)
+                || d.type == ''shared'')'
+            - message: spec.network.underlay.pool is required when underlay is set
+              rule: '!has(self.network) || !has(self.network.underlay) || has(self.network.underlay.pool)'
+            - message: passwordAuth requires ssh.enabled
+              rule: '!has(self.ssh) || !has(self.ssh.passwordAuth) || self.ssh.enabled'
+          status:
+            description: status defines the observed state of VMEnvironment
+            properties:
+              conditions:
+                description: |-
+                  Conditions are the standard conditions of this resource: Accepted /
+                  PlatformReady / AssetsReady / StorageReady / PodScheduled / GuestReady /
+                  RouteReady / LiveMigratable / Ready.
+
+                  The status of each condition is one of True, False, or Unknown.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              dataDisks:
+                description: DataDisks are the states of the additional disks, keyed
+                  by name.
+                items:
+                  description: VMDiskStatus is the state of one virtual disk.
+                  properties:
+                    importProgress:
+                      description: ImportProgress is the import percentage while the
+                        disk is importing.
+                      format: int32
+                      type: integer
+                    message:
+                      description: Message is the human-readable detail, e.g. the
+                        import failure.
+                      type: string
+                    name:
+                      description: |-
+                        Name is the disk's identifier: the data disk's spec name, or the system
+                        disk's.
+                      type: string
+                    phase:
+                      description: Phase is Pending, Importing, Ready, Resizing or
+                        Failed.
+                      type: string
+                    pvcName:
+                      description: PVCName is the claim backing the disk.
+                      type: string
+                  required:
+                  - name
+                  - phase
+                  - pvcName
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              endpoints:
+                description: |-
+                  Endpoints are the access addresses; withheld while stopped. A VM
+                  environment publishes the guest consoles (vnc and serial), ssh, and one
+                  entry per spec.ports[] entry under that port's name.
+                items:
+                  description: |-
+                    Endpoint describes one access address an environment publishes: a web URL, an
+                    SSH address, or an extra application port exposure.
+                  properties:
+                    address:
+                      description: |-
+                        Address is the access address: a URL for an endpoint with a scheme (web,
+                        SSH), or a bare host:port for a tcp/udp port. The port is the one the
+                        address is reachable on, which is not ListenerPort when the Gateway's
+                        dataplane Service is a NodePort Service.
+                      type: string
+                    listenerPort:
+                      description: |-
+                        ListenerPort is the Gateway listener port the endpoint is published on: the
+                        port the environment's ListenerSet declares, or the Gateway's HTTP listener
+                        port for the web endpoint. The controller reuses it across reconciles, so
+                        the environment's listener allocation is stable for as long as the exposure
+                        exists. It is not necessarily the port in Address: a NodePort dataplane
+                        renumbers each listener onto a port from the cluster's node-port range, and
+                        that renumbering is not part of the allocation — a dataplane Service
+                        recreated with different nodePorts changes Address while this does not.
+                        Address says where the endpoint is reachable now, not where it will stay.
+                      format: int32
+                      type: integer
+                    name:
+                      description: |-
+                        Name identifies the channel: the names are those the resource publishes
+                        under status.endpoints, and spec.ports[].name is used as-is for an extra
+                        application port.
+                      type: string
+                  required:
+                  - address
+                  - name
+                  type: object
+                type: array
+              ip:
+                description: |-
+                  IP is the guest's underlay address, when one was requested. It is stable
+                  across reboots, stop/start and migration.
+                type: string
+              lastActivityTime:
+                description: LastActivityTime is when the environment was last seen
+                  active.
+                format: date-time
+                type: string
+              lastStop:
+                description: LastStop records the most recent stop.
+                properties:
+                  at:
+                    description: At is when the stop completed.
+                    format: date-time
+                    type: string
+                  forced:
+                    description: |-
+                      Forced is true when the graceful stop timed out and the guest was
+                      killed.
+                    type: boolean
+                  reason:
+                    description: Reason is UserRequested, Restart or Forced.
+                    type: string
+                required:
+                - at
+                type: object
+              migration:
+                description: Migration records the most recent migration request.
+                properties:
+                  lastTransitionTime:
+                    description: LastTransitionTime is the time State last changed.
+                    format: date-time
+                    type: string
+                  message:
+                    description: Message is the human-readable detail.
+                    type: string
+                  reason:
+                    description: Reason is the machine-readable cause when State is
+                      Failed or Rejected.
+                    type: string
+                  sourceNode:
+                    description: SourceNode is where the guest was when the migration
+                      started.
+                    type: string
+                  state:
+                    description: State is Pending, Running, Succeeded, Failed or Rejected.
+                    type: string
+                  targetNode:
+                    description: TargetNode is where the guest landed, or where it
+                      was to go.
+                    type: string
+                required:
+                - lastTransitionTime
+                - state
+                type: object
+              node:
+                description: Node is the node the guest currently runs on.
+                type: string
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the generation of the most recent spec the
+                  controller has reconciled. If it is less than metadata.generation, the
+                  status may be stale.
+                format: int64
+                type: integer
+              phase:
+                description: Phase describes the current running phase.
+                properties:
+                  lastTransitionTime:
+                    description: LastTransitionTime is the time the current phase
+                      was reached.
+                    format: date-time
+                    type: string
+                  message:
+                    description: |-
+                      Message is the human-readable detail, carrying the underlying
+                      virtualization layer's own text for the faults above.
+                    type: string
+                  name:
+                    description: Name is the current phase.
+                    enum:
+                    - Pending
+                    - Running
+                    - Stopped
+                    - Failed
+                    - Terminating
+                    type: string
+                  reason:
+                    description: |-
+                      Reason explains the phase. It carries the guest-runtime faults that
+                      belong to no condition — a paused guest, a crash loop, an unavailable
+                      launcher image.
+                    type: string
+                required:
+                - name
+                type: object
+              sshClientKeySecret:
+                description: |-
+                  SSHClientKeySecret is the minted client keypair, absent when the spec
+                  names the user's own public keys.
+                properties:
+                  name:
+                    description: name is unique within a namespace to reference a
+                      secret resource.
+                    type: string
+                  namespace:
+                    description: namespace defines the space within which the secret
+                      name must be unique.
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
+              sshPasswordSecret:
+                description: |-
+                  SSHPasswordSecret is the minted login password, absent when password
+                  auth is off or the spec names the user's own Secret.
+                properties:
+                  name:
+                    description: name is unique within a namespace to reference a
+                      secret resource.
+                    type: string
+                  namespace:
+                    description: namespace defines the space within which the secret
+                      name must be unique.
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
+              stopping:
+                description: Stopping is true while a graceful stop is in flight.
+                type: boolean
+              systemDisk:
+                description: SystemDisk is the state of the guest OS disk.
+                properties:
+                  importProgress:
+                    description: ImportProgress is the import percentage while the
+                      disk is importing.
+                    format: int32
+                    type: integer
+                  message:
+                    description: Message is the human-readable detail, e.g. the import
+                      failure.
+                    type: string
+                  name:
+                    description: |-
+                      Name is the disk's identifier: the data disk's spec name, or the system
+                      disk's.
+                    type: string
+                  phase:
+                    description: Phase is Pending, Importing, Ready, Resizing or Failed.
+                    type: string
+                  pvcName:
+                    description: PVCName is the claim backing the disk.
+                    type: string
+                required:
+                - name
+                - phase
+                - pvcName
+                type: object
+            type: object
+        required:
+        - spec
+        type: object
+        x-kubernetes-validations:
+        - message: 'metadata.name must be a DNS-1035 label: at most 63 characters,
+            lowercase letters, digits and hyphens, starting with a letter'
+          rule: self.metadata.name.size() <= 63 && self.metadata.name.matches('^[a-z]([-a-z0-9]*[a-z0-9])?$')
+    served: true
+    storage: true
+    subresources:
+      status: {}
