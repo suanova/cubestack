@@ -16,6 +16,7 @@ limitations under the License.
 
 // +kubebuilder:rbac:groups=ai.cubestack.io,resources=vmimages,verbs=get;list;watch
 // +kubebuilder:rbac:groups=ai.cubestack.io,resources=vmimages/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=ai.cubestack.io,resources=vmimages/finalizers,verbs=update
 // +kubebuilder:rbac:groups=ai.cubestack.io,resources=vmenvironments,verbs=get;list;watch
 // +kubebuilder:rbac:groups=cdi.kubevirt.io,resources=datavolumes,verbs=get;list;watch;create
 
