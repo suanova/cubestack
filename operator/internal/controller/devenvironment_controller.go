@@ -459,9 +459,14 @@ type DevEnvironmentReconciler struct {
 	// APIReader reads straight from the API server instead of the manager's
 	// cache. Port allocation depends on it: usedPorts has to observe a port
 	// another reconcile just reserved, and a cached List serves whatever the
-	// informer last saw (see usedPorts). When nil it is wired from the manager in
-	// SetupWithManager, like Recorder.
+	// informer last saw (see portAllocator.usedPorts). When nil it is wired from
+	// the manager in SetupWithManager, like Recorder.
 	APIReader client.Reader
+	// ports hands out the Gateway's L4 listener ports (::portAllocator). The
+	// pool is gateway-wide, so this field is where a second kind of environment
+	// reconciler takes the same allocator rather than one of its own; it is
+	// wired in SetupWithManager rather than created per reconcile.
+	ports *portAllocator
 }
 
 // Reconcile runs the DevEnvironment pipeline: spec gate, SSH secret, core
@@ -1002,6 +1007,9 @@ func (r *DevEnvironmentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.APIReader == nil {
 		r.APIReader = mgr.GetAPIReader()
 	}
+	if r.ports == nil {
+		r.ports = &portAllocator{}
+	}
 	builder := ctrl.NewControllerManagedBy(mgr).
 		For(&aiv1alpha1.DevEnvironment{}).
 		Owns(&appsv1.StatefulSet{}).
@@ -1042,11 +1050,13 @@ func (r *DevEnvironmentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		}
 	}
 	// MaxConcurrentReconciles is pinned to 1 rather than left to default to it.
-	// Port allocation reads the pool and then creates a TCPRoute, and nothing
-	// reserves the port in between: it is safe only because this single worker
-	// serializes the pair (see usedPorts). Raising this reopens that race and
-	// needs a real reservation primitive first, so making it explicit is what
-	// keeps the dependency from being broken by an unrelated tuning change.
+	// The L4 pool no longer depends on it — a reconcile holds the allocator for
+	// its whole read-then-write (::portAllocator) — but the host port pool does:
+	// reconcileHostPorts reads the pool and then writes status with nothing
+	// reserving the number in between. Raising this reopens that race and needs
+	// the host pool to become a component of the same shape first, so making it
+	// explicit is what keeps the dependency from being broken by an unrelated
+	// tuning change.
 	return builder.WithOptions(ctrlc.Options{MaxConcurrentReconciles: 1}).Complete(r)
 }
 
@@ -4141,7 +4151,7 @@ func (r *DevEnvironmentReconciler) reconcileGatewayRoutes(ctx context.Context, e
 	if publishesHTTP(env) {
 		wanted[cfg.HTTPPort] = corev1.ProtocolTCP
 	}
-	external, err := r.externalPorts(ctx, gw, wanted)
+	external, err := r.ports.externalPorts(ctx, r.APIReader, cfg.portPool(), gw, wanted)
 	if err != nil {
 		setDevEnvironmentRouteReadyCondition(&status.Conditions, false, reasonGatewayNotReady, err.Error())
 		status.Endpoints = nil
@@ -4250,69 +4260,6 @@ func gatewayIP(gw *gatewayv1.Gateway, cfg DevEnvironmentControllerConfig) string
 	return cfg.GatewayIP
 }
 
-// externalPorts maps each given listener port to the port it is reachable on at
-// the Gateway's address. Its argument is the listener ports keyed to the
-// transport each speaks, since a dataplane Service names both.
-//
-// A LoadBalancer or ClusterIP dataplane serves a listener on the listener's own
-// port, so the mapping is the identity. A NodePort dataplane renumbers every
-// listener onto a nodePort instead, and only the dataplane Service knows the
-// assignment: the Gateway's status carries an address but no ports. Reading the
-// Service is what keeps a published endpoint an address that works.
-//
-// It reads through APIReader rather than the cache: an address published from a
-// stale read is wrong in the user's hands, and this read is all that stands
-// between the dataplane's port assignment and the address a user is handed. A
-// listener the dataplane does not expose yet is reported rather than passed
-// through as its own port, so an endpoint is either known-reachable or
-// withheld — never silently dead.
-func (r *DevEnvironmentReconciler) externalPorts(ctx context.Context, gw *gatewayv1.Gateway, ports map[int32]corev1.Protocol) (map[int32]int32, error) {
-	external := make(map[int32]int32, len(ports))
-	for p := range ports {
-		external[p] = p
-	}
-	cfg := r.defaultedConfig()
-	if cfg.GatewayDataplaneNamespace == "" {
-		return external, nil
-	}
-	var svcs corev1.ServiceList
-	if err := r.APIReader.List(ctx, &svcs, client.InNamespace(cfg.GatewayDataplaneNamespace), client.MatchingLabels{
-		gatewayDataplaneNameLabel:      gw.Name,
-		gatewayDataplaneNamespaceLabel: gw.Namespace,
-	}); err != nil {
-		return nil, err
-	}
-	var dataplane *corev1.Service
-	for i := range svcs.Items {
-		if svcs.Items[i].Spec.Type == corev1.ServiceTypeNodePort {
-			dataplane = &svcs.Items[i]
-			break
-		}
-	}
-	if dataplane == nil {
-		return external, nil
-	}
-	for p, protocol := range ports {
-		nodePort := int32(0)
-		for _, sp := range dataplane.Spec.Ports {
-			// The protocol is matched as well as the number. A dataplane
-			// Service carries one entry per TCP and per UDP listener, and the
-			// two are not obliged to agree on a number outside this operator's
-			// pool: a protocol-blind match could return the other entry's
-			// nodePort, naming a port that does not serve this endpoint at all.
-			if sp.Port == p && sp.Protocol == protocol {
-				nodePort = sp.NodePort
-				break
-			}
-		}
-		if nodePort == 0 {
-			return nil, fmt.Errorf("dataplane Service %s/%s exposes no nodePort for the %s listener port %d", dataplane.Namespace, dataplane.Name, protocol, p)
-		}
-		external[p] = nodePort
-	}
-	return external, nil
-}
-
 // publishRoutes allocates the SSH and extra tcp/udp ports, declares them as the
 // environment's own Gateway listeners, then applies the HTTPRoute and one
 // TCPRoute or UDPRoute per allocated port. The returned map is keyed by endpoint
@@ -4321,54 +4268,20 @@ func (r *DevEnvironmentReconciler) externalPorts(ctx context.Context, gw *gatewa
 // acceptance is read from (nil when the environment has no L4 port).
 func (r *DevEnvironmentReconciler) publishRoutes(ctx context.Context, env *aiv1alpha1.DevEnvironment, gw *gatewayv1.Gateway) (map[string]int32, *gatewayv1.ListenerSet, []publishedRoute, error) {
 	cfg := r.defaultedConfig()
-	ports := map[string]int32{}
-	// The pool is read only for an environment that draws from it, and that read
-	// is the reconcile's only use of the TCPRoute, UDPRoute and ListenerSet
-	// kinds, which each arrive with their own CRD. An install can carry the
-	// Gateway and the HTTPRoute without any of them, so an environment with no L4
-	// exposure publishes its HTTPRoute there without naming them, rather than
-	// failing with the NoMatch that a missing kind would otherwise raise.
-	if l4Exposed(env) {
-		used, err := r.usedPorts(ctx, env.Namespace, env.Name)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		held, err := r.heldPorts(ctx, env)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		// A listener the platform declares on the Gateway itself outranks every
-		// ListenerSet bound to it: the Gateway API merges the two lists with the
-		// parent first, and a listener that loses a port collision is marked
-		// Conflicted and never programmed. So a pool port the Gateway already
-		// binds must not be handed out. The failure would not be recoverable
-		// either — the environment's ListenerSet still holds the port, so every
-		// later environment skips it while this one waits on a listener that
-		// will never be accepted.
-		for _, l := range gw.Spec.Listeners {
-			used[l.Port] = true
-		}
-		for _, name := range l4PortNames(env) {
-			p := r.allocatePort(name, used, held)
-			if p == 0 {
-				return nil, nil, nil, fmt.Errorf("no free port in the L4 port range %d-%d", cfg.L4PortRangeStart, cfg.L4PortRangeEnd)
-			}
-			ports[name] = p
-		}
-	}
-
-	// Drop routes for exposures removed since the last reconcile: the loop
-	// above no longer allocates their ports, but the old route would keep
-	// claiming the Gateway listener and block reuse of the freed port.
-	if err := r.pruneL4Routes(ctx, env, ports); err != nil {
-		return nil, nil, nil, err
-	}
-
-	// Declare the listeners before the routes that attach to them. The routes
-	// would be published either way — a route whose listener does not exist yet
-	// simply is not accepted — but creating the listener first means the
-	// environment never reports a state it has to be corrected out of.
-	l4Set, err := r.applyListenerSet(ctx, env, gw, ports)
+	// The pool has no object of its own — the ListenerSets are the ledger — so
+	// taking a port is a read of the pool followed by the write that claims the
+	// number. The allocator is held across both, and across the pruning that
+	// releases this environment's stale numbers: a pass that read the pool and
+	// wrote its claim unlocked could take a port another pass is taking at the
+	// same instant, and the Gateway rejects one of the two listeners with no
+	// retry able to heal it.
+	var ports map[string]int32
+	var l4Set *gatewayv1.ListenerSet
+	err := r.ports.locked(func() error {
+		var err error
+		ports, l4Set, err = r.declareL4Listeners(ctx, env, gw, cfg)
+		return err
+	})
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -4416,6 +4329,67 @@ func (r *DevEnvironmentReconciler) publishRoutes(ctx context.Context, env *aiv1a
 		})
 	}
 	return ports, l4Set, published, nil
+}
+
+// declareL4Listeners picks this environment's L4 ports and writes the ledger
+// that holds them: the routes pruned for exposures that are gone, and the
+// ListenerSet declaring the rest. Both writes claim or release pool numbers, so
+// callers run it with the allocator held (::portAllocator.locked).
+func (r *DevEnvironmentReconciler) declareL4Listeners(ctx context.Context, env *aiv1alpha1.DevEnvironment, gw *gatewayv1.Gateway, cfg DevEnvironmentControllerConfig) (map[string]int32, *gatewayv1.ListenerSet, error) {
+	ports := map[string]int32{}
+	// The pool is read only for an environment that draws from it, and that read
+	// is the reconcile's only use of the TCPRoute, UDPRoute and ListenerSet
+	// kinds, which each arrive with their own CRD. An install can carry the
+	// Gateway and the HTTPRoute without any of them, so an environment with no L4
+	// exposure publishes its HTTPRoute there without naming them, rather than
+	// failing with the NoMatch that a missing kind would otherwise raise.
+	if l4Exposed(env) {
+		pool, names := cfg.portPool(), l4PortNames(env)
+		own := r.envLabels(env.Name)
+		used, err := r.ports.usedPorts(ctx, r.APIReader, pool, env.Namespace, own)
+		if err != nil {
+			return nil, nil, err
+		}
+		held, err := r.ports.heldPorts(ctx, r.APIReader, env.Namespace, own, env.Status.Endpoints, names)
+		if err != nil {
+			return nil, nil, err
+		}
+		// A listener the platform declares on the Gateway itself outranks every
+		// ListenerSet bound to it: the Gateway API merges the two lists with the
+		// parent first, and a listener that loses a port collision is marked
+		// Conflicted and never programmed. So a pool port the Gateway already
+		// binds must not be handed out. The failure would not be recoverable
+		// either — the environment's ListenerSet still holds the port, so every
+		// later environment skips it while this one waits on a listener that
+		// will never be accepted.
+		for _, l := range gw.Spec.Listeners {
+			used[l.Port] = true
+		}
+		for _, name := range names {
+			p := r.ports.allocatePort(pool, name, used, held)
+			if p == 0 {
+				return nil, nil, fmt.Errorf("no free port in the L4 port range %d-%d", cfg.L4PortRangeStart, cfg.L4PortRangeEnd)
+			}
+			ports[name] = p
+		}
+	}
+
+	// Drop routes for exposures removed since the last reconcile: the loop
+	// above no longer allocates their ports, but the old route would keep
+	// claiming the Gateway listener and block reuse of the freed port.
+	if err := r.pruneL4Routes(ctx, env, ports); err != nil {
+		return nil, nil, err
+	}
+
+	// Declare the listeners before the routes that attach to them. The routes
+	// would be published either way — a route whose listener does not exist yet
+	// simply is not accepted — but creating the listener first means the
+	// environment never reports a state it has to be corrected out of.
+	l4Set, err := r.applyListenerSet(ctx, env, gw, ports)
+	if err != nil {
+		return nil, nil, err
+	}
+	return ports, l4Set, nil
 }
 
 // pruneL4Routes deletes this environment's L4 routes whose allocated port is no
@@ -4512,153 +4486,6 @@ func publishesHTTP(env *aiv1alpha1.DevEnvironment) bool {
 	return env.Spec.Type != aiv1alpha1.DevEnvironmentTypeSSH || hasHTTPPorts(env)
 }
 
-// usedPorts collects every L4 port already allocated to another environment
-// (the port pool is gateway-wide, so it spans namespaces). Allocations are read
-// from the objects that declare them, not from status.endpoints: the endpoint
-// list is withheld while a route is unaccepted, and a reservation that disappears
-// from under an environment lets two of them claim the same listener port. Both
-// objects below are durable records — the ListenerSet holds the port outright,
-// and the route's name embeds the port it holds.
-//
-// The environment's L4 listeners are declared by its ListenerSet, and legacy
-// routes attached straight to the Gateway are still counted: the pool is that
-// Gateway's listeners, whatever declared them, and counting both is what carries
-// ports across the cutover, when routes and ListenerSets briefly coexist. A port
-// held by either is taken.
-//
-// Only objects attached to the configured Gateway count: one parented elsewhere
-// holds no listener here. A failed List is returned rather than read as an empty
-// pool, which would hand out ports other environments already hold — the one
-// exception is a kind the API server does not serve, which holds no objects by
-// definition (see the TCPRoute read below).
-//
-// Every L4 protocol shares this pool: a UDP exposure allocates from here and
-// never takes a number TCP already holds. Allocation identity is
-// the port number alone — the ListenerSet scan below reads listener ports without
-// consulting protocol or listener name, which is what makes that structural. Do
-// not add a (protocol, port) key to "reclaim" the shared numbers: the Gateway
-// accepts TCP and UDP on one port, so the collision would not be rejected here
-// and envtest could not see it (design §8.3).
-//
-// The Lists go through APIReader, not the cache. Allocation is a read followed
-// by a create, and the create lands in the API server while the cache catches up
-// asynchronously: an environment reconciled inside that window reads a pool that
-// does not yet contain the port the previous reconcile just took, and claims it
-// too. Reading through avoids the window entirely, which is what lets the rest of
-// allocation stay as it is — reconciles are serialized (MaxConcurrentReconciles
-// is pinned to 1 in SetupWithManager), so nothing else can interleave between
-// this read and the create. Raising that concurrency would make the sequence racy
-// again and would need a real reservation primitive.
-func (r *DevEnvironmentReconciler) usedPorts(ctx context.Context, excludeNS, excludeName string) (map[int32]bool, error) {
-	cfg := r.defaultedConfig()
-	used := map[int32]bool{}
-	// A cluster serving the Gateway API's standard channel has no TCPRoute kind
-	// at all. That means there are no legacy routes to count — the ListenerSet
-	// scan below is what holds every port this operator allocates — so only "no
-	// such kind" is tolerated here: read as a failure it would fail allocation
-	// for every L4 environment, including the udp-only and ssh-only ones that
-	// never had a TCPRoute to count. Every other error is a failed read of a
-	// pool this must not mistake for empty.
-	var trs gatewayv1.TCPRouteList
-	if err := r.APIReader.List(ctx, &trs); err != nil && !meta.IsNoMatchError(err) {
-		return nil, err
-	}
-	// Only TCPRoutes are scanned for their own parent here, and deliberately so:
-	// the legacy attachment this covers is a TCPRoute pointed at a listener on
-	// the Gateway itself, from before the environment declared its own. UDP had
-	// no such era, so every UDPRoute this operator writes hangs off a
-	// ListenerSet and its port is already counted below.
-	for i := range trs.Items {
-		route := &trs.Items[i]
-		if route.Namespace == excludeNS && route.Labels[devEnvironmentLabelKey] == excludeName {
-			continue // this environment's own allocations are free for it to reuse
-		}
-		if !routeParentsTo(route.Spec.ParentRefs, route.Namespace, cfg.GatewayName, cfg.GatewayNamespace) {
-			continue
-		}
-		if p := tcpRoutePort(route.Name); p != 0 {
-			used[p] = true
-		}
-	}
-	var lss gatewayv1.ListenerSetList
-	if err := r.APIReader.List(ctx, &lss); err != nil {
-		return nil, err
-	}
-	for i := range lss.Items {
-		ls := &lss.Items[i]
-		if ls.Namespace == excludeNS && ls.Labels[devEnvironmentLabelKey] == excludeName {
-			continue
-		}
-		if !listenerSetParentsToGateway(ls, cfg.GatewayName, cfg.GatewayNamespace) {
-			continue
-		}
-		for _, listener := range ls.Spec.Listeners {
-			used[listener.Port] = true
-		}
-	}
-	return used, nil
-}
-
-// heldPorts is the listener port each endpoint of this environment already
-// holds, for allocatePort to keep. The endpoint list carries it whenever it is
-// published; the environment's own ListenerSet is where it is read from when it
-// is not. That fallback is the difference between a stable address and a moving
-// one: the list is withheld while a route or the Gateway is unaccepted, and a
-// Gateway is an object the platform creates, replaces and deletes underneath an
-// install, so an environment reads as holding nothing at exactly the moment its
-// listeners are still declared. Allocation would then hand out the lowest free
-// port instead of the environment's own, and the SSH address a user was given
-// would stop being the one that answers.
-//
-// The endpoint list wins where both name the same endpoint. They can only
-// disagree after a reconcile that allocated a port, applied the ListenerSet and
-// then failed before writing the endpoints, and settling on the published port
-// is the choice that leaves the address the user was last shown unchanged.
-func (r *DevEnvironmentReconciler) heldPorts(ctx context.Context, env *aiv1alpha1.DevEnvironment) (map[string]int32, error) {
-	names := l4PortNames(env)
-	held := make(map[string]int32, len(names))
-	for _, ep := range env.Status.Endpoints {
-		if ep.ListenerPort != 0 {
-			held[ep.Name] = ep.ListenerPort
-		}
-	}
-	unrecorded := false
-	for _, name := range names {
-		if _, ok := held[name]; !ok {
-			unrecorded = true
-			break
-		}
-	}
-	if !unrecorded {
-		return held, nil // every endpoint has a record; the ListenerSet adds nothing
-	}
-	// Read through APIReader for the reason usedPorts does: this read is followed
-	// by the write of the port it returns, and the cache may not have caught up
-	// with the previous reconcile's.
-	var lss gatewayv1.ListenerSetList
-	err := r.APIReader.List(ctx, &lss, client.InNamespace(env.Namespace), client.MatchingLabels(r.envLabels(env.Name)))
-	if err != nil {
-		// No ListenerSet kind means no listener was ever declared, and so nothing
-		// to recover — the same tolerance usedPorts extends to the TCPRoute read.
-		if meta.IsNoMatchError(err) {
-			return held, nil
-		}
-		return nil, err
-	}
-	for i := range lss.Items {
-		for _, listener := range lss.Items[i].Spec.Listeners {
-			name := l4ListenerEndpoint(listener.Name)
-			if name == "" {
-				continue
-			}
-			if _, recorded := held[name]; !recorded {
-				held[name] = listener.Port
-			}
-		}
-	}
-	return held, nil
-}
-
 // migrateListenerNames rewrites the environment's listeners under the naming
 // scheme that records the endpoint in the name (::l4ListenerName), pairing each
 // one with the endpoint that the given endpoint list records its port against.
@@ -4708,27 +4535,6 @@ func (r *DevEnvironmentReconciler) migrateListenerNames(ctx context.Context, env
 		return err
 	}
 	return r.Update(ctx, lss)
-}
-
-// allocatePort picks a port for the named endpoint, reusing the port that
-// endpoint already holds when it is still free (stable across restarts) and
-// otherwise the lowest free port in the configured range. The record is the
-// listener port the environment holds, never the port in an endpoint's address:
-// that one says where the endpoint is reachable, not which pool port the
-// environment was given.
-func (r *DevEnvironmentReconciler) allocatePort(name string, used map[int32]bool, held map[string]int32) int32 {
-	cfg := r.defaultedConfig()
-	if p, ok := held[name]; ok && p >= cfg.L4PortRangeStart && p <= cfg.L4PortRangeEnd && !used[p] {
-		used[p] = true
-		return p
-	}
-	for p := cfg.L4PortRangeStart; p <= cfg.L4PortRangeEnd; p++ {
-		if !used[p] {
-			used[p] = true
-			return p
-		}
-	}
-	return 0
 }
 
 // desiredHTTPRoute renders the HTTPRoute: the web path prefix for the main
