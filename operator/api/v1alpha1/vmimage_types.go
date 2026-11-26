@@ -26,6 +26,7 @@ import (
 // VMImageSpec describes one guest OS image in the platform catalogue. The
 // catalogue is cluster-scoped and maintained by administrators; an environment
 // references an entry by name and cannot name any other source.
+// +kubebuilder:validation:XValidation:rule="(has(self.source.registry) && size(self.source.registry) > 0 && !has(self.source.pvc)) || (!has(self.source.registry) && has(self.source.pvc))",message="exactly one of source.registry and source.pvc is required"
 type VMImageSpec struct {
 	// DisplayName is the human-readable name.
 	DisplayName string `json:"displayName"`
@@ -58,10 +59,12 @@ type VMImageSpec struct {
 // fields is set.
 type VMImageSource struct {
 	// Registry is a container image holding the disk.
+	// +kubebuilder:validation:MinLength=1
 	// +optional
 	Registry string `json:"registry,omitempty"`
 
 	// PVC is a claim in the platform namespace.
+	// +kubebuilder:validation:XValidation:rule="size(self.name) > 0",message="the claim name must be set"
 	// +optional
 	PVC *corev1.LocalObjectReference `json:"pvc,omitempty"`
 }
@@ -69,13 +72,18 @@ type VMImageSource struct {
 // VMImageStatus reports whether the golden disk itself is usable. An
 // environment's own import progress is reported on its own status.
 type VMImageStatus struct {
-	// Phase is Importing, Ready or Failed.
-	// +optional
-	Phase string `json:"phase,omitempty"`
-
 	// DataVolume is the platform's copy of the golden disk.
 	// +optional
 	DataVolume string `json:"dataVolume,omitempty"`
+
+	// Conditions are the standard conditions of this resource. Ready is True
+	// once the golden disk is usable; while it is still being imported Ready is
+	// False with reason Importing, and an import that failed sets reason
+	// ImportFailed.
+	// +listType=map
+	// +listMapKey=type
+	// +optional
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true

@@ -65,8 +65,9 @@ const (
 	ConditionRouteReady ConditionType = "RouteReady"
 
 	// ConditionReady aggregates all roles per readinessPolicy, and for a
-	// DevEnvironment reflects the phase derived from the workload.
-	// (InferenceService, DevEnvironment)
+	// DevEnvironment reflects the phase derived from the workload, and for a
+	// VMImage says whether the golden disk is usable. (InferenceService,
+	// DevEnvironment, VMImage)
 	ConditionReady ConditionType = "Ready"
 
 	// ConditionProgressing indicates that the controller is still applying the

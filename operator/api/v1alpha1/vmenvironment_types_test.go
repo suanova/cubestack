@@ -20,16 +20,50 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
 	testVMImage = "ubuntu-24.04"
 	testVMData  = "scratch"
+
+	vmEnvironmentKind = "VMEnvironment"
+
+	// Keys of the unstructured objects built by the raw-object tables. They are
+	// constants because the sibling CRD tests name the same keys, and the
+	// package-wide repetition is what goconst reports.
+	objAPIVersion = "apiVersion"
+	objKind       = "kind"
+	objMetadata   = "metadata"
+	objName       = "name"
+	objSpec       = "spec"
+	specImage     = "image"
+	specResources = "resources"
 )
+
+var vmEnvironmentGVR = schema.GroupVersionResource{
+	Group:    SchemeGroupVersion.Group,
+	Version:  SchemeGroupVersion.Version,
+	Resource: "vmenvironments",
+}
+
+// rawVMEnvironment builds a VMEnvironment object map with a single copy of the
+// apiVersion/kind/metadata/spec keys shared by the raw-object tables.
+func rawVMEnvironment(name string, spec map[string]any) map[string]any {
+	return map[string]any{
+		objAPIVersion: testAPIVersion,
+		objKind:       vmEnvironmentKind,
+		objMetadata:   map[string]any{objName: name, "namespace": testNamespace},
+		objSpec:       spec,
+	}
+}
 
 func validVMEnvironment(name string) *VMEnvironment {
 	size := resource.MustParse("100Gi")
@@ -56,12 +90,16 @@ var _ = Describe("VMEnvironment", func() {
 	Context("valid objects", func() {
 		It("accepts a valid VMEnvironment and round-trips its spec", func() {
 			vme := validVMEnvironment("vme-valid")
+			// Create decodes the stored object back into vme, so the expectation
+			// is taken before the call: a default or an admission rewrite landing
+			// in both objects would otherwise pass unnoticed.
+			want := vme.Spec.DeepCopy()
 
 			Expect(k8sClient.Create(ctx, vme)).To(Succeed())
 
 			got := &VMEnvironment{}
 			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: vme.Name, Namespace: vme.Namespace}, got)).To(Succeed())
-			Expect(got.Spec).To(Equal(vme.Spec))
+			Expect(got.Spec).To(Equal(*want))
 
 			Expect(k8sClient.Delete(ctx, vme)).To(Succeed())
 		})
@@ -116,6 +154,28 @@ var _ = Describe("VMEnvironment", func() {
 			Expect(got.Spec.SSH.Enabled).To(Equal(ptrTo(true)))
 			Expect(got.Spec.SSH.PasswordAuth).To(BeNil())
 			Expect(got.Spec.Ports[0].Type).To(Equal(PortTypeHTTP))
+
+			// A default equal to the Go zero value is indistinguishable from an
+			// absent field through the typed object, so presence is asserted on
+			// the stored form: a default silently dropped from the schema would
+			// leave the field unset here.
+			raw := &unstructured.Unstructured{}
+			raw.SetAPIVersion(testAPIVersion)
+			raw.SetKind(vmEnvironmentKind)
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: vme.Name, Namespace: vme.Namespace}, raw)).To(Succeed())
+			fields, found, err := unstructured.NestedMap(raw.Object, objSpec)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(found).To(BeTrue())
+			Expect(fields).To(HaveKeyWithValue("running", false))
+			Expect(fields["systemDisk"]).To(HaveKeyWithValue("retain", false))
+			Expect(fields["network"]).To(HaveKeyWithValue("rdmaEnabled", false))
+			disks, ok := fields["dataDisks"].([]any)
+			Expect(ok).To(BeTrue())
+			Expect(disks).To(HaveLen(1))
+			disk, ok := disks[0].(map[string]any)
+			Expect(ok).To(BeTrue())
+			Expect(disk).To(HaveKeyWithValue("retain", false))
+			Expect(disk).To(HaveKeyWithValue("readOnly", false))
 
 			Expect(k8sClient.Delete(ctx, got)).To(Succeed())
 		})
@@ -197,12 +257,22 @@ var _ = Describe("VMEnvironment", func() {
 					s.SSH = &VMSSHSpec{Enabled: ptrTo(false), PasswordAuth: &VMSSHPasswordAuth{}}
 				},
 				"passwordAuth requires ssh.enabled"),
-			Entry("unsupported rdmaType",
+			Entry("infiniBand rdmaType",
 				"vme-invalid-rdmatype",
 				func(s *VMEnvironmentSpec) {
-					s.Network = &VMNetworkSpec{RDMAEnabled: true, RDMAType: RDMAType("infinibandx")}
+					// The fabric enum offers roce only: InfiniBand is refused at
+					// admission rather than accepted and reported later.
+					s.Network = &VMNetworkSpec{RDMAEnabled: true, RDMAType: RDMAType("infiniband")}
 				},
 				"Unsupported value"),
+			Entry("image that is not a VMImage name",
+				"vme-invalid-image-ref",
+				func(s *VMEnvironmentSpec) {
+					// A reference the catalogue could never resolve is refused
+					// rather than stored.
+					s.Image = "registry.cubestack.io/cubestack/ubuntu:24.04"
+				},
+				"spec.image"),
 			Entry("duplicate data disk name",
 				"vme-invalid-disk-dup",
 				func(s *VMEnvironmentSpec) {
@@ -214,13 +284,73 @@ var _ = Describe("VMEnvironment", func() {
 				},
 				"Duplicate value"),
 		)
+
+		// The typed client omits empty strings, so the non-empty rules on
+		// pvcName and on the Secret selectors are only reachable as raw objects.
+		DescribeTable("rejects raw values the typed client cannot express",
+			func(name string, mutate func(map[string]any), wantMessage string) {
+				spec := map[string]any{
+					specImage:     testVMImage,
+					specResources: map[string]any{},
+					"systemDisk":  map[string]any{"size": "20Gi"},
+				}
+				mutate(spec)
+
+				dynClient := dynamic.NewForConfigOrDie(cfg)
+				_, err := dynClient.Resource(vmEnvironmentGVR).Namespace(testNamespace).Create(
+					ctx, &unstructured.Unstructured{Object: rawVMEnvironment(name, spec)}, metav1.CreateOptions{})
+				Expect(err).To(HaveOccurred())
+				Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid error, got: %v", err)
+				Expect(err.Error()).To(ContainSubstring(wantMessage))
+			},
+			Entry("empty pvcName on a shared disk",
+				"vme-invalid-pvc-empty",
+				func(s map[string]any) {
+					// Presence alone would pass the CEL rules while naming no claim.
+					s["dataDisks"] = []any{map[string]any{
+						objName: testVMData, "type": "shared", "pvcName": "",
+					}}
+				},
+				"spec.dataDisks"),
+			Entry("ssh key selector with no Secret name",
+				"vme-invalid-key-selector",
+				func(s map[string]any) {
+					s["ssh"] = map[string]any{
+						"authorizedKeysSecret": map[string]any{"key": "authorized_keys"},
+					}
+				},
+				"the Secret name and its data key must both be named"),
+			Entry("ssh password selector with an empty data key",
+				"vme-invalid-password-selector",
+				func(s map[string]any) {
+					// key is required, so only an empty value reaches the rule;
+					// omitting it is refused as a required field first.
+					s["ssh"] = map[string]any{
+						"passwordAuth": map[string]any{
+							"passwordSecret": map[string]any{objName: "vme-password", "key": ""},
+						},
+					}
+				},
+				"the Secret name and its data key must both be named"),
+		)
+
+		It("refuses a name that is not a DNS-1035 label", func() {
+			// The name is the prefix of every object the platform derives, and
+			// the godoc states the DNS-1035 rule the API server would otherwise
+			// not apply (it admits a DNS-1123 subdomain).
+			vme := validVMEnvironment("vme.not.a.label")
+			err := k8sClient.Create(ctx, vme)
+			Expect(err).To(HaveOccurred())
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid error, got: %v", err)
+			Expect(err.Error()).To(ContainSubstring("DNS-1035"))
+		})
 	})
 })
 
 var _ = Describe("VMImage", func() {
-	It("is cluster-scoped and round-trips its spec", func() {
-		img := &VMImage{
-			ObjectMeta: metav1.ObjectMeta{Name: "vmimage-ubuntu-24-04"},
+	validVMImage := func(name string, source VMImageSource) *VMImage {
+		return &VMImage{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
 			Spec: VMImageSpec{
 				DisplayName:   "Ubuntu 24.04 LTS",
 				OS:            "ubuntu",
@@ -228,24 +358,69 @@ var _ = Describe("VMImage", func() {
 				Architecture:  "amd64",
 				MinSystemDisk: resource.MustParse("20Gi"),
 				GuestAgent:    true,
-				Source:        VMImageSource{Registry: "harbor.isuanova.com/suanova/ubuntu:24.04"},
+				Source:        source,
 			},
 		}
+	}
+
+	It("is cluster-scoped and round-trips its spec and status", func() {
+		img := validVMImage("vmimage-ubuntu-24-04", VMImageSource{Registry: "harbor.isuanova.com/suanova/ubuntu:24.04"})
+		want := img.Spec.DeepCopy()
 
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 
 		got := &VMImage{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: img.Name}, got)).To(Succeed())
-		Expect(got.Spec).To(Equal(img.Spec))
+		Expect(got.Spec).To(Equal(*want))
 
-		got.Status.Phase = "Ready"
+		now := metav1.Now()
 		got.Status.DataVolume = "vmimage-ubuntu-24-04-golden"
+		got.Status.Conditions = []metav1.Condition{{
+			Type:               ConditionReady,
+			Status:             metav1.ConditionTrue,
+			Reason:             "Imported",
+			Message:            "golden disk is usable",
+			LastTransitionTime: now,
+		}}
 		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
 
-		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: img.Name}, got)).To(Succeed())
-		Expect(got.Status.Phase).To(Equal("Ready"))
-		Expect(got.Status.DataVolume).To(Equal("vmimage-ubuntu-24-04-golden"))
+		// A fresh object, so the assertions prove the status was persisted rather
+		// than read back out of the object that wrote it.
+		persisted := &VMImage{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: img.Name}, persisted)).To(Succeed())
+		Expect(persisted.Status.DataVolume).To(Equal("vmimage-ubuntu-24-04-golden"))
+		Expect(persisted.Status.Conditions).To(HaveLen(1))
+		Expect(persisted.Status.Conditions[0].Type).To(Equal(ConditionReady))
+		Expect(persisted.Status.Conditions[0].Status).To(Equal(metav1.ConditionTrue))
 
 		Expect(k8sClient.Delete(ctx, got)).To(Succeed())
 	})
+
+	It("accepts a PVC source", func() {
+		img := validVMImage("vmimage-from-pvc", VMImageSource{
+			PVC: &corev1.LocalObjectReference{Name: "golden-ubuntu"},
+		})
+
+		Expect(k8sClient.Create(ctx, img)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, img)).To(Succeed())
+	})
+
+	DescribeTable("requires exactly one source",
+		func(name string, source VMImageSource, wantMessage string) {
+			img := validVMImage(name, source)
+
+			err := k8sClient.Create(ctx, img)
+			Expect(err).To(HaveOccurred())
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid error, got: %v", err)
+			Expect(err.Error()).To(ContainSubstring(wantMessage))
+		},
+		Entry("no source",
+			"vmimage-no-source",
+			VMImageSource{},
+			"exactly one of source.registry and source.pvc"),
+		Entry("both sources",
+			"vmimage-both-sources",
+			VMImageSource{Registry: "harbor.isuanova.com/suanova/ubuntu:24.04", PVC: &corev1.LocalObjectReference{Name: "golden"}},
+			"exactly one of source.registry and source.pvc"),
+	)
 })

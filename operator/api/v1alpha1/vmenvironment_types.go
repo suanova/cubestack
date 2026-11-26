@@ -37,8 +37,12 @@ import (
 type VMEnvironmentSpec struct {
 	// Image is the name of a VMImage in the platform catalogue. Only
 	// catalogued images are accepted: this is not a container image reference,
-	// and no other source exists.
+	// and no other source exists. It is held to the name syntax of the object
+	// it refers to, so a reference the catalogue could never resolve — a
+	// registry path with a tag, say — is refused instead of stored.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	Image string `json:"image"`
 
 	// Running is the desired running state.
@@ -136,6 +140,7 @@ type VMDataDisk struct {
 
 	// PVCName references an existing claim in the project namespace; mutually
 	// exclusive with Size.
+	// +kubebuilder:validation:MinLength=1
 	// +optional
 	PVCName string `json:"pvcName,omitempty"`
 
@@ -163,9 +168,10 @@ type VMNetworkSpec struct {
 	// +optional
 	RDMAEnabled bool `json:"rdmaEnabled,omitempty"`
 
-	// RDMAType names the fabric; effective when rdmaEnabled=true. InfiniBand
-	// is refused before creation.
-	// +kubebuilder:validation:Enum=infiniband;roce
+	// RDMAType names the fabric; effective when rdmaEnabled=true. Only roce is
+	// offered: InfiniBand is refused at admission rather than accepted and
+	// reported against the environment later.
+	// +kubebuilder:validation:Enum=roce
 	// +kubebuilder:default=roce
 	// +optional
 	RDMAType RDMAType `json:"rdmaType,omitempty"`
@@ -205,6 +211,7 @@ type VMSSHSpec struct {
 	//
 	// The Secret holds public keys, and its selected data entry is the file the
 	// guest reads, so it must exist at the named key.
+	// +kubebuilder:validation:XValidation:rule="size(self.name) > 0 && size(self.key) > 0",message="the Secret name and its data key must both be named"
 	// +optional
 	AuthorizedKeysSecret *corev1.SecretKeySelector `json:"authorizedKeysSecret,omitempty"`
 
@@ -225,6 +232,7 @@ type VMSSHPasswordAuth struct {
 	// The password is never written to the resource: the spec carries a
 	// reference, the status carries a reference, and what reaches the guest is
 	// a hash.
+	// +kubebuilder:validation:XValidation:rule="size(self.name) > 0 && size(self.key) > 0",message="the Secret name and its data key must both be named"
 	// +optional
 	PasswordSecret *corev1.SecretKeySelector `json:"passwordSecret,omitempty"`
 }
@@ -290,7 +298,9 @@ type VMEnvironmentStatus struct {
 	// +optional
 	LastActivityTime *metav1.Time `json:"lastActivityTime,omitempty"`
 
-	// Endpoints are the access addresses; withheld while stopped.
+	// Endpoints are the access addresses; withheld while stopped. A VM
+	// environment publishes the guest consoles (vnc and serial), ssh, and one
+	// entry per spec.ports[] entry under that port's name.
 	// +optional
 	Endpoints []Endpoint `json:"endpoints,omitempty"`
 
@@ -400,6 +410,7 @@ type VMMigrationStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=vme
+// +kubebuilder:validation:XValidation:rule="self.metadata.name.size() <= 63 && self.metadata.name.matches('^[a-z]([-a-z0-9]*[a-z0-9])?$')",message="metadata.name must be a DNS-1035 label: at most 63 characters, lowercase letters, digits and hyphens, starting with a letter"
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase.name`
 // +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.phase.reason`
 // +kubebuilder:printcolumn:name="IP",type=string,JSONPath=`.status.ip`

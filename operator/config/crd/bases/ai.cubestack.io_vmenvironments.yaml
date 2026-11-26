@@ -88,6 +88,7 @@ spec:
                       description: |-
                         PVCName references an existing claim in the project namespace; mutually
                         exclusive with Size.
+                      minLength: 1
                       type: string
                     readOnly:
                       default: false
@@ -126,8 +127,12 @@ spec:
                 description: |-
                   Image is the name of a VMImage in the platform catalogue. Only
                   catalogued images are accepted: this is not a container image reference,
-                  and no other source exists.
+                  and no other source exists. It is held to the name syntax of the object
+                  it refers to, so a reference the catalogue could never resolve — a
+                  registry path with a tag, say — is refused instead of stored.
+                maxLength: 253
                 minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                 type: string
               network:
                 description: Network configures the second interface, RDMA access
@@ -164,10 +169,10 @@ spec:
                   rdmaType:
                     default: roce
                     description: |-
-                      RDMAType names the fabric; effective when rdmaEnabled=true. InfiniBand
-                      is refused before creation.
+                      RDMAType names the fabric; effective when rdmaEnabled=true. Only roce is
+                      offered: InfiniBand is refused at admission rather than accepted and
+                      reported against the environment later.
                     enum:
-                    - infiniband
                     - roce
                     type: string
                   underlay:
@@ -366,6 +371,9 @@ spec:
                     - key
                     type: object
                     x-kubernetes-map-type: atomic
+                    x-kubernetes-validations:
+                    - message: the Secret name and its data key must both be named
+                      rule: size(self.name) > 0 && size(self.key) > 0
                   enabled:
                     default: true
                     description: |-
@@ -411,6 +419,9 @@ spec:
                         - key
                         type: object
                         x-kubernetes-map-type: atomic
+                        x-kubernetes-validations:
+                        - message: the Secret name and its data key must both be named
+                          rule: size(self.name) > 0 && size(self.key) > 0
                     type: object
                 type: object
               systemDisk:
@@ -556,19 +567,21 @@ spec:
                 - name
                 x-kubernetes-list-type: map
               endpoints:
-                description: Endpoints are the access addresses; withheld while stopped.
+                description: |-
+                  Endpoints are the access addresses; withheld while stopped. A VM
+                  environment publishes the guest consoles (vnc and serial), ssh, and one
+                  entry per spec.ports[] entry under that port's name.
                 items:
                   description: |-
-                    Endpoint describes an access address of the environment: the web (Jupyter)
-                    URL, the SSH address, or an extra application port exposure.
+                    Endpoint describes one access address an environment publishes: a web URL, an
+                    SSH address, or an extra application port exposure.
                   properties:
                     address:
                       description: |-
-                        Address is the access address: a URL for web (e.g.
-                        http://<gw-ip>:<port>/dev/<ns>/<env>/), or a host:port for SSH and tcp/udp
-                        ports (e.g. ssh://user@<gw-ip>:<port>). The port is the one the address is
-                        reachable on, which is not ListenerPort when the Gateway's dataplane
-                        Service is a NodePort Service.
+                        Address is the access address: a URL for a web endpoint, or a host:port
+                        for SSH and tcp/udp ports (e.g. ssh://user@<gw-ip>:<port>). The port is
+                        the one the address is reachable on, which is not ListenerPort when the
+                        Gateway's dataplane Service is a NodePort Service.
                       type: string
                     listenerPort:
                       description: |-
@@ -585,8 +598,9 @@ spec:
                       type: integer
                     name:
                       description: |-
-                        Name identifies the endpoint: "jupyter", "ssh", or the spec.ports[].name
-                        for an extra application port.
+                        Name identifies the channel: the names are those the resource publishes
+                        under status.endpoints, and spec.ports[].name is used as-is for an extra
+                        application port.
                       type: string
                   required:
                   - address
@@ -756,6 +770,10 @@ spec:
         required:
         - spec
         type: object
+        x-kubernetes-validations:
+        - message: 'metadata.name must be a DNS-1035 label: at most 63 characters,
+            lowercase letters, digits and hyphens, starting with a letter'
+          rule: self.metadata.name.size() <= 63 && self.metadata.name.matches('^[a-z]([-a-z0-9]*[a-z0-9])?$')
     served: true
     storage: true
     subresources:

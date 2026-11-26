@@ -632,7 +632,8 @@ type DevEnvironmentStatus struct {
 	LastActivityTime *metav1.Time `json:"lastActivityTime,omitempty"`
 
 	// Endpoints are the access addresses of the environment: the web (Jupyter)
-	// URL, the SSH address, and any extra application port exposures. The list is
+	// URL under /dev/<ns>/<env>/, the SSH address, and any extra application
+	// port exposures. The list is
 	// withheld while the environment is stopped: nothing is listening behind the
 	// routes, so an address published then would lead nowhere. It is restored when
 	// the environment starts again, each exposure back on the listener port it
@@ -669,18 +670,18 @@ type HostPorts struct {
 	SSH int32 `json:"ssh,omitempty"`
 }
 
-// Endpoint describes an access address of the environment: the web (Jupyter)
-// URL, the SSH address, or an extra application port exposure.
+// Endpoint describes one access address an environment publishes: a web URL, an
+// SSH address, or an extra application port exposure.
 type Endpoint struct {
-	// Name identifies the endpoint: "jupyter", "ssh", or the spec.ports[].name
-	// for an extra application port.
+	// Name identifies the channel: the names are those the resource publishes
+	// under status.endpoints, and spec.ports[].name is used as-is for an extra
+	// application port.
 	Name string `json:"name"`
 
-	// Address is the access address: a URL for web (e.g.
-	// http://<gw-ip>:<port>/dev/<ns>/<env>/), or a host:port for SSH and tcp/udp
-	// ports (e.g. ssh://user@<gw-ip>:<port>). The port is the one the address is
-	// reachable on, which is not ListenerPort when the Gateway's dataplane
-	// Service is a NodePort Service.
+	// Address is the access address: a URL for a web endpoint, or a host:port
+	// for SSH and tcp/udp ports (e.g. ssh://user@<gw-ip>:<port>). The port is
+	// the one the address is reachable on, which is not ListenerPort when the
+	// Gateway's dataplane Service is a NodePort Service.
 	Address string `json:"address"`
 
 	// ListenerPort is the Gateway listener port the endpoint is published on: the
