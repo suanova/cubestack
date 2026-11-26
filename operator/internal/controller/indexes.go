@@ -34,6 +34,11 @@ const (
 	// watches: an edit to either route re-enqueues exactly the services attached
 	// to it, whose rules must be reconciled against the edited object.
 	aigatewayRouterIndexKey = "spec.route.aigatewayRouter"
+
+	// vmImageRefIndexKey is the cache index field for VMEnvironment.spec.image.
+	// It answers which environments reference a catalogue image, the trigger
+	// for importing that image's golden disk.
+	vmImageRefIndexKey = "spec.image"
 )
 
 var (
@@ -42,7 +47,8 @@ var (
 )
 
 // registerSharedIndexes registers the reverse-lookup cache indexes shared by
-// the ModelVersion, InferenceRuntimeProfile and InferenceService controllers.
+// the ModelVersion, InferenceRuntimeProfile, InferenceService and VMImage
+// controllers.
 // It is guarded by sync.Once because client-go rejects a second registration
 // of the same index name with "indexer conflict"; every controller calls it
 // from SetupWithManager and the first call wins.
@@ -87,6 +93,14 @@ func registerAllIndexes(mgr ctrl.Manager) error {
 				refs = append(refs, asset.ConfigMapRef.Name)
 			}
 			return refs
+		}); err != nil {
+		return err
+	}
+	// The image lookup behind the catalogue's first-reference import: the
+	// VMImage controller lists the environments naming an image by it.
+	if err := mgr.GetCache().IndexField(ctx, &aiv1alpha1.VMEnvironment{}, vmImageRefIndexKey,
+		func(o client.Object) []string {
+			return []string{o.(*aiv1alpha1.VMEnvironment).Spec.Image}
 		}); err != nil {
 		return err
 	}

@@ -27,6 +27,8 @@ import (
 // catalogue is cluster-scoped and maintained by administrators; an environment
 // references an entry by name and cannot name any other source.
 // +kubebuilder:validation:XValidation:rule="(has(self.source.registry) && size(self.source.registry) > 0 && !has(self.source.pvc)) || (!has(self.source.registry) && has(self.source.pvc))",message="exactly one of source.registry and source.pvc is required"
+// +kubebuilder:validation:XValidation:rule="quantity(string(self.minSystemDisk)).isGreaterThan(quantity('0'))",message="minSystemDisk must be a positive quantity"
+// +kubebuilder:validation:XValidation:rule="self.source == oldSelf.source && quantity(string(self.minSystemDisk)).compareTo(quantity(string(oldSelf.minSystemDisk))) == 0",message="source and minSystemDisk cannot be changed; publish a new image instead"
 type VMImageSpec struct {
 	// DisplayName is the human-readable name.
 	DisplayName string `json:"displayName"`
@@ -40,14 +42,17 @@ type VMImageSpec struct {
 	// Architecture is the guest architecture, e.g. amd64.
 	Architecture string `json:"architecture"`
 
-	// MinSystemDisk is the smallest system disk this image can run on.
+	// MinSystemDisk is the smallest system disk this image can run on. It cannot
+	// be changed once the entry exists.
 	MinSystemDisk resource.Quantity `json:"minSystemDisk"`
 
 	// GuestAgent is whether the image already runs the guest agent.
 	GuestAgent bool `json:"guestAgent"`
 
 	// Source is where the disk comes from: a registry artifact (a container
-	// image holding a disk file) or an already-imported PVC.
+	// image holding a disk file) or an already-imported PVC. Publishing a
+	// different disk means a new entry: this cannot be changed once the entry
+	// exists.
 	Source VMImageSource `json:"source"`
 
 	// Deprecated refuses new environments; existing ones are unaffected.

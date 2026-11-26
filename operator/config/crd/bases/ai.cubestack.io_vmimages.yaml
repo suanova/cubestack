@@ -59,8 +59,9 @@ spec:
                 anyOf:
                 - type: integer
                 - type: string
-                description: MinSystemDisk is the smallest system disk this image
-                  can run on.
+                description: |-
+                  MinSystemDisk is the smallest system disk this image can run on. It cannot
+                  be changed once the entry exists.
                 pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                 x-kubernetes-int-or-string: true
               os:
@@ -73,7 +74,9 @@ spec:
               source:
                 description: |-
                   Source is where the disk comes from: a registry artifact (a container
-                  image holding a disk file) or an already-imported PVC.
+                  image holding a disk file) or an already-imported PVC. Publishing a
+                  different disk means a new entry: this cannot be changed once the entry
+                  exists.
                 properties:
                   pvc:
                     description: PVC is a claim in the platform namespace.
@@ -110,6 +113,12 @@ spec:
             - message: exactly one of source.registry and source.pvc is required
               rule: (has(self.source.registry) && size(self.source.registry) > 0 &&
                 !has(self.source.pvc)) || (!has(self.source.registry) && has(self.source.pvc))
+            - message: minSystemDisk must be a positive quantity
+              rule: quantity(string(self.minSystemDisk)).isGreaterThan(quantity('0'))
+            - message: source and minSystemDisk cannot be changed; publish a new image
+                instead
+              rule: self.source == oldSelf.source && quantity(string(self.minSystemDisk)).compareTo(quantity(string(oldSelf.minSystemDisk)))
+                == 0
           status:
             description: status defines the observed state of VMImage
             properties:

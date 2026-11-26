@@ -17,6 +17,8 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"fmt"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -34,6 +36,9 @@ const (
 	testVMImage = "ubuntu-24.04"
 	testVMData  = "scratch"
 
+	// testVMImageRegistry is the catalogue artifact the VMImage specs import.
+	testVMImageRegistry = "harbor.isuanova.com/suanova/ubuntu:24.04"
+
 	vmEnvironmentKind = "VMEnvironment"
 	vmImageKind       = "VMImage"
 
@@ -47,6 +52,12 @@ const (
 	objSpec       = "spec"
 	specImage     = "image"
 	specResources = "resources"
+
+	// specMinSystemDisk and specRegistry are the catalogue entry's disk and
+	// artifact, named by the raw objects that write them in a form the typed
+	// client cannot.
+	specMinSystemDisk = "minSystemDisk"
+	specRegistry      = "registry"
 )
 
 var vmEnvironmentGVR = schema.GroupVersionResource{
@@ -80,13 +91,13 @@ func rawVMImage(name string, source map[string]any) map[string]any {
 		objKind:       vmImageKind,
 		objMetadata:   map[string]any{objName: name},
 		objSpec: map[string]any{
-			"displayName":   "Ubuntu 24.04 LTS",
-			"os":            "ubuntu",
-			"osVersion":     "24.04",
-			"architecture":  "amd64",
-			"minSystemDisk": "20Gi",
-			"guestAgent":    true,
-			"source":        source,
+			"displayName":     "Ubuntu 24.04 LTS",
+			"os":              "ubuntu",
+			"osVersion":       "24.04",
+			"architecture":    "amd64",
+			specMinSystemDisk: "20Gi",
+			"guestAgent":      true,
+			"source":          source,
 		},
 	}
 }
@@ -401,7 +412,7 @@ var _ = Describe("VMImage", func() {
 	}
 
 	It("is cluster-scoped and round-trips its spec and status", func() {
-		img := validVMImage("vmimage-ubuntu-24-04", VMImageSource{Registry: "harbor.isuanova.com/suanova/ubuntu:24.04"})
+		img := validVMImage("vmimage-ubuntu-24-04", VMImageSource{Registry: testVMImageRegistry})
 		want := img.Spec.DeepCopy()
 
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
@@ -457,7 +468,7 @@ var _ = Describe("VMImage", func() {
 			"exactly one of source.registry and source.pvc"),
 		Entry("both sources",
 			"vmimage-both-sources",
-			VMImageSource{Registry: "harbor.isuanova.com/suanova/ubuntu:24.04", PVC: &corev1.LocalObjectReference{Name: "golden"}},
+			VMImageSource{Registry: testVMImageRegistry, PVC: &corev1.LocalObjectReference{Name: "golden"}},
 			"exactly one of source.registry and source.pvc"),
 	)
 
@@ -474,11 +485,99 @@ var _ = Describe("VMImage", func() {
 		},
 		Entry("empty registry",
 			"vmimage-empty-registry",
-			map[string]any{"registry": ""},
+			map[string]any{specRegistry: ""},
 			"exactly one of source.registry and source.pvc"),
 		Entry("empty PVC name",
 			"vmimage-empty-pvc",
 			map[string]any{"pvc": map[string]any{objName: ""}},
 			"the claim name must be set"),
 	)
+
+	DescribeTable("requires a positive minSystemDisk",
+		func(name, size string) {
+			img := validVMImage(name, VMImageSource{Registry: testVMImageRegistry})
+			img.Spec.MinSystemDisk = resource.MustParse(size)
+
+			err := k8sClient.Create(ctx, img)
+			Expect(err).To(HaveOccurred())
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid error, got: %v", err)
+			Expect(err.Error()).To(ContainSubstring("minSystemDisk must be a positive quantity"))
+		},
+		Entry("zero", "vmimage-zero-min-disk", "0"),
+		Entry("negative", "vmimage-negative-min-disk", "-1Gi"),
+	)
+
+	// minSystemDisk is an int-or-string quantity, and the schema admits the
+	// integer form; the typed client always writes the string one, so the
+	// integer representation is only expressible as a raw object.
+	DescribeTable("accepts minSystemDisk in either representation",
+		func(name string, size any) {
+			dynClient := dynamic.NewForConfigOrDie(cfg)
+			obj := rawVMImage(name, map[string]any{specRegistry: testVMImageRegistry})
+			obj[objSpec].(map[string]any)[specMinSystemDisk] = size
+
+			created, err := dynClient.Resource(vmImageGVR).Create(
+				ctx, &unstructured.Unstructured{Object: obj}, metav1.CreateOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() {
+				_ = dynClient.Resource(vmImageGVR).Delete(ctx, name, metav1.DeleteOptions{})
+			})
+
+			stored, found, err := unstructured.NestedFieldNoCopy(created.Object, objSpec, specMinSystemDisk)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(found).To(BeTrue())
+			disk := resource.MustParse(fmt.Sprint(stored))
+			Expect(disk.Cmp(resource.MustParse("20Gi"))).To(Equal(0))
+		},
+		Entry("string", "vmimage-disk-string", "20Gi"),
+		Entry("integer", "vmimage-disk-integer", int64(21474836480)),
+	)
+
+	DescribeTable("rejects a non-positive integer minSystemDisk",
+		func(name string, size int64) {
+			dynClient := dynamic.NewForConfigOrDie(cfg)
+			obj := rawVMImage(name, map[string]any{specRegistry: testVMImageRegistry})
+			obj[objSpec].(map[string]any)[specMinSystemDisk] = size
+
+			_, err := dynClient.Resource(vmImageGVR).Create(
+				ctx, &unstructured.Unstructured{Object: obj}, metav1.CreateOptions{})
+			Expect(err).To(HaveOccurred())
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid error, got: %v", err)
+			Expect(err.Error()).To(ContainSubstring("minSystemDisk must be a positive quantity"))
+		},
+		Entry("zero", "vmimage-zero-integer-min-disk", int64(0)),
+		Entry("negative", "vmimage-negative-integer-min-disk", int64(-1)),
+	)
+
+	It("fixes the disk's source and minimum size once the entry exists", func() {
+		name := "vmimage-immutable-disk"
+		img := validVMImage(name, VMImageSource{Registry: testVMImageRegistry})
+		Expect(k8sClient.Create(ctx, img)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
+
+		// A different source or a different size is a different disk, and the
+		// entry's golden copy is imported from the one it was created with.
+		for _, change := range []func(*VMImage){
+			func(v *VMImage) { v.Spec.Source = VMImageSource{PVC: &corev1.LocalObjectReference{Name: "other"}} },
+			func(v *VMImage) { v.Spec.MinSystemDisk = resource.MustParse("40Gi") },
+		} {
+			edited := &VMImage{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name}, edited)).To(Succeed())
+			change(edited)
+
+			err := k8sClient.Update(ctx, edited)
+			Expect(err).To(HaveOccurred())
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid error, got: %v", err)
+			Expect(err.Error()).To(ContainSubstring("source and minSystemDisk cannot be changed"))
+		}
+
+		// The display fields and deprecation stay editable, and a size written
+		// another way is the same size, not an edit of it.
+		edited := &VMImage{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name}, edited)).To(Succeed())
+		edited.Spec.DisplayName = "Ubuntu 24.04 LTS Server"
+		edited.Spec.Deprecated = true
+		edited.Spec.MinSystemDisk = resource.MustParse("20480Mi")
+		Expect(k8sClient.Update(ctx, edited)).To(Succeed())
+	})
 })
