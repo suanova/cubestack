@@ -9,9 +9,14 @@
 import { Box, SxProps, Theme, Typography } from "@mui/material";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import type { MouseEvent as ReactMouseEvent } from "react";
+import { useEffect, type MouseEvent as ReactMouseEvent } from "react";
 
 import { IconName, NavIcon } from "@/components/shell/NavIcons";
+import {
+  DEFAULT_BRAND,
+  ensureBrandingLoaded,
+  useBranding,
+} from "@/components/shell/brandingStore";
 import { offerHandoffFromFloatingChat } from "@/components/cubepilot/agentHandoff";
 import { getTabSnapshot, setStoredTab } from "@/components/cubepilot/tabStore";
 import { withViewTransition } from "@/components/cubepilot/viewTransition";
@@ -133,6 +138,12 @@ function NavLink({
 export function Sidebar() {
   const pathname = usePathname();
   const { t } = useI18n();
+  // The cluster-wide logo + wordmark an admin set on the 设置 page. The server
+  // renders the defaults; the store fills them in after hydration.
+  const { logo, title, subtitle } = useBranding();
+  useEffect(() => {
+    ensureBrandingLoaded();
+  }, []);
 
   const sectionLabelSx: SxProps<Theme> = {
     margin: 0,
@@ -174,20 +185,40 @@ export function Sidebar() {
           color: "text.primary",
         }}
       >
-        <Box
-          sx={{
-            width: 28,
-            height: 28,
-            borderRadius: "var(--radius)",
-            bgcolor: "text.primary",
-            color: "background.default",
-            display: "grid",
-            placeItems: "center",
-            flex: "none",
-          }}
-        >
-          <NavIcon name="brand" size={16} />
-        </Box>
+        {logo ? (
+          // A custom logo sits to the left of the wordmark.
+          <Box
+            component="img"
+            src={logo}
+            // Decorative: the wordmark beside it already names the brand.
+            alt=""
+            data-od-id="brand-logo"
+            sx={{
+              display: "block",
+              width: "auto",
+              height: "auto",
+              maxWidth: 96,
+              maxHeight: 40,
+              objectFit: "contain",
+              flex: "none",
+            }}
+          />
+        ) : (
+          <Box
+            sx={{
+              width: 28,
+              height: 28,
+              borderRadius: "var(--radius)",
+              bgcolor: "text.primary",
+              color: "background.default",
+              display: "grid",
+              placeItems: "center",
+              flex: "none",
+            }}
+          >
+            <NavIcon name="brand" size={16} />
+          </Box>
+        )}
         <Box
           component="span"
           sx={{
@@ -195,9 +226,10 @@ export function Sidebar() {
             fontSize: 14.5,
             letterSpacing: "-0.01em",
             lineHeight: 1.2,
+            minWidth: 0,
           }}
         >
-          CubeStack
+          {title || DEFAULT_BRAND}
           <Box
             component="small"
             sx={{
@@ -207,7 +239,7 @@ export function Sidebar() {
               fontSize: 11,
             }}
           >
-            {t("brand.sub")}
+            {subtitle || t("brand.sub")}
           </Box>
         </Box>
       </Box>

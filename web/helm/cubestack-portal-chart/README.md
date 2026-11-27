@@ -52,7 +52,8 @@ The following table lists the configurable parameters of the Portal chart and th
 | `resources.limits.memory` | Memory limit | `512Mi` |
 | `resources.requests.cpu` | CPU request | `100m` |
 | `resources.requests.memory` | Memory request | `256Mi` |
-| `namespace` | Target namespace (Role/Secrets/htpasswd live here) | `cubestack-system` |
+| `namespace` | Target namespace (Role/Secrets/branding ConfigMap live here) | `cubestack-system` |
+| `adminUsers` | Usernames allowed to change the portal logo on the 设置 page; empty hides the 设置 entry for everyone | `[]` |
 | `operatorNamespace` | Namespace holding the operator CRs (AgentTemplate / AgentInstance / Skill / Task*); empty = `namespace` | `""` |
 | `agentApiUrl` | CubePilot agent API base; empty = `http://cubepilot-api.<operatorNamespace>.svc:8080` | `""` |
 | `gateway.url` | AI Gateway base; empty = discover the `ai-gateway` Service in `gateway.namespace`. Must be `https://` when a token is set | `""` |
@@ -139,6 +140,28 @@ Treat the htpasswd credentials as platform-admin credentials and protect the
 `cubestack-htpasswd` Secret accordingly. If you need per-namespace
 authorization, it is not provided by this chart — do not deploy the portal
 where untrusted users can reach it.
+
+The one exception is branding: changing the logo on the 设置 page is restricted
+to `adminUsers` (deployment `PORTAL_ADMIN_USERS`). The logo itself is readable
+without a session because the login page paints it before sign-in; only an
+allowlisted username may replace or reset it.
+
+### Branding (设置 page)
+
+An admin opens the avatar menu in the topbar and picks 设置 to upload a logo
+(PNG / JPEG / WebP / GIF / SVG, up to 10 MB) or restore the built-in brand.
+Raster images are scaled down in the browser (512 px on the longest edge)
+before saving, so the stored value stays small. The same page edits the brand
+name and subtitle (64 characters each). Logo and words appear side by side in
+the sidebar and on the login page, and the change is cluster-wide.
+
+The image is stored as a data URL under `data.logo` in the ConfigMap named
+`<release>-cubestack-portal-branding` (see `templates/branding.yaml`);
+`data.title` and `data.subtitle` hold the custom wordmark. The chart creates the
+object and grants the pod `get`/`patch` on exactly that name; Helm does not
+manage these data keys, so upgrades keep the branding. Set `adminUsers` to the
+htpasswd usernames that may edit it — leaving it empty hides the 设置 entry and
+branding is read-only for everyone.
 
 ### Session Secret
 

@@ -85,6 +85,15 @@ spec:
           value: {{ .Values.secrets.htpasswd.secretName | quote }}
         - name: HTPASSWD_SECRET_KEY
           value: {{ .Values.secrets.htpasswd.key | quote }}
+        # The 设置 page's cluster-wide logo: the chart-created ConfigMap and the
+        # username allowlist allowed to change it. An empty allowlist means
+        # nobody can edit, and the 设置 entry stays hidden for every user.
+        - name: BRANDING_CONFIGMAP_NAME
+          value: {{ include "cubestack-portal-chart.brandingConfigMapName" . | quote }}
+        - name: BRANDING_CONFIGMAP_NAMESPACE
+          value: {{ .Values.namespace | quote }}
+        - name: PORTAL_ADMIN_USERS
+          value: {{ join "," .Values.adminUsers | quote }}
         # Namespace holding the operator CRs (tasks + agent tabs). Empty in
         # values means "the target namespace".
         - name: CUBESTACK_TASKS_NAMESPACE

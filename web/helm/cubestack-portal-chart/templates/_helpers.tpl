@@ -54,6 +54,14 @@ bounded hash of the namespace always survives the 63-char DNS limit.
 {{- end }}
 
 {{/*
+Create the name of the ConfigMap the 设置 page writes the custom logo into.
+The fullname is capped so the -branding suffix survives the 63-char DNS limit.
+*/}}
+{{- define "cubestack-portal-chart.brandingConfigMapName" -}}
+{{- printf "%s-branding" (include "cubestack-portal-chart.fullname" . | trunc 50 | trimSuffix "-") | trunc 63 | trimSuffix "-" -}}
+{{- end }}
+
+{{/*
 Create the name of the deployment
 */}}
 {{- define "cubestack-portal-chart.deploymentName" -}}

@@ -100,6 +100,12 @@ securityContext:
 # Namespace to install into
 namespace: cubestack-system
 
+# Usernames allowed to change the portal logo on the 设置 page
+# (PORTAL_ADMIN_USERS). Comma-joined by the chart; each entry must match an
+# htpasswd username exactly. Empty = nobody can edit and the 设置 entry is
+# hidden for every user; the logo stays read-only for everyone else.
+adminUsers: []
+
 # Namespace holding the CubePilot operator CRs (AgentTemplate / AgentInstance /
 # Skill / Task*). Empty = the target namespace above. Point this at the
 # operator's namespace when it differs from the portal's — an empty 配置 page is

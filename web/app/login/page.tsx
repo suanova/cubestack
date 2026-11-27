@@ -7,8 +7,15 @@
 // originally asked for, preserved by the auth redirect) or / by default.
 
 import { Box, Button, TextField, Typography } from "@mui/material";
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState, useSyncExternalStore } from "react";
 
+import {
+  DEFAULT_BRAND,
+  ensureBrandingLoaded,
+  getBrandingSnapshot,
+  getServerBrandingSnapshot,
+  subscribeBranding,
+} from "@/components/shell/brandingStore";
 import { apiFetch, withBasePath } from "@/lib/base-path";
 import { useI18n } from "@/lib/i18n";
 
@@ -40,6 +47,18 @@ export default function LoginPage() {
   const [fieldError, setFieldError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // A custom logo + wordmark replace the built-in brand here too; the login
+  // page has no shell/sidebar, so it subscribes to the same store directly.
+  // The GET is public (see /api/settings/branding) because nobody is signed in
+  // yet.
+  const { logo, title, subtitle } = useSyncExternalStore(
+    subscribeBranding,
+    getBrandingSnapshot,
+    getServerBrandingSnapshot,
+  );
+  useEffect(() => {
+    ensureBrandingLoaded();
+  }, []);
 
   async function onSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -113,28 +132,47 @@ export default function LoginPage() {
           py: "20px",
         }}
       >
-        <Box sx={{ display: "flex", alignItems: "center", gap: "10px" }}>
-          <Box
-            sx={{
-              width: 28,
-              height: 28,
-              borderRadius: "var(--radius)",
-              bgcolor: "var(--fg)",
-              color: "var(--bg)",
-              display: "grid",
-              placeItems: "center",
-              flex: "none",
-            }}
-          >
-            <Box component="svg" viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth={1.6}>
-              <path d="M12 2.5 21 7.5v9l-9 5-9-5v-9l9-5Z" />
-              <path d="M12 12 21 7.5M12 12v9.5M12 12 3 7.5" />
+        <Box data-od-id="login-brand" sx={{ display: "flex", alignItems: "center", gap: "10px" }}>
+          {logo ? (
+            <Box
+              component="img"
+              src={logo}
+              // Decorative: the wordmark beside it already names the brand.
+              alt=""
+              data-od-id="login-brand-logo"
+              sx={{
+                display: "block",
+                width: "auto",
+                height: "auto",
+                maxWidth: 160,
+                maxHeight: 40,
+                objectFit: "contain",
+                flex: "none",
+              }}
+            />
+          ) : (
+            <Box
+              sx={{
+                width: 28,
+                height: 28,
+                borderRadius: "var(--radius)",
+                bgcolor: "var(--fg)",
+                color: "var(--bg)",
+                display: "grid",
+                placeItems: "center",
+                flex: "none",
+              }}
+            >
+              <Box component="svg" viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth={1.6}>
+                <path d="M12 2.5 21 7.5v9l-9 5-9-5v-9l9-5Z" />
+                <path d="M12 12 21 7.5M12 12v9.5M12 12 3 7.5" />
+              </Box>
             </Box>
-          </Box>
-          <Box sx={{ fontWeight: 650, fontSize: 15, letterSpacing: "-0.01em" }}>
-            CubeStack
-            <Box component="span" sx={{ color: "var(--muted)", fontWeight: 400, ml: "6px" }}>
-              {t("brand.sub")}
+          )}
+          <Box sx={{ fontWeight: 650, fontSize: 15, letterSpacing: "-0.01em", lineHeight: 1.2, minWidth: 0 }}>
+            {title || DEFAULT_BRAND}
+            <Box component="span" sx={{ display: "block", color: "var(--muted)", fontWeight: 400, fontSize: 12, mt: "1px" }}>
+              {subtitle || t("brand.sub")}
             </Box>
           </Box>
         </Box>
@@ -210,7 +248,7 @@ export default function LoginPage() {
         >
           <Box sx={{ mb: "24px" }}>
             <Typography sx={{ fontSize: 24, fontWeight: 650, letterSpacing: "-0.02em", lineHeight: 1.2, color: "text.primary" }}>
-              {t("auth.title")}
+              {t("auth.title", { brand: title || DEFAULT_BRAND })}
             </Typography>
             <Typography sx={{ mt: "8px", fontSize: 14, color: "var(--muted)" }}>
               {t("auth.sub")}

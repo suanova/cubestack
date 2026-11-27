@@ -8,11 +8,14 @@ import { Dialog, DialogContent, DialogTitle, IconButton } from "@mui/material";
 import { useState } from "react";
 
 import { NavIcon } from "@/components/shell/NavIcons";
+import { useBrandName } from "@/components/shell/brandingStore";
 import { withBasePath } from "@/lib/base-path";
 import { useI18n } from "@/lib/i18n";
 
 export function DocsButton() {
   const { t } = useI18n();
+  const brand = useBrandName();
+  const docsTitle = t("docs.title", { brand });
   const [open, setOpen] = useState(false);
 
   return (
@@ -54,7 +57,7 @@ export function DocsButton() {
             pl: "20px",
           }}
         >
-          {t("docs.title")}
+          {docsTitle}
           <IconButton aria-label={t("docs.close")} title={t("docs.close")} onClick={() => setOpen(false)} size="small">
             <NavIcon name="close" size={16} />
           </IconButton>
@@ -64,7 +67,7 @@ export function DocsButton() {
           {open ? (
             <iframe
               src={withBasePath("/docs")}
-              title={t("docs.title")}
+              title={docsTitle}
               style={{ display: "block", width: "100%", height: "100%", border: 0 }}
             />
           ) : null}
