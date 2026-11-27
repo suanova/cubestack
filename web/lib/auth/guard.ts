@@ -8,7 +8,9 @@ import { verifySession, type SessionClaims } from "./session";
 // Shared auth guard for API route handlers.
 //
 // Apply it to every route under `app/api/**` EXCEPT the auth routes
-// (`/api/auth/login`, `/api/auth/logout`, `/api/auth/me`). A request without a
+// (`/api/auth/login`, `/api/auth/logout`, `/api/auth/me`) and the public
+// branding GET (`/api/settings/branding`), which the login page reads before
+// anyone is signed in. A request without a
 // valid session cookie gets a 401 before the handler runs, so no Kubernetes
 // client is ever built for an unauthenticated caller.
 //

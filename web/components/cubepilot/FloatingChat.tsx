@@ -22,6 +22,7 @@ import { Box } from "@mui/material";
 import { useRouter } from "next/navigation";
 import { Fragment, useEffect, useRef, useState } from "react";
 
+import { useBrandName } from "@/components/shell/brandingStore";
 import { apiFetch } from "@/lib/base-path";
 import {
   addApproval,
@@ -123,6 +124,7 @@ const QUICK_PROMPTS = ["fchat.qp1", "fchat.qp2"] as const;
 
 export function FloatingChat() {
   const { t } = useI18n();
+  const brand = useBrandName();
   const { showToast, toastView } = useToast();
   const router = useRouter();
 
@@ -1248,7 +1250,7 @@ export function FloatingChat() {
         <Box
           data-od-id="fchat-panel"
           role="dialog"
-          aria-label={t("fchat.title")}
+          aria-label={t("fchat.title", { brand })}
           sx={{
             position: "fixed",
             right: "20px",
@@ -1303,7 +1305,7 @@ export function FloatingChat() {
             </Box>
             <Box sx={{ minWidth: 0, flex: 1 }}>
               <Box sx={{ fontSize: 13.5, fontWeight: 650, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                {t("fchat.title")}
+                {t("fchat.title", { brand })}
               </Box>
               <Box sx={{ ...monoSx, fontSize: 10.5, color: "text.secondary", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                 {agentRoleLine(agentStatus, t)}

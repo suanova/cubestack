@@ -6,7 +6,7 @@
 // color-mix() of --bg as the prototype, so it tracks the theme without a
 // re-render hook.
 
-import { Box, Button, Tooltip } from "@mui/material";
+import { Box, IconButton, Menu, MenuItem, Tooltip } from "@mui/material";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
@@ -26,6 +26,7 @@ function crumbKey(pathname: string): MessageKey | null {
   if (pathname === "/inference-services" || pathname.startsWith("/inference-services/")) return "nav.inference";
   if (pathname === "/dev-environments" || pathname.startsWith("/dev-environments/")) return "nav.devenv";
   if (pathname === "/cubepilot" || pathname.startsWith("/cubepilot/")) return "nav.cubepilot";
+  if (pathname === "/settings") return "nav.settings";
   return null;
 }
 
@@ -36,12 +37,19 @@ export function Topbar() {
   const section = crumbKey(pathname);
 
   // The current user (from /api/auth/me) so the shell can show who is signed
-  // in and offer to sign out. A 401 (no session) just hides the badge.
+  // in and offer the settings/sign-out menu. A 401 (no session) just hides the
+  // badge. isAdmin gates the 设置 entry: only PORTAL_ADMIN_USERS may change
+  // platform branding.
   const [user, setUser] = useState<string>("");
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [menuAnchor, setMenuAnchor] = useState<null | HTMLElement>(null);
   useEffect(() => {
     apiFetch("/api/auth/me")
       .then((res) => (res.ok ? res.json() : Promise.reject()))
-      .then((body: { user?: string }) => setUser(body.user ?? ""))
+      .then((body: { user?: string; isAdmin?: boolean }) => {
+        setUser(body.user ?? "");
+        setIsAdmin(body.isAdmin === true);
+      })
       .catch(() => setUser(""));
   }, []);
 
@@ -84,47 +92,65 @@ export function Topbar() {
           {user ? (
             <>
               <Tooltip title={user} arrow>
-                <Box
-                  component="span"
+                <IconButton
+                  aria-label={user}
                   data-od-id="current-user"
+                  onClick={(event) => setMenuAnchor(event.currentTarget)}
                   sx={{
                     width: 28,
                     height: 28,
-                    borderRadius: "50%",
+                    padding: 0,
                     bgcolor: "text.primary",
                     color: "background.default",
-                    display: "grid",
-                    placeItems: "center",
-                    fontSize: 12,
-                    fontWeight: 600,
-                    cursor: "default",
-                    userSelect: "none",
+                    "&:hover": { bgcolor: "text.primary" },
                   }}
                 >
-                  {user.charAt(0).toUpperCase()}
-                </Box>
+                  <Box component="span" sx={{ fontSize: 12, fontWeight: 600, lineHeight: 1, userSelect: "none" }}>
+                    {user.charAt(0).toUpperCase()}
+                  </Box>
+                </IconButton>
               </Tooltip>
-              <Button
-                size="small"
-                variant="outlined"
-                data-od-id="logout-button"
-                onClick={async () => {
-                  try {
-                    await apiFetch("/api/auth/logout", { method: "POST" });
-                  } finally {
-                    router.replace("/login");
-                  }
-                }}
-                sx={{
-                  textTransform: "none",
-                  fontSize: 12.5,
-                  color: "text.secondary",
-                  borderColor: "divider",
-                  "&:hover": { borderColor: "var(--fg)" },
-                }}
+              <Menu
+                anchorEl={menuAnchor}
+                open={Boolean(menuAnchor)}
+                onClose={() => setMenuAnchor(null)}
+                anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+                transformOrigin={{ vertical: "top", horizontal: "right" }}
+                slotProps={{ paper: { sx: { borderRadius: "var(--radius)", minWidth: 168 } } }}
               >
-                {t("auth.logout")}
-              </Button>
+                <MenuItem
+                  disabled
+                  sx={{ fontSize: 13, py: "4px", "&.Mui-disabled": { opacity: 1, color: "text.secondary" } }}
+                >
+                  {user}
+                </MenuItem>
+                {isAdmin ? (
+                  <MenuItem
+                    data-od-id="settings-menu-item"
+                    onClick={() => {
+                      setMenuAnchor(null);
+                      router.push("/settings");
+                    }}
+                    sx={{ fontSize: 13.5, py: "6px" }}
+                  >
+                    {t("nav.settings")}
+                  </MenuItem>
+                ) : null}
+                <MenuItem
+                  data-od-id="logout-button"
+                  onClick={async () => {
+                    setMenuAnchor(null);
+                    try {
+                      await apiFetch("/api/auth/logout", { method: "POST" });
+                    } finally {
+                      router.replace("/login");
+                    }
+                  }}
+                  sx={{ fontSize: 13.5, py: "6px" }}
+                >
+                  {t("auth.logout")}
+                </MenuItem>
+              </Menu>
             </>
           ) : null}
         </Box>

@@ -10,6 +10,7 @@
 import { usePathname } from "next/navigation";
 import { useEffect } from "react";
 
+import { useBrandName } from "@/components/shell/brandingStore";
 import { useI18n, type MessageKey } from "@/lib/i18n";
 
 /** Map a route to the nav key that names that page (mirrors Topbar's crumb). */
@@ -19,14 +20,16 @@ function pageKey(pathname: string): MessageKey | null {
   if (pathname === "/inference-services" || pathname.startsWith("/inference-services/")) return "nav.inference";
   if (pathname === "/dev-environments" || pathname.startsWith("/dev-environments/")) return "nav.devenv";
   if (pathname === "/cubepilot" || pathname.startsWith("/cubepilot/")) return "nav.cubepilot";
+  if (pathname === "/settings") return "nav.settings";
   return null;
 }
 
 export function DocumentMeta() {
   const { t } = useI18n();
   const pathname = usePathname();
-  const appTitle = t("app.title");
-  const description = t("app.description");
+  const brand = useBrandName();
+  const appTitle = t("app.title", { brand });
+  const description = t("app.description", { brand });
   const key = pageKey(pathname);
   const title = key ? `${t(key)} · ${appTitle}` : appTitle;
 

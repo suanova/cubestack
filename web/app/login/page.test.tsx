@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { act } from "react-dom/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { setBranding } from "@/components/shell/brandingStore";
 import LoginPage from "./page";
 
 // The login page reads window.location.search (for ?next=) and navigates via
@@ -77,6 +78,7 @@ describe("login page", () => {
   });
 
   afterEach(() => {
+    setBranding({ logo: null, title: null, subtitle: null });
     vi.unstubAllGlobals();
     document.body.innerHTML = "";
   });
@@ -86,6 +88,38 @@ describe("login page", () => {
     const { container, root } = renderPage();
     expect(container.textContent).toContain("登录 CubeStack");
     expect(container.querySelector('[data-od-id="login-submit"]')).not.toBeNull();
+    act(() => root.unmount());
+  });
+
+  it("renders a custom logo and wordmark instead of the built-in brand", () => {
+    installLocation("");
+    const { container, root } = renderPage();
+    const logo = "data:image/png;base64,iVBORw0KGgo=";
+    act(() => setBranding({ logo, title: "Acme Cloud", subtitle: "智能算力平台" }));
+
+    const brand = container.querySelector('[data-od-id="login-brand"]') as HTMLElement;
+    const image = brand.querySelector('[data-od-id="login-brand-logo"]') as HTMLImageElement;
+    expect(image.getAttribute("src")).toBe(logo);
+    // The logo and the custom wordmark are shown side by side.
+    expect(brand.textContent).toContain("Acme Cloud");
+    expect(brand.textContent).toContain("智能算力平台");
+    expect(brand.textContent).not.toContain("CubeStack");
+
+    act(() => root.unmount());
+  });
+
+  it("renders custom text even without a logo", () => {
+    installLocation("");
+    const { container, root } = renderPage();
+    act(() => setBranding({ logo: null, title: "Acme Cloud", subtitle: "GPU Cloud" }));
+
+    const brand = container.querySelector('[data-od-id="login-brand"]') as HTMLElement;
+    expect(brand.textContent).toContain("Acme Cloud");
+    expect(brand.textContent).toContain("GPU Cloud");
+    expect(brand.querySelector('[data-od-id="login-brand-logo"]')).toBeNull();
+    // The card heading uses the brand name too.
+    expect(container.textContent).toContain("登录 Acme Cloud");
+
     act(() => root.unmount());
   });
 

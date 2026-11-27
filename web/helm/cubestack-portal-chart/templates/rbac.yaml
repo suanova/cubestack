@@ -19,6 +19,13 @@ rules:
     resources: ["secrets"]
     resourceNames: [{{ .Values.secrets.htpasswd.secretName | quote }}]
     verbs: ["get"]
+  # The 设置 page stores a custom logo in the chart-created branding ConfigMap.
+  # Scoped by name, and get/patch only: the app reads the object before
+  # patching it, and never lists or touches any other ConfigMap.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: [{{ include "cubestack-portal-chart.brandingConfigMapName" . | quote }}]
+    verbs: ["get", "patch"]
   {{- if eq $operatorNs .Values.namespace }}
   # External-model credentials: adding a keyed model on the config page writes a
   # Secret named llm-<model> in the *operator* namespace (the CR only ever

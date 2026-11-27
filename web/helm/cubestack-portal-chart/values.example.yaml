@@ -13,6 +13,11 @@ image:
 # Number of replicas
 replicaCount: 1
 
+# Usernames allowed to change the portal logo on the 设置 page. Each entry must
+# match an htpasswd username exactly; empty hides the 设置 entry for everyone.
+adminUsers:
+  - admin
+
 # Ingress configuration
 ingress:
   enabled: true
